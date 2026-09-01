@@ -10,6 +10,8 @@ from mana_agent.multi_agent.core.ids import new_decision_id
 from mana_agent.multi_agent.core.types import DecisionRecord, DecisionStatus, MessageType, to_jsonable
 from mana_agent.multi_agent.taskboard.store import decision_from_dict
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+from mana_agent.persistence.workspace_db import get_workspace_db
+from mana_agent.persistence.workspace_repository import WorkspaceRepository
 from mana_agent.workspaces.paths import workspace_dir
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -24,6 +26,9 @@ class DecisionRoom:
         service = WorkspaceService()
         repo = service.register_repository(self.root)
         workspace = service.workspace_for_repository(repo.repository_id)
+        self.workspace_id = workspace.workspace_id
+        self.db = get_workspace_db(self.workspace_id)
+        self.repository = WorkspaceRepository(self.workspace_id, db=self.db)
         self.path = workspace_dir(workspace.workspace_id) / "taskboard" / "decisions.json"
         self.decisions: dict[str, DecisionRecord] = {}
         self.load()
@@ -88,25 +93,15 @@ class DecisionRoom:
             rejected_options=rejected_options or [],
         )
         self.decisions[decision.decision_id] = decision
+        self.repository.save_decision(decision)
         if discussion_id:
             self.discussions.close(discussion_id, decision.decision_id)
         self.taskboard.add_decision(task_id, decision)
-        self.save()
         return decision
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(to_jsonable(self.decisions), indent=2, sort_keys=True), encoding="utf-8")
+        for decision in self.decisions.values():
+            self.repository.save_decision(decision)
 
     def load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
-        self.decisions = {
-            key: decision_from_dict(value)
-            for key, value in payload.items()
-            if isinstance(value, dict)
-        }
+        self.decisions = {d.decision_id: d for d in self.repository.list_decisions()}

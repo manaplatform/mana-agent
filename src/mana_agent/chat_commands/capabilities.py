@@ -31,9 +31,9 @@ def build_cli_capability_matrix(app=None) -> list[CliCapabilityEntry]:  # noqa: 
         "connector telegram start": "/connect telegram start",
         "connector telegram stop": "/connect telegram stop",
         "session new": "/new",
-        "session list": "/sessions list",
-        "session show": "/sessions show",
-        "session switch": "/sessions switch",
+        "session list": "/session list",
+        "session show": "/session show",
+        "session switch": "/session switch",
     }
     rows: list[CliCapabilityEntry] = []
 

@@ -47,6 +47,8 @@ from mana_agent.integrations.provider_failure import (
     ProviderFailure,
     ProviderFailureKind,
     RetryOwner,
+    cancellation_aware_sleep,
+    choose_backoff_seconds,
     circuit_scope_key,
     classify_http_status,
     classify_stream_interrupt,
@@ -58,9 +60,9 @@ logger = logging.getLogger(__name__)
 
 AuthChecker = Callable[[str | None], bool]
 
-# Bridge never multiplies retries. Codex owns stream reconnect; the supervisor
-# owns task-level recovery. See mana_agent.integrations.provider_failure.
-BRIDGE_TRANSPORT_MAX_ATTEMPTS = 1
+# Bridge transport-level retry budget for initial stream establishment before
+# any stream chunks are received (up to 5 attempts with backoff/jitter).
+BRIDGE_TRANSPORT_MAX_ATTEMPTS = 5
 
 
 def _bearer_token(header_value: str | None) -> str | None:
@@ -235,6 +237,10 @@ def build_bridge_app(
                     )
 
         stream = bool(chat_payload.get("stream"))
+        transport_max_attempts = max(
+            1,
+            int(getattr(upstream, "transport_max_attempts", BRIDGE_TRANSPORT_MAX_ATTEMPTS) or 1),
+        )
         url = upstream.base_url.rstrip("/") + "/chat/completions"
         headers = {
             "Authorization": f"Bearer {upstream.api_key}",
@@ -298,106 +304,215 @@ def build_bridge_app(
             # fake stream disconnect / Codex reconnect.
             client: httpx.AsyncClient | None = None
             response: httpx.Response | None = None
-            try:
-                client = httpx.AsyncClient(timeout=upstream.timeout_seconds)
-                http_request = client.build_request(
-                    "POST", url, headers=headers, json=chat_payload
-                )
-                # Keep the long timeout for an accepted tool-using stream, but
-                # do not let a provider that never returns response headers pin
-                # the entire coding turn for ten minutes.  ``send(...,
-                # stream=True)`` completes when the stream is accepted, so this
-                # bound applies only to the initial upstream handshake.
-                response = await asyncio.wait_for(
-                    client.send(http_request, stream=True),
-                    timeout=upstream.stream_open_timeout_seconds,
-                )
-            except asyncio.TimeoutError as exc:
-                if client is not None:
-                    await client.aclose()
-                timeout_error = httpx.ReadTimeout(
-                    "Timed out waiting for the upstream streaming response to start."
-                )
-                failure = classify_transport_exception(
-                    timeout_error,
-                    provider=upstream.provider,
-                    model=model,
-                    operation="chat_completion_stream",
-                    endpoint=url,
-                    attempt=1,
-                    max_attempts=transport_max_attempts,
-                    display_name=upstream.display_name,
-                )
-                breaker.record_failure(scope, failure)
-                raise _failure_to_upstream_error(failure) from exc
-            except httpx.TimeoutException as exc:
-                if client is not None:
-                    await client.aclose()
-                failure = classify_transport_exception(
-                    exc,
-                    provider=upstream.provider,
-                    model=model,
-                    operation="chat_completion_stream",
-                    endpoint=url,
-                    attempt=1,
-                    max_attempts=transport_max_attempts,
-                    display_name=upstream.display_name,
-                )
-                breaker.record_failure(scope, failure)
-                raise _failure_to_upstream_error(failure) from exc
-            except httpx.HTTPError as exc:
-                if client is not None:
-                    await client.aclose()
-                failure = classify_transport_exception(
-                    exc,
-                    provider=upstream.provider,
-                    model=model,
-                    operation="chat_completion_stream",
-                    endpoint=url,
-                    attempt=1,
-                    max_attempts=transport_max_attempts,
-                    display_name=upstream.display_name,
-                )
-                breaker.record_failure(scope, failure)
-                raise _failure_to_upstream_error(failure) from exc
 
-            assert response is not None and client is not None
-            if response.status_code >= 400:
-                body_bytes = await response.aread()
-                await response.aclose()
-                await client.aclose()
-                failure = classify_http_status(
-                    response.status_code,
-                    provider=upstream.provider,
-                    model=model,
-                    body=body_bytes,
-                    headers=response.headers,
-                    operation="chat_completion_stream",
-                    endpoint=url,
-                    attempt=1,
-                    max_attempts=transport_max_attempts,
-                    display_name=upstream.display_name,
-                )
-                breaker.record_failure(scope, failure)
-                raise _failure_to_upstream_error(failure)
+            for attempt in range(1, transport_max_attempts + 1):
+                if not breaker.allow_request(scope):
+                    failure = ProviderFailure(
+                        kind=ProviderFailureKind.CIRCUIT_OPEN,
+                        provider=upstream.provider,
+                        model=model,
+                        http_status=503,
+                        retryable=True,
+                        safe_message=(
+                            f"{upstream.display_name} temporarily unavailable (circuit open). "
+                            "Not probing yet."
+                        ),
+                        operation="chat_completion_stream",
+                        endpoint=url,
+                        retry_owner=RetryOwner.TRANSPORT,
+                        error_code="upstream_circuit_open",
+                        attempt=attempt,
+                        max_attempts=transport_max_attempts,
+                    )
+                    raise _failure_to_upstream_error(failure)
 
-            # Upstream accepted the stream. Only now begin Responses SSE.
-            breaker.record_success(scope)
-            return StreamingResponse(
-                _stream_accepted_upstream(
-                    client=client,
-                    response=response,
-                    chat_payload=chat_payload,
-                    upstream=upstream,
-                    url=url,
-                    circuit_key=scope,
-                    circuit_breaker=breaker,
-                    tool_origins=tool_origins,
-                    response_tool_names=response_tool_names,
-                    tool_namespaces=tool_namespaces,
-                ),
-                media_type="text/event-stream",
-            )
+                client = None
+                response = None
+                failure: ProviderFailure | None = None
+                try:
+                    client = httpx.AsyncClient(timeout=upstream.timeout_seconds)
+                    http_request = client.build_request(
+                        "POST", url, headers=headers, json=chat_payload
+                    )
+                    # Keep the long timeout for an accepted tool-using stream, but
+                    # do not let a provider that never returns response headers pin
+                    # the entire coding turn for ten minutes. ``send(...,
+                    # stream=True)`` completes when the stream is accepted, so this
+                    # bound applies only to the initial upstream handshake.
+                    response = await asyncio.wait_for(
+                        client.send(http_request, stream=True),
+                        timeout=upstream.stream_open_timeout_seconds,
+                    )
+                except asyncio.TimeoutError as exc:
+                    if client is not None:
+                        await client.aclose()
+                        client = None
+                    timeout_error = httpx.ReadTimeout(
+                        "Timed out waiting for the upstream streaming response to start."
+                    )
+                    failure = classify_transport_exception(
+                        timeout_error,
+                        provider=upstream.provider,
+                        model=model,
+                        operation="chat_completion_stream",
+                        endpoint=url,
+                        attempt=attempt,
+                        max_attempts=transport_max_attempts,
+                        received_stream_data=False,
+                        tool_side_effects=False,
+                        display_name=upstream.display_name,
+                    )
+                except httpx.TimeoutException as exc:
+                    if client is not None:
+                        await client.aclose()
+                        client = None
+                    failure = classify_transport_exception(
+                        exc,
+                        provider=upstream.provider,
+                        model=model,
+                        operation="chat_completion_stream",
+                        endpoint=url,
+                        attempt=attempt,
+                        max_attempts=transport_max_attempts,
+                        received_stream_data=False,
+                        tool_side_effects=False,
+                        display_name=upstream.display_name,
+                    )
+                except httpx.HTTPError as exc:
+                    if client is not None:
+                        await client.aclose()
+                        client = None
+                    failure = classify_transport_exception(
+                        exc,
+                        provider=upstream.provider,
+                        model=model,
+                        operation="chat_completion_stream",
+                        endpoint=url,
+                        attempt=attempt,
+                        max_attempts=transport_max_attempts,
+                        received_stream_data=False,
+                        tool_side_effects=False,
+                        display_name=upstream.display_name,
+                    )
+
+                if failure is not None:
+                    # Exception during stream establishment before any stream data
+                    if (
+                        failure.retryable
+                        and failure.retry_owner is RetryOwner.TRANSPORT
+                        and not failure.received_stream_data
+                        and not failure.tool_side_effects
+                        and attempt < transport_max_attempts
+                    ):
+                        delay = choose_backoff_seconds(failure, attempt=attempt - 1)
+                        failure_with_backoff = failure.with_backoff_ms(int(delay * 1000))
+                        logger.warning(
+                            "responses_bridge.upstream_stream_retry attempt=%s max_attempts=%s "
+                            "failure_kind=%s delay_s=%.2f model=%s provider=%s safe_message=%r",
+                            attempt,
+                            transport_max_attempts,
+                            failure.kind.value,
+                            delay,
+                            model,
+                            upstream.provider,
+                            failure.safe_message,
+                        )
+                        log_provider_failure(failure_with_backoff, level=logging.WARNING)
+                        await cancellation_aware_sleep(delay)
+                        continue
+
+                    if attempt >= transport_max_attempts:
+                        logger.error(
+                            "responses_bridge.upstream_stream_retry_exhausted attempt=%s "
+                            "max_attempts=%s failure_kind=%s model=%s provider=%s "
+                            "exhaustion_reason=%r",
+                            attempt,
+                            transport_max_attempts,
+                            failure.kind.value,
+                            model,
+                            upstream.provider,
+                            failure.safe_message,
+                        )
+                    breaker.record_failure(scope, failure)
+                    raise _failure_to_upstream_error(failure)
+
+                assert response is not None and client is not None
+                if response.status_code >= 400:
+                    body_bytes = await response.aread()
+                    await response.aclose()
+                    await client.aclose()
+                    client = None
+                    failure = classify_http_status(
+                        response.status_code,
+                        provider=upstream.provider,
+                        model=model,
+                        body=body_bytes,
+                        headers=response.headers,
+                        operation="chat_completion_stream",
+                        endpoint=url,
+                        attempt=attempt,
+                        max_attempts=transport_max_attempts,
+                        received_stream_data=False,
+                        tool_side_effects=False,
+                        display_name=upstream.display_name,
+                    )
+                    if (
+                        failure.retryable
+                        and failure.retry_owner is RetryOwner.TRANSPORT
+                        and not failure.received_stream_data
+                        and not failure.tool_side_effects
+                        and attempt < transport_max_attempts
+                    ):
+                        delay = choose_backoff_seconds(failure, attempt=attempt - 1)
+                        failure_with_backoff = failure.with_backoff_ms(int(delay * 1000))
+                        logger.warning(
+                            "responses_bridge.upstream_stream_retry attempt=%s max_attempts=%s "
+                            "failure_kind=%s delay_s=%.2f model=%s provider=%s http_status=%s safe_message=%r",
+                            attempt,
+                            transport_max_attempts,
+                            failure.kind.value,
+                            delay,
+                            model,
+                            upstream.provider,
+                            response.status_code,
+                            failure.safe_message,
+                        )
+                        log_provider_failure(failure_with_backoff, level=logging.WARNING)
+                        await cancellation_aware_sleep(delay)
+                        continue
+
+                    if attempt >= transport_max_attempts:
+                        logger.error(
+                            "responses_bridge.upstream_stream_retry_exhausted attempt=%s "
+                            "max_attempts=%s failure_kind=%s model=%s provider=%s "
+                            "exhaustion_reason=%r",
+                            attempt,
+                            transport_max_attempts,
+                            failure.kind.value,
+                            model,
+                            upstream.provider,
+                            failure.safe_message,
+                        )
+                    breaker.record_failure(scope, failure)
+                    raise _failure_to_upstream_error(failure)
+
+                # Upstream accepted the stream (HTTP 2xx). Only now begin Responses SSE.
+                breaker.record_success(scope)
+                return StreamingResponse(
+                    _stream_accepted_upstream(
+                        client=client,
+                        response=response,
+                        chat_payload=chat_payload,
+                        upstream=upstream,
+                        url=url,
+                        circuit_key=scope,
+                        circuit_breaker=breaker,
+                        tool_origins=tool_origins,
+                        response_tool_names=response_tool_names,
+                        tool_namespaces=tool_namespaces,
+                    ),
+                    media_type="text/event-stream",
+                )
 
         # Non-streaming path: one transport attempt, classify, no nested retries.
         try:

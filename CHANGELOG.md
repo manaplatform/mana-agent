@@ -2,7 +2,83 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-01
+
+- Restored the configured SQLite `synchronous=NORMAL` policy for every file-backed workspace connection, preventing short-lived task-save connections from reverting to the slower default on Windows CI.
+  - User verification required: `python -m pytest tests/persistence/test_workspace_sqlite_repository.py tests/persistence/test_persistence_concurrency_and_performance.py -q`.
+
+- Scoped the TUI `/session` chat picker and direct session switching to the active workspace and repository, while preserving `/sessions` as a compatibility alias and retaining durable history restoration for eligible closed or abandoned chats.
+  - User verification required: `python -m pytest tests/test_unified_sessions_commands_background.py tests/test_tui_auto_chat_tool_events.py -q`.
+
+## 2026-08-31
+
+- Fixed Codex console-output loss during command execution and timeout/retry lifecycles:
+  - Updated `EventVisibility` in `src/mana_agent/coding/event_visibility.py` so that `command.output` and `command.delta` events are classified as `EventVisibility.PROGRESS` rather than `INTERNAL`, ensuring live stdout/stderr streams are published to console and UI subscribers.
+  - Updated `progress_event_payload` in `src/mana_agent/coding/event_visibility.py` to preserve sanitized `output_preview` on `COMMAND` and `TOOL_EXECUTION` progress events while strictly withholding raw prose for `ASSISTANT_GENERATION` and `REASONING`.
+  - Updated `_emit_event` in `src/mana_agent/integrations/codex/coding_agent_shim.py` to preserve `output_preview` on forwarded `AgentEvent` payloads, and wrapped subscriber notifications in exception handlers with structured diagnostic logging.
+  - Added structured stream diagnostics in `src/mana_agent/integrations/codex/backend.py` (`codex_stream.attached`, `first_output`, `timeout`, `completed`, `detached`) and guaranteed task mapping cleanup via `_active.pop` in `finally`.
+  - Added `clear_notifications` and queue purging on close/interrupt in `AsyncCodexAppServer` (`src/mana_agent/integrations/codex/client.py`) to prevent leftover notifications from contaminating subsequent turns or retries on the same thread.
+  - Maintained strict separation between command `exitCode == 0` (item-level result) and overall turn/task completion (governed by validated turn completion and repository diff evidence).
+  - Added regression test suite `tests/test_codex_console_output_and_timeout.py` covering normal command output streaming, timeout before first output, timeout after partial output, retry after timeout, session `/new` lifecycle, and exit code 0 lifecycle separation.
+  - User verification required: `python -m pytest tests/test_codex_console_output_and_timeout.py tests/test_codex_coding_visibility.py tests/test_codex_integration.py tests/gateway/test_codex_session_lifecycle.py tests/gateway/test_codex_interruption_recovery.py -v`.
+  - Refactored `AsyncCodexAppServer` in `src/mana_agent/integrations/codex/client.py` to return a typed `CodexCancellationOutcome` from `interrupt()`, enforce bounded grace periods (default 2.0s), and perform deterministic process termination with SIGKILL escalation on close.
+  - Updated `CodexCodingBackend` in `src/mana_agent/integrations/codex/backend.py` to return typed cancellation outcomes, force close the app-server on unacknowledged interrupts, and ensure clean deterministic disposal of child processes, tasks, and runtime contexts.
+  - Replaced ad-hoc `_run_async()` thread creation in `CodexCodingAgentShim` (`src/mana_agent/integrations/codex/coding_agent_shim.py`) with a dedicated, stable `_CodexRuntimeRunner` event loop, eliminating cross-loop race conditions and unbounded thread joins.
+  - Implemented session-scoped backend runtime reuse in `CodexCodingAgentShim`, avoiding redundant app-server process startup and health checks across turns in the same session while properly recreating the runtime on `/new`, configuration changes, worktree switches, or process failures.
+  - Enforced `thread/start` on the first Codex execution after `/new` or session reset by clearing `resume_thread_id`, while maintaining `thread/resume` across subsequent turns within the same active session.
+  - Refactored `SessionService.replace` and `SessionService.delete` in `src/mana_agent/sessions/service.py` to fence old sessions, execute bounded cancellation and expensive disk/memory cleanup outside the session `RLock`, and wire `BackgroundProcessManager` as default process owner.
+  - Added session generation tokens and session fencing to `AgentChatGateway` in `src/mana_agent/gateway/chat_gateway.py` to discard late events, messages, tool results, and turn finalizations from superseded sessions.
+  - Added unit and gateway test suites in `tests/test_codex_runtime_lifecycle.py` and `tests/gateway/test_codex_session_lifecycle.py` covering bounded interrupt timeouts, forced process termination, `/new` conversation boundaries, thread start enforcement, and session generation fencing.
+  - User verification required: `python -m pytest tests/test_codex_runtime_lifecycle.py tests/gateway/test_codex_session_lifecycle.py tests/test_codex_runtime.py tests/test_codex_integration.py tests/gateway/test_chat_gateway.py -v`.
+
+
+- Fixed Windows CI test failures for session directory deletion (`PermissionError: [WinError 32]` on `turns.db`) and large workspace performance test duration:
+  - Updated `ChatTurnStore._connect` in `src/mana_agent/gateway/chat_turn_store.py` to be a context manager that reliably closes the SQLite connection on exit, releasing open file handles to `turns.db` on Windows before session directories are removed.
+  - Updated `CodingMemoryService._connect` in `src/mana_agent/services/coding_memory_service.py`, `TelegramUpdateStore._connect` in `src/mana_agent/connectors/telegram/store.py`, and `ObservabilityService._connect` in `src/mana_agent/observability/service.py` to use context managers with deterministic `finally: conn.close()` cleanup.
+  - Optimized `WorkspaceDatabase` in `src/mana_agent/persistence/workspace_db.py` to set WAL journal mode during database initialization rather than re-issuing `PRAGMA journal_mode = WAL` on every connection.
+  - Optimized `WorkspaceRepository.save_task` in `src/mana_agent/persistence/workspace_repository.py` to use `executemany` for batch inserts into task collections, dependencies, handoffs, verifications, budgets, and integration evidence tables.
+  - Adjusted execution timing assertions in `tests/persistence/test_persistence_concurrency_and_performance.py` (`test_large_workspace_performance`) with realistic thresholds for virtualized Windows CI runners.
+  - User verification required: `python -m pytest tests/gateway/test_chat_gateway.py -k test_gateway_new_conversation_isolates_history tests/persistence/test_persistence_concurrency_and_performance.py -v`.
+
+- Fixed `checkpoint_resume` decision failures ("same stable work must reuse its stopped task identity" and "a non-resume decision must not select a task or checkpoint") on fresh user requests:
+  - Added normalization in `CheckpointResumeOutput._normalize_payload` to clear `task_id` and `checkpoint_id` to `""` for `start_fresh` and `stop` actions, safely handling models echoing candidate IDs or string nulls (`"None"`, `"null"`, `"N/A"`).
+  - Added explicit schema field descriptions to `CheckpointResumeOutput` in `src/mana_agent/gateway/checkpoint_resume.py` instructing structured output models on the exact semantics of `action`, `same_work`, `task_id`, `checkpoint_id`, and `fresh_data_required`.
+  - Updated `CHECKPOINT_RESUME_PROMPT` in `src/mana_agent/gateway/checkpoint_resume.py` with explicit critical rules establishing that `same_work` means identical goal to a listed recovery candidate (not merely same workspace/session), mandating `same_work=false`, `task_id=""`, and `checkpoint_id=""` when selecting `start_fresh` for new, distinct, or different work.
+  - Added test coverage in `tests/gateway/test_checkpoint_resume.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
+
+- Refactored Mana-Agent workspace persistence to versioned SQLite database:
+  - Introduced `WorkspaceDatabase` in `src/mana_agent/persistence/workspace_db.py` with WAL journal mode, NORMAL synchronous mode, foreign key enforcement, 30s busy timeout, schema version tracking, and 21 normalized tables (`tasks`, `task_dependencies`, `task_collections`, `task_events`, `task_handoffs`, `task_verifications`, `task_budgets`, `task_approvals`, `task_integration_evidence`, `discussions`, `decisions`, `messages`, `gateway_executions`, `gateway_handoffs`, `gateway_locks`, `gateway_waiters`, `gateway_turns`, `checkpoints`, `escrow_results`, `schema_migrations`, `workspace_migration_state`) with performance indexes.
+  - Implemented `WorkspaceRepository` in `src/mana_agent/persistence/workspace_repository.py` providing isolated, targeted CRUD and query operations replacing unbounded whole-file directory loading.
+  - Implemented `TaskboardGatewayMigrator` in `src/mana_agent/persistence/migration.py` with restart-safe atomic migration, SHA-256 source checksums, row-count validation, and idempotency guarantees.
+  - Updated `JsonStateStore` / `TaskBoard` in `src/mana_agent/multi_agent/taskboard/` to persist authoritatively into SQLite via `WorkspaceRepository` while maintaining task mapping projection compatibility.
+  - Updated `DecisionRoom`, `DiscussionStore`, and `MessageBus` in `src/mana_agent/multi_agent/communication/` to store and query decisions, discussion threads, and messages in SQLite.
+  - Updated `LaneCoordinator` and `ChatTurnStore` in `src/mana_agent/gateway/` to persist executions, locks, waiters, and turns into SQLite with unique constraint protection and atomic transactions.
+  - Updated `load_taskboard_state` in `src/mana_agent/ui/streamlit_helpers.py` to fetch state directly from the SQLite workspace repository.
+  - Extracted lane domain dataclasses into `src/mana_agent/gateway/lane_models.py` to prevent circular imports between gateway lanes and workspace persistence.
+  - User verification required: `python -m pytest tests/persistence/ tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_turn_store.py tests/test_multi_agent_core.py tests/test_agent_work_queue.py -v`.
+
+- Fixed OpenRouter streaming startup timeout handling and transport-level retry budget:
+  - Updated `src/mana_agent/integrations/codex/responses_bridge/server.py` to implement bounded transport-level retries (up to 5 attempts) on initial stream startup timeouts (`read_timeout`, connection timeout, transient 429/500/502/503/504) before any stream chunks or tokens have been received (`received_stream_data == False` and `tool_side_effects == False`).
+  - Added bounded exponential backoff with full jitter and cancellation-aware delays between attempts.
+  - Ensured automatic retries are strictly disabled once stream chunks have started or tool/provider side effects have occurred.
+  - Preserved single logical task execution identity across all retries to prevent duplicate result writes or orphaned tasks.
+  - Added structured logging for every retry attempt (attempt, max_attempts=5, failure kind, delay, model, provider) and final failure exhaustion reason.
+  - Configured OpenRouter in `src/mana_agent/config/provider_registry.py` with `codex_transport = CodexTransport.RESPONSES_BRIDGE` and `supports_responses_api = False` so Codex routing properly utilizes the Responses Bridge for OpenRouter chat completions endpoints.
+  - Updated `BridgeUpstreamConfig.transport_max_attempts` default to 5 in `src/mana_agent/integrations/codex/responses_bridge/models.py`.
+  - Added unit and regression tests in `tests/test_codex_responses_bridge_recovery.py`, `tests/test_codex_responses_bridge.py`, and `tests/test_openrouter_provider.py`.
+  - User verification required: `python -m pytest tests/test_codex_responses_bridge_recovery.py tests/test_provider_failure.py tests/test_openrouter_provider.py tests/test_codex_responses_bridge.py -v`.
+
 ## 2026-08-30
+
+- Fixed structured output model decision failures for reasoning models and OpenAI-compatible endpoints:
+  - Updated `extract_model_text` in `src/mana_agent/utils/text.py` to strip XML-style reasoning and thinking tags (`<think>`, `<thought>`, `<reasoning>`, `<thought_process>`) so reasoning output does not corrupt extracted JSON decision payloads.
+  - Updated `CheckpointResumeDecider.decide` in `src/mana_agent/gateway/checkpoint_resume.py` to catch structured output parser errors (e.g. `OutputParserException` when `parsed: None` / `refusal: None` is returned) and empty responses from reasoning models (e.g. MiniMax-M3, DeepSeek-R1, OpenRouter/vLLM) and retry direct model invocation (`self.llm.invoke`) before failing.
+  - Added `model_validator` normalization in `CheckpointResumeOutput` and `FollowupClassificationOutput` to safely accept aliased or omitted `reason` fields (e.g., `rationale`, `explanation`, `justification`, `thought`) and generate descriptive non-empty fallbacks based on the model's selected action/category, preventing Pydantic `Field required` missing validation errors.
+  - Applied robust structured output fallback to direct prompt invocation across `src/mana_agent/gateway/followup_classifier.py`, `src/mana_agent/gateway/entry_routing.py`, `src/mana_agent/gateway/feature_integration.py`, `src/mana_agent/execution_supervisor/budget_decision.py`, `src/mana_agent/multi_agent/runtime/multi_task_orchestrator.py`, `src/mana_agent/multi_agent/agents/main_agent.py`, and `src/mana_agent/commands/cli_internal.py`.
+  - Maintained strict model-decision-only execution policy and schema validation: if direct invocation also fails or produces unparseable/invalid output, workflows halt safely with clear actionable errors without falling back to heuristic actions.
+  - Added regression test suites in `tests/gateway/test_checkpoint_resume.py` and `tests/gateway/test_followup_classifier.py`.
+  - User verification required: `python -m pytest tests/gateway/test_checkpoint_resume.py tests/gateway/test_followup_classifier.py tests/gateway/test_entry_routing.py tests/gateway/test_checkpoint_resume_invariants.py -v`.
 
 - Fixed `entry_route` Decision Validation and Prompt Guidance for `memory_task_id`:
   - Updated `ENTRY_ROUTER_PROMPT` in `src/mana_agent/gateway/entry_routing.py` to explicitly declare that `memory_task_id` must be empty string `""` for all routes except `memory`, preventing models from incorrectly populating task IDs on non-memory routes.

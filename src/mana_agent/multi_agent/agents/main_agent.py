@@ -56,11 +56,16 @@ class MainAgentResult:
     repository_ids: list[str] | None = None
 
 
+from mana_agent.utils.text import extract_model_text
+
+
 class _MainAgentSkillDraftGenerator:
     """Adapter around the existing model selected for the task lifecycle."""
 
     def __init__(self, llm: Any) -> None:
-        self.model = llm.with_structured_output(SkillDraft)
+        self.llm = llm
+        structured = getattr(llm, "with_structured_output", None)
+        self.model = structured(SkillDraft) if callable(structured) else None
 
     def generate(self, experience: ExperienceRecord, decision) -> SkillDraft:  # noqa: ANN001
         prompt = (
@@ -70,8 +75,20 @@ class _MainAgentSkillDraftGenerator:
             f"Eligibility:\n{decision.model_dump_json(indent=2)}\n\n"
             f"Recorded evidence:\n{experience.model_dump_json(indent=2)}"
         )
-        value = self.model.invoke(prompt)
-        return value if isinstance(value, SkillDraft) else SkillDraft.model_validate(value)
+        if self.model is not None:
+            try:
+                value = self.model.invoke(prompt)
+                return value if isinstance(value, SkillDraft) else SkillDraft.model_validate(value)
+            except Exception:
+                pass
+        raw = self.llm.invoke(prompt)
+        text = extract_model_text(getattr(raw, "content", raw))
+        if text.startswith("```"):
+            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end >= start:
+            text = text[start : end + 1]
+        return SkillDraft.model_validate_json(text)
 
 
 class MainAgent:
@@ -874,8 +891,21 @@ class MainAgent:
             f"Task: {child.user_request}\nFeature targets: {getattr(plan, 'implementation_targets', [])}\n"
             f"Repository references: {source_refs}\nRead evidence: {read_evidence}\n"
         )
-        result = self.routing_llm.with_structured_output(WiringDecision).invoke(prompt)
-        return result if isinstance(result, WiringDecision) else WiringDecision.model_validate(result)
+        structured = getattr(self.routing_llm, "with_structured_output", None)
+        if callable(structured):
+            try:
+                result = structured(WiringDecision).invoke(prompt)
+                return result if isinstance(result, WiringDecision) else WiringDecision.model_validate(result)
+            except Exception:
+                pass
+        raw = self.routing_llm.invoke(prompt)
+        text = extract_model_text(getattr(raw, "content", raw))
+        if text.startswith("```"):
+            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end >= start:
+            text = text[start : end + 1]
+        return WiringDecision.model_validate_json(text)
 
     def _project_wiring_completion(self, child_task_id: str, verification) -> None:  # noqa: ANN001
         supervisor = self.execution_supervisor

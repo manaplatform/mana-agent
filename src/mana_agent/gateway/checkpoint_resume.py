@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mana_agent.context_cost.models import ContextBudgetExceeded
 from mana_agent.evals.ids import stable_hash
@@ -59,22 +59,88 @@ class CheckpointResumeOutput(BaseModel):
         "start_fresh",
         "stop",
         "human_review_required",
-    ]
-    task_id: str = ""
-    checkpoint_id: str = ""
-    same_work: bool
-    fresh_data_required: bool
-    checkpoint_still_valid: bool
-    side_effects_safe_to_repeat: bool
-    safe_to_continue: bool
-    reason: str = Field(min_length=1)
+    ] = Field(
+        description=(
+            "The recovery action: 'resume_checkpoint' to continue an existing candidate's checkpoint, "
+            "'retry_task' to restart an existing candidate under the same task ID, "
+            "'replan_task' to replan an existing candidate from its first incomplete step under the same task ID, "
+            "'start_fresh' to create a brand new task identity for new/different work or when live fresh data is required, "
+            "'stop' if unsafe, or 'human_review_required' for ambiguous lost leases."
+        )
+    )
+    task_id: str = Field(
+        default="",
+        description="Exact task_id from recovery_candidates for resume_checkpoint, retry_task, replan_task, or human_review_required. Must be empty string for start_fresh and stop.",
+    )
+    checkpoint_id: str = Field(
+        default="",
+        description="Exact checkpoint_id from recovery_candidates ONLY for resume_checkpoint. Must be empty string for retry_task, replan_task, start_fresh, stop, and human_review_required.",
+    )
+    same_work: bool = Field(
+        description="True ONLY if the current request is the exact same goal as a listed candidate in recovery_candidates. Must be False when selecting start_fresh for new, different, or distinct work.",
+    )
+    fresh_data_required: bool = Field(
+        description="True if the request requires live external state (web, prices, live APIs) or fresh execution.",
+    )
+    checkpoint_still_valid: bool = Field(
+        description="True ONLY when resuming a valid checkpoint via resume_checkpoint. False for retry_task, replan_task, start_fresh, and stop.",
+    )
+    side_effects_safe_to_repeat: bool = Field(
+        description="True if repeating unfinished work is safe (required True for resume_checkpoint, retry_task, replan_task).",
+    )
+    safe_to_continue: bool = Field(
+        description="True if execution is safe to proceed (True for resume_checkpoint, retry_task, replan_task, start_fresh; False for stop and human_review_required).",
+    )
+    reason: str = Field(default="", min_length=1, description="Brief justification for the decision.")
 
-    @field_validator("reason", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _normalize_reason(cls, v: Any) -> str:
-        if v is None:
-            return ""
-        return str(v).strip()
+    def _normalize_payload(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            action = str(data.get("action") or "start_fresh").strip()
+
+            # Normalize string representations of None / empty for task_id and checkpoint_id
+            for id_field in ("task_id", "checkpoint_id"):
+                val = str(data.get(id_field) or "").strip()
+                if val.lower() in {"none", "null", "n/a", "empty", "false", "undefined", "''", '""'}:
+                    data[id_field] = ""
+
+            # When action is start_fresh or stop, task_id and checkpoint_id are inherently empty
+            if action in {"start_fresh", "stop"}:
+                data["task_id"] = ""
+                data["checkpoint_id"] = ""
+
+            if not data.get("reason"):
+                for alias in (
+                    "rationale",
+                    "explanation",
+                    "justification",
+                    "thought",
+                    "summary",
+                    "details",
+                    "why",
+                ):
+                    if data.get(alias):
+                        data["reason"] = str(data.pop(alias)).strip()
+                        break
+            for key in (
+                "rationale",
+                "explanation",
+                "justification",
+                "thought",
+                "summary",
+                "details",
+                "why",
+                "thinking",
+                "reasoning",
+            ):
+                data.pop(key, None)
+            if not data.get("reason") or not str(data.get("reason")).strip():
+                data["reason"] = f"Model decision selected {action}"
+            else:
+                data["reason"] = str(data["reason"]).strip()
+        return data
 
 
 
@@ -152,6 +218,13 @@ multi-task roots and reverted compound jobs that should start again from the fir
 Candidates may report lane_state blocked/paused/waiting for such jobs. When uncertain, select stop
 rather than guessing.
 
+CRITICAL RULES FOR same_work AND start_fresh:
+- `same_work` means: Is the current request the EXACT SAME GOAL as one of the listed recovery_candidates?
+- `same_work` does NOT mean "working on the same repository or chat session". It means "identical goal to a listed candidate".
+- If the current request is a NEW instruction, a DIFFERENT task, or not the exact goal of any listed candidate: you MUST set `same_work=false` and select `action="start_fresh"`.
+- If the current request IS the same goal as a candidate in recovery_candidates and does not require fresh live data: you MUST select `resume_checkpoint`, `retry_task`, or `replan_task` (with `same_work=true` and copying the candidate's `task_id`).
+- When `recovery_candidates` is non-empty and `fresh_data_required` is false, you must NEVER output `action='start_fresh'` with `same_work=true`. For new/different work, you MUST set `same_work=false`.
+
 When incomplete work is the same, `entry_route_requires_live_data` is false, does not require fresh data,
 and is safe to continue, and a recoverable candidate is listed, you must select resume_checkpoint,
 retry_task, or replan_task for the applicable candidate; do not select start_fresh. Select start_fresh
@@ -173,10 +246,10 @@ checkpoint_still_valid, side_effects_safe_to_repeat, and safe_to_continue true a
 fresh_data_required false. For start_fresh, leave task_id and checkpoint_id empty, set safe_to_continue
 true, and set fresh_data_required true whenever `entry_route_requires_live_data` is true, live/fresh
 data is required, or when `same_work` is true but fresh data is required. When work is different and
-the route does not require live data, fresh_data_required may be false. For stop, leave task_id and
-checkpoint_id empty and set safe_to_continue false. For retry_task or replan_task, copy an exact
-non-completed candidate task_id, leave checkpoint_id empty (even when the candidate lists a
-checkpoint—these actions intentionally do not resume that checkpoint), set same_work,
+the route does not require live data, fresh_data_required may be false and same_work MUST be false.
+For stop, leave task_id and checkpoint_id empty and set safe_to_continue false. For retry_task or
+replan_task, copy an exact non-completed candidate task_id, leave checkpoint_id empty (even when the
+candidate lists a checkpoint—these actions intentionally do not resume that checkpoint), set same_work,
 side_effects_safe_to_repeat, and safe_to_continue true, set checkpoint_still_valid false, and set
 fresh_data_required false. When recovery_candidates is empty and the work is the same, start_fresh
 with same_work true is valid.
@@ -234,13 +307,32 @@ class CheckpointResumeDecider:
         invoke_kwargs = {"max_tokens": CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS}
         try:
             structured = getattr(self.llm, "with_structured_output", None)
+            response = None
+            structured_error = None
             if callable(structured):
-                response = structured(
-                    CheckpointResumeOutput, method="json_schema", strict=True
-                ).invoke(messages, **invoke_kwargs)
-            else:
-                response = self.llm.invoke(messages, **invoke_kwargs)
-            output = _coerce_checkpoint_output(response)
+                try:
+                    response = structured(
+                        CheckpointResumeOutput, method="json_schema", strict=True
+                    ).invoke(messages, **invoke_kwargs)
+                except ContextBudgetExceeded:
+                    raise
+                except Exception as exc:
+                    structured_error = exc
+            if response is None:
+                try:
+                    response = self.llm.invoke(messages, **invoke_kwargs)
+                except Exception as exc:
+                    if structured_error is not None and "length" in str(structured_error).lower():
+                        raise structured_error from exc
+                    raise
+            try:
+                output = _coerce_checkpoint_output(response)
+            except Exception as coerce_exc:
+                if callable(structured) and structured_error is None:
+                    direct_response = self.llm.invoke(messages, **invoke_kwargs)
+                    output = _coerce_checkpoint_output(direct_response)
+                else:
+                    raise coerce_exc
         except ContextBudgetExceeded as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "

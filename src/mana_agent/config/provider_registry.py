@@ -68,8 +68,8 @@ class ProviderRegistry:
                     ("HTTP-Referer", "https://github.com/manaplatform/mana-agent"),
                     ("X-OpenRouter-Title", "Mana-Agent"),
                 ),
-                supports_responses_api=True,
-                codex_transport=CodexTransport.DIRECT_RESPONSES,
+                supports_responses_api=False,
+                codex_transport=CodexTransport.RESPONSES_BRIDGE,
             ),
             ProviderDefinition(
                 id="nvidia",

@@ -42,6 +42,20 @@ def _resolve_existing_directory(value: str | Path | None) -> str | None:
     return None
 
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class CodexCancellationOutcome:
+    """Explicit outcome of an attempted Codex turn cancellation."""
+
+    acknowledged: bool
+    status: str  # "acknowledged", "timed_out", "failed", "closed"
+    error: str | None = None
+    thread_id: str = ""
+    turn_id: str = ""
+
+
 class AsyncCodexAppServer:
     """Own one Codex app-server subprocess and its request/notification stream."""
 
@@ -122,7 +136,13 @@ class AsyncCodexAppServer:
             ) from exc
         await self.notify("initialized", {})
 
-    async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         if not self.running or self._process is None:
             raise CodexUnavailableError("Codex app-server is not running")
         request_id = self._next_id
@@ -130,18 +150,30 @@ class AsyncCodexAppServer:
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         await self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        timeout = self.request_timeout_seconds if timeout_seconds is None else max(0.1, float(timeout_seconds))
         try:
-            return await asyncio.wait_for(future, timeout=self.request_timeout_seconds)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError as exc:
             self._pending.pop(request_id, None)
             raise CodexTimeoutError(
                 f"Codex request timed out: {method}",
                 method=method,
-                timeout_seconds=self.request_timeout_seconds,
+                timeout_seconds=int(timeout) if timeout >= 1 else 1,
             ) from exc
 
     async def notify(self, method: str, params: dict[str, Any]) -> None:
         await self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def clear_notifications(self, thread_id: str) -> None:
+        """Discard any unconsumed queued notifications for thread_id."""
+        key = str(thread_id)
+        if key in self._notifications:
+            queue = self._notifications[key]
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
     async def notifications(self, thread_id: str) -> AsyncIterator[dict[str, Any]]:
         queue = self._notifications[str(thread_id)]
@@ -152,21 +184,72 @@ class AsyncCodexAppServer:
             if method in {"turn/completed", "turn/failed", "turn/cancelled"}:
                 return
 
-    async def interrupt(self, *, thread_id: str, turn_id: str) -> None:
+    async def interrupt(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        timeout_seconds: float = 2.0,
+    ) -> CodexCancellationOutcome:
+        """Attempt bounded interruption of an in-flight turn with an explicit typed outcome."""
+        logger.info(
+            "codex_client.interrupt_requested thread_id=%s turn_id=%s timeout=%.2f",
+            thread_id,
+            turn_id,
+            timeout_seconds,
+        )
+        if not self.running or self._process is None:
+            return CodexCancellationOutcome(
+                acknowledged=False,
+                status="closed",
+                thread_id=thread_id,
+                turn_id=turn_id,
+                error="Codex app-server is not running",
+            )
         try:
-            await self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
-        except CodexTimeoutError:
-            logger.warning(
-                "Codex turn/interrupt timed out for thread %s turn %s",
+            await self.request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                timeout_seconds=timeout_seconds,
+            )
+            logger.info(
+                "codex_client.interrupt_acknowledged thread_id=%s turn_id=%s",
                 thread_id,
                 turn_id,
             )
-        except Exception as exc:
+            return CodexCancellationOutcome(
+                acknowledged=True,
+                status="acknowledged",
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+        except CodexTimeoutError as exc:
             logger.warning(
-                "Codex turn/interrupt failed for thread %s turn %s: %s",
+                "codex_client.interrupt_timeout thread_id=%s turn_id=%s error=%s",
                 thread_id,
                 turn_id,
                 exc,
+            )
+            return CodexCancellationOutcome(
+                acknowledged=False,
+                status="timed_out",
+                thread_id=thread_id,
+                turn_id=turn_id,
+                error=str(exc),
+            )
+        except Exception as exc:
+            logger.warning(
+                "codex_client.interrupt_failed thread_id=%s turn_id=%s error=%s",
+                thread_id,
+                turn_id,
+                exc,
+            )
+            return CodexCancellationOutcome(
+                acknowledged=False,
+                status="failed",
+                thread_id=thread_id,
+                turn_id=turn_id,
+                error=str(exc),
             )
 
     async def deny_server_request(self, request: dict[str, Any]) -> None:
@@ -192,26 +275,40 @@ class AsyncCodexAppServer:
             }
         )
 
-    async def close(self) -> None:
+    async def close(self, *, wait_timeout: float = 1.0) -> None:
         process = self._process
         self._process = None
+        logger.info("codex_client.close_requested pid=%s", getattr(process, "pid", None) if process else None)
         if process is not None and process.returncode is None:
-            process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+                process.terminate()
+            except OSError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=max(0.1, wait_timeout))
+            except (asyncio.TimeoutError, TimeoutError):
+                try:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
+                except (OSError, asyncio.TimeoutError, TimeoutError):
+                    pass
         for task in (self._reader_task, self._stderr_task):
             if task is not None and not task.done():
                 task.cancel()
         self._reader_task = None
         self._stderr_task = None
         error = CodexUnavailableError("Codex app-server closed before responding")
-        for future in self._pending.values():
+        for future in list(self._pending.values()):
             if not future.done():
                 future.set_exception(error)
         self._pending.clear()
+        for queue in self._notifications.values():
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+        self._notifications.clear()
 
     async def _write(self, payload: dict[str, Any]) -> None:
         process = self._process
@@ -226,21 +323,25 @@ class AsyncCodexAppServer:
         process = self._process
         if process is None or process.stdout is None:
             return
-        while line := await process.stdout.readline():
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            payload = self._sanitize_payload(payload)
-            if "id" in payload and ("result" in payload or "error" in payload):
-                self._resolve_response(payload)
-                continue
-            method = str(payload.get("method") or "")
-            if method:
-                thread_id = self._notification_thread_id(payload)
-                await self._notifications[thread_id].put(payload)
+        logger.info("codex_client.stdout_reader_attached pid=%s", getattr(process, "pid", None))
+        try:
+            while line := await process.stdout.readline():
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                payload = self._sanitize_payload(payload)
+                if "id" in payload and ("result" in payload or "error" in payload):
+                    self._resolve_response(payload)
+                    continue
+                method = str(payload.get("method") or "")
+                if method:
+                    thread_id = self._notification_thread_id(payload)
+                    await self._notifications[thread_id].put(payload)
+        finally:
+            logger.info("codex_client.stdout_reader_eof pid=%s", getattr(process, "pid", None) if process else None)
         if process.returncode is None:
             await process.wait()
         detail = self._stderr[-1] if self._stderr else "process exited"
@@ -415,4 +516,4 @@ class AsyncCodexAppServer:
         return sanitized
 
 
-__all__ = ["AsyncCodexAppServer"]
+__all__ = ["AsyncCodexAppServer", "CodexCancellationOutcome"]

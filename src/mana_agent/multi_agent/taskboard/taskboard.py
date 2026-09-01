@@ -51,7 +51,7 @@ class TaskBoard:
     def _new_task_id(self) -> str:
         """Allocate an ID unused by this projection or an authoritative store."""
         task_id = new_task_id()
-        while task_id in self.tasks or (
+        while task_id in self.tasks or self.store.repository.task_exists(task_id) or (
             self._task_id_is_reserved is not None
             and self._task_id_is_reserved(task_id)
         ):
@@ -314,6 +314,12 @@ class TaskBoard:
         self.save()
 
     def get_task(self, task_id: str) -> TaskBoardItem:
+        if task_id in self.tasks:
+            return self.tasks[task_id]
+        persisted = self.store.repository.get_task_or_none(task_id)
+        if persisted is not None:
+            self.tasks[task_id] = persisted
+            return persisted
         return self.tasks[task_id]
 
     def update_status(self, task_id: str, status: TaskStatus, *, reason: str | None = None) -> None:
@@ -673,19 +679,11 @@ class TaskBoard:
 
     def save(self) -> None:
         with self._save_lock:
-            self.store.save_state({
-                "schema_version": 2,
-                "tasks": {key: serialize(value) for key, value in self.tasks.items()},
-            })
+            for task in self.tasks.values():
+                self.store.repository.save_task(task)
 
     def load(self) -> None:
-        payload = self.store.load_state()
-        tasks = payload.get("tasks", {}) if isinstance(payload, dict) else {}
-        self.tasks = {
-            task_id: task_from_dict(item)
-            for task_id, item in tasks.items()
-            if isinstance(item, dict)
-        }
+        self.tasks = {task.task_id: task for task in self.store.repository.list_tasks()}
 
     def _add_text(self, task_id: str, field_name: str, value: str, *, save: bool = True) -> None:
         if not str(value or "").strip():

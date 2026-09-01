@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mana_agent.context_cost.accounting import ModelContextLimitError
 from mana_agent.context_cost.models import ContextBudgetExceeded
@@ -52,6 +52,43 @@ class FollowupClassificationOutput(BaseModel):
         ),
     )
     reason: str = Field(default="", min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_payload(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            if not data.get("reason"):
+                for alias in (
+                    "rationale",
+                    "explanation",
+                    "justification",
+                    "thought",
+                    "summary",
+                    "details",
+                    "why",
+                ):
+                    if data.get(alias):
+                        data["reason"] = str(data.pop(alias)).strip()
+                        break
+            for key in (
+                "rationale",
+                "explanation",
+                "justification",
+                "thought",
+                "summary",
+                "details",
+                "why",
+                "thinking",
+                "reasoning",
+            ):
+                data.pop(key, None)
+            if not data.get("reason") or not str(data.get("reason")).strip():
+                category = data.get("category", "new_task")
+                data["reason"] = f"Model classified turn as {category}"
+            else:
+                data["reason"] = str(data["reason"]).strip()
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,25 +205,33 @@ class FollowupClassifier:
             if retrieved_contexts:
                 payload["retrieved_context"] = retrieved_contexts
 
+            messages = [
+                SystemMessage(content=_PROMPT),
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+            ]
             try:
                 structured = getattr(self.llm, "with_structured_output", None)
+                raw = None
+                structured_error = None
                 if callable(structured):
-                    raw = structured(
-                        FollowupClassificationOutput, method="json_schema", strict=True
-                    ).invoke(
-                        [
-                            SystemMessage(content=_PROMPT),
-                            HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
-                        ]
-                    )
-                else:
-                    raw = self.llm.invoke(
-                        [
-                            SystemMessage(content=_PROMPT),
-                            HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
-                        ]
-                    )
-                output = _coerce_followup_output(raw)
+                    try:
+                        raw = structured(
+                            FollowupClassificationOutput, method="json_schema", strict=True
+                        ).invoke(messages)
+                    except (ContextBudgetExceeded, ModelContextLimitError):
+                        raise
+                    except Exception as exc:
+                        structured_error = exc
+                if raw is None:
+                    raw = self.llm.invoke(messages)
+                try:
+                    output = _coerce_followup_output(raw)
+                except Exception as coerce_exc:
+                    if callable(structured) and structured_error is None:
+                        direct_raw = self.llm.invoke(messages)
+                        output = _coerce_followup_output(direct_raw)
+                    else:
+                        raise coerce_exc
             except (ContextBudgetExceeded, ModelContextLimitError) as exc:
                 raise FollowupClassificationError(
                     "Model decision failed: followup_classification. No fallback action was executed. "

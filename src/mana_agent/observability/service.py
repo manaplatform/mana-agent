@@ -13,6 +13,8 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -110,10 +112,15 @@ class ObservabilityStore:
         self.directory.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Generator[sqlite3.Connection, None, None]:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as db:

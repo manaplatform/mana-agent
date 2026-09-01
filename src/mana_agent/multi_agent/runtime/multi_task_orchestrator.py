@@ -16,6 +16,7 @@ from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+from mana_agent.utils.text import extract_model_text
 
 
 MAX_MULTI_TASK_CHILDREN = 12
@@ -152,22 +153,42 @@ class MultiTaskOrchestrator:
         started = time.perf_counter()
         try:
             structured = getattr(self.llm, "with_structured_output", None)
+            response = None
+            structured_error = None
             if callable(structured):
-                response = structured(MultiTaskPlan, method="json_schema", strict=True).invoke(messages)
-                plan = MultiTaskPlan.model_validate(response)
-            else:
+                try:
+                    response = structured(MultiTaskPlan, method="json_schema", strict=True).invoke(messages)
+                except Exception as exc:
+                    structured_error = exc
+            if response is None:
                 response = self.llm.invoke(messages)
-                raw = getattr(response, "content", response)
-                if isinstance(raw, list):
-                    raw = " ".join(
-                        str(item.get("text", item)) if isinstance(item, dict) else str(item)
-                        for item in raw
-                    )
-                text = str(raw).strip()
-                if text.startswith("```"):
-                    text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-                start, end = text.find("{"), text.rfind("}")
-                plan = MultiTaskPlan.model_validate_json(text[start : end + 1])
+            try:
+                if isinstance(response, MultiTaskPlan):
+                    plan = response
+                elif isinstance(response, dict):
+                    plan = MultiTaskPlan.model_validate(response)
+                else:
+                    raw = getattr(response, "content", response)
+                    text = extract_model_text(raw)
+                    if text.startswith("```"):
+                        text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+                    start, end = text.find("{"), text.rfind("}")
+                    if start >= 0 and end >= start:
+                        text = text[start : end + 1]
+                    plan = MultiTaskPlan.model_validate_json(text)
+            except Exception as coerce_exc:
+                if callable(structured) and structured_error is None:
+                    direct_response = self.llm.invoke(messages)
+                    raw = getattr(direct_response, "content", direct_response)
+                    text = extract_model_text(raw)
+                    if text.startswith("```"):
+                        text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+                    start, end = text.find("{"), text.rfind("}")
+                    if start >= 0 and end >= start:
+                        text = text[start : end + 1]
+                    plan = MultiTaskPlan.model_validate_json(text)
+                else:
+                    raise coerce_exc
         except Exception as exc:
             record_current(
                 "model.call.failed",

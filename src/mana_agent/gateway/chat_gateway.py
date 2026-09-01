@@ -158,7 +158,7 @@ from mana_agent.execution_supervisor.models import (
     SideEffectClassification,
     TERMINAL_STATES,
 )
-from mana_agent.execution_supervisor.budget_decision import BudgetOverrunDecider
+from mana_agent.execution_supervisor.budget_decision import BudgetOverrunFinalizationDecider
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
 from mana_agent.human_inbox.models import (
     AgentInboxObservation,
@@ -1335,6 +1335,8 @@ class AgentChatGateway:
         self.session_service.process_manager = self.background_processes
         self.connector_service = ConnectorService(self.background_processes)
         self.command_dispatcher = CommandDispatcher(self.command_registry)
+        self._fenced_sessions: set[str] = set()
+        self._session_generations: dict[str, int] = {}
 
         # Default session state seed
         self._default_flow_id = self.config.flow_id
@@ -3357,6 +3359,32 @@ class AgentChatGateway:
         self, session_id: str, *, frontend: str | None = None
     ) -> str:
         """Permanently replace the current conversation with a fresh session."""
+        self._fenced_sessions.add(session_id)
+        try:
+            self.cancel(session_id, reason="session replaced by /new", source="new")
+        except Exception:
+            pass
+
+        if self._coding_agent is not None:
+            if hasattr(self._coding_agent, "reset_session"):
+                try:
+                    self._coding_agent.reset_session()
+                except Exception:
+                    pass
+            elif hasattr(self._coding_agent, "reset_flow"):
+                try:
+                    self._coding_agent.reset_flow()
+                except Exception:
+                    pass
+
+        try:
+            from mana_agent.connectors.browser.session import default_browser_manager
+
+            default_browser_manager().close(session_id)
+        except Exception:
+            pass
+        self._discard_server_approvals(session_id)
+
         state = self._session(session_id)
         selected_frontend = frontend or str(state.get("frontend") or "cli")
         record = self.session_service.replace(
@@ -3364,25 +3392,38 @@ class AgentChatGateway:
         )
         self._sessions.pop(session_id, None)
         self._active.discard(session_id)
-        self._discard_server_approvals(session_id)
         self._chat_session_id = None
+
+        new_sid = record.session_id
+        self._session_generations[new_sid] = self._session_generations.get(new_sid, 0) + 1
         return self.create_session(
-            frontend=selected_frontend, session_id=record.session_id
+            frontend=selected_frontend, session_id=new_sid
         )
 
     def switch_session(
-        self, session_id: str, *, frontend: str = "cli"
+        self,
+        session_id: str,
+        *,
+        frontend: str = "cli",
+        workspace_id: str | None = None,
+        repository_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Activate a canonical session and return its exact durable timeline."""
         current = self._chat_session_id
-        workspace_id = None
+        active_workspace_id = workspace_id
+        active_repository_id = repository_id
         if current:
             try:
-                workspace_id = self._workspaces.store.get_session(current).workspace_id
+                current_record = self._workspaces.store.get_session(current)
+                active_workspace_id = active_workspace_id or current_record.workspace_id
+                active_repository_id = active_repository_id or current_record.primary_repository_id
             except FileNotFoundError:
                 pass
         activation = self.session_service.bind(
-            session_id, frontend=frontend, workspace_id=workspace_id
+            session_id,
+            frontend=frontend,
+            workspace_id=active_workspace_id,
+            repository_id=active_repository_id,
         )
         if current and current != session_id:
             self._active.discard(current)
@@ -3395,6 +3436,16 @@ class AgentChatGateway:
         return activation.messages
 
     def delete_session(self, session_id: str) -> None:
+        self._fenced_sessions.add(session_id)
+        try:
+            self.cancel(session_id, reason="session deleted", source="delete")
+        except Exception:
+            pass
+        if self._coding_agent is not None and hasattr(self._coding_agent, "reset_session"):
+            try:
+                self._coding_agent.reset_session()
+            except Exception:
+                pass
         self.session_service.delete(session_id, gateway=self)
         self._sessions.pop(session_id, None)
         self._active.discard(session_id)
@@ -3467,6 +3518,9 @@ class AgentChatGateway:
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
     ) -> Any:
+        if session_id in self._fenced_sessions:
+            logger.debug("Suppressing message append for fenced session %s", session_id)
+            return None
         message = self._history_store.append(
             session_id,
             role=role,
@@ -4410,8 +4464,8 @@ class AgentChatGateway:
             step_id=f"budget-overrun-finalization:{uuid.uuid4().hex}",
             execution_kind="budget_overrun_finalization",
         )
-        decision = BudgetOverrunDecider(self._entry_router.llm).decide(
-            task, result_payload=redact_secrets(dict(result.payload))
+        decision = BudgetOverrunFinalizationDecider(self._entry_router.llm).decide(
+            task=task, result_payload=redact_secrets(dict(result.payload))
         )
         execution = self._lane_coordinator.finalize_budget_overrun(decision)
         return {
@@ -6515,6 +6569,9 @@ class AgentChatGateway:
         state: dict[str, Any],
         memory_warning: str = "",
     ) -> ChatTurnResult:
+        if session_id in self._fenced_sessions:
+            logger.debug("Suppressing turn result finalization for fenced session %s", session_id)
+            return result
         # Preserve a caller-set entry_route (from EntryRoutingDecision). process_chat_turn
         # may overwrite payload["route"] with internal paths like "auto_chat"; eval scoring
         # and lane bookkeeping must still see the validated entry route (repository, coding, …).
@@ -8517,11 +8574,15 @@ class AgentChatGateway:
                 event_sink=sink,
                 lane_task_id=lane_task_id,
             )
-        if len(decision.required_sources) > 1 or decision.required_sources[0] in {
-            "browser",
-            "search",
-            "github",
-        }:
+        if len(decision.required_sources) > 1 or (
+            decision.required_sources
+            and decision.required_sources[0]
+            in {
+                "browser",
+                "search",
+                "github",
+            }
+        ):
             return self._execute_required_sources(
                 decision=decision,
                 text=execution_text,

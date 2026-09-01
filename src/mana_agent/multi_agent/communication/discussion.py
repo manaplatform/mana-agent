@@ -6,6 +6,8 @@ from pathlib import Path
 from mana_agent.multi_agent.core.ids import new_discussion_id
 from mana_agent.multi_agent.core.types import DiscussionStatus, DiscussionThread, to_jsonable, utc_now
 from mana_agent.multi_agent.taskboard.store import discussion_from_dict
+from mana_agent.persistence.workspace_db import get_workspace_db
+from mana_agent.persistence.workspace_repository import WorkspaceRepository
 from mana_agent.workspaces.paths import workspace_dir
 from mana_agent.workspaces.service import WorkspaceService
 
@@ -17,6 +19,9 @@ class DiscussionStore:
         service = WorkspaceService()
         repo = service.register_repository(self.root)
         workspace = service.workspace_for_repository(repo.repository_id)
+        self.workspace_id = workspace.workspace_id
+        self.db = get_workspace_db(self.workspace_id)
+        self.repository = WorkspaceRepository(self.workspace_id, db=self.db)
         self.path = workspace_dir(workspace.workspace_id) / "taskboard" / "discussions.json"
         self.discussions: dict[str, DiscussionThread] = {}
         self.load()
@@ -49,18 +54,8 @@ class DiscussionStore:
         self.save()
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(to_jsonable(self.discussions), indent=2, sort_keys=True), encoding="utf-8")
+        for discussion in self.discussions.values():
+            self.repository.save_discussion(discussion)
 
     def load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
-        self.discussions = {
-            key: discussion_from_dict(value)
-            for key, value in payload.items()
-            if isinstance(value, dict)
-        }
+        self.discussions = {d.discussion_id: d for d in self.repository.list_discussions()}

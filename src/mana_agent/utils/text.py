@@ -2,7 +2,26 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+_THINKING_TAGS_PATTERN = re.compile(
+    r"<(?:think|thought|reasoning|thought_process)>.*?</(?:think|thought|reasoning|thought_process)>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+_UNCLOSED_THINKING_PATTERN = re.compile(
+    r"^<(?:think|thought|reasoning|thought_process)>.*?(?=(?:```|\{|\Z))",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_thinking_tags(text: str) -> str:
+    """Remove thinking/reasoning XML-style tags and their contents from raw model text."""
+    if not text or not any(tag in text.lower() for tag in ("<think", "<thought", "<reasoning")):
+        return text
+    cleaned = _THINKING_TAGS_PATTERN.sub("", text)
+    cleaned = _UNCLOSED_THINKING_PATTERN.sub("", cleaned)
+    return cleaned.strip()
 
 
 def extract_model_text(content: Any) -> str:
@@ -15,7 +34,7 @@ def extract_model_text(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
-        return content.strip()
+        return _strip_thinking_tags(content).strip()
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .errors import TelegramQueueError
@@ -21,12 +23,16 @@ class TelegramUpdateStore:
         except OSError:
             pass
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Generator[sqlite3.Connection, None, None]:
         db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
-        db.execute("PRAGMA busy_timeout=30000")
-        return db
+        try:
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("PRAGMA busy_timeout=30000")
+            yield db
+        finally:
+            db.close()
 
     def _initialize(self) -> None:
         with self._connect() as db:

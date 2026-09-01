@@ -1125,7 +1125,11 @@ def _invoke_routing_model(
         except TypeError:
             runner = structured_output(EntryRoutingOutput)
 
-    result = runner.invoke(messages)
+    try:
+        result = runner.invoke(messages)
+    except Exception:
+        response = llm.invoke(messages)
+        return response, _coerce_routing_output(response)
 
     # LangChain include_raw=True contract:
     #
@@ -1152,21 +1156,18 @@ def _invoke_routing_model(
         if raw is not None:
             try:
                 return raw, _coerce_routing_output(raw)
-            except Exception as raw_error:
-                # Preserve the original structured-parser error when possible.
-                if parsing_error is not None:
-                    raise parsing_error from raw_error
-                raise
+            except Exception:
+                pass
 
-        if parsing_error is not None:
-            raise parsing_error
-
-        raise ValueError(
-            "structured entry-router response contained neither parsed nor raw output"
-        )
+        response = llm.invoke(messages)
+        return response, _coerce_routing_output(response)
 
     # Defensive compatibility with implementations that ignore include_raw.
-    return result, _coerce_routing_output(result)
+    try:
+        return result, _coerce_routing_output(result)
+    except Exception:
+        response = llm.invoke(messages)
+        return response, _coerce_routing_output(response)
 
 def _coerce_routing_output(response: Any) -> dict[str, Any]:
     if isinstance(response, EntryRoutingOutput):

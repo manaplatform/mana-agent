@@ -28,6 +28,8 @@ from mana_agent.integrations.codex.runtime_environment import CodexRuntimeEnviro
 def test_transport_selection_openai_direct_nvidia_bridge() -> None:
     assert PROVIDERS.get("openai").codex_transport is CodexTransport.DIRECT_RESPONSES
     assert PROVIDERS.get("openai").supports_responses_api is True
+    assert PROVIDERS.get("openrouter").codex_transport is CodexTransport.RESPONSES_BRIDGE
+    assert PROVIDERS.get("openrouter").supports_responses_api is False
     assert PROVIDERS.get("nvidia").codex_transport is CodexTransport.RESPONSES_BRIDGE
     assert PROVIDERS.get("nvidia").supports_responses_api is False
     assert PROVIDERS.get("nvidia").api_key_env == "NVIDIA_API_KEY"

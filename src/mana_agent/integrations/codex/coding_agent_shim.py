@@ -13,7 +13,9 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+import logging
+from collections.abc import Coroutine
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from mana_agent.coding.event_visibility import (
     EventVisibility,
@@ -24,6 +26,7 @@ from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, W
 from mana_agent.coding.live_events import publish_coding_event
 from mana_agent.config.model_capabilities import normalize_reasoning_request_overrides
 from mana_agent.integrations.codex.backend import CodexCodingBackend
+from mana_agent.integrations.codex.client import CodexCancellationOutcome
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.exceptions import CodexCapabilityError
 from mana_agent.integrations.codex.terminal_summary import (
@@ -47,31 +50,55 @@ if TYPE_CHECKING:
     from mana_agent.gateway.routing import GatewayRoutingAuthority
     from mana_agent.context_cost import ContextCostGovernor
 
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
 BackendFactory = Callable[[], CodexCodingBackend]
 WorkspaceManagerFactory = Callable[[], WorkspaceManager]
 
 
-def _run_async(coro: Any) -> Any:
-    """Run a coroutine from sync code even when a parent event loop is active."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    result: list[Any] = []
-    failure: list[BaseException] = []
+class _CodexRuntimeRunner:
+    """Owns a stable background event loop thread for Codex lifecycle and execution."""
 
-    def _collect() -> None:
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def _ensure_running(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("CodexRuntimeRunner is closed")
+            if self._loop is None or not self._loop.is_running():
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(
+                    target=self._loop.run_forever,
+                    daemon=True,
+                    name="codex-runtime-loop",
+                )
+                self._thread.start()
+            return self._loop
+
+    def run(self, coro: Coroutine[Any, Any, T], *, timeout: float | None = None) -> T:
+        loop = self._ensure_running()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
-            result.append(asyncio.run(coro))
-        except BaseException as exc:  # re-raised on the caller thread
-            failure.append(exc)
+            return future.result(timeout=timeout)
+        except Exception:
+            future.cancel()
+            raise
 
-    thread = threading.Thread(target=_collect, daemon=True)
-    thread.start()
-    thread.join()
-    if failure:
-        raise failure[0]
-    return result[0]
+    def close(self, *, wait_timeout: float = 1.0) -> None:
+        with self._lock:
+            self._closed = True
+            loop = self._loop
+            thread = self._thread
+            self._loop = None
+            self._thread = None
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.1, wait_timeout))
 
 
 class CodexCodingAgentShim:
@@ -128,25 +155,65 @@ class CodexCodingAgentShim:
                 enabled=self.codex_settings.worktree_isolation,
             )
         )
+        self._runner = _CodexRuntimeRunner()
+        self._session_backend: CodexCodingBackend | None = None
+        self._session_backend_key: tuple[Any, ...] | None = None
         self._flow_results: dict[str, dict[str, Any]] = {}
         self._active_flow_id: str | None = None
         self._active_backend: tuple[str, Any] | None = None
 
     def cancel(self, task_id: str | None = None) -> bool:
-        """Propagate cancellation to the active Codex backend/turn if in flight."""
+        """Propagate bounded cancellation to the active Codex backend/turn if in flight."""
         if self._active_backend is not None:
             active_task_id, backend = self._active_backend
             if task_id is None or str(task_id).strip() == str(active_task_id).strip():
+                record_current("provider.cancellation.requested", {"task_id": active_task_id})
                 cancel_func = getattr(backend, "cancel", None)
                 if callable(cancel_func):
                     try:
-                        record_current("provider.cancellation.requested", {"task_id": active_task_id})
-                        _run_async(backend.cancel(active_task_id))
+                        try:
+                            coro = backend.cancel(active_task_id, timeout_seconds=2.0)
+                        except TypeError:
+                            coro = backend.cancel(active_task_id)
+                        outcome = self._runner.run(coro, timeout=3.0)
+                        if isinstance(outcome, CodexCancellationOutcome) and not outcome.acknowledged:
+                            close_func = getattr(backend, "close", None)
+                            if callable(close_func):
+                                try:
+                                    self._runner.run(backend.close(), timeout=2.0)
+                                except Exception:
+                                    pass
                         return True
                     except Exception:
-                        logger.debug("Failed to cancel active codex turn for %s", active_task_id, exc_info=True)
+                        logger.debug("Failed to cancel active codex turn for %s, forcing close", active_task_id, exc_info=True)
+                        close_func = getattr(backend, "close", None)
+                        if callable(close_func):
+                            try:
+                                self._runner.run(backend.close(), timeout=2.0)
+                            except Exception:
+                                pass
                         return False
         return False
+
+    def reset_session(self, session_id: str = "") -> None:
+        """Explicitly reset session state, cancel active backend, and reset thread/flow IDs."""
+        self.cancel()
+        self.session_id = str(session_id or "").strip()
+        self.resume_thread_id = ""
+        self._active_flow_id = None
+        self._flow_results.clear()
+        if self._session_backend is not None:
+            try:
+                self._runner.run(self._session_backend.close(), timeout=2.0)
+            except Exception:
+                pass
+            self._session_backend = None
+            self._session_backend_key = None
+
+    def close(self) -> None:
+        """Close the coding agent shim, active backend, and runtime executor."""
+        self.reset_session()
+        self._runner.close()
 
     def preview_execution_checklist(
 
@@ -209,12 +276,20 @@ class CodexCodingAgentShim:
             self._flow_results.pop(selected, None)
         if not flow_id or selected == self._active_flow_id:
             self._active_flow_id = None
+            self.resume_thread_id = ""
         return selected or None
 
     def update_model(self, model_name: str) -> None:
         self.codex_settings = self.codex_settings.model_copy(
             update={"model": str(model_name or "").strip() or None}
         )
+        if self._session_backend is not None:
+            try:
+                self._runner.run(self._session_backend.close(), timeout=2.0)
+            except Exception:
+                pass
+            self._session_backend = None
+            self._session_backend_key = None
 
     def _tool_policy_for_request(self, _request: str, **_kwargs: Any) -> dict[str, Any]:
         """Reject legacy queue planning instead of manufacturing a tool policy."""
@@ -534,25 +609,59 @@ class CodexCodingAgentShim:
             )
 
         events: list[AgentEvent] = []
-        backend = self._backend_factory()
+        backend_key = (
+            str(self.codex_settings.model or ""),
+            str(self.codex_settings.provider or ""),
+            str(self.codex_settings.approval_policy or ""),
+            str(workspace.sandbox),
+            str(workspace.worktree_path),
+        )
+        backend_client = getattr(self._session_backend, "_client", None)
+        client_running = getattr(backend_client, "running", True) if backend_client is not None else True
+        if (
+            self._session_backend is not None
+            and self._session_backend_key == backend_key
+            and client_running
+        ):
+            backend = self._session_backend
+            if hasattr(backend, "resume_thread_id"):
+                backend.resume_thread_id = self.resume_thread_id
+        else:
+            if self._session_backend is not None:
+                try:
+                    self._runner.run(self._session_backend.close(), timeout=2.0)
+                except Exception:
+                    pass
+            backend = self._backend_factory()
+            backend.resume_thread_id = self.resume_thread_id
+            self._session_backend = backend
+            self._session_backend_key = backend_key
+
         self._active_backend = (task_id, backend)
 
         async def run() -> CodingTaskResult:
-            try:
-                async for event in backend.stream(task, workspace):
-                    events.append(event)
-                    self._emit_event(
-                        event,
-                        requires_repository_write=requires_repository_write,
-                    )
-                return backend.result_for(task_id)
-            finally:
-                await backend.close()
+            async for event in backend.stream(task, workspace):
+                events.append(event)
+                self._emit_event(
+                    event,
+                    requires_repository_write=requires_repository_write,
+                )
+            return backend.result_for(task_id)
 
         try:
-            result = _run_async(run())
+            result = self._runner.run(run())
+            if result.thread_id:
+                self.resume_thread_id = result.thread_id
+                backend.resume_thread_id = result.thread_id
         except (KeyboardInterrupt, asyncio.CancelledError):
             record_current("codex.turn.cancelled", {"task_id": task_id, "reason": "user_interrupt"})
+            if self._session_backend is not None:
+                try:
+                    self._runner.run(self._session_backend.close(), timeout=2.0)
+                except Exception:
+                    pass
+                self._session_backend = None
+                self._session_backend_key = None
             if manager is not None:
                 manager.transition(
                     self.workspace_task_id or task_id,
@@ -568,6 +677,13 @@ class CodexCodingAgentShim:
             )
         except Exception as exc:
             record_current("codex.turn.failed", {"task_id": task_id, "error_type": type(exc).__name__, "error": str(exc)})
+            if self._session_backend is not None:
+                try:
+                    self._runner.run(self._session_backend.close(), timeout=2.0)
+                except Exception:
+                    pass
+                self._session_backend = None
+                self._session_backend_key = None
             if manager is not None:
                 manager.transition(
                     self.workspace_task_id or task_id,
@@ -730,6 +846,7 @@ class CodexCodingAgentShim:
             return
 
         safe = progress_event_payload(event)
+        output_preview = str(safe.get("output_preview") or event.output_preview or "")
         # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
         progress = AgentEvent(
             event_id=str(safe.get("event_id") or event.event_id),
@@ -749,36 +866,61 @@ class CodexCodingAgentShim:
             token_usage=event.token_usage,
             model=event.model,
             error=str(safe.get("error") or ""),
-            output_preview="",
+            output_preview=output_preview,
             visibility="progress",
             semantic_kind=str(safe.get("semantic_kind") or event.semantic_kind or ""),
             payload={},
         )
-        publish_coding_event(progress)
-        if self.session_id and self.repository_id:
-            from mana_agent.services.execution_event_hub import get_execution_event_hub
-
-            get_execution_event_hub().publish(
-                {
-                    **progress.model_dump(mode="json"),
-                    "type": progress.event_type,
-                    "event_id": progress.event_id,
-                    "metadata": {
-                        "visibility": progress.visibility,
-                        "semantic_kind": progress.semantic_kind,
-                    },
-                },
-                conversation_id=self.session_id,
-                execution_id=event.task_id,
-                repository_id=self.repository_id,
-            )
-        if self.event_sink is None:
-            return
-        payload = progress.model_dump(mode="json")
         try:
-            self.event_sink(progress.event_type, payload)
-        except TypeError:
-            self.event_sink(payload)
+            publish_coding_event(progress)
+        except Exception:
+            logger.debug(
+                "codex_shim.publish_coding_event_failed event_id=%s task_id=%s turn_id=%s",
+                progress.event_id,
+                event.task_id,
+                event.turn_id,
+                exc_info=True,
+            )
+        if self.session_id and self.repository_id:
+            try:
+                from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+                get_execution_event_hub().publish(
+                    {
+                        **progress.model_dump(mode="json"),
+                        "type": progress.event_type,
+                        "event_id": progress.event_id,
+                        "metadata": {
+                            "visibility": progress.visibility,
+                            "semantic_kind": progress.semantic_kind,
+                            "output_preview": progress.output_preview,
+                        },
+                    },
+                    conversation_id=self.session_id,
+                    execution_id=event.task_id,
+                    repository_id=self.repository_id,
+                )
+            except Exception:
+                logger.debug(
+                    "codex_shim.execution_event_hub_publish_failed event_id=%s task_id=%s",
+                    progress.event_id,
+                    event.task_id,
+                    exc_info=True,
+                )
+        if self.event_sink is not None:
+            payload = progress.model_dump(mode="json")
+            try:
+                try:
+                    self.event_sink(progress.event_type, payload)
+                except TypeError:
+                    self.event_sink(payload)
+            except Exception:
+                logger.debug(
+                    "codex_shim.event_sink_publish_failed event_id=%s task_id=%s",
+                    progress.event_id,
+                    event.task_id,
+                    exc_info=True,
+                )
 
     def _emit_terminal_result(
         self,
