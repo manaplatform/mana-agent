@@ -64,11 +64,20 @@ class SessionService:
             self._active_by_frontend.pop(frontend, None)
             return None
 
-    def bind(self, session_id: str, *, frontend: str = "cli", workspace_id: str | None = None) -> SessionActivation:
+    def bind(
+        self,
+        session_id: str,
+        *,
+        frontend: str = "cli",
+        workspace_id: str | None = None,
+        repository_id: str | None = None,
+    ) -> SessionActivation:
         with self._lock:
             record = self.workspaces.store.get_session(session_id)
             if workspace_id and record.workspace_id != workspace_id:
                 raise ValueError("session does not belong to the selected workspace")
+            if repository_id and repository_id not in record.attached_repository_ids:
+                raise ValueError("session does not include the active repository")
             if record.status == "archived":
                 raise ValueError("archived sessions cannot be activated")
             if record.status != "active":
@@ -79,12 +88,19 @@ class SessionService:
                 messages=[row.to_dict() for row in self.history.list(session_id, limit=5000)],
             )
 
-    def list(self, *, workspace_id: str | None = None, current_id: str = "") -> list[SessionSummary]:
+    def list(
+        self,
+        *,
+        workspace_id: str | None = None,
+        repository_id: str | None = None,
+        current_id: str = "",
+    ) -> list[SessionSummary]:
         rows = self.workspaces.store.list_sessions()
         return [
             self.summary(row, current_id=current_id)
             for row in rows
-            if not workspace_id or row.workspace_id == workspace_id
+            if (not workspace_id or row.workspace_id == workspace_id)
+            and (not repository_id or repository_id in row.attached_repository_ids)
         ]
 
     def summary(self, record: SessionRecord, *, current_id: str = "") -> SessionSummary:

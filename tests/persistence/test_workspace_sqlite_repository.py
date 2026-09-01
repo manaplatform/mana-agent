@@ -41,6 +41,8 @@ def test_workspace_database_initialization(temp_workspace):
         # Check pragmas
         journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
         assert journal_mode.lower() == "wal"
+        synchronous = conn.execute("PRAGMA synchronous;").fetchone()[0]
+        assert synchronous == 1  # NORMAL
         foreign_keys = conn.execute("PRAGMA foreign_keys;").fetchone()[0]
         assert foreign_keys == 1
 

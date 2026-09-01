@@ -3401,18 +3401,29 @@ class AgentChatGateway:
         )
 
     def switch_session(
-        self, session_id: str, *, frontend: str = "cli"
+        self,
+        session_id: str,
+        *,
+        frontend: str = "cli",
+        workspace_id: str | None = None,
+        repository_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Activate a canonical session and return its exact durable timeline."""
         current = self._chat_session_id
-        workspace_id = None
+        active_workspace_id = workspace_id
+        active_repository_id = repository_id
         if current:
             try:
-                workspace_id = self._workspaces.store.get_session(current).workspace_id
+                current_record = self._workspaces.store.get_session(current)
+                active_workspace_id = active_workspace_id or current_record.workspace_id
+                active_repository_id = active_repository_id or current_record.primary_repository_id
             except FileNotFoundError:
                 pass
         activation = self.session_service.bind(
-            session_id, frontend=frontend, workspace_id=workspace_id
+            session_id,
+            frontend=frontend,
+            workspace_id=active_workspace_id,
+            repository_id=active_repository_id,
         )
         if current and current != session_id:
             self._active.discard(current)

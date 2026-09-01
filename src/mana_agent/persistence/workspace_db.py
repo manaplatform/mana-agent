@@ -453,6 +453,11 @@ class WorkspaceDatabase:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA busy_timeout = 30000;")
+        # ``synchronous`` is a per-connection setting.  Reapply the WAL
+        # durability/performance policy here because task saves use short-lived
+        # connections, especially on slower Windows CI filesystems.
+        if str(self.db_path) != ":memory:":
+            conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
 
     @contextmanager

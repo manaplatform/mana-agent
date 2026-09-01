@@ -23,7 +23,11 @@ def _sessions(context: CommandContext, args: list[str]) -> CommandResult:
         raise RuntimeError("Session service is unavailable. No fallback action was executed.")
     action = args[0].lower() if args else "list"
     if action == "list":
-        rows = context.sessions.list(workspace_id=context.workspace_id or None, current_id=context.session_id)
+        rows = context.sessions.list(
+            workspace_id=context.workspace_id or None,
+            repository_id=context.repository_id or None,
+            current_id=context.session_id,
+        )
         data = [row.model_dump(mode="json") for row in rows]
         lines = [f"{'*' if row.current else ' '} {row.short_id}  {row.title}  {row.status}  {row.message_count} messages" for row in rows]
         events = [{"type": "session.picker", "sessions": data}] if context.frontend in {"tui", "dashboard"} else []
@@ -39,7 +43,20 @@ def _sessions(context: CommandContext, args: list[str]) -> CommandResult:
         messages = [item.to_dict() for item in context.sessions.history.list(sid, limit=5000)]
         return CommandResult(status="success", message=json.dumps(summary.model_dump(mode="json"), indent=2), data={"session": summary.model_dump(mode="json"), "messages": messages})
     if action == "switch" and len(args) == 2:
-        messages = context.gateway.switch_session(args[1], frontend=context.frontend) if context.gateway else context.sessions.bind(args[1], frontend=context.frontend, workspace_id=context.workspace_id or None).messages
+        if context.gateway:
+            messages = context.gateway.switch_session(
+                args[1],
+                frontend=context.frontend,
+                workspace_id=context.workspace_id or None,
+                repository_id=context.repository_id or None,
+            )
+        else:
+            messages = context.sessions.bind(
+                args[1],
+                frontend=context.frontend,
+                workspace_id=context.workspace_id or None,
+                repository_id=context.repository_id or None,
+            ).messages
         return CommandResult(status="success", message=f"Switched to session {args[1]}.", data={"session_id": args[1], "messages": messages}, events=[{"type": "timeline.replace", "messages": messages}])
     if action == "rename" and len(args) >= 3:
         row = context.sessions.rename(args[1], " ".join(args[2:]))
@@ -62,7 +79,7 @@ def _sessions(context: CommandContext, args: list[str]) -> CommandResult:
                 {"type": "session.activated", "session_id": replacement},
             ])
         return CommandResult(status="success", message=f"Deleted session {deleted_id}.", data=data, events=events)
-    raise ValueError("Usage: /sessions [list|current|show [id]|switch <id>|rename <id> <title>|delete <id>]")
+    raise ValueError("Usage: /session [list|current|show [id]|switch <id>|rename <id> <title>|delete <id>]")
 
 
 def _new(context: CommandContext, _args: list[str]) -> CommandResult:
@@ -383,7 +400,7 @@ def _agent_command(name: str):
 def definitions() -> list[CommandDefinition]:
     rows = [
         CommandDefinition(canonical_name="new", description="Permanently replace the current chat.", required_capability="sessions", handler=_new),
-        CommandDefinition(canonical_name="sessions", aliases=("session",), description="List and manage canonical chats.", argument_schema="[list|current|show|switch|rename|delete]", required_capability="sessions", confirmation_actions=frozenset({"delete"}), handler=_sessions),
+        CommandDefinition(canonical_name="session", aliases=("sessions",), description="Open the repository-scoped chat picker and manage chats.", argument_schema="[list|current|show|switch|rename|delete]", required_capability="sessions", confirmation_actions=frozenset({"delete"}), handler=_sessions),
         CommandDefinition(canonical_name="processes", description="Inspect persistent operating-system services.", argument_schema="[list|show|logs|stop|restart|cleanup]", required_capability="processes", confirmation_actions=frozenset({"stop"}), handler=_processes),
         CommandDefinition(canonical_name="connect", description="Configure or manage a connector.", argument_schema="[list|telegram ...]", required_capability="connectors", accepts_secrets=True, handler=_connect),
         CommandDefinition(canonical_name="disconnect", description="Remove connector configuration.", argument_schema="<name>", required_capability="connectors", confirmation_required=True, handler=lambda context, args: _connect(context, ["disconnect", *args])),

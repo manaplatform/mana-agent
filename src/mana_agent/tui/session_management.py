@@ -33,11 +33,11 @@ class SessionPickerScreen(ModalScreen[SessionAction | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="session-dialog"):
-            yield Label("Chats")
+            yield Label("Repository chats")
             yield Input(placeholder="Search sessions…", id="session-search")
             yield ListView(id="session-list")
             yield Input(placeholder="New title for selected chat", id="session-title")
-            yield Static("Select a chat to switch, rename, or delete.", id="session-note")
+            yield Static("Only chats in the active workspace and repository are shown.", id="session-note")
             with Horizontal(classes="actions"):
                 yield Button("Switch", id="session-switch", variant="primary")
                 yield Button("Rename", id="session-rename")
@@ -78,6 +78,11 @@ class SessionPickerScreen(ModalScreen[SessionAction | None]):
             return
         sid = str(selected["session_id"])
         if event.button.id == "session-switch":
+            if selected.get("status") == "archived":
+                self.query_one("#session-note", Static).update(
+                    "Archived chats cannot be opened. Select an active, closed, or abandoned chat."
+                )
+                return
             self.dismiss(SessionAction("switch", sid))
         elif event.button.id == "session-rename":
             self.dismiss(SessionAction("rename", sid, self.query_one("#session-title", Input).value))

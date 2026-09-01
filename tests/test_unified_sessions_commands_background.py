@@ -12,6 +12,7 @@ from mana_agent.chat_commands.models import CommandInvocation
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRouteRegistry, EntryRouter, RouteAvailability, RouteRegistration
 from mana_agent.sessions import SessionService
 from mana_agent.sessions.migration import DashboardConversationMigration
+from mana_agent.workspaces.models import SessionRecord
 
 
 class _IdleGateway:
@@ -52,7 +53,12 @@ def test_switch_reopens_and_restores_exact_chronological_history(monkeypatch, tm
     service.history.append(record.session_id, role="assistant", content="two", turn_id="1", created_at="2024-01-01T00:00:01+00:00")
     service.workspaces.close_session(record.session_id)
 
-    activation = service.bind(record.session_id, frontend="tui", workspace_id=record.workspace_id)
+    activation = service.bind(
+        record.session_id,
+        frontend="tui",
+        workspace_id=record.workspace_id,
+        repository_id=record.primary_repository_id,
+    )
 
     assert activation.session.status == "active"
     assert [item["content"] for item in activation.messages] == ["one", "two"]
@@ -80,6 +86,71 @@ def test_shared_registry_is_identical_and_requires_delete_confirmation(monkeypat
     )
     assert pending and pending.status == "confirmation_required"
     assert sessions.workspaces.store.get_session(session.session_id)
+
+
+def test_session_picker_and_switch_are_scoped_to_workspace_repository(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    sessions = SessionService()
+    current = sessions.create(repo_a)
+    repository_b = sessions.workspaces.register_repository(repo_b)
+    workspace = sessions.workspaces.store.get_workspace(current.workspace_id)
+    workspace.repository_ids.append(repository_b.repository_id)
+    sessions.workspaces.store.save_workspace(workspace)
+    excluded = SessionRecord(
+        workspace_id=workspace.workspace_id,
+        primary_repository_id=repository_b.repository_id,
+        attached_repository_ids=[repository_b.repository_id],
+        cwd=str(repo_b),
+        title="Other repository",
+    )
+    sessions.workspaces.store.save_session(excluded)
+    context = CommandContext(
+        frontend="tui",
+        session_id=current.session_id,
+        workspace_id=current.workspace_id,
+        repository_id=current.primary_repository_id,
+        capabilities={"chat", "sessions"},
+        sessions=sessions,
+    )
+
+    singular = CommandDispatcher(build_default_registry()).dispatch("/session", context)
+    plural = CommandDispatcher(build_default_registry()).dispatch("/sessions list", context)
+
+    assert singular and plural
+    assert singular.data == plural.data
+    assert [row["session_id"] for row in singular.data["sessions"]] == [current.session_id]
+    assert singular.events == [{"type": "session.picker", "sessions": singular.data["sessions"]}]
+
+    rejected = CommandDispatcher(build_default_registry()).dispatch(
+        f"/session switch {excluded.session_id}", context
+    )
+
+    assert rejected and rejected.status == "error"
+    assert rejected.message == "session does not include the active repository"
+
+
+def test_archived_session_cannot_be_activated(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = SessionService()
+    session = sessions.create(repo)
+    sessions.workspaces.archive_session(session.session_id)
+
+    try:
+        sessions.bind(
+            session.session_id,
+            workspace_id=session.workspace_id,
+            repository_id=session.primary_repository_id,
+        )
+    except ValueError as exc:
+        assert str(exc) == "archived sessions cannot be activated"
+    else:
+        raise AssertionError("archived session activation should fail")
 
 
 def test_natural_language_uses_model_resolver_not_keyword_fallback(monkeypatch, tmp_path: Path) -> None:

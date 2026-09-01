@@ -2,6 +2,14 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-01
+
+- Restored the configured SQLite `synchronous=NORMAL` policy for every file-backed workspace connection, preventing short-lived task-save connections from reverting to the slower default on Windows CI.
+  - User verification required: `python -m pytest tests/persistence/test_workspace_sqlite_repository.py tests/persistence/test_persistence_concurrency_and_performance.py -q`.
+
+- Scoped the TUI `/session` chat picker and direct session switching to the active workspace and repository, while preserving `/sessions` as a compatibility alias and retaining durable history restoration for eligible closed or abandoned chats.
+  - User verification required: `python -m pytest tests/test_unified_sessions_commands_background.py tests/test_tui_auto_chat_tool_events.py -q`.
+
 ## 2026-08-31
 
 - Fixed Codex console-output loss during command execution and timeout/retry lifecycles:

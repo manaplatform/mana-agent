@@ -758,7 +758,7 @@ class ManaChatApp(App):
             return
         import shlex
 
-        command = f"/sessions {action.action} {shlex.quote(action.session_id)}"
+        command = f"/session {action.action} {shlex.quote(action.session_id)}"
         if action.action == "rename":
             command += " " + shlex.quote(action.title)
         result = self.gateway.dispatch_command(
