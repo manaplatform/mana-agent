@@ -165,6 +165,9 @@ class CodexCodingBackend:
             turn_id = ""
             governor_call_id = ""
             last_usage: dict[str, Any] | None = None
+            first_output_at: datetime | None = None
+            last_output_at: datetime | None = None
+            output_chunks_count: int = 0
             prompt = build_codex_prompt(task, workspace)
             sequence += 1
             transport = getattr(self.settings, "codex_transport", None)
@@ -285,9 +288,6 @@ class CodexCodingBackend:
                         "provider_started_at": provider_started_at.isoformat(),
                     },
                 )
-                first_output_at: datetime | None = None
-                last_output_at: datetime | None = None
-                output_chunks_count: int = 0
                 logger.info(
                     "codex_stream.attached task_id=%s thread_id=%s turn_id=%s",
                     task.task_id,

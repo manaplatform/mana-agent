@@ -245,6 +245,38 @@ def test_codex_timeout_before_first_output(tmp_path: Path) -> None:
     assert len(client.interrupted) == 1
 
 
+def test_codex_timeout_during_thread_or_turn_start(tmp_path: Path) -> None:
+    """Verify timeout during thread/start or turn/start handles output_chunks_count cleanly without UnboundLocalError."""
+    client = _MockCodexClient()
+
+    async def _failing_request(method: str, params: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
+        if method == "turn/start":
+            raise asyncio.TimeoutError
+        return await _MockCodexClient.request(client, method, params, timeout_seconds=timeout_seconds)
+
+    client.request = _failing_request  # type: ignore[method-assign]
+
+    backend = CodexCodingBackend(
+        CodexSettings(enabled=True, task_timeout_seconds=1),
+        client_factory=lambda *a: client,
+    )
+
+    received: list[AgentEvent] = []
+    task = CodingTask(task_id="task-timeout-start-1", goal="hang on start", requires_repository_write=False)
+
+    async def _run():
+        async for ev in backend.stream(task, _workspace(tmp_path)):
+            received.append(ev)
+
+    asyncio.run(_run())
+
+    errors = [e for e in received if e.event_type == "error"]
+    assert len(errors) == 1
+    assert "timed out" in errors[0].title.lower() or "timed out" in errors[0].error.lower()
+    assert errors[0].status == "failed"
+    assert task.task_id not in backend._active
+
+
 # ---------------------------------------------------------------------------
 # 3. Timeout after partial output
 # ---------------------------------------------------------------------------

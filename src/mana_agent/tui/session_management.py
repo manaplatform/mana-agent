@@ -30,6 +30,7 @@ class SessionPickerScreen(ModalScreen[SessionAction | None]):
         super().__init__()
         self.sessions = sessions
         self._delete_armed = False
+        self._visible: list[dict[str, Any]] = list(sessions)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="session-dialog"):
@@ -45,10 +46,10 @@ class SessionPickerScreen(ModalScreen[SessionAction | None]):
                 yield Button("Close", id="session-close")
 
     def on_mount(self) -> None:
-        self._render(self.sessions)
+        self._render_sessions(self.sessions)
         self.query_one("#session-search", Input).focus()
 
-    def _render(self, rows: list[dict[str, Any]]) -> None:
+    def _render_sessions(self, rows: list[dict[str, Any]]) -> None:
         view = self.query_one("#session-list", ListView)
         view.clear()
         self._visible = rows
@@ -60,7 +61,7 @@ class SessionPickerScreen(ModalScreen[SessionAction | None]):
         if event.input.id != "session-search":
             return
         needle = event.value.strip().lower()
-        self._render([row for row in self.sessions if needle in f"{row.get('title')} {row.get('session_id')}".lower()])
+        self._render_sessions([row for row in self.sessions if needle in f"{row.get('title')} {row.get('session_id')}".lower()])
 
     def _selected(self) -> dict[str, Any] | None:
         view = self.query_one("#session-list", ListView)
