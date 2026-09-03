@@ -2,6 +2,16 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-03
+
+- Fixed premature `api_workflow_incomplete` failure in Mana-Agent API execution:
+  - Added an evidence-based API workflow completion guard in `AskAgent.run` (`src/mana_agent/multi_agent/runtime/ask_agent.py`) that refuses premature natural-language completion when declared required outcomes (`api_execution_verified`, `user_goal_verified`) are safely actionable, forcing model continuation with the exact remaining API contract while preserving conversation and tool history.
+  - Added `pin()` and `unpin()` to `CapabilityRegistry` (`src/mana_agent/context_cost/capabilities.py`), protecting `api_request_preview` and `api_request_execute` from idle eviction (`unload_idle`) during multi-step API inspection and search.
+  - Enhanced error extraction and outcome validation in `AgentChatGateway._api_workflow_completion_from_trace` (`src/mana_agent/gateway/chat_gateway.py`) to surface specific non-continuable blockers (`validation_failure`, `ambiguous_operation`, `missing_credential`, `blocked_host`, etc.) instead of collapsing everything into generic `api_workflow_incomplete`.
+  - Ensured operations requiring authorization (e.g. mutating POST or `unknown_high_risk`) cleanly transition to `route-api-awaiting-approval` with pending permissions rather than failing prematurely.
+  - Added regression test suites across `tests/context_cost/test_context_cost_core.py`, `tests/test_ask_agent.py`, and `tests/gateway/test_api_manager_route.py`.
+  - User verification required: `pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_ask_agent.py tests/context_cost/test_context_cost_core.py -q`.
+
 ## 2026-09-01
 
 - Fixed `TypeError: SessionPickerScreen._render() missing 1 required positional argument: 'rows'` when opening the `/session` modal screen in the TUI:

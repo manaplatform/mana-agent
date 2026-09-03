@@ -293,6 +293,37 @@ def test_capability_manifest_load_never_widens_authorization_and_saves_schemas()
     assert registry.active.schema_tokens < registry.schema_tokens_for(tool.name for tool in tools) * 0.4
 
 
+def test_capability_pin_protects_tools_from_idle_unloading() -> None:
+    tools = [
+        FakeTool("read_1", "read"),
+        FakeTool("api_request_preview", "preview"),
+        FakeTool("api_request_execute", "execute"),
+    ]
+    registry = CapabilityRegistry(tools, allowed_names={"read_1", "api_request_preview", "api_request_execute"})
+    registry.initial({"read_1", "api_request_preview", "api_request_execute"}, include_core=False)
+    assert {tool.name for tool in registry.bound_tools()} == {"read_1", "api_request_preview", "api_request_execute"}
+
+    # Pin preview and execute so idle unloading won't touch them
+    registry.pin(["api_request_preview", "api_request_execute"], step=0)
+    assert "api_request_preview" in registry.pinned
+    assert "api_request_execute" in registry.pinned
+
+    # At step 10 (far exceeding default idle_steps=3), read_1 is unloaded for being idle, but pinned tools remain
+    unloaded = registry.unload_idle(step=10, idle_steps=3)
+    assert "read_1" in unloaded["unloaded"]
+    assert "api_request_preview" not in unloaded["unloaded"]
+    assert "api_request_execute" not in unloaded["unloaded"]
+    assert {tool.name for tool in registry.bound_tools()} == {"api_request_preview", "api_request_execute"}
+
+    # Unpinning allows normal unloading
+    registry.unpin(["api_request_preview"])
+    assert "api_request_preview" not in registry.pinned
+    unloaded2 = registry.unload_idle(step=10, idle_steps=3)
+    assert "api_request_preview" in unloaded2["unloaded"]
+    assert "api_request_execute" not in unloaded2["unloaded"]
+    assert {tool.name for tool in registry.bound_tools()} == {"api_request_execute"}
+
+
 def test_logger_redacts_and_retention_cleanup_is_best_effort(tmp_path: Path) -> None:
     logger = ContextCostLogger(root=tmp_path, enabled=True, retention_days=7)
     logger.write({"session_id": "s", "api_key": "sk-secret-value", "authorization": "Bearer abc.def", "prompt": "private prompt text"})

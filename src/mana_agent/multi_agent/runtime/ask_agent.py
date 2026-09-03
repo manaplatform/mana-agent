@@ -75,6 +75,204 @@ _FORCED_WRITE_INSTRUCTION = (
     "placeholder or stub content."
 )
 
+_API_EXECUTION_TOOLS = frozenset({
+    "api_request_execute",
+    "browser_api_execute",
+    "browser_http_execute",
+    "authorized_api_execute",
+    "api_connector_execute",
+    "authorized_http_connector",
+    "integration_executor",
+    "http_runtime",
+})
+
+_API_TERMINAL_BLOCKER_CODES = frozenset({
+    "validation_failure",
+    "ambiguous_operation",
+    "missing_credential",
+    "blocked_host",
+    "ssrf_policy_violation",
+    "permission_required",
+    "operation_not_found",
+    "integration_not_found",
+    "unsupported_documentation",
+    "documentation_authorization_required",
+    "malformed_specification",
+    "openapi_local_ref_unresolved",
+    "upstream_api_failure",
+    "timeout",
+    "rate_limit",
+    "response_too_large",
+    "api_manager_validation_error",
+})
+
+
+class _ApiWorkflowLoopState:
+    def __init__(self) -> None:
+        self.active: bool = False
+        self.task_intent: str = ""
+        self.source_decision_id: str = ""
+        self.session_id: str = ""
+        self.required_outcomes: set[str] = set()
+        self.candidates_available: bool = False
+        self.preview_called: bool = False
+        self.execute_called: bool = False
+        self.execution_verified: bool = False
+        self.permission_required: bool = False
+        self.terminal_reached: bool = False
+        self.terminal_blocker: str | None = None
+        self.continuation_count: int = 0
+        self.max_continuations: int = 2
+
+    @property
+    def execution_required(self) -> bool:
+        return self.active and bool(
+            {"api_execution_verified", "user_goal_verified"} & self.required_outcomes
+        )
+
+    def is_terminal_or_completed(self) -> bool:
+        return (
+            self.execution_verified
+            or self.permission_required
+            or self.terminal_reached
+            or self.terminal_blocker is not None
+        )
+
+    def should_continue(self) -> bool:
+        if not self.execution_required:
+            return False
+        if self.is_terminal_or_completed():
+            return False
+        if self.continuation_count >= self.max_continuations:
+            return False
+        return True
+
+    def build_continuation_instruction(self) -> str:
+        needed = sorted(self.required_outcomes & {"api_execution_verified", "user_goal_verified"})
+        parts = [
+            f"Your API workflow declared required execution outcomes ({', '.join(needed)}) "
+            "that are still safely actionable. Do NOT answer in prose before satisfying the workflow contract."
+        ]
+        ids = []
+        if self.source_decision_id:
+            ids.append(f"source_decision_id={self.source_decision_id!r}")
+        if self.session_id:
+            ids.append(f"session_id={self.session_id!r}")
+        if ids:
+            parts.append(f"Use the host-bound {' and '.join(ids)} for all API tool calls.")
+
+        steps = [
+            "Proceed with the exact remaining API contract:",
+            "1. If operations have not been retrieved, call api_operations_search or inspect saved integrations.",
+            "2. Select a retrieved candidate operation using a strict ApiRouteDecision (with source_decision_id, "
+            "task_intent, workflow='request_preview' or 'request_execution', integration_id, operation_id, "
+            "confidence >= 0.65, matched_terms, required_missing_inputs, reason, and safe_to_continue=true).",
+            "3. Call api_request_preview whenever risk policy requires it (for POST/PUT/PATCH/DELETE mutations or "
+            "unknown_high_risk operations).",
+            "4. If api_request_preview returns permission_required, stop normally so trusted local approval can be obtained.",
+            "5. Call api_request_execute only when allowed (safe read-only GET/HEAD/OPTIONS, or once approved).",
+            "6. If genuine required input is missing or operation selection remains materially ambiguous, report the specific blocker.",
+        ]
+        parts.append("\n".join(steps))
+        return "\n\n".join(parts)
+
+    def record_tool_call(
+        self,
+        *,
+        name: str,
+        args: dict[str, Any],
+        content: Any,
+        tool_ok: bool,
+        step_idx: int,
+        capability_registry: Any | None,
+        allowed_tools: set[str],
+        coerce_fn: Any,
+    ) -> None:
+        payload = coerce_fn(content)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        result_field = payload_dict.get("result")
+        result_dict = result_field if isinstance(result_field, dict) else {}
+
+        if name == "api_workflow_decide" and tool_ok:
+            candidate = result_dict or payload_dict
+            if candidate.get("safe_to_continue") is True:
+                self.active = True
+                self.task_intent = str(candidate.get("task_intent") or "")
+                decision_source_id = str(candidate.get("source_decision_id") or "")
+                if decision_source_id:
+                    self.source_decision_id = decision_source_id
+                decision_session_id = str(candidate.get("session_id") or "")
+                if decision_session_id:
+                    self.session_id = decision_session_id
+                raw_req = candidate.get("required_outcomes") or ()
+                if isinstance(raw_req, str):
+                    raw_req = (raw_req,)
+                self.required_outcomes = {str(item).strip() for item in raw_req if str(item).strip()}
+                if self.execution_required and capability_registry is not None:
+                    capability_registry.pin(
+                        [t for t in ("api_request_preview", "api_request_execute") if t in allowed_tools],
+                        step=step_idx,
+                    )
+
+        elif name == "api_operations_search" and tool_ok:
+            candidates = result_field if isinstance(result_field, list) else (payload if isinstance(payload, list) else [])
+            if candidates:
+                self.candidates_available = True
+            else:
+                self.terminal_blocker = "operation_not_found"
+            if self.execution_required and capability_registry is not None:
+                capability_registry.pin(
+                    [t for t in ("api_request_preview", "api_request_execute") if t in allowed_tools],
+                    step=step_idx,
+                )
+
+        elif name in {"api_integration_get", "api_integrations_list"} and tool_ok:
+            if self.execution_required and capability_registry is not None:
+                capability_registry.pin(
+                    [t for t in ("api_request_preview", "api_request_execute") if t in allowed_tools],
+                    step=step_idx,
+                )
+
+        elif name == "api_request_preview":
+            self.preview_called = True
+            if (
+                payload_dict.get("permission_required") is True
+                or payload_dict.get("error_code") == "permission_required"
+                or result_dict.get("permission_required") is True
+                or payload_dict.get("permission_scope") == "api.request.execute"
+                or result_dict.get("permission_scope") == "api.request.execute"
+            ):
+                self.permission_required = True
+            elif not tool_ok:
+                err_code = str(payload_dict.get("error_code") or "").strip()
+                if err_code in _API_TERMINAL_BLOCKER_CODES:
+                    self.terminal_blocker = err_code
+
+        elif name in _API_EXECUTION_TOOLS:
+            self.execute_called = True
+            executed = result_dict if result_dict else payload_dict
+            if tool_ok and isinstance(executed, dict) and (executed.get("executed") is True or executed.get("execution_verified") is True):
+                if isinstance(executed.get("status_code"), int) and executed.get("upstream_ok") is not False:
+                    self.execution_verified = True
+            if (
+                payload_dict.get("permission_required") is True
+                or payload_dict.get("error_code") == "permission_required"
+                or executed.get("permission_required") is True
+            ):
+                self.permission_required = True
+            elif not tool_ok:
+                err_code = str(payload_dict.get("error_code") or "").strip()
+                if err_code in _API_TERMINAL_BLOCKER_CODES:
+                    self.terminal_blocker = err_code
+
+        elif name == "api_workflow_terminal" and tool_ok:
+            self.terminal_reached = True
+
+        elif not tool_ok:
+            err_code = str(payload_dict.get("error_code") or "").strip()
+            if err_code in _API_TERMINAL_BLOCKER_CODES:
+                self.terminal_blocker = err_code
+
 
 class _SemanticSearchInput(BaseModel):
     query: str = Field(description="Query used for semantic code search")
@@ -2202,6 +2400,10 @@ class AskAgent:
         mutation_succeeded = False
         forced_write_done = False
 
+        api_state = _ApiWorkflowLoopState()
+        api_state.session_id = str(flow_id or getattr(self, "session_id", "default-session") or "default-session")
+        api_state.source_decision_id = str(getattr(self, "current_turn_id", "") or (run_id or ""))
+
         messages = [
             SystemMessage(
                 content=apply_spirit_instruction(
@@ -2415,6 +2617,22 @@ class AskAgent:
                     forced_write_done = True
                     messages.append(HumanMessage(content=_FORCED_WRITE_INSTRUCTION))
                     continue
+
+                if api_state.should_continue():
+                    api_state.continuation_count += 1
+                    if capability_registry is not None:
+                        capability_registry.pin(
+                            [t for t in ("api_request_preview", "api_request_execute") if t in allowed_tools],
+                            step=step_idx,
+                        )
+                        if capability_registry.active.revision != bound_revision:
+                            allowed_tools.update(capability_registry.active.loaded)
+                            bound_tools = capability_registry.bound_tools()
+                            bound = self.llm.bind_tools(bound_tools)
+                            bound_revision = capability_registry.active.revision
+                    messages.append(HumanMessage(content=api_state.build_continuation_instruction()))
+                    continue
+
                 final_answer = self._extract_model_text(ai_msg.content) or str(ai_msg.content)
                 break
 
@@ -2914,6 +3132,18 @@ class AskAgent:
                             )
                     capability_registry.mark_used(name, step_idx)
                 append_tool_message(name, content, str(call.get("id", "")), step_idx)
+                api_state.record_tool_call(
+                    name=name,
+                    args=args if isinstance(args, dict) else {},
+                    content=content,
+                    tool_ok=not self._tool_error_detail(content) and (
+                        self._coerce_tool_payload(content) or {}
+                    ).get("ok") is not False,
+                    step_idx=step_idx,
+                    capability_registry=capability_registry,
+                    allowed_tools=allowed_tools,
+                    coerce_fn=self._coerce_tool_payload,
+                )
 
                 if stagnant_steps >= self.MAX_STAGNANT_STEPS and not force_synthesis_reason:
                     force_synthesis_reason = "no_progress"

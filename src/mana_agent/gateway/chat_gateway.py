@@ -604,8 +604,19 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
         result_succeeded = result.get("ok") is True
 
         if not trace_succeeded or not result_succeeded:
-            err_code = str(result.get("error_code") or trace.get("error_code") or "").strip()
-            err_msg = str(result.get("error") or result.get("message") or trace.get("error") or "").strip()
+            raw_err = result.get("error")
+            err_code = str(
+                result.get("error_code")
+                or (raw_err.get("code") if isinstance(raw_err, dict) else "")
+                or trace.get("error_code")
+                or ""
+            ).strip()
+            err_msg = str(
+                (raw_err.get("message") if isinstance(raw_err, dict) else raw_err)
+                or result.get("message")
+                or trace.get("error")
+                or ""
+            ).strip()
             if err_code:
                 last_tool_error_code = err_code
                 last_tool_error_message = err_msg
@@ -931,6 +942,31 @@ def _api_workflow_completion_from_trace(response: Any) -> dict[str, Any]:
                 f"API import failed ({last_tool_error_code}): {last_tool_error_message}"
                 if last_tool_error_message
                 else f"API import failed: {last_tool_error_code}"
+            )
+        elif last_tool_error_code in {
+            "validation_failure",
+            "ambiguous_operation",
+            "missing_credential",
+            "blocked_host",
+            "ssrf_policy_violation",
+            "permission_required",
+            "operation_not_found",
+            "integration_not_found",
+            "unsupported_documentation",
+            "documentation_authorization_required",
+            "malformed_specification",
+            "openapi_local_ref_unresolved",
+            "upstream_api_failure",
+            "timeout",
+            "rate_limit",
+            "response_too_large",
+            "api_manager_validation_error",
+        }:
+            error_code = last_tool_error_code
+            message = (
+                f"API workflow blocked ({last_tool_error_code}): {last_tool_error_message}"
+                if last_tool_error_message
+                else f"API workflow blocked: {last_tool_error_code}"
             )
         else:
             error_code = "api_workflow_incomplete"

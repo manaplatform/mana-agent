@@ -1899,3 +1899,140 @@ def test_api_workflow_durable_task_projection_persists_events_and_evidence(
     assert evidence["execution_evidence"]["status_code"] == 200
     assert len(evidence["actual_tool_events"]) == 1
     assert evidence["actual_tool_events"][0]["tool_name"] == "api_request_execute"
+
+
+def test_api_workflow_surfaces_specific_blocker_error_codes() -> None:
+    for code in ("validation_failure", "ambiguous_operation", "missing_credential", "blocked_host"):
+        response = SimpleNamespace(
+            answer="Blocked by specific error.",
+            sources=[],
+            warnings=[],
+            trace=[
+                {
+                    "tool_name": "api_workflow_decide",
+                    "status": "ok",
+                    "output_preview": json.dumps(
+                        {
+                            "ok": True,
+                            "result": {
+                                "task_intent": "call api",
+                                "required_outcomes": ["api_execution_verified", "user_goal_verified"],
+                                "safe_to_continue": True,
+                            },
+                        }
+                    ),
+                },
+                {
+                    "tool_name": "api_request_preview",
+                    "status": "error",
+                    "output_preview": json.dumps(
+                        {
+                            "ok": False,
+                            "error_code": code,
+                            "message": f"Operation failed due to {code}",
+                        }
+                    ),
+                },
+            ],
+        )
+        completion = _api_workflow_completion_from_trace(response)
+        assert completion["valid"] is False
+        assert completion["error_code"] == code
+        assert f"API workflow blocked ({code})" in completion["message"]
+
+
+def test_api_route_sefaria_post_preview_awaits_approval(tmp_path: Path) -> None:
+    class SefariaAskAgent:
+        def run(self, *, system_prompt: str, **kwargs):
+            return SimpleNamespace(
+                answer="The annotation has been previewed and is awaiting local approval before execution.",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "api_workflow_decide",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "task_intent": "create annotation on Sefaria text",
+                                    "required_outcomes": [
+                                        "api_target_resolved",
+                                        "operation_resolved",
+                                        "api_execution_verified",
+                                        "user_goal_verified",
+                                    ],
+                                    "reason": "Mutation requires execution evidence and goal verification.",
+                                    "safe_to_continue": True,
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": [
+                                    {
+                                        "operation_id": "create_annotation",
+                                        "method": "POST",
+                                        "risk_level": "unknown_high_risk",
+                                    }
+                                ],
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "risk_level": "unknown_high_risk",
+                                    "permission_required": True,
+                                    "permission_scope": "api.request.execute",
+                                    "permission_request_id": "req_sefaria_approval_001",
+                                    "approval_required": True,
+                                },
+                            }
+                        ),
+                    },
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = None
+    gateway._lane_coordinator = None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+
+    result = gateway._execute_api_route(
+        decision=EntryRoutingDecision(
+            route="api",
+            confidence=0.99,
+            reason="Annotate Sefaria text.",
+            required_sources=("api",),
+        ),
+        context=EntryRouteContext(
+            session_id="session-sefaria",
+            conversation_id="session-sefaria",
+            turn_id="turn-sefaria",
+        ),
+        text="Create an annotation on Sefaria Genesis 1:1.",
+        ask_service=SimpleNamespace(ask_agent=SefariaAskAgent()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-api-awaiting-approval"
+    assert result.error is None
+    assert len(result.payload.get("permission_requests", [])) == 1
+    req = result.payload["permission_requests"][0]
+    assert req["permission_request_id"] == "req_sefaria_approval_001"
+    assert req["permission_scope"] == "api.request.execute"

@@ -1275,3 +1275,245 @@ def test_ask_agent_stops_progress_after_apply_patch_failures_without_write_retry
     result = agent.run("Implement change", tmp_path / ".mana/index", 2, max_steps=6, timeout_seconds=2)
     assert "Tool loop stopped after no-progress detection" in "\n".join(result.warnings)
     assert not any(trace.tool_name == "write_file" for trace in result.trace)
+
+
+def test_ask_agent_api_workflow_guard_continues_on_premature_answer(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    decide_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": {
+                "safe_to_continue": True,
+                "task_intent": "create annotation on Sefaria",
+                "source_decision_id": "dec_sefaria_001",
+                "session_id": "session_sefaria",
+                "required_outcomes": [
+                    "api_target_resolved",
+                    "operation_resolved",
+                    "api_execution_verified",
+                    "user_goal_verified",
+                ],
+            },
+        },
+        name="api_workflow_decide",
+        description="Workflow decide",
+    )
+    search_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": [
+                {
+                    "operation_id": "create_annotation",
+                    "method": "POST",
+                    "risk_level": "unknown_high_risk",
+                }
+            ],
+        },
+        name="api_operations_search",
+        description="Search operations",
+    )
+    preview_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": {
+                "risk_level": "unknown_high_risk",
+                "permission_required": True,
+                "permission_scope": "api.request.execute",
+                "permission_request_id": "req_appr_123",
+            },
+        },
+        name="api_request_preview",
+        description="Preview request",
+    )
+    agent.tools = [decide_tool, search_tool, preview_tool]
+
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {"query": "annotate"}}]),
+            _FakeAIMessage("Found the POST annotation operation and verified required schema.", tool_calls=[]),
+            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "api_request_preview", "args": {"decision": {"operation_id": "create_annotation"}}}]),
+            _FakeAIMessage("The request has been previewed and is awaiting approval.", tool_calls=[]),
+        ]
+    )
+    agent.llm = llm
+
+    result = agent.run(
+        "Annotate Genesis 1:1 on Sefaria",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=10,
+        timeout_seconds=5,
+        tool_policy={
+            "allowed_tools": ["api_workflow_decide", "api_operations_search", "api_request_preview"]
+        },
+    )
+    assert result.answer == "The request has been previewed and is awaiting approval."
+    tool_names_in_trace = [t.tool_name for t in result.trace]
+    assert tool_names_in_trace == ["api_workflow_decide", "api_operations_search", "api_request_preview"]
+
+
+def test_ask_agent_api_workflow_safe_get_executes_and_finishes(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    decide_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": {
+                "safe_to_continue": True,
+                "task_intent": "fetch text",
+                "required_outcomes": ["api_execution_verified", "user_goal_verified"],
+            },
+        },
+        name="api_workflow_decide",
+        description="Workflow decide",
+    )
+    search_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": [{"operation_id": "get_text", "method": "GET", "risk_level": "read_only"}],
+        },
+        name="api_operations_search",
+        description="Search operations",
+    )
+    execute_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": {
+                "executed": True,
+                "upstream_ok": True,
+                "status_code": 200,
+                "body": {"text": "In the beginning"},
+            },
+        },
+        name="api_request_execute",
+        description="Execute request",
+    )
+    agent.tools = [decide_tool, search_tool, execute_tool]
+
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {"query": "get text"}}]),
+            _FakeAIMessage("I found the operation get_text.", tool_calls=[]),
+            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "api_request_execute", "args": {"decision": {"operation_id": "get_text"}}}]),
+            _FakeAIMessage("Execution succeeded with text: In the beginning.", tool_calls=[]),
+        ]
+    )
+    agent.llm = llm
+
+    result = agent.run(
+        "Get Genesis text",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=10,
+        timeout_seconds=5,
+        tool_policy={
+            "allowed_tools": ["api_workflow_decide", "api_operations_search", "api_request_execute"]
+        },
+    )
+    assert result.answer == "Execution succeeded with text: In the beginning."
+    tool_names = [t.tool_name for t in result.trace]
+    assert tool_names == ["api_workflow_decide", "api_operations_search", "api_request_execute"]
+
+
+def test_ask_agent_api_workflow_stops_on_terminal_blocker_validation_failure(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    decide_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": {
+                "safe_to_continue": True,
+                "task_intent": "create annotation",
+                "required_outcomes": ["api_execution_verified", "user_goal_verified"],
+            },
+        },
+        name="api_workflow_decide",
+        description="Workflow decide",
+    )
+    search_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": [{"operation_id": "create_annotation", "method": "POST"}],
+        },
+        name="api_operations_search",
+        description="Search operations",
+    )
+    preview_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": False,
+            "error_code": "validation_failure",
+            "message": "Missing required body parameter: 'annotation_text'",
+        },
+        name="api_request_preview",
+        description="Preview request",
+    )
+    agent.tools = [decide_tool, search_tool, preview_tool]
+
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {}}]),
+            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "api_request_preview", "args": {}}]),
+            _FakeAIMessage("Validation failed: missing annotation_text.", tool_calls=[]),
+        ]
+    )
+    agent.llm = llm
+
+    result = agent.run(
+        "Annotate",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=10,
+        timeout_seconds=5,
+        tool_policy={
+            "allowed_tools": ["api_workflow_decide", "api_operations_search", "api_request_preview"]
+        },
+    )
+    assert result.answer == "Validation failed: missing annotation_text."
+    assert len(result.trace) == 3
+
+
+def test_ask_agent_api_workflow_limits_continuations(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    decide_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": {
+                "safe_to_continue": True,
+                "task_intent": "execute something",
+                "required_outcomes": ["api_execution_verified", "user_goal_verified"],
+            },
+        },
+        name="api_workflow_decide",
+        description="Workflow decide",
+    )
+    search_tool = StructuredTool.from_function(
+        func=lambda **kwargs: {
+            "ok": True,
+            "result": [{"operation_id": "some_op"}],
+        },
+        name="api_operations_search",
+        description="Search operations",
+    )
+    agent.tools = [decide_tool, search_tool]
+
+    llm = _CapabilityBindingLLM(
+        [
+            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {}}]),
+            _FakeAIMessage("Prose answer 1", tool_calls=[]),
+            _FakeAIMessage("Prose answer 2", tool_calls=[]),
+            _FakeAIMessage("Final prose answer after max continuations", tool_calls=[]),
+        ]
+    )
+    agent.llm = llm
+
+    result = agent.run(
+        "Execute",
+        tmp_path / ".mana/index",
+        2,
+        max_steps=10,
+        timeout_seconds=5,
+        tool_policy={"allowed_tools": ["api_workflow_decide", "api_operations_search"]},
+    )
+    assert result.answer == "Final prose answer after max continuations"
