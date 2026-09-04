@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from mana_agent.config.model_catalog import maintained_token_limits
 from mana_agent.config.settings import Settings
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.context_cost.models import AccountingSnapshot
@@ -23,6 +25,8 @@ from mana_agent.gateway.envelope import (
     build_routing_execution_envelope,
 )
 from mana_agent.workspaces.retention import RetentionPolicy
+
+logger = logging.getLogger(__name__)
 
 
 def default_accounting_snapshot(task_id: str = "", turn_id: str = "") -> AccountingSnapshot:
@@ -154,21 +158,26 @@ class ContextCompactor:
             if exec_state is not None:
                 all_rec = getattr(exec_state, "all_recovery_candidates", ()) or ()
                 rec_cand = getattr(exec_state, "recoverable_task_candidates", ()) or ()
-                task_candidates_tokens += estimate_value_tokens(
+                task_candidates_tokens = estimate_value_tokens(
                     list(all_rec) + list(rec_cand)
                 )
                 lane_dict = dict(getattr(exec_state, "lane_states", {}) or {})
-                for lane_val in lane_dict.values():
-                    if isinstance(lane_val, dict) and "logs" in lane_val:
-                        logs_tokens += estimate_value_tokens(lane_val["logs"])
-                if "logs" in lane_dict:
-                    logs_tokens += estimate_value_tokens(lane_dict["logs"])
+                lane_dict_clean = {}
+                for lane_id, lane_val in lane_dict.items():
+                    if isinstance(lane_val, dict):
+                        if "logs" in lane_val:
+                            logs_tokens += estimate_value_tokens(lane_val["logs"])
+                        lane_dict_clean[lane_id] = {k: v for k, v in lane_val.items() if k != "logs"}
+                    elif lane_id == "logs":
+                        logs_tokens += estimate_value_tokens(lane_val)
+                    else:
+                        lane_dict_clean[lane_id] = lane_val
 
                 exec_state_tokens = estimate_value_tokens({
                     "active_flow_id": getattr(exec_state, "active_flow_id", None),
                     "active_route": getattr(exec_state, "active_route", ""),
                     "lane_id": getattr(exec_state, "lane_id", ""),
-                    "lane_states": lane_dict,
+                    "lane_states": lane_dict_clean,
                     "pending_required_work": getattr(exec_state, "pending_required_work", False),
                     "pending_checkpoint_id": getattr(exec_state, "pending_checkpoint_id", None),
                 })
@@ -179,50 +188,43 @@ class ContextCompactor:
                     acct.as_dict() if hasattr(acct, "as_dict") else str(acct)
                 )
 
-        raw_art = getattr(context, "artifact_evidence", {}) or {}
+            caps = getattr(eff_envelope, "capabilities_and_tools", ()) or ()
+            if caps:
+                tools_tokens = estimate_value_tokens(list(caps))
+
+        raw_art = getattr(context, "artifact_evidence", {}) or (getattr(eff_envelope, "artifact_metadata", {}) if eff_envelope else {}) or {}
         art_tokens = estimate_value_tokens(dict(raw_art) if isinstance(raw_art, dict) else raw_art)
-        raw_mem = getattr(context, "memory_task_candidates", ()) or ()
+
+        raw_mem = getattr(context, "memory_task_candidates", ()) or (getattr(getattr(eff_envelope, "memory_availability", None), "memory_task_candidates", ()) if eff_envelope else ()) or ()
         mem_tokens = estimate_value_tokens(list(raw_mem) if isinstance(raw_mem, (list, tuple)) else raw_mem)
-        task_candidates_tokens += mem_tokens
 
         other_tokens = estimate_value_tokens({
             "session_id": getattr(context, "session_id", ""),
             "conversation_id": getattr(context, "conversation_id", ""),
             "turn_id": getattr(context, "turn_id", ""),
             "previous_route": getattr(context, "previous_route", ""),
+            "conversation_summary": getattr(context, "conversation_summary", ""),
             "authenticated_user_id": getattr(context, "authenticated_user_id", ""),
-        })
-
-        context_dict = (
-            context.to_dict()
-            if hasattr(context, "to_dict")
-            else {
-                "session_id": getattr(context, "session_id", ""),
-                "conversation_id": getattr(context, "conversation_id", ""),
-                "turn_id": getattr(context, "turn_id", ""),
-                "previous_route": getattr(context, "previous_route", ""),
-                "conversation_summary": getattr(context, "conversation_summary", ""),
-                "artifact_evidence": raw_art,
-                "memory_task_candidates": list(raw_mem) if isinstance(raw_mem, (list, tuple)) else raw_mem,
-                "memory_capsules_enabled": getattr(context, "memory_capsules_enabled", False),
-                "atomic_child": getattr(context, "atomic_child", False),
-                "orchestration_parent_task_id": getattr(context, "orchestration_parent_task_id", ""),
-                "authenticated_user_id": getattr(context, "authenticated_user_id", ""),
-            }
-        )
-
-        sample_payload = {
-            "user_prompt": str(user_prompt or "").strip(),
-            "context": context_dict,
-            "routes": list(routes),
             "routing_constraints": {
                 "atomic_child": getattr(context, "atomic_child", False),
                 "disallowed_routes": [],
                 "orchestration_parent_task_id": str(getattr(context, "orchestration_parent_task_id", "")),
             },
-        }
+        })
 
-        total = sys_prompt_tokens + estimate_value_tokens(sample_payload) + logs_tokens
+        total = (
+            user_req_tokens
+            + sys_prompt_tokens
+            + routes_tokens
+            + exec_state_tokens
+            + task_candidates_tokens
+            + art_tokens
+            + mem_tokens
+            + accounting_tokens
+            + tools_tokens
+            + logs_tokens
+            + other_tokens
+        )
 
         return ContextComponentBreakdown(
             user_request=user_req_tokens,
@@ -238,6 +240,7 @@ class ContextCompactor:
             other=other_tokens,
             total_tokens=total,
         )
+
 
     def compact_recovery_candidates(
         self,
@@ -388,15 +391,20 @@ class ContextCompactor:
         workspace_records_pruned: int = 0,
         repository_records_compacted: int = 0,
     ) -> CompactedRoutingContext:
-        """Run the full multi-tier context reduction pass and construct a bounded routing capsule."""
+        """Run the multi-tier deterministic context reduction passes and construct a bounded routing capsule."""
         eff_envelope = envelope or getattr(context, "envelope", None)
 
         if context_window is None:
-            cand_windows = [
-                int(getattr(c, "context_window", 0))
-                for c in getattr(eff_envelope, "model_candidates", ())
-                if getattr(c, "context_window", 0)
-            ] if eff_envelope else []
+            cand_windows = []
+            if eff_envelope:
+                for c in getattr(eff_envelope, "model_candidates", ()):
+                    limits = maintained_token_limits(
+                        getattr(c, "provider", None), getattr(c, "model_id", None)
+                    )
+                    if limits:
+                        cand_windows.append(int(limits[0]))
+                    elif getattr(c, "context_window", 0):
+                        cand_windows.append(int(c.context_window))
             if cand_windows:
                 resolved_window = max(cand_windows)
             else:
@@ -415,11 +423,10 @@ class ContextCompactor:
             routes=routes,
         )
 
+        raw_total = raw_breakdown.total_tokens
         logs_excluded = raw_breakdown.logs_and_traces
+        deficit_before = max(0, raw_total - resolved_window)
 
-
-        # Step 1 & 2: Relevance filtering, log separation, candidate compaction
-        max_candidates = self.policy.max_recovery_candidates
         all_candidates = (
             getattr(eff_envelope.execution_state, "all_recovery_candidates", ())
             if (eff_envelope is not None and getattr(eff_envelope, "execution_state", None) is not None)
@@ -430,176 +437,253 @@ class ContextCompactor:
             if (eff_envelope is not None and getattr(eff_envelope, "execution_state", None) is not None)
             else ()
         )
-
-        compact_all_rec = self.compact_recovery_candidates(
-            all_candidates, max_candidates=max_candidates
-        )
-        compact_rec = self.compact_recovery_candidates(
-            rec_candidates, max_candidates=max_candidates
-        )
-
-        compact_lanes = (
-            self.compact_lane_states(getattr(eff_envelope.execution_state, "lane_states", {}))
+        lane_states = (
+            getattr(eff_envelope.execution_state, "lane_states", {})
             if (eff_envelope is not None and getattr(eff_envelope, "execution_state", None) is not None)
             else {}
         )
-        compact_tools = (
-            self.compact_tools_and_capabilities(getattr(eff_envelope, "capabilities_and_tools", ()))
+        capabilities_and_tools = (
+            getattr(eff_envelope, "capabilities_and_tools", ())
             if eff_envelope is not None
-            else []
+            else ()
         )
-        raw_art = getattr(context, "artifact_evidence", {}) or {}
-        compact_artifacts = self.compact_artifact_evidence(raw_art)
-        raw_mem = getattr(context, "memory_task_candidates", ()) or ()
-        compact_memory_candidates = list(raw_mem)[:max_candidates]
+        raw_art = getattr(context, "artifact_evidence", {}) or (
+            getattr(eff_envelope, "artifact_metadata", {}) if eff_envelope else {}
+        ) or {}
+        raw_mem = getattr(context, "memory_task_candidates", ()) or (
+            getattr(getattr(eff_envelope, "memory_availability", None), "memory_task_candidates", ())
+            if eff_envelope
+            else ()
+        ) or ()
+        conv_summary = getattr(context, "conversation_summary", "")
+        prev_turn_pointers = getattr(eff_envelope, "previous_turn_pointers", None) if eff_envelope else None
 
-        # Step 3: Capacity reservation
-        user_tokens = estimate_value_tokens(user_prompt)
-        sys_tokens = estimate_value_tokens(system_prompt)
-        reserved_budget = user_tokens + sys_tokens + response_reserve_tokens
-        remaining_budget = max(0, resolved_window - reserved_budget)
-
-        # Tiered reduction if still exceeds budget
-        if estimate_value_tokens(compact_all_rec) > remaining_budget // 2 and remaining_budget > 0:
-            compact_all_rec = self.compact_recovery_candidates(
-                compact_all_rec, max_candidates=max(2, max_candidates // 2)
-            )
-            compact_rec = self.compact_recovery_candidates(
-                compact_rec, max_candidates=max(2, max_candidates // 2)
-            )
-
-        # Build bounded execution state
-        if eff_envelope is not None and getattr(eff_envelope, "execution_state", None) is not None:
-            es = eff_envelope.execution_state
-            bounded_exec_state = ExecutionRecoveryState(
-                active_flow_id=getattr(es, "active_flow_id", None),
-                active_route=getattr(es, "active_route", ""),
-                lane_id=getattr(es, "lane_id", ""),
-                lane_states=compact_lanes,
-                recoverable_task_candidates=tuple(compact_rec),
-                all_recovery_candidates=tuple(compact_all_rec),
-                pending_required_work=getattr(es, "pending_required_work", False),
-                pending_checkpoint_id=getattr(es, "pending_checkpoint_id", None),
-            )
-        else:
-            bounded_exec_state = ExecutionRecoveryState(
-                lane_states=compact_lanes,
-                recoverable_task_candidates=tuple(compact_rec),
-                all_recovery_candidates=tuple(compact_all_rec),
+        def _build_bounded(
+            lanes: dict[str, Any],
+            all_rec: list[dict[str, Any]],
+            rec_cands: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            art: dict[str, Any],
+            mem: list[Any],
+            summary: str,
+            pointers: Any,
+        ) -> tuple[RoutingExecutionEnvelope, EntryRouteContext]:
+            es_orig = getattr(eff_envelope, "execution_state", None) if eff_envelope else None
+            bounded_es = ExecutionRecoveryState(
+                active_flow_id=getattr(es_orig, "active_flow_id", None) if es_orig else None,
+                active_route=getattr(es_orig, "active_route", "") if es_orig else "",
+                lane_id=getattr(es_orig, "lane_id", "") if es_orig else "",
+                lane_states=lanes,
+                recoverable_task_candidates=tuple(rec_cands),
+                all_recovery_candidates=tuple(all_rec),
+                pending_required_work=getattr(es_orig, "pending_required_work", False) if es_orig else False,
+                pending_checkpoint_id=getattr(es_orig, "pending_checkpoint_id", None) if es_orig else None,
             )
 
-        identity = (
-            getattr(eff_envelope, "identity", None)
-            if eff_envelope is not None
-            else None
-        ) or IdentitySessionRelationship(
-            authenticated_user_id=getattr(context, "authenticated_user_id", ""),
-            session_id=getattr(context, "session_id", ""),
-            conversation_id=getattr(context, "conversation_id", ""),
-            turn_id=getattr(context, "turn_id", ""),
-        )
-
-        acct_snap = (
-            getattr(eff_envelope, "accounting_snapshot", None)
-            if eff_envelope is not None
-            else None
-        ) or default_accounting_snapshot(
-            task_id=getattr(context, "turn_id", ""),
-            turn_id=getattr(context, "turn_id", ""),
-        )
-
-        bounded_envelope = build_routing_execution_envelope(
-            user_request=user_prompt,
-            identity=identity,
-            execution_state=bounded_exec_state,
-            accounting_snapshot=acct_snap,
-            model_candidates=getattr(eff_envelope, "model_candidates", ()) if eff_envelope else (),
-            route_availability=getattr(eff_envelope, "route_availability", ()) if eff_envelope else (),
-            capabilities_and_tools=tuple(compact_tools),
-            approval_state=getattr(eff_envelope, "approval_state", None) if eff_envelope else None,
-            artifact_metadata=compact_artifacts,
-            previous_turn_pointers=getattr(eff_envelope, "previous_turn_pointers", None) if eff_envelope else None,
-            conversation_context_availability=getattr(eff_envelope, "conversation_context_availability", None) if eff_envelope else None,
-            memory_availability=getattr(eff_envelope, "memory_availability", None) if eff_envelope else None,
-        )
-
-        if isinstance(context, EntryRouteContext):
-            bounded_context = EntryRouteContext(
-                session_id=context.session_id,
-                conversation_id=context.conversation_id,
-                turn_id=context.turn_id,
-                previous_route=context.previous_route,
-                conversation_summary=context.conversation_summary,
-                artifact_evidence=compact_artifacts,
-                memory_task_candidates=tuple(compact_memory_candidates),
-                memory_capsules_enabled=context.memory_capsules_enabled,
-                atomic_child=context.atomic_child,
-                orchestration_parent_task_id=context.orchestration_parent_task_id,
-                authenticated_user_id=context.authenticated_user_id,
-                envelope=bounded_envelope,
+            identity = (
+                getattr(eff_envelope, "identity", None)
+                if eff_envelope is not None
+                else None
+            ) or IdentitySessionRelationship(
+                authenticated_user_id=getattr(context, "authenticated_user_id", ""),
+                session_id=getattr(context, "session_id", ""),
+                conversation_id=getattr(context, "conversation_id", ""),
+                turn_id=getattr(context, "turn_id", ""),
             )
-        else:
-            bounded_context = EntryRouteContext(
+
+            acct_snap = (
+                getattr(eff_envelope, "accounting_snapshot", None)
+                if eff_envelope is not None
+                else None
+            ) or default_accounting_snapshot(
+                task_id=getattr(context, "turn_id", ""),
+                turn_id=getattr(context, "turn_id", ""),
+            )
+
+            env = build_routing_execution_envelope(
+                user_request=user_prompt,
+                identity=identity,
+                execution_state=bounded_es,
+                accounting_snapshot=acct_snap,
+                model_candidates=getattr(eff_envelope, "model_candidates", ()) if eff_envelope else (),
+                route_availability=getattr(eff_envelope, "route_availability", ()) if eff_envelope else (),
+                capabilities_and_tools=tuple(tools),
+                approval_state=getattr(eff_envelope, "approval_state", None) if eff_envelope else None,
+                artifact_metadata=art,
+                previous_turn_pointers=pointers,
+                conversation_context_availability=getattr(eff_envelope, "conversation_context_availability", None) if eff_envelope else None,
+                memory_availability=getattr(eff_envelope, "memory_availability", None) if eff_envelope else None,
+            )
+
+            ctx = EntryRouteContext(
                 session_id=getattr(context, "session_id", ""),
                 conversation_id=getattr(context, "conversation_id", ""),
                 turn_id=getattr(context, "turn_id", ""),
                 previous_route=getattr(context, "previous_route", ""),
-                conversation_summary=getattr(context, "conversation_summary", ""),
-                artifact_evidence=compact_artifacts,
-                memory_task_candidates=tuple(compact_memory_candidates),
+                conversation_summary=summary,
+                artifact_evidence=art,
+                memory_task_candidates=tuple(mem),
                 memory_capsules_enabled=getattr(context, "memory_capsules_enabled", False),
                 atomic_child=getattr(context, "atomic_child", False),
                 orchestration_parent_task_id=getattr(context, "orchestration_parent_task_id", ""),
                 authenticated_user_id=getattr(context, "authenticated_user_id", ""),
-                envelope=bounded_envelope,
+                envelope=env,
             )
-            if hasattr(context, "__dict__"):
-                setattr(context, "envelope", bounded_envelope)
-                setattr(context, "artifact_evidence", compact_artifacts)
-                setattr(context, "memory_task_candidates", tuple(compact_memory_candidates))
+            return env, ctx
 
-        # Calculate compacted breakdown
-        compacted_breakdown = self.calculate_raw_breakdown(
+        # Pass 1: Deduplication, Log/Trace Separation
+        cur_lanes = self.compact_lane_states(lane_states)
+        cur_all = self.compact_recovery_candidates(all_candidates, max_candidates=self.policy.max_recovery_candidates)
+        cur_rec = self.compact_recovery_candidates(rec_candidates, max_candidates=self.policy.max_recovery_candidates)
+        cur_tools = self.compact_tools_and_capabilities(capabilities_and_tools)
+        cur_art = self.compact_artifact_evidence(raw_art, max_references=6)
+        cur_mem = list(raw_mem)[:self.policy.max_recovery_candidates]
+        cur_summary = str(conv_summary or "")
+        cur_pointers = prev_turn_pointers or PreviousTurnPointers()
+
+        env, ctx = _build_bounded(
+            cur_lanes, cur_all, cur_rec, cur_tools, cur_art, cur_mem, cur_summary, cur_pointers
+        )
+        breakdown = self.calculate_raw_breakdown(
             user_prompt=user_prompt,
             system_prompt=system_prompt,
-            context=bounded_context,
-            envelope=bounded_envelope,
+            context=ctx,
+            envelope=env,
             routes=routes,
         )
 
-        raw_total = raw_breakdown.total_tokens
-        compacted_total = compacted_breakdown.total_tokens
-        tokens_saved = max(0, raw_total - compacted_total)
+        # Pass 2: Stale tool traces and tool schema trimming (if still exceeds budget)
+        if breakdown.total_tokens > resolved_window:
+            cur_tools = [
+                {"name": str(t.get("name") or ""), "description": str(t.get("description") or "")[:60]}
+                for t in cur_tools
+            ]
+            env, ctx = _build_bounded(
+                cur_lanes, cur_all, cur_rec, cur_tools, cur_art, cur_mem, cur_summary, cur_pointers
+            )
+            breakdown = self.calculate_raw_breakdown(
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                context=ctx,
+                envelope=env,
+                routes=routes,
+            )
 
-        deficit_before = max(0, raw_total - resolved_window)
+        # Pass 3: Conversation history and completed task candidates pruning (if still exceeds budget)
+        if breakdown.total_tokens > resolved_window:
+            cur_all = [c for c in cur_all if c.get("state") not in {"completed", "cancelled"} or c.get("checkpoint_id")][:4]
+            cur_rec = [c for c in cur_rec if c.get("state") not in {"completed", "cancelled"} or c.get("checkpoint_id")][:4]
+            if len(cur_summary) > 200:
+                cur_summary = cur_summary[:200] + "..."
+            if cur_pointers is not None:
+                cur_pointers = PreviousTurnPointers(
+                    previous_turn_id=getattr(cur_pointers, "previous_turn_id", ""),
+                    previous_route=getattr(cur_pointers, "previous_route", ""),
+                    previous_task_id=getattr(cur_pointers, "previous_task_id", ""),
+                    related_task_ids=(),
+                    retrieval_hints=(),
+                )
+            env, ctx = _build_bounded(
+                cur_lanes, cur_all, cur_rec, cur_tools, cur_art, cur_mem, cur_summary, cur_pointers
+            )
+            breakdown = self.calculate_raw_breakdown(
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                context=ctx,
+                envelope=env,
+                routes=routes,
+            )
+
+        # Pass 4: Progressive bounding of task candidates and artifact references (if still exceeds budget)
+        if breakdown.total_tokens > resolved_window:
+            for cand_limit, art_limit in [(2, 2), (1, 1), (0, 0)]:
+                cand_slice_all = cur_all[:cand_limit]
+                cand_slice_rec = cur_rec[:cand_limit]
+                art_compact = (
+                    self.compact_artifact_evidence(raw_art, max_references=art_limit)
+                    if art_limit > 0
+                    else {"references": [], "artifact_families": [], "detected_extensions": [], "has_user_artifact": False}
+                )
+                mem_slice = cur_mem[:cand_limit]
+                summary_compact = ""
+                env_cand, ctx_cand = _build_bounded(
+                    cur_lanes, cand_slice_all, cand_slice_rec, cur_tools, art_compact, mem_slice, summary_compact, cur_pointers
+                )
+                bd_cand = self.calculate_raw_breakdown(
+                    user_prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    context=ctx_cand,
+                    envelope=env_cand,
+                    routes=routes,
+                )
+                env, ctx, breakdown = env_cand, ctx_cand, bd_cand
+                if breakdown.total_tokens <= resolved_window:
+                    break
+
+        compacted_total = breakdown.total_tokens
+        tokens_saved = max(0, raw_total - compacted_total)
         deficit_after = max(0, compacted_total - resolved_window)
         is_valid = deficit_after == 0
 
+        safety_margin = int(getattr(self.settings, "mana_context_safety_margin_tokens", 1024) or 1024)
+        conv_tokens = estimate_value_tokens(cur_summary) + (
+            estimate_value_tokens(cur_pointers.to_dict()) if cur_pointers else 0
+        )
+
+        logger.info(
+            "Context budget equation: model_context_limit=%s system_prompt_tokens=%s conversation_history_tokens=%s tool_schemas=%s memory=%s routing_envelope=%s workspace_context=%s reserved_completion_tokens=%s safety_margin=%s resulting_deficit=%s",
+            resolved_window,
+            breakdown.system_prompt,
+            conv_tokens,
+            breakdown.tools_and_capabilities,
+            breakdown.memory_candidates,
+            breakdown.execution_state + breakdown.task_candidates,
+            breakdown.artifact_evidence,
+            response_reserve_tokens,
+            safety_margin,
+            deficit_after,
+        )
+
         remaining_oversized: list[str] = []
         if deficit_after > 0:
-            if compacted_breakdown.user_request > resolved_window // 2:
+            if breakdown.user_request > resolved_window // 2:
                 remaining_oversized.append("user_request")
-            if compacted_breakdown.task_candidates > resolved_window // 4:
+            if breakdown.task_candidates > resolved_window // 4:
                 remaining_oversized.append("task_candidates")
-            if compacted_breakdown.artifact_evidence > resolved_window // 4:
+            if breakdown.artifact_evidence > resolved_window // 4:
                 remaining_oversized.append("artifact_evidence")
 
         diagnostic_details = {
             "context_limit": resolved_window,
-            "required_tokens": compacted_total,
+            "input_tokens": compacted_total,
+            "reserved_output_tokens": response_reserve_tokens,
+            "compacted_tokens": compacted_total,
+            "remaining_deficit": deficit_after,
             "deficit": deficit_after,
-            "tokens_by_category": compacted_breakdown.to_dict(),
+            "required_tokens": compacted_total,
+            "tokens_by_category": breakdown.to_dict(),
             "raw_tokens_by_category": raw_breakdown.to_dict(),
             "attempted_compaction": True,
             "remaining_oversized_categories": remaining_oversized,
             "phase": "entry_route",
             "provider_call_executed": False,
+            "budget_equation": {
+                "model_context_limit": resolved_window,
+                "system_prompt_tokens": breakdown.system_prompt,
+                "conversation_history_tokens": conv_tokens,
+                "tool_schemas": breakdown.tools_and_capabilities,
+                "memory": breakdown.memory_candidates,
+                "routing_envelope": breakdown.execution_state + breakdown.task_candidates,
+                "workspace_context": breakdown.artifact_evidence,
+                "reserved_completion_tokens": response_reserve_tokens,
+                "safety_margin": safety_margin,
+                "resulting_deficit": deficit_after,
+            },
         }
 
-
         return CompactedRoutingContext(
-            bounded_envelope=bounded_envelope,
-            bounded_context=bounded_context,
+            bounded_envelope=env,
+            bounded_context=ctx,
             raw_context_tokens=raw_total,
             compacted_context_tokens=compacted_total,
             context_tokens_saved=tokens_saved,
@@ -609,13 +693,14 @@ class ContextCompactor:
             repository_records_compacted=repository_records_compacted,
             routing_context_deficit_before_compaction=deficit_before,
             routing_context_deficit_after_compaction=deficit_after,
-            breakdown=compacted_breakdown,
+            breakdown=breakdown,
             attempted_compaction=True,
             remaining_oversized_categories=tuple(remaining_oversized),
             is_valid=is_valid,
             deficit=deficit_after,
             diagnostic_details=diagnostic_details,
         )
+
 
 
 __all__ = [

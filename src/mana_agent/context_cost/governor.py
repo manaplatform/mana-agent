@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import hashlib
 import threading
 import uuid
@@ -10,6 +11,8 @@ from contextlib import contextmanager
 from decimal import Decimal
 from dataclasses import replace
 from typing import Any, Iterator, Iterable, Sequence
+
+logger = logging.getLogger(__name__)
 
 from mana_agent.context_cost.artifact_store import ContextArtifactStore
 from mana_agent.context_cost.compression import (
@@ -359,7 +362,14 @@ class ContextCostGovernor:
         if len(matches) == 1:
             return matches[0]
         model_matches = [profile for profile in self._profiles if str(getattr(profile, "model_id", "")) == normalized_model]
-        return model_matches[0] if len(model_matches) == 1 else None
+        if len(model_matches) == 1:
+            return model_matches[0]
+        try:
+            return self.profile_resolver.resolve(
+                ModelIdentity(provider or "unknown", model)
+            )
+        except Exception:
+            return None
 
     def _cost(self, input_tokens: int, output_tokens: int, profile: Any | None) -> Any:
         return calculate_cost(input_tokens, output_tokens, profile=profile)
@@ -575,6 +585,19 @@ class ContextCostGovernor:
                     budget = self.context_budget(context_window=resolved.context_window)
                     required = int(exc.required or (resolved.context_window + 1))
                     breakdown = breakdown_for_segments(compacted)
+                    logger.info(
+                        "Context budget equation: model_context_limit=%s system_prompt_tokens=%s conversation_history_tokens=%s tool_schemas=%s memory=%s routing_envelope=%s workspace_context=%s reserved_completion_tokens=%s safety_margin=%s resulting_deficit=%s",
+                        resolved.context_window,
+                        breakdown.system_tokens,
+                        breakdown.history_tokens,
+                        breakdown.schema_tokens,
+                        breakdown.memory_tokens,
+                        breakdown.other_tokens,
+                        breakdown.evidence_tokens,
+                        budget.response_reserve_tokens,
+                        budget.safety_margin_tokens,
+                        exc.deficit or 0,
+                    )
                     snapshot = BudgetSnapshot(
                         breakdown=breakdown,
                         budget=budget,

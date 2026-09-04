@@ -83,6 +83,12 @@ _MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
     "gpt-5.6-luna": (400_000, 128_000),
     "gpt-5.6-sol": (400_000, 128_000),
     "gpt-5.6-terra": (400_000, 128_000),
+    "gpt-6": (1_050_000, 128_000),
+    "gpt-6-astra": (1_050_000, 128_000),
+    "astra": (1_050_000, 128_000),
+    "openai/gpt-6": (1_050_000, 128_000),
+    "openai/gpt-6-astra": (1_050_000, 128_000),
+    "openai/astra": (1_050_000, 128_000),
     "o3": (200_000, 100_000),
     "o3-mini": (200_000, 100_000),
     "o4-mini": (200_000, 100_000),
@@ -116,6 +122,10 @@ def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | N
         if lowered.startswith(key.casefold()):
             return limits
     provider_id = str(provider or "").strip().casefold()
+    if "astra" in lowered:
+        return (1_050_000, 128_000)
+    if provider_id == "openai" and (lowered.startswith("gpt-6") or "astra" in lowered):
+        return (1_050_000, 128_000)
     if "grok" in lowered or "x-ai" in lowered:
         return (500_000, 65_536)
     if "claude" in lowered or provider_id == "anthropic":
@@ -149,6 +159,9 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "gpt-4.1-mini": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "gpt-4o": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.IMAGE_INPUT}),
     "gpt-4o-mini": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.IMAGE_INPUT}),
+    "gpt-6": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "gpt-6-astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "text-embedding-3-small": frozenset({ModelCapability.EMBEDDING}),
     "text-embedding-3-large": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/nv-embedqa-e5-v5": frozenset({ModelCapability.EMBEDDING}),

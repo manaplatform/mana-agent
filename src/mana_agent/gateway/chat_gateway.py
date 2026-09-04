@@ -5296,14 +5296,21 @@ class AgentChatGateway:
                     context=route_context,
                 )
             except EntryRoutingError as exc:
+                state.pop("_memory_task_binding", None)
+                state.pop("_conversation_context_tool", None)
+                state.pop("_context_retrieval_tools", None)
                 result = ChatTurnResult(
                     answer=str(exc),
                     error=getattr(exc, "code", "") or str(exc),
+                    error_code=getattr(exc, "code", "") or "entry_route_invalid",
                     mode=(
                         "route-budget-blocked"
                         if getattr(exc, "code", "") == "context_budget_blocked"
                         else "route-error"
                     ),
+                    retry_possible=False,
+                    resume_available=False,
+                    checkpoint_available=False,
                     payload={
                         "route": "unsupported",
                         "error_code": getattr(exc, "code", "") or "entry_route_invalid",
@@ -5312,6 +5319,7 @@ class AgentChatGateway:
                         "diagnostic_details": getattr(exc, "details", {}),
                     },
                 )
+
 
             else:
                 record_current(
