@@ -5,10 +5,12 @@ import json
 from typing import Any
 
 from mana_agent.config.model_capabilities import resolve_model_capability
+from mana_agent.config.model_catalog import maintained_token_limits
 from mana_agent.config.provider_registry import split_qualified_model_id
 from mana_agent.config.user_config import get_setting
 from mana_agent.model_routing.models import LatencyClass, ModelProfile, sanitize_configuration
 from mana_agent.multi_agent.core.types import AgentRole
+
 
 
 _LEVELS = (
@@ -79,14 +81,25 @@ def configured_profiles(value: list[dict[str, Any]] | str) -> tuple[ModelProfile
             config.setdefault("capability_confidence", desc.capability_confidence)
             config.setdefault("capability_descriptor", desc.to_dict())
 
+            desc_meta = getattr(desc, "metadata", {}) or {}
+            catalog_window = desc_meta.get("context_window") or desc_meta.get("context_length")
+            catalog_output = desc_meta.get("max_output_tokens") or desc_meta.get("max_completion_tokens")
+            maintained = maintained_token_limits(provider, model_id)
+            raw_window = int(raw.get("context_window") or 0)
+            raw_output = int(raw.get("max_output_tokens") or raw.get("max_completion_tokens") or 0)
+            resolved_window = int(raw_window or (maintained[0] if maintained else 0) or (int(catalog_window) if catalog_window else 0) or 0)
+            resolved_output = int(raw_output or (maintained[1] if maintained else 0) or (int(catalog_output) if catalog_output else 0) or 0)
+            if resolved_window > 0 and resolved_output > 0:
+                resolved_output = min(resolved_window, resolved_output)
+
             profiles.append(ModelProfile(
                 provider=provider,
                 model_id=model_id,
                 supported_roles=roles,
                 supported_tools=tools,
                 reasoning_settings=frozenset(str(item) for item in raw.get("reasoning_settings") or (["default"] if desc.reasoning_required else ["none"])),
-                context_window=int(raw.get("context_window") or 0),
-                max_output_tokens=int(raw.get("max_output_tokens") or raw.get("max_completion_tokens") or 0),
+                context_window=resolved_window,
+                max_output_tokens=resolved_output,
                 tokenizer=str(raw.get("tokenizer") or "") or None,
                 latency_class=LatencyClass(str(raw.get("latency_class") or "standard")),
                 input_cost_per_million=float(raw.get("input_cost_per_million") or 0.0),
@@ -177,8 +190,19 @@ def profiles_for_pinned_models(
         elif not reasoning_settings:
             reasoning_settings = set(reasoning)
         maintained = maintained_token_limits(provider, model_id)
-        window = int(maintained[0] if maintained else context_window)
-        output = int(maintained[1] if maintained else max_output_tokens)
+        desc_meta = getattr(desc, "metadata", {}) or {}
+        catalog_window = desc_meta.get("context_window") or desc_meta.get("context_length")
+        catalog_output = desc_meta.get("max_output_tokens") or desc_meta.get("max_completion_tokens")
+        window = int(
+            (maintained[0] if maintained else None)
+            or (int(catalog_window) if catalog_window else None)
+            or context_window
+        )
+        output = int(
+            (maintained[1] if maintained else None)
+            or (int(catalog_output) if catalog_output else None)
+            or max_output_tokens
+        )
         output = min(window, max(1, output))
         if desc.is_known:
             can_tool = desc.supports_tool_calls
@@ -264,20 +288,25 @@ def profiles_from_legacy_configuration(
         # routing can make a provider/model decision.
         if "MODEL_LEVEL_1_FAST_TOOL" in levels:
             latency = LatencyClass.INTERACTIVE
+        desc = resolve_model_capability(provider, model_id)
         maintained = maintained_token_limits(provider, model_id)
+        desc_meta = getattr(desc, "metadata", {}) or {}
+        catalog_window = desc_meta.get("context_window") or desc_meta.get("context_length")
+        catalog_output = desc_meta.get("max_output_tokens") or desc_meta.get("max_completion_tokens")
         window = int(
-            (maintained[0] if maintained else 0)
+            (maintained[0] if maintained else None)
+            or (int(catalog_window) if catalog_window else None)
             or context_window
             or 0
         )
         output = int(
-            (maintained[1] if maintained else 0)
+            (maintained[1] if maintained else None)
+            or (int(catalog_output) if catalog_output else None)
             or max_output_tokens
             or 0
         )
         if window > 0 and output > 0:
             output = min(window, output)
-        desc = resolve_model_capability(provider, model_id)
         if desc.is_known:
             can_tool = desc.supports_tool_calls
             can_p = desc.supports_repository_write

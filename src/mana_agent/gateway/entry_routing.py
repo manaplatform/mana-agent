@@ -587,12 +587,28 @@ class EntryRouter:
                 self.compactor = None
 
         if self.compactor is not None:
+            router_window = None
+            if self.llm is not None:
+                llm_model = (
+                    getattr(self.llm, "model_name", None)
+                    or getattr(self.llm, "model", None)
+                    or getattr(self.llm, "model_id", None)
+                )
+                llm_provider = getattr(self.llm, "provider", None) or ""
+                if llm_model:
+                    from mana_agent.config.model_catalog import maintained_token_limits
+
+                    limits = maintained_token_limits(str(llm_provider), str(llm_model))
+                    if limits:
+                        router_window = limits[0]
+
             compaction = self.compactor.compact_routing_context(
                 user_prompt=user_prompt,
                 system_prompt=ENTRY_ROUTER_PROMPT,
                 context=context,
                 envelope=envelope,
                 routes=routes,
+                context_window=router_window,
             )
             if not compaction.is_valid:
                 raise EntryRoutingError(
@@ -717,7 +733,12 @@ class EntryRouter:
                 code="context_budget_blocked",
                 phase="entry_route",
                 provider_call_executed=False,
+                details=getattr(exc, "details", {}) or {
+                    "phase": "entry_route",
+                    "provider_call_executed": False,
+                },
             ) from exc
+
         except Exception as exc:
             record_current("model.call.failed", {"boundary": "entry_router", "error_type": type(exc).__name__, "error": str(exc)})
             raise EntryRoutingError(

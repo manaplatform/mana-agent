@@ -2,6 +2,20 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-05
+
+- Fixed Astra GPT-6 entry route context budget deficit and added deterministic multi-pass compaction:
+  - Resolved Astra (GPT-6 Astra) context limit (`1_050_000` tokens) and max output tokens (`128_000` tokens) across `_MAINTAINED_TOKEN_LIMITS` (`src/mana_agent/config/model_catalog.py`), model capability descriptors (`src/mana_agent/config/model_capabilities.py`), model routing profiles (`src/mana_agent/model_routing/profiles.py`), and context cost profiles (`src/mana_agent/context_cost/profiles.py`), preventing generic 16k fallbacks from capping Astra turns.
+  - Implemented non-redundant component breakdown estimation in `ContextCompactor.calculate_raw_breakdown` (`src/mana_agent/gateway/context_compactor.py`), eliminating double counting of operational logs and deduplicating envelope and context payload accounting.
+  - Implemented 4-pass deterministic context compaction before provider execution in `ContextCompactor.compact_routing_context` (Pass 1: deduplicate candidates and strip operational logs; Pass 2: trim stale tool traces and compress schemas; Pass 3: compress conversation history and prune completed candidates; Pass 4: progressively bound candidates and artifact references), recalculating budget after each pass and halting immediately when the deficit is cleared.
+  - Protected critical execution state throughout compaction: strictly preserved `user_prompt`, `pending_checkpoint_id`, active lane and tasks, `approval_state`, tool schemas, and recent user context.
+  - Resolved model context window from `EntryRouter.llm` in `EntryRouter.route` (`src/mana_agent/gateway/entry_routing.py`), passing the true model context limit to the compactor before routing execution.
+  - Added full context budget equation logging across `ContextCostGovernor` (`src/mana_agent/context_cost/governor.py`) and `ContextCompactor` (`src/mana_agent/gateway/context_compactor.py`).
+  - Added structured diagnostics (`context_limit`, `input_tokens`, `reserved_output_tokens`, `compacted_tokens`, `remaining_deficit`, `budget_equation`, `phase`, `provider_call_executed`) to `EntryRoutingError` on genuinely impossible context budgets.
+  - Ensured session state cleanup in `AgentChatGateway` (`src/mana_agent/gateway/chat_gateway.py`) on entry routing errors, ensuring blocked turns never leave stale bindings or prevent subsequent turns or `/new`.
+  - Added comprehensive regression test suite in `tests/gateway/test_astra_entry_route_budget.py`.
+  - User verification required: `pytest tests/gateway/test_astra_entry_route_budget.py tests/gateway/test_context_budget_retention.py -v`.
+
 ## 2026-09-04
 
 - Fixed `test_large_workspace_performance` and Windows CI session teardown file locking:
