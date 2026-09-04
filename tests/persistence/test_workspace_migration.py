@@ -31,7 +31,8 @@ def migration_setup(tmp_path: Path, monkeypatch):
     db_path = ws_dir / "state.db"
     db = WorkspaceDatabase(workspace_id, db_path=db_path)
     migrator = TaskboardGatewayMigrator(workspace_id, db=db)
-    return migrator, ws_dir, db
+    yield migrator, ws_dir, db
+    db.close()
 
 
 def test_migrate_taskboard_legacy_files(migration_setup):

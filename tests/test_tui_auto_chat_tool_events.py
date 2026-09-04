@@ -217,3 +217,53 @@ def test_tui_new_command_deletes_active_session_and_clears_mounted_log(tmp_path:
             assert list(app.chat_log.children) == []
 
     asyncio.run(run())
+
+
+def test_tui_records_api_approval_failure_as_terminal_assistant_message(
+    tmp_path: Path,
+) -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path, model="gpt-test")
+    notifications = []
+    app.notify = lambda msg, *args, **kwargs: notifications.append((msg, kwargs.get("severity")))
+    app._record_api_approval_completion(
+        "api_approval_fail_1",
+        {
+            "status": "failed",
+            "message": "Approved API request failed in the controlled API runtime with HTTP status 400.\nError: upstream_api_error: Bad Request",
+        },
+    )
+
+    messages = [
+        event for event in history.get_events()
+        if isinstance(event, AssistantMessageEvent)
+    ]
+    assert messages[-1].turn_id == "api_approval_fail_1"
+    assert "HTTP status 400" in messages[-1].content
+    assert app.status_text == "API request failed"
+    assert any(severity == "error" for _, severity in notifications)
+
+
+def test_tui_records_api_approval_denial_as_terminal_assistant_message(
+    tmp_path: Path,
+) -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path, model="gpt-test")
+    notifications = []
+    app.notify = lambda msg, *args, **kwargs: notifications.append((msg, kwargs.get("severity")))
+    app._record_api_approval_completion(
+        "api_approval_deny_1",
+        {
+            "status": "denied",
+            "message": "API request denied. No external mutation was executed.",
+        },
+    )
+
+    messages = [
+        event for event in history.get_events()
+        if isinstance(event, AssistantMessageEvent)
+    ]
+    assert messages[-1].turn_id == "api_approval_deny_1"
+    assert "API request denied" in messages[-1].content
+    assert app.status_text == "API request denied"
+    assert any(severity == "warning" for _, severity in notifications)

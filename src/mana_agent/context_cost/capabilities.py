@@ -38,6 +38,7 @@ class CapabilityRegistry:
         self._event_callback = event_callback
         self.manifest = {name: self._entry(tool) for name, tool in self._tools.items()}
         self.active = ActiveCapabilitySet()
+        self.pinned: set[str] = set()
 
     def _entry(self, tool: Any) -> CapabilityManifestEntry:
         name = str(tool.name)
@@ -104,8 +105,23 @@ class CapabilityRegistry:
         self._emit("context.capabilities_loaded", payload)
         return payload
 
+    def pin(self, names: Iterable[str], *, step: int = 0) -> None:
+        valid = {str(name) for name in names if str(name)} & self._allowed
+        if not valid:
+            return
+        self.pinned.update(valid)
+        before = self.active.schema_tokens
+        previous_loaded = set(self.active.loaded)
+        self.active.loaded.update(valid)
+        for name in valid:
+            self.active.last_used_step[name] = int(step)
+        self._refresh_revision(before, previous_loaded)
+
+    def unpin(self, names: Iterable[str]) -> None:
+        self.pinned.difference_update(str(name) for name in names if str(name))
+
     def unload(self, names: Iterable[str], *, reason: str = "model_requested") -> dict[str, Any]:
-        removable = {str(name) for name in names if str(name)} - CORE_CAPABILITIES
+        removable = ({str(name) for name in names if str(name)} - CORE_CAPABILITIES) - self.pinned
         before = self.active.schema_tokens
         previous_loaded = set(self.active.loaded)
         removed = sorted(removable & self.active.loaded)
@@ -118,7 +134,7 @@ class CapabilityRegistry:
         return payload
 
     def unload_idle(self, *, step: int, idle_steps: int) -> dict[str, Any]:
-        expired = [name for name, last in self.active.last_used_step.items() if name not in CORE_CAPABILITIES and int(step) - last >= max(1, int(idle_steps))]
+        expired = [name for name, last in self.active.last_used_step.items() if name not in CORE_CAPABILITIES and name not in self.pinned and int(step) - last >= max(1, int(idle_steps))]
         return self.unload(expired, reason="idle")
 
     def mark_used(self, name: str, step: int) -> None:

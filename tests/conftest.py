@@ -8,6 +8,8 @@ import os
 import shutil
 import stat
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -166,18 +168,47 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     _install_real_mana_write_guard()
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_workspace_dbs_per_test() -> Iterator[None]:
+    yield
+    try:
+        from mana_agent.persistence.workspace_db import close_all_workspace_dbs
+
+        close_all_workspace_dbs()
+    except Exception:
+        pass
+
+
 def _remove_test_home(path: Path) -> None:
-    def onerror(function, failed_path, exc_info):  # noqa: ANN001
+    def retry_onerror(function, failed_path, exc_info):  # noqa: ANN001
+        try:
+            os.chmod(failed_path, stat.S_IWRITE | stat.S_IREAD)
+            function(failed_path)
+        except OSError:
+            pass
+
+    for attempt in range(5):
+        try:
+            shutil.rmtree(path, onerror=retry_onerror)
+            if not path.exists():
+                return
+        except OSError:
+            pass
+        gc.collect()
+        time.sleep(0.1 * (attempt + 1))
+
+    def strict_onerror(function, failed_path, exc_info):  # noqa: ANN001
         try:
             os.chmod(failed_path, stat.S_IWRITE | stat.S_IREAD)
             function(failed_path)
         except OSError as cleanup_error:
             raise RuntimeError(f"Could not remove isolated Mana test home {path}: {failed_path}") from cleanup_error
 
-    try:
-        shutil.rmtree(path, onerror=onerror)
-    except OSError as exc:
-        raise RuntimeError(f"Could not remove isolated Mana test home {path}") from exc
+    if path.exists():
+        try:
+            shutil.rmtree(path, onerror=strict_onerror)
+        except OSError as exc:
+            raise RuntimeError(f"Could not remove isolated Mana test home {path}") from exc
     if path.exists():
         raise RuntimeError(f"Could not remove isolated Mana test home {path}")
 
@@ -187,6 +218,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # n
 
     if _TEST_MANA_HOME is None:
         return
+    try:
+        from mana_agent.persistence.workspace_db import close_all_workspace_dbs
+
+        close_all_workspace_dbs()
+    except Exception:
+        pass
     gc.collect()
     logging.shutdown()
     _remove_test_home(_TEST_MANA_HOME)

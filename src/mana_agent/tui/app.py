@@ -481,6 +481,11 @@ class ManaChatApp(App):
                 else "Computer permission"
             )
             self.notify(f"{action_name} action failed: {exc}", severity="error")
+            if choice.api:
+                self.history.add(AssistantMessageEvent(
+                    content=f"API approval action failed: {exc}",
+                    turn_id=choice.request_id,
+                ))
 
     def _record_api_approval_completion(
         self,
@@ -499,6 +504,10 @@ class ManaChatApp(App):
         if status == "denied":
             self.notify("API request denied. No API request was executed.", severity="warning")
             self.update_status("API request denied")
+            return
+        if status in {"failed", "approved_not_executed"}:
+            self.notify(f"API request failed: {message}", severity="error")
+            self.update_status("API request failed")
             return
         self.notify("API request completed. Response added to chat.")
         self.update_status("API request completed")

@@ -2,6 +2,37 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-04
+
+- Fixed `test_large_workspace_performance` and Windows CI session teardown file locking:
+  - Added thread-local SQLite connection caching and re-entrancy depth tracking to `WorkspaceDatabase` (`src/mana_agent/persistence/workspace_db.py`), eliminating repetitive `sqlite3.connect()`, PRAGMA re-execution, and the automatic WAL-to-DB sync/checkpoint triggered on connection closure in WAL mode.
+  - Reduced per-task write latency by over 10x (down to < 0.1ms per task), accelerating 500-task workspace operations from ~80s to < 1s on virtualized Windows CI disks.
+  - Added explicit connection pool cleanup (`close()`, `close_all_workspace_dbs()`) and tracked active database instances in `_ALL_DATABASES`.
+  - Added automatic per-test and session-finish database cleanup (`_cleanup_workspace_dbs_per_test`, `pytest_sessionfinish`) and retry backoff in `_remove_test_home` (`tests/conftest.py`), eliminating `PermissionError: [WinError 32]` on `state.db` during Windows CI test session cleanup.
+  - User verification required: `pytest tests/persistence/ -v`.
+
+- Fixed post-approval API failure lifecycle across API Manager, Chat Gateway, and TUI:
+  - Implemented one authoritative post-approval finalizer `_finalize_api_approval_outcome` in `AgentChatGateway` (`src/mana_agent/gateway/chat_gateway.py`) governing all terminal states: approval denied (`cancelled`), approved execution succeeded (`completed`), approved upstream/HTTP failed (`failed`), transport/timeout/DNS/TLS exceptions (`failed`), policy/validation errors before network execution (`failed`), and continuation-model failure after HTTP success (`failed`).
+  - Ensured failed executions never route through `_resume_api_continuation()`, preventing illegal `api_execution_verified` status on upstream HTTP failures.
+  - Wrapped request execution in `ApiManagerService.decide_approval` (`src/mana_agent/api_manager/service.py`) in explicit exception handling calling `record_failed()`, preventing pending approvals from getting trapped in `approved_execution_pending`.
+  - Enriched `UpstreamApiError` and `ApiTimeoutError` in `ApiExecutor` (`src/mana_agent/api_manager/executor.py`) to capture structured response evidence (`status_code`, `redacted_url`, `json_body`, `text_body`, `method`, `latency_ms`, `attempts`), preserving upstream error diagnostics for the Sefaria POST failure scenario.
+  - Guaranteed lane coordinator finalization (`LaneTaskState.FAILED` or `LaneTaskState.CANCELLED`), stopping supervisor heartbeats and eliminating endless heartbeat loops on failed or denied approvals.
+  - Reconciled waiting parent tasks and taskboard records when child API mutation tasks finish in failed or cancelled states.
+  - Ensured idempotency on duplicate approve or deny commands across the approval broker and chat gateway.
+  - Updated `ManaChatApp` in `src/mana_agent/tui/app.py` to handle `failed` and `approved_not_executed` states with error notifications and terminal assistant failure messages.
+  - Added regression test suites in `tests/gateway/test_api_manager_route.py` and `tests/test_tui_auto_chat_tool_events.py`.
+  - User verification required: `pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_tui_auto_chat_tool_events.py tests/test_api_conversations.py -q`.
+
+## 2026-09-03
+
+- Fixed premature `api_workflow_incomplete` failure in Mana-Agent API execution:
+  - Added an evidence-based API workflow completion guard in `AskAgent.run` (`src/mana_agent/multi_agent/runtime/ask_agent.py`) that refuses premature natural-language completion when declared required outcomes (`api_execution_verified`, `user_goal_verified`) are safely actionable, forcing model continuation with the exact remaining API contract while preserving conversation and tool history.
+  - Added `pin()` and `unpin()` to `CapabilityRegistry` (`src/mana_agent/context_cost/capabilities.py`), protecting `api_request_preview` and `api_request_execute` from idle eviction (`unload_idle`) during multi-step API inspection and search.
+  - Enhanced error extraction and outcome validation in `AgentChatGateway._api_workflow_completion_from_trace` (`src/mana_agent/gateway/chat_gateway.py`) to surface specific non-continuable blockers (`validation_failure`, `ambiguous_operation`, `missing_credential`, `blocked_host`, etc.) instead of collapsing everything into generic `api_workflow_incomplete`.
+  - Ensured operations requiring authorization (e.g. mutating POST or `unknown_high_risk`) cleanly transition to `route-api-awaiting-approval` with pending permissions rather than failing prematurely.
+  - Added regression test suites across `tests/context_cost/test_context_cost_core.py`, `tests/test_ask_agent.py`, and `tests/gateway/test_api_manager_route.py`.
+  - User verification required: `pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_ask_agent.py tests/context_cost/test_context_cost_core.py -q`.
+
 ## 2026-09-01
 
 - Fixed `TypeError: SessionPickerScreen._render() missing 1 required positional argument: 'rows'` when opening the `/session` modal screen in the TUI:

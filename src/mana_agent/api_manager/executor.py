@@ -15,7 +15,7 @@ import time
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
@@ -125,6 +125,7 @@ class _PendingApproval:
     request_fingerprint: str = ""
     state: str = "waiting_approval"
     continuation_outcome: dict[str, Any] | None = None
+    failure_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 class PendingApiApprovalBroker:
@@ -271,7 +272,13 @@ class PendingApiApprovalBroker:
                 raise LookupError("No API request is waiting for that approval.")
             if pending.session_id != session_id and pending.conversation_id != session_id:
                 raise PermissionError("The API approval belongs to a different session.")
-            if pending.state in {"executed_resume_pending", "resumed", "completed"}:
+            if pending.state in {
+                "executed_resume_pending",
+                "resumed",
+                "completed",
+                "failed",
+                "denied",
+            }:
                 return pending.request.model_copy(deep=True), pending.preview.model_copy(deep=True)
             pending.approved = True
             pending.state = "approved_execution_pending"
@@ -313,11 +320,34 @@ class PendingApiApprovalBroker:
                 if outcome is not None:
                     pending.continuation_outcome = outcome
 
-    def record_failed(self, request_id: str) -> None:
+    def record_failed(
+        self,
+        request_id: str,
+        *,
+        error: Any = None,
+        failure_details: dict[str, Any] | None = None,
+        outcome: dict[str, Any] | None = None,
+        executed: bool | None = None,
+        receipt_id: str = "",
+    ) -> str:
         with self._lock:
             pending = self._pending.get(request_id)
             if pending is not None:
                 pending.state = "failed"
+                if executed is not None:
+                    pending.executed = executed
+                if receipt_id:
+                    pending.receipt_id = receipt_id
+                elif not pending.receipt_id:
+                    pending.receipt_id = f"rcpt_{uuid.uuid4().hex}"
+                receipt_id = pending.receipt_id
+                if error is not None:
+                    pending.execution_result = error
+                if failure_details is not None:
+                    pending.failure_evidence = dict(failure_details)
+                self._receipts[receipt_id] = pending
+                self._receipts_by_fingerprint[pending.request_fingerprint] = pending
+            return receipt_id or f"rcpt_{uuid.uuid4().hex}"
 
     def get_pending(self, request_id: str) -> _PendingApproval | None:
         with self._lock:
@@ -503,13 +533,30 @@ class ApiExecutor:
         )
         outcome = action_gateway.execute(adapter, approval_id=transactional_approval_id)
         if outcome.action.state.value != "committed":
+            captured_res = captured.get("result")
+            details = {
+                "action_id": outcome.action.action_id,
+                "action_state": outcome.action.state.value,
+                "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+            }
+            if captured_res is not None:
+                details.update({
+                    "executed": True,
+                    "upstream_ok": False,
+                    "status_code": captured_res.status_code,
+                    "redacted_url": captured_res.redacted_url,
+                    "method": captured_res.method,
+                    "content_type": captured_res.content_type,
+                    "body_kind": captured_res.body_kind,
+                    "json_body": captured_res.json_body,
+                    "text_body": captured_res.text_body,
+                    "latency_ms": captured_res.latency_ms,
+                    "attempts": captured_res.attempts,
+                })
+            status_text = f" with HTTP status {captured_res.status_code}" if captured_res and captured_res.status_code else ""
             raise UpstreamApiError(
-                "The API request executed but did not produce sufficient verification evidence.",
-                details={
-                    "action_id": outcome.action.action_id,
-                    "action_state": outcome.action.state.value,
-                    "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
-                },
+                f"The API request executed{status_text} but did not produce sufficient verification evidence.",
+                details=details,
             )
         return captured.get("result") or ApiExecutionResult.model_validate(outcome.result)
 
@@ -535,7 +582,16 @@ class ApiExecutor:
             try:
                 response = self._send_with_redirects(request, cancellation=cancellation)
             except (socket.timeout, TimeoutError) as exc:
-                last_error = ApiTimeoutError("The upstream API request timed out.")
+                last_error = ApiTimeoutError(
+                    "The upstream API request timed out.",
+                    details={
+                        "reason": "timeout",
+                        "exception_class": type(exc).__name__,
+                        "error": str(exc),
+                        "attempt": attempt,
+                        "executed": False,
+                    },
+                )
             except ApiCancelledError:
                 raise
             except (BlockedHostError, SsrfPolicyViolationError, ResponseTooLargeError):
@@ -543,7 +599,13 @@ class ApiExecutor:
             except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
                 last_error = UpstreamApiError(
                     "The upstream API request failed before a response was received.",
-                    details={"reason": type(exc).__name__},
+                    details={
+                        "reason": type(exc).__name__,
+                        "exception_class": type(exc).__name__,
+                        "error": str(exc),
+                        "attempt": attempt,
+                        "executed": False,
+                    },
                 )
             else:
                 status = response.status

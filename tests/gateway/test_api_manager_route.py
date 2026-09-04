@@ -1899,3 +1899,566 @@ def test_api_workflow_durable_task_projection_persists_events_and_evidence(
     assert evidence["execution_evidence"]["status_code"] == 200
     assert len(evidence["actual_tool_events"]) == 1
     assert evidence["actual_tool_events"][0]["tool_name"] == "api_request_execute"
+
+
+def test_api_workflow_surfaces_specific_blocker_error_codes() -> None:
+    for code in ("validation_failure", "ambiguous_operation", "missing_credential", "blocked_host"):
+        response = SimpleNamespace(
+            answer="Blocked by specific error.",
+            sources=[],
+            warnings=[],
+            trace=[
+                {
+                    "tool_name": "api_workflow_decide",
+                    "status": "ok",
+                    "output_preview": json.dumps(
+                        {
+                            "ok": True,
+                            "result": {
+                                "task_intent": "call api",
+                                "required_outcomes": ["api_execution_verified", "user_goal_verified"],
+                                "safe_to_continue": True,
+                            },
+                        }
+                    ),
+                },
+                {
+                    "tool_name": "api_request_preview",
+                    "status": "error",
+                    "output_preview": json.dumps(
+                        {
+                            "ok": False,
+                            "error_code": code,
+                            "message": f"Operation failed due to {code}",
+                        }
+                    ),
+                },
+            ],
+        )
+        completion = _api_workflow_completion_from_trace(response)
+        assert completion["valid"] is False
+        assert completion["error_code"] == code
+        assert f"API workflow blocked ({code})" in completion["message"]
+
+
+def test_api_route_sefaria_post_preview_awaits_approval(tmp_path: Path) -> None:
+    class SefariaAskAgent:
+        def run(self, *, system_prompt: str, **kwargs):
+            return SimpleNamespace(
+                answer="The annotation has been previewed and is awaiting local approval before execution.",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "api_workflow_decide",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "task_intent": "create annotation on Sefaria text",
+                                    "required_outcomes": [
+                                        "api_target_resolved",
+                                        "operation_resolved",
+                                        "api_execution_verified",
+                                        "user_goal_verified",
+                                    ],
+                                    "reason": "Mutation requires execution evidence and goal verification.",
+                                    "safe_to_continue": True,
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_operations_search",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": [
+                                    {
+                                        "operation_id": "create_annotation",
+                                        "method": "POST",
+                                        "risk_level": "unknown_high_risk",
+                                    }
+                                ],
+                            }
+                        ),
+                    },
+                    {
+                        "tool_name": "api_request_preview",
+                        "status": "ok",
+                        "output_preview": json.dumps(
+                            {
+                                "ok": True,
+                                "result": {
+                                    "risk_level": "unknown_high_risk",
+                                    "permission_required": True,
+                                    "permission_scope": "api.request.execute",
+                                    "permission_request_id": "req_sefaria_approval_001",
+                                    "approval_required": True,
+                                },
+                            }
+                        ),
+                    },
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = None
+    gateway._lane_coordinator = None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+
+    result = gateway._execute_api_route(
+        decision=EntryRoutingDecision(
+            route="api",
+            confidence=0.99,
+            reason="Annotate Sefaria text.",
+            required_sources=("api",),
+        ),
+        context=EntryRouteContext(
+            session_id="session-sefaria",
+            conversation_id="session-sefaria",
+            turn_id="turn-sefaria",
+        ),
+        text="Create an annotation on Sefaria Genesis 1:1.",
+        ask_service=SimpleNamespace(ask_agent=SefariaAskAgent()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-api-awaiting-approval"
+    assert result.error is None
+    assert len(result.payload.get("permission_requests", [])) == 1
+    req = result.payload["permission_requests"][0]
+    assert req["permission_request_id"] == "req_sefaria_approval_001"
+    assert req["permission_scope"] == "api.request.execute"
+
+
+def _setup_test_approval_environment(tmp_path: Path, monkeypatch: Any | None = None):
+    import os
+    if monkeypatch is not None:
+        monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    else:
+        os.environ["MANA_HOME"] = str(tmp_path / "home")
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+    from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneId, LaneTaskState
+    from mana_agent.gateway.lane_coordinator import LaneCoordinator
+    from mana_agent.api_manager.runtime_tools import api_manager_service
+    from mana_agent.api_manager.models import HttpMethod, OperationRiskLevel
+    from mana_agent.api_manager.request_builder import BuiltApiRequest, RequestPreview
+
+    events: list[tuple[str, str, dict]] = []
+
+    def sink(event_type: str, title: str = "", **kwargs: Any) -> None:
+        events.append((event_type, title, kwargs))
+
+    class ContinuationAskAgent:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, *, question: str, system_prompt: str, **kwargs):
+            self.calls.append({"question": question, "kwargs": kwargs})
+            return SimpleNamespace(
+                answer="خلاصه فارسی: متن با موفقیت دریافت شد.",
+                sources=[],
+                warnings=[],
+                trace=[],
+            )
+
+    ask_agent = ContinuationAskAgent()
+    coordinator = LaneCoordinator(tmp_path)
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = sink
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    gateway._stack = SimpleNamespace(ask_service=SimpleNamespace(ask_agent=ask_agent))
+    gateway._sessions = {}
+    gateway._lane_coordinator = coordinator
+    gateway._synchronize_lane_usage = lambda task_id: {}
+
+    reservation = coordinator.reserve(
+        normalized_intent="Sefaria API request",
+        lane_id=LaneId.OPERATIONS,
+        session_id="conv_sefaria_session",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=100,
+        requested_output_tokens=200,
+    )
+    lane_task_id = reservation.execution.task_id
+    coordinator.transition(
+        lane_task_id,
+        LaneTaskState.RUNNING,
+        reason="API request running",
+    )
+    coordinator.transition(
+        lane_task_id,
+        LaneTaskState.WAITING,
+        reason="API request waiting for trusted local approval",
+    )
+
+    service = api_manager_service(tmp_path)
+    req = BuiltApiRequest(
+        integration_id="api_sefaria_integration",
+        operation_id="post_sefaria_annotation",
+        method="POST",
+        url="https://www.sefaria.org/api/v3/texts/Genesis.1.1",
+        timeout_seconds=30.0,
+        risk_level=OperationRiskLevel.UPDATE,
+        session_id="conv_sefaria_session",
+        routing_task_intent="ایجاد حاشیه‌نویسی در متن سفاریا",
+    )
+    prev = RequestPreview(
+        integration_id="api_sefaria_integration",
+        integration_name="Sefaria",
+        operation_id="post_sefaria_annotation",
+        operation_name="Post Annotation",
+        method="POST",
+        redacted_url="https://www.sefaria.org/api/v3/texts/Genesis.1.1",
+        redacted_headers={},
+        query_parameters={},
+        body_summary={"text": "annotation body"},
+        expected_side_effects="Create annotation.",
+        risk_level=OperationRiskLevel.UPDATE,
+        approval_required=True,
+    )
+    details = service.approvals.prepare(
+        req,
+        prev,
+        session_id="conv_sefaria_session",
+        conversation_id="conv_sefaria_session",
+        turn_id="turn_sefaria_post",
+        task_intent="ایجاد حاشیه‌نویسی در متن سفاریا",
+        lane_task_id=lane_task_id,
+    )
+    approval_id = details["permission_request_id"]
+    return gateway, coordinator, lane_task_id, service, approval_id, ask_agent, events
+
+
+def test_api_workflow_post_approval_upstream_failure_finalizes_lane_and_emits_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneTaskState
+    from types import MethodType
+
+    gateway, coordinator, lane_task_id, service, approval_id, ask_agent, events = (
+        _setup_test_approval_environment(tmp_path, monkeypatch)
+    )
+
+    def mock_execute_fail(self, request, preview, **kwargs):
+        return SimpleNamespace(
+            executed=True,
+            upstream_ok=False,
+            status_code=400,
+            json_body={"error": "Field 'user_id' is required"},
+            text_body="Bad Request",
+            model_dump=lambda mode="json": {
+                "executed": True,
+                "upstream_ok": False,
+                "status_code": 400,
+                "json_body": {"error": "Field 'user_id' is required"},
+                "text_body": "Bad Request",
+            },
+        )
+
+    service._execute_prepared_request = MethodType(mock_execute_fail, service)
+
+    result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+
+    assert result["status"] == "failed"
+    assert result["upstream_ok"] is False
+    assert result["executed"] is True
+    assert "400" in result["answer"]
+    assert "Field 'user_id' is required" in result["answer"]
+    assert len(ask_agent.calls) == 0
+
+    assert coordinator.inspect_task(lane_task_id).state == LaneTaskState.FAILED
+    active = [t for t in coordinator.executions if t.state in ACTIVE_LANE_STATES]
+    assert len(active) == 0
+
+    event_types = [e[0] for e in events]
+    assert "api.call.failed" in event_types
+    assert "turn.finished" in event_types
+
+    duplicate_result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+    assert duplicate_result["status"] == "failed"
+    assert len(ask_agent.calls) == 0
+
+
+def test_api_workflow_post_approval_transport_exception_finalizes_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneTaskState
+    from types import MethodType
+
+    gateway, coordinator, lane_task_id, service, approval_id, ask_agent, events = (
+        _setup_test_approval_environment(tmp_path, monkeypatch)
+    )
+
+    def mock_execute_exc(self, request, preview, **kwargs):
+        raise ConnectionError("DNS resolution failed for api.sefaria.org")
+
+    service._execute_prepared_request = MethodType(mock_execute_exc, service)
+
+    result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+
+    assert result["status"] == "failed"
+    assert result["executed"] is False
+    assert result["upstream_ok"] is False
+    assert "DNS resolution failed" in result["message"]
+    assert len(ask_agent.calls) == 0
+
+    assert coordinator.inspect_task(lane_task_id).state == LaneTaskState.FAILED
+    active = [t for t in coordinator.executions if t.state in ACTIVE_LANE_STATES]
+    assert len(active) == 0
+
+    event_types = [e[0] for e in events]
+    assert "api.call.failed" in event_types
+    assert "turn.finished" in event_types
+
+    duplicate_result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+    assert duplicate_result["status"] == "failed"
+
+
+def test_api_workflow_post_approval_denial_cancels_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneTaskState
+
+    gateway, coordinator, lane_task_id, service, approval_id, ask_agent, events = (
+        _setup_test_approval_environment(tmp_path, monkeypatch)
+    )
+
+    result = gateway.deny_api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+
+    assert result["status"] == "denied"
+    assert len(ask_agent.calls) == 0
+
+    assert coordinator.inspect_task(lane_task_id).state == LaneTaskState.CANCELLED
+    active = [t for t in coordinator.executions if t.state in ACTIVE_LANE_STATES]
+    assert len(active) == 0
+
+    event_types = [e[0] for e in events]
+    assert "api.approval_decided" in event_types
+    assert "turn.finished" in event_types
+
+    duplicate = gateway.deny_api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+    assert duplicate["status"] == "denied"
+
+
+def test_api_workflow_post_approval_continuation_failure_finalizes_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneTaskState
+    from types import MethodType
+
+    gateway, coordinator, lane_task_id, service, approval_id, ask_agent, events = (
+        _setup_test_approval_environment(tmp_path, monkeypatch)
+    )
+
+    def mock_execute_ok(self, request, preview, **kwargs):
+        return SimpleNamespace(
+            executed=True,
+            upstream_ok=True,
+            status_code=200,
+            json_body={"ok": True},
+            text_body='{"ok": true}',
+            model_dump=lambda mode="json": {
+                "executed": True,
+                "upstream_ok": True,
+                "status_code": 200,
+                "json_body": {"ok": True},
+            },
+        )
+
+    service._execute_prepared_request = MethodType(mock_execute_ok, service)
+
+    def failing_run(*args, **kwargs):
+        raise RuntimeError("Continuation LLM timeout")
+
+    ask_agent.run = failing_run
+
+    result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"] == "continuation_model_failed"
+    assert "Continuation LLM timeout" in result["message"]
+
+    assert coordinator.inspect_task(lane_task_id).state == LaneTaskState.FAILED
+    active = [t for t in coordinator.executions if t.state in ACTIVE_LANE_STATES]
+    assert len(active) == 0
+
+
+def test_api_workflow_post_approval_reconciles_waiting_parent_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+    from mana_agent.gateway.lanes import ACTIVE_LANE_STATES, LaneId, LaneTaskState
+    from mana_agent.api_manager.runtime_tools import api_manager_service
+    from mana_agent.api_manager.models import HttpMethod, OperationRiskLevel
+    from mana_agent.api_manager.request_builder import BuiltApiRequest, RequestPreview
+    from mana_agent.gateway.lane_coordinator import LaneCoordinator
+    from types import MethodType
+
+    coordinator = LaneCoordinator(tmp_path)
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway._event_sink = lambda *a, **kw: None
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    gateway._stack = SimpleNamespace(ask_service=SimpleNamespace(ask_agent=None))
+    gateway._sessions = {}
+    gateway._lane_coordinator = coordinator
+    gateway._synchronize_lane_usage = lambda task_id: {}
+
+    parent_reservation = coordinator.reserve(
+        normalized_intent="Parent workflow intent",
+        lane_id=LaneId.RESEARCH,
+        session_id="conv_sefaria_session",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        requested_input_tokens=100,
+        requested_output_tokens=200,
+    )
+    parent_task_id = parent_reservation.execution.task_id
+    coordinator.transition(
+        parent_task_id,
+        LaneTaskState.RUNNING,
+        reason="Parent running",
+    )
+    coordinator.transition(
+        parent_task_id,
+        LaneTaskState.WAITING,
+        reason="Parent waiting on child approval",
+    )
+
+    child_reservation = coordinator.reserve(
+        normalized_intent="Child API mutation",
+        lane_id=LaneId.OPERATIONS,
+        session_id="conv_sefaria_session",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+        parent_task_id=parent_task_id,
+        requested_input_tokens=100,
+        requested_output_tokens=200,
+    )
+    child_task_id = child_reservation.execution.task_id
+    coordinator.transition(
+        child_task_id,
+        LaneTaskState.RUNNING,
+        reason="Child running",
+    )
+    coordinator.transition(
+        child_task_id,
+        LaneTaskState.WAITING,
+        reason="Child waiting on user approval",
+    )
+
+    service = api_manager_service(tmp_path)
+    req = BuiltApiRequest(
+        integration_id="api_sefaria_integration",
+        operation_id="post_annotation",
+        method="POST",
+        url="https://www.sefaria.org/api/v3/texts/Genesis.1.1",
+        timeout_seconds=30.0,
+        risk_level=OperationRiskLevel.UPDATE,
+        session_id="conv_sefaria_session",
+        routing_task_intent="Child mutation",
+    )
+    prev = RequestPreview(
+        integration_id="api_sefaria_integration",
+        integration_name="Sefaria",
+        operation_id="post_annotation",
+        operation_name="Post Annotation",
+        method="POST",
+        redacted_url="https://www.sefaria.org/api/v3/texts/Genesis.1.1",
+        redacted_headers={},
+        query_parameters={},
+        body_summary={},
+        expected_side_effects="Create annotation.",
+        risk_level=OperationRiskLevel.UPDATE,
+        approval_required=True,
+    )
+    details = service.approvals.prepare(
+        req,
+        prev,
+        session_id="conv_sefaria_session",
+        conversation_id="conv_sefaria_session",
+        turn_id="turn_child_post",
+        task_intent="Child mutation",
+        lane_task_id=child_task_id,
+    )
+    approval_id = details["permission_request_id"]
+
+    def mock_execute_fail(self, request, preview, **kwargs):
+        return SimpleNamespace(
+            executed=True,
+            upstream_ok=False,
+            status_code=400,
+            json_body={"error": "Validation error"},
+            text_body="Bad Request",
+            model_dump=lambda mode="json": {
+                "executed": True,
+                "upstream_ok": False,
+                "status_code": 400,
+                "json_body": {"error": "Validation error"},
+            },
+        )
+
+    service._execute_prepared_request = MethodType(mock_execute_fail, service)
+
+    result = gateway.api_approval_command(
+        approval_id,
+        session_id="conv_sefaria_session",
+        client_type="dashboard",
+    )
+
+    assert result["status"] == "failed"
+    assert coordinator.inspect_task(child_task_id).state == LaneTaskState.FAILED
+    assert coordinator.inspect_task(parent_task_id).state == LaneTaskState.FAILED
+    active = [t for t in coordinator.executions if t.state in ACTIVE_LANE_STATES]
+    assert len(active) == 0
+

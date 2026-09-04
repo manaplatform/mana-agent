@@ -5,6 +5,9 @@ from __future__ import annotations
 import getpass
 import hashlib
 import re
+import socket
+import ssl
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -713,6 +716,22 @@ class ApiManagerService:
         parsed = urlsplit(url)
         return f"{parsed.hostname or ''}{parsed.path}"
 
+    @staticmethod
+    def _provenance_from_pending(pending: Any, *, session_id: str) -> dict[str, Any]:
+        if not pending:
+            return {"session_id": session_id}
+        return {
+            "permission_request_id": getattr(pending, "permission_request_id", "") or "",
+            "session_id": getattr(pending, "session_id", session_id) or session_id,
+            "conversation_id": getattr(pending, "conversation_id", "") or "",
+            "turn_id": getattr(pending, "turn_id", "") or "",
+            "execution_id": getattr(pending, "execution_id", "") or "",
+            "lane_task_id": getattr(pending, "lane_task_id", "") or "",
+            "checkpoint_id": getattr(pending, "checkpoint_id", "") or "",
+            "source_decision_id": getattr(pending, "source_decision_id", "") or "",
+            "task_intent": getattr(pending, "task_intent", "") or "",
+        }
+
     def decide_approval(
         self,
         request_id: str,
@@ -729,18 +748,31 @@ class ApiManagerService:
         calls are idempotent and reuse the stored execution receipt.
         """
         if not approve:
+            pending = self.approvals.get_pending(request_id)
+            if pending and pending.state == "denied" and pending.continuation_outcome is not None:
+                return pending.continuation_outcome
             self.approvals.deny(
                 request_id,
                 session_id=session_id,
                 client_type=client_type,
             )
-            return {
+            pending = self.approvals.get_pending(request_id)
+            provenance = self._provenance_from_pending(pending, session_id=session_id)
+            outcome = {
                 "approved": False,
                 "executed": False,
                 "upstream_ok": False,
                 "status": "denied",
+                "approval_request_id": request_id,
                 "result": {},
+                "provenance": provenance,
             }
+            return outcome
+
+        pending = self.approvals.get_pending(request_id)
+        if pending and pending.state in {"completed", "failed", "denied"}:
+            if pending.continuation_outcome is not None:
+                return pending.continuation_outcome
 
         request, preview = self.approvals.approve(
             request_id,
@@ -749,58 +781,141 @@ class ApiManagerService:
         )
 
         pending = self.approvals.get_pending(request_id)
+        provenance = self._provenance_from_pending(pending, session_id=session_id)
+
+        if pending and pending.state in {"completed", "failed", "denied"} and pending.continuation_outcome is not None:
+            return pending.continuation_outcome
+
         if pending and pending.executed and pending.execution_result is not None:
             result = pending.execution_result
             receipt_id = pending.receipt_id
-        else:
-            result = self._execute_prepared_request(
-                request,
-                preview,
-                approval_reference=request_id,
-                task_intent=request.routing_task_intent,
+            payload = (
+                result.model_dump(mode="json")
+                if hasattr(result, "model_dump")
+                else dict(result)
+                if isinstance(result, dict)
+                else {}
             )
-            receipt_id = self.approvals.record_execution(request_id, result)
+            upstream_ok = (
+                getattr(result, "upstream_ok", False)
+                if not isinstance(result, dict)
+                else bool(result.get("upstream_ok", False))
+            )
+            executed = (
+                getattr(result, "executed", False)
+                if not isinstance(result, dict)
+                else bool(result.get("executed", False))
+            )
+            status_code = (
+                getattr(result, "status_code", 0)
+                if not isinstance(result, dict)
+                else int(result.get("status_code", 0) or 0)
+            )
+        else:
+            try:
+                result = self._execute_prepared_request(
+                    request,
+                    preview,
+                    approval_reference=request_id,
+                    task_intent=request.routing_task_intent,
+                )
+                receipt_id = self.approvals.record_execution(request_id, result)
+                payload = (
+                    result.model_dump(mode="json")
+                    if hasattr(result, "model_dump")
+                    else dict(result)
+                    if isinstance(result, dict)
+                    else {}
+                )
+                upstream_ok = (
+                    getattr(result, "upstream_ok", False)
+                    if not isinstance(result, dict)
+                    else bool(result.get("upstream_ok", False))
+                )
+                executed = (
+                    getattr(result, "executed", False)
+                    if not isinstance(result, dict)
+                    else bool(result.get("executed", False))
+                )
+                status_code = (
+                    getattr(result, "status_code", 0)
+                    if not isinstance(result, dict)
+                    else int(result.get("status_code", 0) or 0)
+                )
+            except Exception as exc:
+                exc_details = getattr(exc, "details", {}) if isinstance(getattr(exc, "details", None), dict) else {}
+                executed = bool(exc_details.get("executed", False))
+                status_code = int(exc_details.get("status_code", 0) or 0)
+                err_code = str(getattr(exc, "code", "") or "").strip()
+                if not err_code:
+                    if isinstance(exc, (socket.timeout, TimeoutError)):
+                        err_code = "timeout"
+                    elif isinstance(exc, (ssl.SSLError, ssl.CertificateError)):
+                        err_code = "tls_error"
+                    elif isinstance(exc, socket.gaierror):
+                        err_code = "dns_resolution_error"
+                    elif isinstance(exc, (ConnectionError, OSError)):
+                        err_code = "connection_error"
+                    elif isinstance(exc, PermissionError):
+                        err_code = "permission_denied"
+                    else:
+                        err_code = "execution_error"
 
-        payload = (
-            result.model_dump(mode="json")
-            if hasattr(result, "model_dump")
-            else dict(result)
-            if isinstance(result, dict)
-            else {}
-        )
-        upstream_ok = (
-            getattr(result, "upstream_ok", False)
-            if not isinstance(result, dict)
-            else bool(result.get("upstream_ok", False))
-        )
-        executed = (
-            getattr(result, "executed", False)
-            if not isinstance(result, dict)
-            else bool(result.get("executed", False))
-        )
-        if pending and pending.executed:
-            executed = True
-            if pending.state in {"executed_resume_pending", "resumed", "completed"}:
-                upstream_ok = True
-        status_code = (
-            getattr(result, "status_code", 0)
-            if not isinstance(result, dict)
-            else int(result.get("status_code", 0) or 0)
-        )
+                failure_details = {
+                    "executed": executed,
+                    "upstream_ok": False,
+                    "status_code": status_code,
+                    "error_code": err_code,
+                    "exception_class": type(exc).__name__,
+                    "error_message": str(exc),
+                    "redacted_endpoint": self._redacted_host_path(request.url),
+                    "integration_id": request.integration_id,
+                    "operation_id": request.operation_id,
+                    "method": request.method,
+                }
+                for k in ("json_body", "text_body", "content_type", "body_kind", "latency_ms", "attempts", "attempt"):
+                    if exc_details.get(k) not in (None, ""):
+                        failure_details[k] = exc_details[k]
 
-        provenance = {
-            "permission_request_id": request_id,
-            "session_id": getattr(pending, "session_id", session_id) if pending else session_id,
-            "conversation_id": getattr(pending, "conversation_id", "") if pending else "",
-            "turn_id": getattr(pending, "turn_id", "") if pending else "",
-            "execution_id": getattr(pending, "execution_id", "") if pending else "",
-            "lane_task_id": getattr(pending, "lane_task_id", "") if pending else "",
-            "checkpoint_id": getattr(pending, "checkpoint_id", "") if pending else "",
-            "task_intent": getattr(pending, "task_intent", "") if pending else "",
-        } if pending else {}
+                receipt_id = (
+                    pending.receipt_id
+                    if pending and pending.receipt_id
+                    else f"rcpt_{uuid.uuid4().hex}"
+                )
+                status_suffix = f" with HTTP status {status_code}" if status_code else ""
+                outcome = {
+                    "approved": True,
+                    "executed": executed,
+                    "upstream_ok": False,
+                    "status": "failed",
+                    "receipt_id": receipt_id,
+                    "result_receipt_id": receipt_id,
+                    "error_code": err_code,
+                    "exception_class": type(exc).__name__,
+                    "message": f"The approved API request failed ({err_code}){status_suffix}: {exc}",
+                    "error_details": failure_details,
+                    "result": {
+                        "executed": executed,
+                        "upstream_ok": False,
+                        "status_code": status_code,
+                        "error_code": err_code,
+                        "error": str(exc),
+                        **exc_details,
+                    },
+                    "provenance": provenance,
+                }
+                self.approvals.record_failed(
+                    request_id,
+                    error=exc,
+                    failure_details=failure_details,
+                    executed=executed,
+                    receipt_id=receipt_id,
+                )
+                return outcome
 
         if not upstream_ok:
-            return {
+            failure_details = self._execution_failure_details(result)
+            outcome = {
                 "approved": True,
                 "executed": bool(executed),
                 "upstream_ok": False,
@@ -809,12 +924,19 @@ class ApiManagerService:
                 "result_receipt_id": receipt_id,
                 "error_code": "upstream_api_error",
                 "message": f"The upstream API returned HTTP {status_code}.",
-                "error_details": self._execution_failure_details(result),
+                "error_details": failure_details,
                 "result": payload,
                 "provenance": provenance,
             }
+            self.approvals.record_failed(
+                request_id,
+                failure_details=failure_details,
+                executed=bool(executed),
+                receipt_id=receipt_id,
+            )
+            return outcome
 
-        return {
+        outcome = {
             "approved": True,
             "executed": bool(executed),
             "upstream_ok": True,
@@ -824,6 +946,7 @@ class ApiManagerService:
             "result": payload,
             "provenance": provenance,
         }
+        return outcome
 
     def _validate_route(
         self,

@@ -101,6 +101,10 @@ class WorkspaceRepository:
         self.workspace_id = str(workspace_id)
         self.db = db or get_workspace_db(self.workspace_id, db_path=db_path)
 
+    def close(self) -> None:
+        if self.db is not None:
+            self.db.close()
+
     # -------------------------------------------------------------------------
     # TaskBoard / Tasks
     # -------------------------------------------------------------------------

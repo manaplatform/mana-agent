@@ -32,7 +32,8 @@ def temp_workspace(tmp_path: Path):
     db_path = tmp_path / "state.db"
     db = WorkspaceDatabase("test-workspace", db_path=db_path)
     repo = WorkspaceRepository("test-workspace", db=db)
-    return db, repo, tmp_path
+    yield db, repo, tmp_path
+    db.close()
 
 
 def test_workspace_database_initialization(temp_workspace):

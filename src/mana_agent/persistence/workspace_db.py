@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import weakref
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -430,7 +431,7 @@ SCHEMA_V1_STATEMENTS = [
 
 
 class WorkspaceDatabase:
-    """Thread-safe SQLite database manager for workspace runtime state."""
+    """Thread-safe SQLite database manager for workspace runtime state with connection caching."""
 
     def __init__(self, workspace_id: str, db_path: Path | str | None = None) -> None:
         self.workspace_id = str(workspace_id)
@@ -441,6 +442,10 @@ class WorkspaceDatabase:
         else:
             self.db_path = Path(db_path).resolve()
 
+        self._local = threading.local()
+        self._all_connections: list[sqlite3.Connection] = []
+        self._conn_lock = threading.Lock()
+        self._closed = False
         self._init_db()
 
     def _create_connection(self) -> sqlite3.Connection:
@@ -460,28 +465,82 @@ class WorkspaceDatabase:
             conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
 
+    def _get_connection(self) -> sqlite3.Connection:
+        if self._closed:
+            raise RuntimeError(f"WorkspaceDatabase for {self.workspace_id} is closed")
+        conn = getattr(self._local, "connection", None)
+        if conn is not None:
+            try:
+                conn.total_changes
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                conn = None
+        if conn is None:
+            conn = self._create_connection()
+            self._local.connection = conn
+            self._local.tx_depth = 0
+            with self._conn_lock:
+                self._all_connections.append(conn)
+        return conn
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = self._create_connection()
+        conn = self._get_connection()
         try:
             yield conn
-        finally:
-            conn.close()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        conn = self._create_connection()
-        conn.execute("BEGIN IMMEDIATE;")
+        conn = self._get_connection()
+        depth = getattr(self._local, "tx_depth", 0)
+        self._local.tx_depth = depth + 1
+        if depth == 0:
+            conn.execute("BEGIN IMMEDIATE;")
         try:
             yield conn
-            conn.commit()
+            if depth == 0:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            if depth == 0:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             raise
         finally:
-            conn.close()
+            self._local.tx_depth = max(0, getattr(self._local, "tx_depth", 1) - 1)
+
+    def close(self) -> None:
+        self._closed = True
+        with self._conn_lock:
+            for conn in self._all_connections:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._all_connections.clear()
+            if hasattr(self, "_local"):
+                self._local.connection = None
+                self._local.tx_depth = 0
+        with _DATABASES_LOCK:
+            for key, db in list(_DATABASES.items()):
+                if db is self:
+                    _DATABASES.pop(key, None)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _init_db(self) -> None:
+        with _DATABASES_LOCK:
+            _ALL_DATABASES.add(self)
         if str(self.db_path) != ":memory:":
             with self.connect() as conn:
                 conn.execute("PRAGMA journal_mode = WAL;")
@@ -500,13 +559,26 @@ class WorkspaceDatabase:
 
 _DATABASES: dict[str, WorkspaceDatabase] = {}
 _DATABASES_LOCK = threading.RLock()
+_ALL_DATABASES: weakref.WeakSet[WorkspaceDatabase] = weakref.WeakSet()
+
+
+def close_all_workspace_dbs() -> None:
+    """Close all open connections across all WorkspaceDatabase instances."""
+    with _DATABASES_LOCK:
+        instances = list(_ALL_DATABASES) + list(_DATABASES.values())
+        _DATABASES.clear()
+        for db in instances:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def get_workspace_db(workspace_id: str, db_path: Path | str | None = None) -> WorkspaceDatabase:
     key = f"{workspace_id}:{db_path}"
     with _DATABASES_LOCK:
         db = _DATABASES.get(key)
-        if db is None:
+        if db is None or db._closed:
             db = WorkspaceDatabase(workspace_id, db_path=db_path)
             _DATABASES[key] = db
         return db
