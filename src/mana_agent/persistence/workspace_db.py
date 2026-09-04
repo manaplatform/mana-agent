@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import weakref
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -526,6 +527,10 @@ class WorkspaceDatabase:
             if hasattr(self, "_local"):
                 self._local.connection = None
                 self._local.tx_depth = 0
+        with _DATABASES_LOCK:
+            for key, db in list(_DATABASES.items()):
+                if db is self:
+                    _DATABASES.pop(key, None)
 
     def __del__(self) -> None:
         try:
@@ -534,6 +539,8 @@ class WorkspaceDatabase:
             pass
 
     def _init_db(self) -> None:
+        with _DATABASES_LOCK:
+            _ALL_DATABASES.add(self)
         if str(self.db_path) != ":memory:":
             with self.connect() as conn:
                 conn.execute("PRAGMA journal_mode = WAL;")
@@ -552,6 +559,19 @@ class WorkspaceDatabase:
 
 _DATABASES: dict[str, WorkspaceDatabase] = {}
 _DATABASES_LOCK = threading.RLock()
+_ALL_DATABASES: weakref.WeakSet[WorkspaceDatabase] = weakref.WeakSet()
+
+
+def close_all_workspace_dbs() -> None:
+    """Close all open connections across all WorkspaceDatabase instances."""
+    with _DATABASES_LOCK:
+        instances = list(_ALL_DATABASES) + list(_DATABASES.values())
+        _DATABASES.clear()
+        for db in instances:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def get_workspace_db(workspace_id: str, db_path: Path | str | None = None) -> WorkspaceDatabase:

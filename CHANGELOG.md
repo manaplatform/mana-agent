@@ -4,10 +4,11 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-04
 
-- Fixed `test_large_workspace_performance` Windows CI timeout / performance degradation:
+- Fixed `test_large_workspace_performance` and Windows CI session teardown file locking:
   - Added thread-local SQLite connection caching and re-entrancy depth tracking to `WorkspaceDatabase` (`src/mana_agent/persistence/workspace_db.py`), eliminating repetitive `sqlite3.connect()`, PRAGMA re-execution, and the automatic WAL-to-DB sync/checkpoint triggered on connection closure in WAL mode.
   - Reduced per-task write latency by over 10x (down to < 0.1ms per task), accelerating 500-task workspace operations from ~80s to < 1s on virtualized Windows CI disks.
-  - Added explicit connection pool cleanup (`close()`) and safe teardown across persistence test fixtures (`perf_workspace`, `temp_workspace`, `migration_setup`), avoiding Windows file locking (`[WinError 32]`) on temporary directories.
+  - Added explicit connection pool cleanup (`close()`, `close_all_workspace_dbs()`) and tracked active database instances in `_ALL_DATABASES`.
+  - Added automatic per-test and session-finish database cleanup (`_cleanup_workspace_dbs_per_test`, `pytest_sessionfinish`) and retry backoff in `_remove_test_home` (`tests/conftest.py`), eliminating `PermissionError: [WinError 32]` on `state.db` during Windows CI test session cleanup.
   - User verification required: `pytest tests/persistence/ -v`.
 
 - Fixed post-approval API failure lifecycle across API Manager, Chat Gateway, and TUI:
