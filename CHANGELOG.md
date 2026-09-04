@@ -2,6 +2,26 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-04
+
+- Fixed `test_large_workspace_performance` Windows CI timeout / performance degradation:
+  - Added thread-local SQLite connection caching and re-entrancy depth tracking to `WorkspaceDatabase` (`src/mana_agent/persistence/workspace_db.py`), eliminating repetitive `sqlite3.connect()`, PRAGMA re-execution, and the automatic WAL-to-DB sync/checkpoint triggered on connection closure in WAL mode.
+  - Reduced per-task write latency by over 10x (down to < 0.1ms per task), accelerating 500-task workspace operations from ~80s to < 1s on virtualized Windows CI disks.
+  - Added explicit connection pool cleanup (`close()`) and safe teardown across persistence test fixtures (`perf_workspace`, `temp_workspace`, `migration_setup`), avoiding Windows file locking (`[WinError 32]`) on temporary directories.
+  - User verification required: `pytest tests/persistence/ -v`.
+
+- Fixed post-approval API failure lifecycle across API Manager, Chat Gateway, and TUI:
+  - Implemented one authoritative post-approval finalizer `_finalize_api_approval_outcome` in `AgentChatGateway` (`src/mana_agent/gateway/chat_gateway.py`) governing all terminal states: approval denied (`cancelled`), approved execution succeeded (`completed`), approved upstream/HTTP failed (`failed`), transport/timeout/DNS/TLS exceptions (`failed`), policy/validation errors before network execution (`failed`), and continuation-model failure after HTTP success (`failed`).
+  - Ensured failed executions never route through `_resume_api_continuation()`, preventing illegal `api_execution_verified` status on upstream HTTP failures.
+  - Wrapped request execution in `ApiManagerService.decide_approval` (`src/mana_agent/api_manager/service.py`) in explicit exception handling calling `record_failed()`, preventing pending approvals from getting trapped in `approved_execution_pending`.
+  - Enriched `UpstreamApiError` and `ApiTimeoutError` in `ApiExecutor` (`src/mana_agent/api_manager/executor.py`) to capture structured response evidence (`status_code`, `redacted_url`, `json_body`, `text_body`, `method`, `latency_ms`, `attempts`), preserving upstream error diagnostics for the Sefaria POST failure scenario.
+  - Guaranteed lane coordinator finalization (`LaneTaskState.FAILED` or `LaneTaskState.CANCELLED`), stopping supervisor heartbeats and eliminating endless heartbeat loops on failed or denied approvals.
+  - Reconciled waiting parent tasks and taskboard records when child API mutation tasks finish in failed or cancelled states.
+  - Ensured idempotency on duplicate approve or deny commands across the approval broker and chat gateway.
+  - Updated `ManaChatApp` in `src/mana_agent/tui/app.py` to handle `failed` and `approved_not_executed` states with error notifications and terminal assistant failure messages.
+  - Added regression test suites in `tests/gateway/test_api_manager_route.py` and `tests/test_tui_auto_chat_tool_events.py`.
+  - User verification required: `pytest tests/gateway/test_api_manager_route.py tests/test_api_manager.py tests/test_tui_auto_chat_tool_events.py tests/test_api_conversations.py -q`.
+
 ## 2026-09-03
 
 - Fixed premature `api_workflow_incomplete` failure in Mana-Agent API execution:

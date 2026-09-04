@@ -2397,69 +2397,35 @@ class AgentChatGateway:
         from mana_agent.api_manager.events import api_event_scope
         from mana_agent.api_manager.runtime_tools import api_manager_service
 
-        with api_event_scope(
-            session_id=session_id,
-            execution_id=approval_request_id,
-            root=self.root,
-        ):
-            result = api_manager_service(self.root).decide_approval(
-                approval_request_id,
-                session_id=session_id,
-                approve=True,
-                client_type=client_type,
-            )
+        service = api_manager_service(self.root)
+        pending = service.approvals.get_pending(approval_request_id)
+        if pending and pending.state in {"completed", "failed", "denied"}:
+            if getattr(pending, "continuation_outcome", None) is not None:
+                return pending.continuation_outcome
 
-        if not isinstance(result, dict):
-            return {
-                "status": "failed",
-                "approval_request_id": approval_request_id,
-                "result": result,
-                "message": (
-                    "API approval returned an invalid execution result. "
-                    "Completion was not recorded."
-                ),
-            }
-
-        approved = result.get("approved") is True
-        executed = result.get("executed") is True
-
-        raw_execution = result.get("result")
-        execution = (
-            dict(raw_execution)
-            if isinstance(raw_execution, dict)
-            else {}
-        )
-
-        upstream_ok = result.get("upstream_ok") is True or execution.get("upstream_ok") is True
-
-        raw_status_code = execution.get("status_code")
         try:
-            status_code = int(raw_status_code or 0)
-        except (TypeError, ValueError):
-            status_code = 0
-
-        # Approval must never be reported as successful completion without
-        # authoritative evidence that the request actually executed.
-        if not approved:
-            return {
+            with api_event_scope(
+                session_id=session_id,
+                execution_id=approval_request_id,
+                root=self.root,
+            ):
+                result = service.decide_approval(
+                    approval_request_id,
+                    session_id=session_id,
+                    approve=True,
+                    client_type=client_type,
+                )
+        except Exception as exc:
+            logger.warning("decide_approval threw unexpected exception: %s", exc, exc_info=True)
+            result = {
+                "approved": True,
+                "executed": False,
+                "upstream_ok": False,
                 "status": "failed",
-                "approval_request_id": approval_request_id,
-                "result": result,
-                "message": (
-                    "API approval was not granted. "
-                    "No successful external execution was recorded."
-                ),
-            }
-
-        if not executed:
-            return {
-                "status": "approved_not_executed",
-                "approval_request_id": approval_request_id,
-                "result": result,
-                "message": (
-                    "The API request was approved, but execution was not confirmed. "
-                    "Completion was not recorded."
-                ),
+                "error_code": "execution_error",
+                "exception_class": type(exc).__name__,
+                "message": f"API approval execution failed: {exc}",
+                "result": {"error": str(exc)},
             }
 
         if callable(self._event_sink):
@@ -2468,57 +2434,69 @@ class AgentChatGateway:
                 "API request approved",
                 conversation_id=session_id,
                 execution_id=approval_request_id,
-                status="success" if upstream_ok else "failed",
+                status="completed" if (isinstance(result, dict) and result.get("upstream_ok")) else "failed",
                 metadata={
                     "permission_request_id": approval_request_id,
                     "decision": "approve",
                     "api_approval": True,
                 },
             )
-            self._event_sink(
-                "api.call.started",
-                "API call started",
-                conversation_id=session_id,
-                execution_id=approval_request_id,
-            )
-            self._event_sink(
-                "api.call.completed" if upstream_ok else "api.call.failed",
-                "API call completed" if upstream_ok else "API call failed",
-                conversation_id=session_id,
-                execution_id=approval_request_id,
-                status_code=status_code,
-            )
 
-        # An executed HTTP request is not the same thing as a successful API
-        # operation. HTTP/upstream failure must remain a failed workflow result.
-        if not upstream_ok:
-            status_suffix = (
-                f" with HTTP status {status_code}"
-                if status_code
-                else ""
+        if not isinstance(result, dict):
+            return self._finalize_api_approval_outcome(
+                approval_request_id,
+                session_id=session_id,
+                decision_result={
+                    "status": "failed",
+                    "error_code": "invalid_execution_result",
+                    "message": "API approval returned an invalid execution result. Completion was not recorded.",
+                },
+                client_type=client_type,
+                status="failed",
+                error="invalid_execution_result",
+                message="API approval returned an invalid execution result. Completion was not recorded.",
             )
 
-            message = (
-                "The approved API request was executed"
-                f"{status_suffix}, but the upstream API did not report success. "
-                "The API workflow was not marked completed."
+        approved = result.get("approved") is True
+        executed = result.get("executed") is True
+        raw_execution = result.get("result")
+        execution = dict(raw_execution) if isinstance(raw_execution, dict) else {}
+        upstream_ok = result.get("upstream_ok") is True or execution.get("upstream_ok") is True
+
+        if not approved:
+            return self._finalize_api_approval_outcome(
+                approval_request_id,
+                session_id=session_id,
+                decision_result=result,
+                client_type=client_type,
+                status="failed",
+                message="API approval was not granted. No successful external execution was recorded.",
             )
 
-            details = self._api_approval_completion_message(
-                execution,
-                status_code,
+        if result.get("status") == "failed" or not upstream_ok:
+            return self._finalize_api_approval_outcome(
+                approval_request_id,
+                session_id=session_id,
+                decision_result=result,
+                client_type=client_type,
+                status="failed",
+                error=str(result.get("error_code") or "upstream_api_error"),
+                execution_evidence=execution,
+                message=str(result.get("message") or ""),
             )
 
-            if details:
-                message = f"{message}\n\n{details}"
-
-            return {
-                "status": "failed",
-                "approval_request_id": approval_request_id,
-                "result": result,
-                "execution_evidence": execution,
-                "message": message,
-            }
+        if not executed:
+            return self._finalize_api_approval_outcome(
+                approval_request_id,
+                session_id=session_id,
+                decision_result=result,
+                client_type=client_type,
+                status="approved_not_executed",
+                message=str(
+                    result.get("message")
+                    or "The API request was approved, but execution was not confirmed. Completion was not recorded."
+                ),
+            )
 
         return self._resume_api_continuation(
             approval_request_id,
@@ -2549,16 +2527,10 @@ class AgentChatGateway:
 
         if (
             pending
-            and pending.state == "completed"
-            and (
-                getattr(pending, "continuation_outcome", None) is not None
-                or (
-                    isinstance(pending.execution_result, dict)
-                    and "outcome" in pending.execution_result
-                )
-            )
+            and pending.state in {"completed", "failed", "denied"}
+            and getattr(pending, "continuation_outcome", None) is not None
         ):
-            return getattr(pending, "continuation_outcome", None) or pending.execution_result["outcome"]
+            return pending.continuation_outcome
 
         service.approvals.record_resumed(approval_request_id)
 
@@ -2625,9 +2597,146 @@ class AgentChatGateway:
                 final_answer = str(getattr(response, "answer", response) or "").strip()
             except Exception as exc:
                 logger.warning("API continuation model step failed: %s", exc, exc_info=True)
+                return self._finalize_api_approval_outcome(
+                    approval_request_id,
+                    session_id=session_id,
+                    decision_result=decision_result,
+                    client_type=client_type,
+                    status="failed",
+                    error="continuation_model_failed",
+                    message=f"API continuation model failed: {exc}",
+                    execution_evidence=execution,
+                )
 
         if not final_answer:
             final_answer = self._api_approval_completion_message(execution, status_code)
+
+        return self._finalize_api_approval_outcome(
+            approval_request_id,
+            session_id=session_id,
+            decision_result=decision_result,
+            client_type=client_type,
+            status="completed",
+            message=final_answer,
+            execution_evidence=execution,
+            assistant_message_content=final_answer,
+        )
+
+    @staticmethod
+    def _api_approval_failure_message(
+        execution: dict[str, Any],
+        status_code: int = 0,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> str:
+        """Render bounded redacted API failure evidence as readable terminal output."""
+        lines = [
+            "Approved API request failed in the controlled API runtime"
+            + (f" with HTTP status {status_code}." if status_code else ".")
+        ]
+        if error_code or error_message:
+            err_desc = f"{error_code}: {error_message}".strip(": ")
+            lines.append(f"Error: {err_desc}")
+        lines.extend(["", "Failure evidence"])
+        for label, key in (
+            ("Method", "method"),
+            ("Endpoint", "redacted_url"),
+            ("Status code", "status_code"),
+            ("Content type", "content_type"),
+            ("Response type", "body_kind"),
+            ("Attempts", "attempts"),
+            ("Latency", "latency_ms"),
+        ):
+            val = execution.get(key)
+            if val not in (None, ""):
+                if key == "latency_ms":
+                    try:
+                        val = f"{float(val):.0f} ms"
+                    except (TypeError, ValueError):
+                        val = str(val)
+                lines.append(f"- **{label}:** {val}")
+
+        json_body = execution.get("json_body")
+        if json_body not in (None, ""):
+            lines.extend(("", "Response details"))
+            lines.extend(AgentChatGateway._format_api_response_value(
+                redact_secrets(json_body),
+            ))
+        elif execution.get("text_body"):
+            lines.extend(("", "Response details", str(execution["text_body"])[:4000]))
+        elif execution.get("error"):
+            lines.extend(("", f"- **Error details:** {execution['error']}"))
+
+        message = "\n".join(lines)
+        if len(message) > 16_000:
+            return message[:16_000] + "\n[API failure evidence truncated]"
+        return message
+
+    def _finalize_api_approval_outcome(
+        self,
+        approval_request_id: str,
+        *,
+        session_id: str,
+        decision_result: dict[str, Any],
+        client_type: str = "tui",
+        status: str,
+        message: str = "",
+        error: str = "",
+        execution_evidence: dict[str, Any] | None = None,
+        assistant_message_content: str = "",
+    ) -> dict[str, Any]:
+        """Authoritative lifecycle finalizer for all post-approval API outcomes."""
+        from mana_agent.api_manager.runtime_tools import api_manager_service
+
+        service = api_manager_service(self.root)
+        pending = service.approvals.get_pending(approval_request_id)
+        if (
+            pending
+            and pending.state in {"completed", "failed", "denied"}
+            and getattr(pending, "continuation_outcome", None) is not None
+        ):
+            return pending.continuation_outcome
+
+        execution_id = getattr(pending, "execution_id", "") if pending else approval_request_id
+        lane_task_id = getattr(pending, "lane_task_id", "") if pending else ""
+        raw_execution = execution_evidence if execution_evidence is not None else decision_result.get("result")
+        execution = dict(raw_execution) if isinstance(raw_execution, dict) else {}
+        status_code = int(execution.get("status_code") or decision_result.get("status_code") or 0)
+        receipt_id = (
+            decision_result.get("receipt_id")
+            or decision_result.get("result_receipt_id")
+            or (pending.receipt_id if pending else "")
+            or ""
+        )
+
+        approved = status in {"completed", "approved_not_executed"} or (
+            status == "failed" and decision_result.get("approved") is True
+        )
+        executed = status == "completed" or (
+            status == "failed"
+            and (execution.get("executed") is True or decision_result.get("executed") is True)
+        )
+        upstream_ok = status == "completed" and (
+            execution.get("upstream_ok") is True or decision_result.get("upstream_ok") is True
+        )
+
+        if assistant_message_content:
+            final_answer = assistant_message_content
+        elif status == "completed":
+            final_answer = message or self._api_approval_completion_message(execution, status_code)
+        elif status == "denied":
+            final_answer = message or "API request denied. No external mutation was executed."
+        elif status == "approved_not_executed":
+            final_answer = message or "The API request was approved, but execution was not confirmed."
+        else:
+            err_code = error or str(decision_result.get("error_code") or "")
+            err_msg = message or str(decision_result.get("message") or "")
+            final_answer = self._api_approval_failure_message(
+                execution,
+                status_code=status_code,
+                error_code=err_code,
+                error_message=err_msg,
+            )
 
         msg_id = f"msg_{uuid.uuid4().hex[:16]}"
         assistant_msg = {
@@ -2638,7 +2747,8 @@ class AgentChatGateway:
             "metadata": {
                 "approval_request_id": approval_request_id,
                 "api_approval": True,
-                "resumed": True,
+                "resumed": status == "completed",
+                "status": status,
             },
         }
 
@@ -2652,60 +2762,173 @@ class AgentChatGateway:
                 metadata={
                     "approval_request_id": approval_request_id,
                     "api_approval": True,
-                    "resumed": True,
+                    "resumed": status == "completed",
+                    "status": status,
                 },
             )
         except Exception:
             pass
 
         if callable(self._event_sink):
-            self._event_sink(
-                "turn.finished",
-                "API workflow completed",
-                message=final_answer,
-                conversation_id=session_id,
-                execution_id=execution_id or approval_request_id,
-                status="success",
-                metadata={
-                    "message_id": msg_id,
-                    "content": final_answer,
-                    "approval_request_id": approval_request_id,
-                    "api_approval": True,
-                    "resumed": True,
-                },
-            )
+            if status == "completed":
+                self._event_sink(
+                    "turn.finished",
+                    "API workflow completed",
+                    message=final_answer,
+                    conversation_id=session_id,
+                    execution_id=execution_id or approval_request_id,
+                    status="success",
+                    metadata={
+                        "message_id": msg_id,
+                        "content": final_answer,
+                        "approval_request_id": approval_request_id,
+                        "api_approval": True,
+                        "resumed": True,
+                    },
+                )
+            elif status == "denied":
+                self._event_sink(
+                    "turn.finished",
+                    "API workflow denied",
+                    message=final_answer,
+                    conversation_id=session_id,
+                    execution_id=execution_id or approval_request_id,
+                    status="cancelled",
+                    metadata={
+                        "message_id": msg_id,
+                        "content": final_answer,
+                        "approval_request_id": approval_request_id,
+                        "api_approval": True,
+                        "resumed": False,
+                    },
+                )
+            else:
+                self._event_sink(
+                    "api.call.failed",
+                    "API request failed",
+                    conversation_id=session_id,
+                    execution_id=execution_id or approval_request_id,
+                    status="failed",
+                    metadata={
+                        "approval_request_id": approval_request_id,
+                        "error": error or message,
+                        "status_code": status_code,
+                        "execution": execution,
+                    },
+                )
+                self._event_sink(
+                    "turn.finished",
+                    "API workflow failed",
+                    message=final_answer,
+                    conversation_id=session_id,
+                    execution_id=execution_id or approval_request_id,
+                    status="failed",
+                    metadata={
+                        "message_id": msg_id,
+                        "content": final_answer,
+                        "approval_request_id": approval_request_id,
+                        "api_approval": True,
+                        "resumed": False,
+                    },
+                )
 
-        if lane_task_id:
+        if lane_task_id and self._lane_coordinator:
+            if status == "completed":
+                target_lane_state = LaneTaskState.COMPLETED
+                lane_result = {"answer": final_answer, "status": "completed"}
+                lane_error = ""
+            elif status == "denied":
+                target_lane_state = LaneTaskState.CANCELLED
+                lane_result = {"answer": final_answer, "status": "cancelled"}
+                lane_error = message or "API request denied by user."
+            else:
+                target_lane_state = LaneTaskState.FAILED
+                lane_result = {"answer": final_answer, "status": "failed", "error": error or message}
+                lane_error = error or message or "API request execution failed."
+
             try:
                 self._finish_lane(
                     lane_task_id,
-                    state=LaneTaskState.COMPLETED,
-                    result={"answer": final_answer},
+                    state=target_lane_state,
+                    verification_state={
+                        "api_result": execution,
+                        "chat_result": lane_result,
+                    },
+                    error=lane_error,
                 )
             except Exception:
-                pass
+                logger.warning("Failed finishing lane task %s", lane_task_id, exc_info=True)
 
-        receipt_id = (
-            decision_result.get("receipt_id")
-            or decision_result.get("result_receipt_id")
-            or (pending.receipt_id if pending else "")
-            or ""
-        )
+            try:
+                execution_info = self._lane_coordinator.inspect_task(lane_task_id)
+                parent_id = getattr(execution_info, "parent_task_id", None)
+                if parent_id and parent_id in getattr(self._lane_coordinator, "_executions", {}):
+                    parent_exec = self._lane_coordinator.inspect_task(parent_id)
+                    if parent_exec.state == LaneTaskState.WAITING:
+                        active_siblings = any(
+                            child.task_id != lane_task_id
+                            and child.parent_task_id == parent_id
+                            and child.state in ACTIVE_LANE_STATES
+                            for child in self._lane_coordinator.executions
+                        )
+                        if not active_siblings:
+                            self._finish_lane(
+                                parent_id,
+                                state=target_lane_state,
+                                error=lane_error if target_lane_state != LaneTaskState.COMPLETED else "",
+                            )
+            except Exception:
+                logger.debug("Failed reconciling parent lane task %s", lane_task_id, exc_info=True)
+
+            if getattr(self._lane_coordinator, "taskboard", None):
+                try:
+                    execution_info = self._lane_coordinator.inspect_task(lane_task_id)
+                    board_task_id = getattr(execution_info, "taskboard_task_id", "") or lane_task_id
+                    if board_task_id in self._lane_coordinator.taskboard.tasks:
+                        task = self._lane_coordinator.taskboard.get_task(board_task_id)
+                        task.status = "done" if status == "completed" else ("cancelled" if status == "denied" else "failed")
+                        if execution:
+                            task.integration_evidence_records.append({
+                                "final_status": status,
+                                "evidence": execution,
+                            })
+                        self._lane_coordinator.taskboard.save()
+                except Exception:
+                    logger.debug("Failed reconciling taskboard task %s", lane_task_id, exc_info=True)
+
         outcome = {
-            "status": "completed",
-            "approved": True,
-            "executed": True,
-            "upstream_ok": True,
-            "resume": "completed",
+            "status": status,
+            "approved": approved,
+            "executed": executed,
+            "upstream_ok": upstream_ok,
+            "resume": "completed" if status == "completed" else "failed",
             "execution_id": execution_id or approval_request_id,
             "approval_request_id": approval_request_id,
             "result_receipt_id": receipt_id,
-            "result": execution,
+            "result": execution if execution else decision_result.get("result", {}),
             "answer": final_answer,
             "message": final_answer,
             "assistant_message": assistant_msg,
         }
-        service.approvals.record_completed(approval_request_id, outcome=outcome)
+        if error:
+            outcome["error"] = error
+        if pending:
+            pending.continuation_outcome = outcome
+
+        if status == "completed":
+            service.approvals.record_completed(approval_request_id, outcome=outcome)
+        elif status == "denied":
+            pass
+        else:
+            service.approvals.record_failed(
+                approval_request_id,
+                error=error or status,
+                failure_details=execution,
+                outcome=outcome,
+                executed=executed,
+                receipt_id=receipt_id,
+            )
+
         return outcome
     @staticmethod
     def _api_approval_completion_message(
@@ -2874,12 +3097,18 @@ class AgentChatGateway:
         from mana_agent.api_manager.events import api_event_scope
         from mana_agent.api_manager.runtime_tools import api_manager_service
 
+        service = api_manager_service(self.root)
+        pending = service.approvals.get_pending(approval_request_id)
+        if pending and pending.state in {"completed", "failed", "denied"}:
+            if getattr(pending, "continuation_outcome", None) is not None:
+                return pending.continuation_outcome
+
         with api_event_scope(
             session_id=session_id,
             execution_id=approval_request_id,
             root=self.root,
         ):
-            result = api_manager_service(self.root).decide_approval(
+            result = service.decide_approval(
                 approval_request_id,
                 session_id=session_id,
                 approve=False,
@@ -2898,12 +3127,15 @@ class AgentChatGateway:
                     "api_approval": True,
                 },
             )
-        return {
-            "status": "denied",
-            "approval_request_id": approval_request_id,
-            "result": result,
-            "message": "API request denied. No external mutation was executed.",
-        }
+        return self._finalize_api_approval_outcome(
+            approval_request_id,
+            session_id=session_id,
+            decision_result=result,
+            client_type=client_type,
+            status="denied",
+            message=str(result.get("message") or "API request denied. No external mutation was executed."),
+        )
+
 
     def _build_entry_route_registry(self) -> EntryRouteRegistry:
         registry = EntryRouteRegistry()
@@ -6794,11 +7026,15 @@ class AgentChatGateway:
 
     def _finish_lane(self, task_id: str, **kwargs: Any) -> Any:
         """Finish a lane with the provider usage accrued under its execution identity."""
-        usage = self._synchronize_lane_usage(task_id)
+        try:
+            usage = self._synchronize_lane_usage(task_id)
+        except Exception:
+            usage = {}
         verification_state = dict(kwargs.get("verification_state") or {})
         verification_state.setdefault("context_cost_usage", usage)
         kwargs["verification_state"] = verification_state
         return self._lane_coordinator.finish(task_id, **kwargs)
+
 
     def _recalculate_active_lane_budget(self, forecast: BudgetForecast) -> None:
         """Apply a provider-call forecast only while its exact lane task is active."""

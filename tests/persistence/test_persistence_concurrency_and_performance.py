@@ -18,7 +18,8 @@ def perf_workspace(tmp_path: Path):
     db_path = tmp_path / "perf_state.db"
     db = WorkspaceDatabase("perf-workspace", db_path=db_path)
     repo = WorkspaceRepository("perf-workspace", db=db)
-    return db, repo
+    yield db, repo
+    db.close()
 
 
 def test_concurrent_task_writes(perf_workspace):
