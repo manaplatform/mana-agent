@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mana_agent.coding.models import AgentEvent, CodingTaskResult, WorkspaceContext
+from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.client import AsyncCodexAppServer, CodexCancellationOutcome
@@ -258,13 +258,37 @@ def test_new_conversation_after_completed_codex_work_uses_thread_start(
         ),
     )
 
-    # Turn 1 in session 1: starts thread-1
+    # Turn 1 in session 1: starts thread-1 via thread/start + turn/start
     gateway.process_turn(session_1, "First task")
     assert threads_started == ["thread-1"]
+    assert threads_resumed == []
 
-    # Turn 2 in session 1: reuses runtime and calls thread/resume (no new thread/start)
+    # Turn 2 in session 1: reuses live runtime and calls turn/start only (no thread/resume)
     gateway.process_turn(session_1, "Second task in same session")
     assert threads_started == ["thread-1"]
+    assert threads_resumed == []
+
+    # Turn 3 in session 1: reuses live runtime and calls turn/start only
+    gateway.process_turn(session_1, "Third task in same session")
+    assert threads_started == ["thread-1"]
+    assert threads_resumed == []
+
+    # Recreated client: reconstructs session with persisted thread ID
+    recreated_backend = CodexCodingBackend(
+        settings,
+        client_factory=lambda cmd: MockAppServerClient(cmd),
+        resume_thread_id=shim.resume_thread_id,
+    )
+    task = CodingTask(task_id="recreated-gw-task", goal="Recreated client task", requires_repository_write=False)
+    ws = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="readOnly",
+        approval_policy=settings.approval_policy,
+    )
+    res = asyncio.run(recreated_backend.execute(task, ws))
+    assert res.status == "completed"
     assert "thread-1" in threads_resumed
 
     # Start new conversation via /new

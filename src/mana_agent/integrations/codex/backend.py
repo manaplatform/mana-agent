@@ -59,6 +59,7 @@ class CodexCodingBackend:
         self.settings = settings
         self.worker_id = worker_id or f"codex-{uuid.uuid4().hex[:8]}"
         self.resume_thread_id = str(resume_thread_id or "").strip()
+        self._loaded_thread_id = ""
         self.context_cost_governor = context_cost_governor
         self._uses_default_client = client_factory is None
         self._client_factory = client_factory or (lambda command: AsyncCodexAppServer(command))
@@ -67,6 +68,38 @@ class CodexCodingBackend:
         self._active: dict[str, tuple[str, str]] = {}
         self._results: dict[str, CodingTaskResult] = {}
         self._run_lock = asyncio.Lock()
+
+    @property
+    def loaded_thread_id(self) -> str:
+        return self._loaded_thread_id
+
+    @loaded_thread_id.setter
+    def loaded_thread_id(self, value: str) -> None:
+        self._loaded_thread_id = str(value or "").strip()
+        if self._loaded_thread_id and self._client is not None:
+            if hasattr(self._client, "mark_thread_loaded"):
+                self._client.mark_thread_loaded(self._loaded_thread_id)
+
+    def is_thread_loaded(self, thread_id: str) -> bool:
+        th = str(thread_id or "").strip()
+        if not th or self._client is None:
+            return False
+        client_running = getattr(self._client, "running", True)
+        if not client_running:
+            return False
+        if hasattr(self._client, "is_thread_loaded"):
+            return bool(self._client.is_thread_loaded(th))
+        return self._loaded_thread_id == th
+
+    async def _restart_client(self, workspace: WorkspaceContext) -> None:
+        await self.close()
+        execution_dir = _execution_directory(workspace)
+        await self.start(
+            execution_dir,
+            sandbox_mode=_codex_sandbox(workspace),
+        )
+        if self._client is None or not getattr(self._client, "running", True):
+            raise CodexUnavailableError("Codex app-server failed to restart during recovery")
 
     async def start(
         self,
@@ -194,18 +227,42 @@ class CodexCodingBackend:
                 },
             )
             try:
-                if self.resume_thread_id:
-                    thread_response = await self._client.request(
-                        "thread/resume",
-                        {"threadId": self.resume_thread_id, **self._thread_params(workspace)},
-                    )
-                else:
-                    thread_response = await self._client.request("thread/start", self._thread_params(workspace))
-                thread_id = _response_id(thread_response, "thread")
-                if not thread_id and self.resume_thread_id:
+                if self.is_thread_loaded(self.resume_thread_id):
                     thread_id = self.resume_thread_id
-                if not thread_id:
-                    raise CodexExecutionError("Codex thread/start returned no thread id")
+                    logger.info(
+                        "codex_thread.resident task_id=%s thread_id=%s reusing resident thread without thread/resume",
+                        task.task_id,
+                        thread_id,
+                    )
+                elif not self.resume_thread_id:
+                    thread_response = await self._client.request("thread/start", self._thread_params(workspace))
+                    thread_id = _response_id(thread_response, "thread")
+                    if not thread_id:
+                        raise CodexExecutionError("Codex thread/start returned no thread id")
+                    self.loaded_thread_id = thread_id
+                    self.resume_thread_id = thread_id
+                else:
+                    try:
+                        thread_response = await self._client.request(
+                            "thread/resume",
+                            {"threadId": self.resume_thread_id, **self._thread_params(workspace)},
+                        )
+                    except (CodexTimeoutError, CodexUnavailableError) as exc:
+                        logger.warning(
+                            "codex_stream.resume_failed task_id=%s thread_id=%s error=%s; closing and recreating unhealthy app-server",
+                            task.task_id,
+                            self.resume_thread_id,
+                            exc,
+                        )
+                        await self._restart_client(workspace)
+                        thread_response = await self._client.request(
+                            "thread/resume",
+                            {"threadId": self.resume_thread_id, **self._thread_params(workspace)},
+                        )
+                    thread_id = _response_id(thread_response, "thread") or self.resume_thread_id
+                    if not thread_id:
+                        raise CodexExecutionError("Codex thread/resume returned no thread id")
+                    self.loaded_thread_id = thread_id
                 sequence += 1
                 yield AgentEvent(
                     event_type="turn.starting",
@@ -258,6 +315,8 @@ class CodexCodingBackend:
                         model=self.settings.model or "",
                         payload=governor_decision.snapshot.as_dict(),
                     )
+                if hasattr(self._client, "clear_notifications"):
+                    self._client.clear_notifications(thread_id)
                 provider_started_at = datetime.now(timezone.utc)
                 turn_response = await self._client.request(
                     "turn/start",
@@ -313,6 +372,21 @@ class CodexCodingBackend:
                                 output_chunks_count,
                             )
                             break
+                        notif_params = notification.get("params") if isinstance(notification.get("params"), dict) else {}
+                        notif_turn = str(
+                            notif_params.get("turnId")
+                            or (notif_params.get("turn", {}).get("id") if isinstance(notif_params.get("turn"), dict) else "")
+                            or ""
+                        ).strip()
+                        if notif_turn and turn_id and notif_turn != turn_id:
+                            logger.debug(
+                                "codex_stream.skipping_stale_notification task_id=%s turn_id=%s notif_turn=%s method=%s",
+                                task.task_id,
+                                turn_id,
+                                notif_turn,
+                                notification.get("method"),
+                            )
+                            continue
                         event = adapt_codex_event(
                             task.task_id,
                             notification,
@@ -560,6 +634,7 @@ class CodexCodingBackend:
         finally:
             self._client = None
             self._active.clear()
+            self._loaded_thread_id = ""
             if self._runtime_context is not None:
                 self._runtime_context.close()
                 self._runtime_context = None

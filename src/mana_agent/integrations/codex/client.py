@@ -86,8 +86,25 @@ class AsyncCodexAppServer:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._notifications: defaultdict[str, asyncio.Queue[dict[str, Any]]] = defaultdict(asyncio.Queue)
+        self._loaded_threads: set[str] = set()
         self._stderr: list[str] = []
         self._write_lock = asyncio.Lock()
+
+    @property
+    def loaded_thread_ids(self) -> frozenset[str]:
+        return frozenset(self._loaded_threads)
+
+    def is_thread_loaded(self, thread_id: str) -> bool:
+        th = str(thread_id or "").strip()
+        return bool(th and th in self._loaded_threads)
+
+    def mark_thread_loaded(self, thread_id: str) -> None:
+        th = str(thread_id or "").strip()
+        if th:
+            self._loaded_threads.add(th)
+
+    def clear_loaded_threads(self) -> None:
+        self._loaded_threads.clear()
 
     @property
     def running(self) -> bool:
@@ -152,7 +169,7 @@ class AsyncCodexAppServer:
         await self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         timeout = self.request_timeout_seconds if timeout_seconds is None else max(0.1, float(timeout_seconds))
         try:
-            return await asyncio.wait_for(future, timeout=timeout)
+            result = await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError as exc:
             self._pending.pop(request_id, None)
             raise CodexTimeoutError(
@@ -160,6 +177,21 @@ class AsyncCodexAppServer:
                 method=method,
                 timeout_seconds=int(timeout) if timeout >= 1 else 1,
             ) from exc
+
+        if method == "thread/start":
+            th_id = str((result.get("thread") or {}).get("id") or result.get("threadId") or "").strip()
+            if th_id:
+                self.mark_thread_loaded(th_id)
+        elif method == "thread/resume":
+            th_id = str(
+                (result.get("thread") or {}).get("id")
+                or result.get("threadId")
+                or params.get("threadId")
+                or ""
+            ).strip()
+            if th_id:
+                self.mark_thread_loaded(th_id)
+        return result
 
     async def notify(self, method: str, params: dict[str, Any]) -> None:
         await self._write({"jsonrpc": "2.0", "method": method, "params": params})
@@ -309,6 +341,7 @@ class AsyncCodexAppServer:
                 except asyncio.QueueEmpty:
                     break
         self._notifications.clear()
+        self.clear_loaded_threads()
 
     async def _write(self, payload: dict[str, Any]) -> None:
         process = self._process
@@ -349,6 +382,7 @@ class AsyncCodexAppServer:
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(error)
+        self.clear_loaded_threads()
 
     async def _read_stderr(self) -> None:
         process = self._process

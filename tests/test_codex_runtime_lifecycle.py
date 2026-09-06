@@ -154,13 +154,19 @@ def test_codex_coding_backend_cancel_forces_close_on_unacknowledged_interrupt() 
     assert backend._client is None
 
 
-def test_codex_coding_agent_shim_session_scoped_backend_reuse(tmp_path: Path) -> None:
+def test_codex_coding_agent_shim_session_scoped_backend_reuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend._git_changed_files",
+        lambda *args, **kwargs: ["README.md"],
+    )
     clients_created = 0
+    created_clients: list[TrackingClient] = []
 
     class TrackingClient:
         def __init__(self, command: tuple[str, ...]) -> None:
             nonlocal clients_created
             clients_created += 1
+            created_clients.append(self)
             self.running = True
             self.closed = False
             self.requests: list[str] = []
@@ -200,24 +206,188 @@ def test_codex_coding_agent_shim_session_scoped_backend_reuse(tmp_path: Path) ->
     )
 
     try:
-        # Turn 1: Should start fresh client and call thread/start
+        # Turn 1: Should start fresh client and call thread/start + turn/start
         res1 = shim.generate("First turn")
         assert clients_created == 1
         assert shim.resume_thread_id == "thread-session-1"
+        assert created_clients[0].requests == ["thread/start", "turn/start"]
 
-        # Turn 2: Should REUSE client inside same session and call thread/resume
+        # Turn 2: Should REUSE live client in same session and call turn/start ONLY (never thread/resume)
         res2 = shim.generate("Second turn in same session")
         assert clients_created == 1  # No new client created!
         assert shim.resume_thread_id == "thread-session-1"
+        assert created_clients[0].requests == ["thread/start", "turn/start", "turn/start"]
 
-        # Turn 3 after reset_session: Should close old client and create fresh one with thread/start
+        # Turn 3: Also REUSES live client and calls turn/start ONLY
+        res3 = shim.generate("Third turn in same session")
+        assert clients_created == 1
+        assert created_clients[0].requests == ["thread/start", "turn/start", "turn/start", "turn/start"]
+
+        # Recreated client: Reconstruct session on fresh backend/client with persisted thread ID
+        fresh_backend = CodexCodingBackend(
+            _settings(),
+            client_factory=lambda cmd: TrackingClient(cmd),
+            resume_thread_id=shim.resume_thread_id,
+        )
+        task = CodingTask(task_id="recreated-task", goal="Turn on recreated client", requires_repository_write=False)
+        result = asyncio.run(fresh_backend.execute(task, ws))
+        assert result.status == "completed"
+        assert clients_created == 2
+        assert created_clients[1].requests == ["thread/resume", "turn/start"]
+
+        # Turn after reset_session (/new): Should close old client and create fresh one with thread/start + turn/start
         shim.reset_session("new-session-id")
         assert shim.resume_thread_id == ""
 
-        res3 = shim.generate("First turn in new session")
-        assert clients_created == 2  # New client created!
+        res4 = shim.generate("First turn in new session")
+        assert clients_created == 3  # New client created!
+        assert created_clients[2].requests == ["thread/start", "turn/start"]
     finally:
         shim.close()
+
+
+def test_codex_resident_session_bypasses_hanging_thread_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: A normal second message on a live session must never invoke thread/resume.
+
+    If thread/resume is hanging or times out, the second turn must still succeed without
+    CODING_PROVIDER_TIMEOUT because resident threads call turn/start directly.
+    """
+    monkeypatch.setattr(
+        "mana_agent.integrations.codex.backend._git_changed_files",
+        lambda *args, **kwargs: ["README.md"],
+    )
+    clients_created = 0
+    created_clients: list[Any] = []
+
+    class HangingResumeClient:
+        def __init__(self, command: tuple[str, ...]) -> None:
+            nonlocal clients_created
+            clients_created += 1
+            created_clients.append(self)
+            self.running = True
+            self.closed = False
+            self.requests: list[str] = []
+
+        async def start(self) -> None:
+            return None
+
+        async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
+            self.requests.append(method)
+            if method == "thread/start":
+                return {"thread": {"id": "thread-hanging-resume-test"}}
+            if method == "thread/resume":
+                # Deliberately hang/timeout to simulate the bug scenario
+                raise CodexTimeoutError(
+                    "Codex request timed out: thread/resume",
+                    method="thread/resume",
+                    timeout_seconds=1,
+                )
+            if method == "turn/start":
+                return {"turn": {"id": "turn-1"}}
+            return {}
+
+        async def notifications(self, thread_id: str):
+            yield {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turn": {"id": "turn-1"},
+                    "usage": {"inputTokens": 10},
+                },
+            }
+
+        async def close(self, *, wait_timeout: float = 1.0) -> None:
+            self.closed = True
+            self.running = False
+
+    ws = _workspace(tmp_path)
+    shim = CodexCodingAgentShim(
+        repo_root=ws.repository_path,
+        codex_settings=_settings(),
+        backend_factory=lambda: CodexCodingBackend(
+            _settings(),
+            client_factory=lambda cmd: HangingResumeClient(cmd),
+        ),
+    )
+
+    try:
+        # Turn 1: Fresh session, uses thread/start + turn/start
+        res1 = shim.generate("Turn 1 goal")
+        assert res1.get("status") != "failed"
+        assert shim.resume_thread_id == "thread-hanging-resume-test"
+        assert created_clients[0].requests == ["thread/start", "turn/start"]
+
+        # Turn 2: Second message in live session. MUST NEVER invoke thread/resume!
+        # Should complete successfully without CODING_PROVIDER_TIMEOUT.
+        res2 = shim.generate("Turn 2 follow-up in same live session")
+        assert res2.get("status") != "failed"
+        assert created_clients[0].requests == ["thread/start", "turn/start", "turn/start"]
+        assert "thread/resume" not in created_clients[0].requests
+    finally:
+        shim.close()
+
+
+def test_codex_thread_resume_timeout_explicit_recovery(tmp_path: Path) -> None:
+    """A real resume timeout on an uncertain connection closes and recreates the app-server,
+    initializes it, and resumes once on the fresh client.
+    """
+    attempt = 0
+    clients: list[Any] = []
+
+    class RecoveringClient:
+        def __init__(self, command: tuple[str, ...]) -> None:
+            clients.append(self)
+            self.running = True
+            self.closed = False
+            self.requests: list[str] = []
+
+        async def start(self) -> None:
+            return None
+
+        async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
+            nonlocal attempt
+            self.requests.append(method)
+            if method == "thread/resume":
+                attempt += 1
+                if attempt == 1:
+                    # First client times out on resume (unhealthy connection)
+                    raise CodexTimeoutError(
+                        "Codex request timed out: thread/resume",
+                        method="thread/resume",
+                        timeout_seconds=1,
+                    )
+                # Second client succeeds on resume
+                return {"thread": {"id": "thread-recovered"}}
+            if method == "turn/start":
+                return {"turn": {"id": "turn-recovered"}}
+            return {}
+
+        async def notifications(self, thread_id: str):
+            yield {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turn": {"id": "turn-recovered"},
+                },
+            }
+
+        async def close(self, *, wait_timeout: float = 1.0) -> None:
+            self.closed = True
+            self.running = False
+
+    ws = _workspace(tmp_path)
+    backend = CodexCodingBackend(
+        _settings(),
+        client_factory=lambda cmd: RecoveringClient(cmd),
+        resume_thread_id="thread-persisted-1",
+    )
+    task = CodingTask(task_id="recovery-task", goal="Recovery after resume timeout", requires_repository_write=False)
+    result = asyncio.run(backend.execute(task, ws))
+    assert result.status == "completed"
+    assert len(clients) == 2  # First client closed, second client created
+    assert clients[0].closed is True
+    assert clients[0].requests == ["thread/resume"]
+    assert clients[1].requests == ["thread/resume", "turn/start"]
 
 
 def test_codex_coding_agent_shim_restarts_on_model_change(tmp_path: Path) -> None:

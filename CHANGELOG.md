@@ -4,6 +4,19 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-06
 
+- Fixed Codex thread resume timeout on follow-up turns in active sessions:
+  - Preserved resident app-server and backend across turns within the same Mana session in `CodexCodingAgentShim` and `CodexCodingBackend`.
+  - Added loaded thread tracking (`is_thread_loaded`, `mark_thread_loaded`, `clear_loaded_threads`, `loaded_thread_id`) in `AsyncCodexAppServer` (`src/mana_agent/integrations/codex/client.py`) and `CodexCodingBackend` (`src/mana_agent/integrations/codex/backend.py`).
+  - Prevented redundant and blocking `thread/resume` calls when the resident backend/client is alive and already owns the active Codex thread, calling `turn/start` directly with the persisted thread ID.
+  - Restricted `thread/resume` execution strictly to session reconstruction after process loss, backend restart, or when the thread is not loaded in the active runtime.
+  - Implemented explicit recovery on genuine resume timeouts or connection failures in `CodexCodingBackend`: cleanly closed and recreated the unhealthy app-server, initialized it, and resumed the persisted thread once without blindly replaying on uncertain connections.
+  - Cleared stale notifications from prior completed turns via `clear_notifications` before admitting the next turn (prior to `turn/start`), and skipped notifications bearing stale turn IDs in the stream consumer, ensuring new turn notifications are never dropped.
+  - Preserved `/new` conversation reset: cleared thread ID and closed runtime to guarantee subsequent turns initialize a clean thread via `thread/start`.
+  - Updated `tests/test_codex_runtime_lifecycle.py` and `tests/gateway/test_codex_session_lifecycle.py` to verify turn 1 = `thread/start + turn/start`, turns 2/3 on live client = `turn/start` only, and recreated client = `thread/resume + turn/start`.
+  - Added regression test `test_codex_resident_session_bypasses_hanging_thread_resume` verifying that live resident turns complete cleanly without `CODING_PROVIDER_TIMEOUT` even when `thread/resume` hangs.
+  - Added test `test_codex_thread_resume_timeout_explicit_recovery` verifying explicit app-server recreation and single-resume recovery.
+  - User verification required: `pytest tests/test_codex_runtime_lifecycle.py tests/gateway/test_codex_session_lifecycle.py -v`.
+
 - Fixed Codex and TUI lifecycle synchronization, event delivery, and `/new` conversation reset:
   - Made `ExecutionEventHub` the durable source of truth and fallback for TUI coding progress while preserving `coding_event_scope()` low-latency fast path.
   - Subscribed active TUI session to general coding events on `ExecutionEventHub` (bridging safe `progress` and `terminal` events to `CodingActivityEvent -> ChatHistory -> ExecutionPanel`) while strictly filtering internal reasoning, assistant deltas, and model drafts.
