@@ -23,6 +23,7 @@ class ExecutionPanel(Vertical):
         self.model = ""
         self.phase = "queued"
         self.events: list[dict] = []
+        self._event_ids: set[str] = set()
         self.header: Static | None = None
         self.activity_log: SelectableText | None = None
         self.footer: Static | None = None
@@ -40,9 +41,21 @@ class ExecutionPanel(Vertical):
         yield self.footer
 
     def update_event(self, event: dict) -> None:
-        self.events.append(dict(event))
-        self.events = self.events[-80:]
-        self._render_state(event)
+        event_dict = dict(event)
+        event_id = str(event_dict.get("event_id") or event_dict.get("id") or "").strip()
+        if event_id:
+            if event_id in self._event_ids:
+                return
+            self._event_ids.add(event_id)
+        self.events.append(event_dict)
+        if len(self.events) > 80:
+            self.events = self.events[-80:]
+            self._event_ids = {
+                str(e.get("event_id") or e.get("id") or "").strip()
+                for e in self.events
+                if str(e.get("event_id") or e.get("id") or "").strip()
+            }
+        self._render_state(event_dict)
 
     def on_mount(self) -> None:
         if self.events:

@@ -3664,6 +3664,11 @@ class AgentChatGateway:
 
         new_sid = record.session_id
         self._session_generations[new_sid] = self._session_generations.get(new_sid, 0) + 1
+        if self._coding_agent is not None and hasattr(self._coding_agent, "reset_session"):
+            try:
+                self._coding_agent.reset_session(new_sid)
+            except Exception:
+                pass
         return self.create_session(
             frontend=selected_frontend, session_id=new_sid
         )
@@ -5231,6 +5236,7 @@ class AgentChatGateway:
                 session_id=session_id,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
+                user_message_id=user_message_id,
                 previous_route=str(state.get("active_route") or ""),
                 conversation_summary="",
                 artifact_evidence=artifact_ev,
@@ -5743,6 +5749,7 @@ class AgentChatGateway:
                             str(item.get("state") or "") != LaneTaskState.COMPLETED.value
                             and not bool(item.get("deadline_exceeded"))
                             and str(item.get("lane") or "") == lane_id.value
+                            and (not session_id or not item.get("session_id") or str(item.get("session_id")) == str(session_id))
                         )
                     ]
                     followup_model = getattr(self._entry_router, "llm", None)
@@ -8596,6 +8603,7 @@ class AgentChatGateway:
                 or not (supervisor_recoverable or lane_recoverable)
                 or task.workspace_id != workspace_id
                 or task.repository_id != repository_id
+                or (session_id and task.session_id and str(task.session_id) != str(session_id))
             ):
                 continue
             
@@ -8706,6 +8714,7 @@ class AgentChatGateway:
                 if (
                     execution.workspace_id != workspace_id
                     or execution.repository_id != repository_id
+                    or (session_id and execution.session_id and str(execution.session_id) != str(session_id))
                 ):
                     continue
                 if lane_id is not None and execution.owning_lane != lane_id:
@@ -9501,6 +9510,9 @@ class AgentChatGateway:
                 or self._feature_integration_decision_provider(ask_service=ask_service)
             ),
             feature_integration_decision=options.get("feature_integration_decision"),
+            turn_id=context.turn_id,
+            user_message_id=context.user_message_id,
+            dispatch_source="entry_route",
         )
         wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
             self._lane_coordinator.taskboard,

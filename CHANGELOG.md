@@ -2,6 +2,22 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-06
+
+- Fixed Codex and TUI lifecycle synchronization, event delivery, and `/new` conversation reset:
+  - Made `ExecutionEventHub` the durable source of truth and fallback for TUI coding progress while preserving `coding_event_scope()` low-latency fast path.
+  - Subscribed active TUI session to general coding events on `ExecutionEventHub` (bridging safe `progress` and `terminal` events to `CodingActivityEvent -> ChatHistory -> ExecutionPanel`) while strictly filtering internal reasoning, assistant deltas, and model drafts.
+  - Added multi-layer event deduplication by original `event_id` across `ManaChatApp`, `ChatLog`, and `ExecutionPanel`, preventing duplicate rendering across scope and hub delivery.
+  - Maintained execution/task ID to frontend `turn_id` mapping so background and hub events route to the correct execution panel.
+  - Implemented durable event replay on session open/switch without duplicate rendering.
+  - Resolved double task execution on `/new` by atomically detaching prior session event listeners, clearing frontend turn mappings, and resetting coding agent session state.
+  - Fixed `_recovery_candidates` in `AgentChatGateway` to strictly filter by `session_id`, preventing cancelled or interrupted tasks of prior sessions from resurrecting in fresh sessions.
+  - Added thread-safe execution-level idempotency guard in `CodexCodingAgentShim` keyed by `(session_id, authoritative_id)` to reject duplicate dispatches while preserving internal retry lifecycles.
+  - Added early `_turn_in_progress` submission guard in `ManaChatApp` to prevent rapid concurrent submissions.
+  - Added structured diagnostic logging for Codex lifecycle transitions (`session_reset`, `dispatch_received`, `execution_started`, `execution_idempotent_reuse`, `attempt_started`, `attempt_completed`, `execution_completed`, `execution_failed`).
+  - Added comprehensive regression test suite in `tests/test_codex_tui_lifecycle.py` covering all 11 lifecycle scenarios.
+  - User verification required: `pytest tests/test_codex_tui_lifecycle.py -v`.
+
 ## 2026-09-05
 
 - Fixed Astra GPT-6 entry route context budget deficit and added deterministic multi-pass compaction:

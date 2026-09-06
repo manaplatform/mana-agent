@@ -81,6 +81,7 @@ class EntryRouteContext:
     session_id: str
     conversation_id: str
     turn_id: str
+    user_message_id: str = ""
     previous_route: str = ""
     conversation_summary: str = ""
     artifact_evidence: dict[str, Any] = field(default_factory=dict)
@@ -96,6 +97,7 @@ class EntryRouteContext:
             "session_id": self.session_id,
             "conversation_id": self.conversation_id,
             "turn_id": self.turn_id,
+            "user_message_id": self.user_message_id,
             "previous_route": self.previous_route,
             "conversation_summary": self.conversation_summary,
             "artifact_evidence": dict(self.artifact_evidence),
