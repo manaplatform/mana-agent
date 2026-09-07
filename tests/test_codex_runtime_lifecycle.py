@@ -698,7 +698,7 @@ def test_codex_durable_session_home_never_contains_credentials(tmp_path: Path) -
     from mana_agent.integrations.codex.runtime_environment import CodexRuntimeEnvironment
 
     settings = _settings(api_key="super-secret-mana-token-12345")
-    runtime_config = CodexRuntimeConfigBuilder.build(settings)
+    runtime_config = CodexRuntimeConfigBuilder.build(settings, sandbox_mode="workspace-write")
 
     session_home = get_codex_session_home("test-repo-cred", "test-session-cred")
     context = CodexRuntimeEnvironment.create(runtime_config, home=session_home, durable=True)

@@ -21,6 +21,12 @@ All notable repository changes should be recorded here.
   - Updated `tests/gateway/test_lane_coordinator.py` to verify both inclusion of failed tasks from prior non-fenced sessions and exclusion of tasks from fenced sessions.
   - User verification required: `pytest tests/gateway/test_lane_coordinator.py tests/test_codex_tui_lifecycle.py -v`.
 
+- Fixed Codex app-server loaded thread tracking, runtime config sandbox mode, and gateway repository identity binding:
+  - Allowed `mark_thread_loaded` in `AsyncCodexAppServer` to record loaded thread IDs while relying on `is_thread_loaded` to evaluate running process state, ensuring thread residency is accurately reflected upon process start.
+  - Supplied `sandbox_mode="workspace-write"` to `CodexRuntimeConfigBuilder.build()` in regression test `test_codex_durable_session_home_never_contains_credentials`.
+  - Preserved explicit `repository_id` on `_coding_agent` in `AgentChatGateway._bind_runtime_session` when already set, ensuring durable thread state persistence and deletion target the correct repository namespace.
+  - User verification required: `pytest tests/gateway/test_codex_session_lifecycle.py tests/test_codex_runtime_lifecycle.py -v`.
+
 ## 2026-09-06
 
 - Fixed Codex thread resume timeout on follow-up turns in active sessions:

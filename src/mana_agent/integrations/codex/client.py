@@ -110,7 +110,7 @@ class AsyncCodexAppServer:
 
     def mark_thread_loaded(self, thread_id: str) -> None:
         th = str(thread_id or "").strip()
-        if th and self.running:
+        if th:
             self._loaded_threads.add(th)
 
     def clear_loaded_threads(self) -> None:

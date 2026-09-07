@@ -3559,7 +3559,7 @@ class AgentChatGateway:
                 conversation_id=session_id,
             )
         if self._coding_agent is not None and hasattr(self._coding_agent, "session_id"):
-            if hasattr(self._coding_agent, "repository_id") and self._stack.repository_id:
+            if hasattr(self._coding_agent, "repository_id") and not getattr(self._coding_agent, "repository_id", None) and self._stack.repository_id:
                 self._coding_agent.repository_id = self._stack.repository_id
             self._coding_agent.session_id = session_id
         memory = self._stack.coding_memory_service
