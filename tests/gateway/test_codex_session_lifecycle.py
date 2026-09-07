@@ -13,13 +13,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mana_agent.coding.models import AgentEvent, CodingTaskResult, WorkspaceContext
+from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.client import AsyncCodexAppServer, CodexCancellationOutcome
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.exceptions import CodexTimeoutError
+from mana_agent.integrations.codex.runtime_environment import get_codex_session_home
+from mana_agent.integrations.codex.session_store import load_codex_session_thread
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 
 
@@ -258,13 +260,37 @@ def test_new_conversation_after_completed_codex_work_uses_thread_start(
         ),
     )
 
-    # Turn 1 in session 1: starts thread-1
+    # Turn 1 in session 1: starts thread-1 via thread/start + turn/start
     gateway.process_turn(session_1, "First task")
     assert threads_started == ["thread-1"]
+    assert threads_resumed == []
 
-    # Turn 2 in session 1: reuses runtime and calls thread/resume (no new thread/start)
+    # Turn 2 in session 1: reuses live runtime and calls turn/start only (no thread/resume)
     gateway.process_turn(session_1, "Second task in same session")
     assert threads_started == ["thread-1"]
+    assert threads_resumed == []
+
+    # Turn 3 in session 1: reuses live runtime and calls turn/start only
+    gateway.process_turn(session_1, "Third task in same session")
+    assert threads_started == ["thread-1"]
+    assert threads_resumed == []
+
+    # Recreated client: reconstructs session with persisted thread ID
+    recreated_backend = CodexCodingBackend(
+        settings,
+        client_factory=lambda cmd: MockAppServerClient(cmd),
+        resume_thread_id=shim.resume_thread_id,
+    )
+    task = CodingTask(task_id="recreated-gw-task", goal="Recreated client task", requires_repository_write=False)
+    ws = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="readOnly",
+        approval_policy=settings.approval_policy,
+    )
+    res = asyncio.run(recreated_backend.execute(task, ws))
+    assert res.status == "completed"
     assert "thread-1" in threads_resumed
 
     # Start new conversation via /new
@@ -275,6 +301,171 @@ def test_new_conversation_after_completed_codex_work_uses_thread_start(
     # Turn 1 in session 2: MUST start fresh thread-2 via thread/start
     gateway.process_turn(session_2, "First task in new session")
     assert threads_started == ["thread-1", "thread-2"]
+
+
+def test_codex_session_switch_reconstructs_backend_and_resumes_persisted_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test 22: Switching away to session 2 and switching back to session 1
+    reconstructs the Codex backend and resumes the original persisted thread.
+    """
+    threads_started: list[str] = []
+    threads_resumed: list[str] = []
+    requests: list[str] = []
+
+    class SwitchClient:
+        def __init__(self, command: tuple[str, ...]) -> None:
+            self.running = True
+
+        async def start(self) -> None:
+            return None
+
+        async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
+            requests.append(method)
+            if method == "thread/start":
+                th_id = f"thread-switch-{len(threads_started) + 1}"
+                threads_started.append(th_id)
+                return {"thread": {"id": th_id}}
+            if method == "thread/resume":
+                th_id = params.get("threadId", "unknown")
+                threads_resumed.append(th_id)
+                return {"thread": {"id": th_id}}
+            if method == "turn/start":
+                return {"turn": {"id": "turn-1"}}
+            return {}
+
+        async def notifications(self, thread_id: str):
+            yield {
+                "method": "turn/completed",
+                "params": {"threadId": thread_id, "turn": {"id": "turn-1"}},
+            }
+
+        async def close(self, *, wait_timeout: float = 1.0) -> None:
+            self.running = False
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _edit_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+
+    gateway = AgentChatGateway(tmp_path, coding_agent=True, auto_execute_plan=True, agent_tools=False)
+    session_1 = gateway.create_session(frontend="cli")
+
+    settings = _settings(worktree_isolation=False)
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=settings,
+        session_id=session_1,
+        repository_id="repo-switch-test",
+        backend_factory=lambda: CodexCodingBackend(
+            settings,
+            session_id=shim.session_id,
+            repository_id=shim.repository_id or "",
+            resume_thread_id=shim.resume_thread_id,
+            client_factory=lambda cmd: SwitchClient(cmd),
+        ),
+    )
+    gateway._coding_agent = shim
+    gateway._stack.coding_agent = shim
+
+    from mana_agent.gateway.entry_routing import EntryRoutingDecision
+
+    monkeypatch.setattr(
+        gateway._entry_router,
+        "route",
+        lambda *args, **kwargs: EntryRoutingDecision(
+            route="coding",
+            confidence=0.99,
+            reason="coding task",
+            required_sources=(),
+            reuse_active_route=False,
+        ),
+    )
+
+    # Session 1: Turn 1 -> starts thread-switch-1
+    gateway.process_turn(session_1, "Turn 1 in session 1")
+    assert threads_started == ["thread-switch-1"]
+    assert threads_resumed == []
+
+    # Switch away to Session 2
+    session_2 = gateway.create_new_session(frontend="cli")
+    gateway.process_turn(session_2, "Turn 1 in session 2")
+    assert threads_started == ["thread-switch-1", "thread-switch-2"]
+
+    # Switch back to Session 1
+    gateway.switch_session(session_1, frontend="cli")
+    assert gateway._chat_session_id == session_1
+    assert shim.session_id == session_1
+
+    # Turn in Session 1: must resume thread-switch-1
+    gateway.process_turn(session_1, "Turn 2 in session 1 after switch")
+    assert "thread-switch-1" in threads_resumed
+
+
+def test_codex_explicit_delete_session_cleans_durable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test 17: Explicit session deletion cleans up durable Codex state."""
+    class DummyClient:
+        def __init__(self, command: tuple[str, ...]) -> None:
+            self.running = True
+
+        async def start(self) -> None:
+            return None
+
+        async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
+            if method == "thread/start":
+                return {"thread": {"id": "th-to-delete"}}
+            if method == "turn/start":
+                return {"turn": {"id": "tu-1"}}
+            return {}
+
+        async def notifications(self, thread_id: str):
+            yield {"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": "tu-1"}}}
+
+        async def close(self, *, wait_timeout: float = 1.0) -> None:
+            self.running = False
+
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.decide_chat_route", lambda **kwargs: _edit_decision())
+    monkeypatch.setattr("mana_agent.gateway.turn_engine.handle_small_direct_edit", lambda *args, **kwargs: SimpleNamespace(handled=False))
+
+    gateway = AgentChatGateway(tmp_path, coding_agent=True, auto_execute_plan=True, agent_tools=False)
+    session_1 = gateway.create_session(frontend="cli")
+    settings = _settings(worktree_isolation=False)
+    shim = CodexCodingAgentShim(
+        repo_root=tmp_path,
+        codex_settings=settings,
+        session_id=session_1,
+        repository_id="repo-delete-test",
+        backend_factory=lambda: CodexCodingBackend(
+            settings,
+            session_id=shim.session_id,
+            repository_id=shim.repository_id or "",
+            resume_thread_id=shim.resume_thread_id,
+            client_factory=lambda cmd: DummyClient(cmd),
+        ),
+    )
+    gateway._coding_agent = shim
+    gateway._stack.coding_agent = shim
+
+    from mana_agent.gateway.entry_routing import EntryRoutingDecision
+
+    monkeypatch.setattr(
+        gateway._entry_router,
+        "route",
+        lambda *args, **kwargs: EntryRoutingDecision(
+            route="coding",
+            confidence=0.99,
+            reason="coding task",
+            required_sources=(),
+            reuse_active_route=False,
+        ),
+    )
+
+    gateway.process_turn(session_1, "Turn in session 1")
+    assert load_codex_session_thread("repo-delete-test", session_1) == "th-to-delete"
+
+    # Explicit deletion
+    gateway.delete_session(session_1)
+    assert load_codex_session_thread("repo-delete-test", session_1) == ""
 
 
 def test_session_generation_fence_rejects_late_events(tmp_path: Path) -> None:

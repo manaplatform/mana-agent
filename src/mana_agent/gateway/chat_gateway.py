@@ -3406,9 +3406,9 @@ class AgentChatGateway:
                 self._coding_agent.repo_root = prepared.repository_root
             if hasattr(self._coding_agent, "working_directory"):
                 self._coding_agent.working_directory = prepared.working_directory
-            if hasattr(self._coding_agent, "repository_id"):
+            if hasattr(self._coding_agent, "repository_id") and not getattr(self._coding_agent, "repository_id", None):
                 self._coding_agent.repository_id = prepared.repository_id
-            if hasattr(self._coding_agent, "workspace_id"):
+            if hasattr(self._coding_agent, "workspace_id") and not getattr(self._coding_agent, "workspace_id", None):
                 self._coding_agent.workspace_id = prepared.workspace_id
         if prepared.initialized:
             self._emit_workspace_initialized(prepared.working_directory)
@@ -3559,6 +3559,8 @@ class AgentChatGateway:
                 conversation_id=session_id,
             )
         if self._coding_agent is not None and hasattr(self._coding_agent, "session_id"):
+            if hasattr(self._coding_agent, "repository_id") and not getattr(self._coding_agent, "repository_id", None) and self._stack.repository_id:
+                self._coding_agent.repository_id = self._stack.repository_id
             self._coding_agent.session_id = session_id
         memory = self._stack.coding_memory_service
         if memory is not None and str(getattr(memory, "session_id", "")) != session_id:
@@ -3664,6 +3666,11 @@ class AgentChatGateway:
 
         new_sid = record.session_id
         self._session_generations[new_sid] = self._session_generations.get(new_sid, 0) + 1
+        if self._coding_agent is not None and hasattr(self._coding_agent, "reset_session"):
+            try:
+                self._coding_agent.reset_session(new_sid)
+            except Exception:
+                pass
         return self.create_session(
             frontend=selected_frontend, session_id=new_sid
         )
@@ -3709,11 +3716,27 @@ class AgentChatGateway:
             self.cancel(session_id, reason="session deleted", source="delete")
         except Exception:
             pass
-        if self._coding_agent is not None and hasattr(self._coding_agent, "reset_session"):
+        if self._coding_agent is not None and hasattr(self._coding_agent, "delete_session"):
+            try:
+                self._coding_agent.delete_session(session_id)
+            except Exception:
+                pass
+        elif self._coding_agent is not None and hasattr(self._coding_agent, "reset_session"):
             try:
                 self._coding_agent.reset_session()
             except Exception:
                 pass
+        try:
+            from mana_agent.integrations.codex.runtime_environment import cleanup_codex_session_home
+            from mana_agent.integrations.codex.session_store import clear_codex_session_thread
+
+            stack_repo = str(getattr(self._stack, "repository_id", "") or "").strip()
+            coding_repo = str(getattr(self._coding_agent, "repository_id", "") or "").strip()
+            if stack_repo and stack_repo != coding_repo:
+                cleanup_codex_session_home(stack_repo, session_id)
+                clear_codex_session_thread(stack_repo, session_id)
+        except Exception:
+            pass
         self.session_service.delete(session_id, gateway=self)
         self._sessions.pop(session_id, None)
         self._active.discard(session_id)
@@ -5231,6 +5254,7 @@ class AgentChatGateway:
                 session_id=session_id,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
+                user_message_id=user_message_id,
                 previous_route=str(state.get("active_route") or ""),
                 conversation_summary="",
                 artifact_evidence=artifact_ev,
@@ -8571,6 +8595,7 @@ class AgentChatGateway:
             reverse=True,
         )
         now = datetime.now(timezone.utc)
+        fenced_sessions = getattr(self, "_fenced_sessions", None) or set()
         seen: set[str] = set()
         for task in durable_tasks:
             execution = executions.get(task.task_id)
@@ -8596,6 +8621,7 @@ class AgentChatGateway:
                 or not (supervisor_recoverable or lane_recoverable)
                 or task.workspace_id != workspace_id
                 or task.repository_id != repository_id
+                or (task.session_id and str(task.session_id) in fenced_sessions)
             ):
                 continue
             
@@ -8706,6 +8732,7 @@ class AgentChatGateway:
                 if (
                     execution.workspace_id != workspace_id
                     or execution.repository_id != repository_id
+                    or (execution.session_id and str(execution.session_id) in fenced_sessions)
                 ):
                     continue
                 if lane_id is not None and execution.owning_lane != lane_id:
@@ -9501,6 +9528,9 @@ class AgentChatGateway:
                 or self._feature_integration_decision_provider(ask_service=ask_service)
             ),
             feature_integration_decision=options.get("feature_integration_decision"),
+            turn_id=context.turn_id,
+            user_message_id=context.user_message_id,
+            dispatch_source="entry_route",
         )
         wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
             self._lane_coordinator.taskboard,

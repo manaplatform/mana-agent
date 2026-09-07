@@ -738,6 +738,9 @@ def process_chat_turn(
     feature_integration_verification_executor: IntegrationVerificationExecutor | None = None,
     feature_integration_decision_provider: Callable[..., WiringDecision | dict[str, Any] | None] | None = None,
     feature_integration_decision: WiringDecision | dict[str, Any] | None = None,
+    turn_id: str = "",
+    user_message_id: str = "",
+    dispatch_source: str = "",
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1065,9 +1068,15 @@ def process_chat_turn(
     pending_prechecklist = session_state.get("pending_prechecklist")
     pending_source = str(session_state.get("pending_prechecklist_source") or "")
     pending_warning = str(session_state.get("pending_prechecklist_warning") or "")
+    resolved_turn_id = str(turn_id or feature_integration_trigger_turn_id or "")
     gateway_task_kwargs = (
-        {"gateway_task_id": gateway_task_id}
-        if gateway_task_id
+        {
+            "gateway_task_id": gateway_task_id,
+            "turn_id": resolved_turn_id,
+            "user_message_id": user_message_id,
+            "dispatch_source": dispatch_source or "process_chat_turn",
+        }
+        if (gateway_task_id or resolved_turn_id)
         and bool(getattr(coding_agent, "supports_gateway_task_identity", False))
         else {}
     )

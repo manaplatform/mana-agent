@@ -99,6 +99,31 @@ class CodexBadRequestError(CodexProtocolError):
         )
 
 
+class CodexThreadStateMissingError(CodexProtocolError):
+    """Raised when Codex returns -32600 indicating no rollout found for thread id."""
+
+    def __init__(
+        self,
+        message: str = "Codex thread state missing: no rollout found for thread id",
+        *,
+        provider: str = "",
+        model: str = "",
+        transport: str = "",
+        http_status: int | None = 404,
+        original_error: str | None = None,
+        error_code: str = "CODING_PROVIDER_THREAD_STATE_MISSING",
+    ) -> None:
+        super().__init__(
+            message,
+            provider=provider,
+            model=model,
+            transport=transport,
+            http_status=http_status,
+            original_error=original_error,
+            error_code=error_code,
+        )
+
+
 class CodexExecutionError(CodexError):
     pass
 
@@ -208,6 +233,7 @@ __all__ = [
     "CodexExecutionError",
     "CodexInterruptionError",
     "CodexProtocolError",
+    "CodexThreadStateMissingError",
     "CodexTimeoutError",
     "CodexToolProtocolError",
     "CodexUnavailableError",

@@ -134,6 +134,16 @@ def test_recovery_candidates_include_failed_task_from_another_session(
     assert candidates[0]["completion_contract"]
     assert candidates[0]["deadline_exceeded"] is False
 
+    # Fenced sessions (e.g. replaced by /new) must be excluded from recovery candidates
+    gateway._fenced_sessions = {"session-before-restart"}
+    fenced_candidates = gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-new",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    )
+    assert fenced_candidates == []
+
 
 def test_recovery_candidates_include_blocked_multi_task_root_without_inbox_wait(
     coordinator: LaneCoordinator,

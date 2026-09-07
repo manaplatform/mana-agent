@@ -1,6 +1,65 @@
 # Change Log
 
 All notable repository changes should be recorded here.
+## 2026-09-07
+
+- Fixed coding agent repository identity preservation across turn preparation and session deletion:
+  - Preserved pre-configured `repository_id` and `workspace_id` on `self._coding_agent` in `AgentChatGateway._prepare_coding_workspace`, preventing injected or specialized coding agent namespaces from being clobbered during turn workspace preparation.
+  - Enhanced `AgentChatGateway.delete_session` to purge durable Codex session state for stack repository namespace alongside coding agent repository namespace.
+  - User verification required: `pytest tests/gateway/test_codex_session_lifecycle.py tests/test_codex_runtime_lifecycle.py tests/gateway/test_lane_coordinator.py -v`.
+
+- Fixed Codex thread resume failure (-32600 no rollout found for thread id) on follow-up turns:
+  - Scoped durable Codex session homes to `repository_id + session_id` under `~/.mana/runtime/codex/sessions/<safe_slug>_<hash>`, ensuring rollouts persist across backend lifecycles and turns.
+  - Decoupled process and app-server lifecycle from durable rollout storage by setting `durable=True` on `CodexRuntimeContext`, preserving rollout data when closing backends and only purging files on explicit session deletion (`delete_session`).
+  - Removed per-turn and task-specific properties (`worktree_path`, `sandbox`) from `_session_backend_key` in `CodexCodingAgentShim`, preventing unnecessary backend destruction and recreation between turns in the same session.
+  - Added runtime process generation tracking to `AsyncCodexAppServer` and `CodexCodingBackend`, preventing loaded thread state in one process generation from being erroneously treated as loaded in a subsequent generation.
+  - Added atomic, durable, credential-free thread state persistence in `src/mana_agent/integrations/codex/session_store.py` (`save_codex_session_thread`, `load_codex_session_thread`, `clear_codex_session_thread`).
+  - Added typed `CodexThreadStateMissingError` (`CODING_PROVIDER_THREAD_STATE_MISSING`) when Codex returns JSON-RPC error `-32600` (`"no rollout found for thread id"`).
+  - Implemented graceful recovery for missing rollouts in `CodexCodingBackend`: invalidates the stale thread ID, emits an explicit recovery warning event, transparently starts a fresh thread via `thread/start`, and completes the turn without crashing the chat session or deleting history.
+  - Integrated `delete_session` in `AgentChatGateway` to clean up durable session state upon explicit session removal while maintaining `/new` reset semantics.
+  - Added regression test suite in `tests/test_codex_runtime_lifecycle.py` and `tests/gateway/test_codex_session_lifecycle.py` covering durable home reuse, multi-worktree turns, missing rollout recovery, process generation boundaries, credential safety, session switching, and explicit session deletion.
+  - User verification required: `pytest tests/test_codex_runtime_lifecycle.py tests/gateway/test_codex_session_lifecycle.py -v`.
+
+- Fixed cross-session recovery candidate resolution in `AgentChatGateway._recovery_candidates`:
+  - Replaced overly restrictive `session_id` exact-match check with `_fenced_sessions` exclusion in `_recovery_candidates` and chat turn recovery, allowing tasks from prior non-fenced sessions to be eligible for cross-session recovery, checkpoint resume, retry, and replan within the workspace and repository.
+  - Preserved `/new` conversation reset protection: sessions explicitly replaced via `start_new_conversation` or removed via `delete_session` are recorded in `_fenced_sessions` and their tasks remain strictly excluded from new session recovery candidates.
+  - Updated `tests/gateway/test_lane_coordinator.py` to verify both inclusion of failed tasks from prior non-fenced sessions and exclusion of tasks from fenced sessions.
+  - User verification required: `pytest tests/gateway/test_lane_coordinator.py tests/test_codex_tui_lifecycle.py -v`.
+
+- Fixed Codex app-server loaded thread tracking, runtime config sandbox mode, and gateway repository identity binding:
+  - Allowed `mark_thread_loaded` in `AsyncCodexAppServer` to record loaded thread IDs while relying on `is_thread_loaded` to evaluate running process state, ensuring thread residency is accurately reflected upon process start.
+  - Supplied `sandbox_mode="workspace-write"` to `CodexRuntimeConfigBuilder.build()` in regression test `test_codex_durable_session_home_never_contains_credentials`.
+  - Preserved explicit `repository_id` on `_coding_agent` in `AgentChatGateway._bind_runtime_session` when already set, ensuring durable thread state persistence and deletion target the correct repository namespace.
+  - User verification required: `pytest tests/gateway/test_codex_session_lifecycle.py tests/test_codex_runtime_lifecycle.py -v`.
+
+## 2026-09-06
+
+- Fixed Codex thread resume timeout on follow-up turns in active sessions:
+  - Preserved resident app-server and backend across turns within the same Mana session in `CodexCodingAgentShim` and `CodexCodingBackend`.
+  - Added loaded thread tracking (`is_thread_loaded`, `mark_thread_loaded`, `clear_loaded_threads`, `loaded_thread_id`) in `AsyncCodexAppServer` (`src/mana_agent/integrations/codex/client.py`) and `CodexCodingBackend` (`src/mana_agent/integrations/codex/backend.py`).
+  - Prevented redundant and blocking `thread/resume` calls when the resident backend/client is alive and already owns the active Codex thread, calling `turn/start` directly with the persisted thread ID.
+  - Restricted `thread/resume` execution strictly to session reconstruction after process loss, backend restart, or when the thread is not loaded in the active runtime.
+  - Implemented explicit recovery on genuine resume timeouts or connection failures in `CodexCodingBackend`: cleanly closed and recreated the unhealthy app-server, initialized it, and resumed the persisted thread once without blindly replaying on uncertain connections.
+  - Cleared stale notifications from prior completed turns via `clear_notifications` before admitting the next turn (prior to `turn/start`), and skipped notifications bearing stale turn IDs in the stream consumer, ensuring new turn notifications are never dropped.
+  - Preserved `/new` conversation reset: cleared thread ID and closed runtime to guarantee subsequent turns initialize a clean thread via `thread/start`.
+  - Updated `tests/test_codex_runtime_lifecycle.py` and `tests/gateway/test_codex_session_lifecycle.py` to verify turn 1 = `thread/start + turn/start`, turns 2/3 on live client = `turn/start` only, and recreated client = `thread/resume + turn/start`.
+  - Added regression test `test_codex_resident_session_bypasses_hanging_thread_resume` verifying that live resident turns complete cleanly without `CODING_PROVIDER_TIMEOUT` even when `thread/resume` hangs.
+  - Added test `test_codex_thread_resume_timeout_explicit_recovery` verifying explicit app-server recreation and single-resume recovery.
+  - User verification required: `pytest tests/test_codex_runtime_lifecycle.py tests/gateway/test_codex_session_lifecycle.py -v`.
+
+- Fixed Codex and TUI lifecycle synchronization, event delivery, and `/new` conversation reset:
+  - Made `ExecutionEventHub` the durable source of truth and fallback for TUI coding progress while preserving `coding_event_scope()` low-latency fast path.
+  - Subscribed active TUI session to general coding events on `ExecutionEventHub` (bridging safe `progress` and `terminal` events to `CodingActivityEvent -> ChatHistory -> ExecutionPanel`) while strictly filtering internal reasoning, assistant deltas, and model drafts.
+  - Added multi-layer event deduplication by original `event_id` across `ManaChatApp`, `ChatLog`, and `ExecutionPanel`, preventing duplicate rendering across scope and hub delivery.
+  - Maintained execution/task ID to frontend `turn_id` mapping so background and hub events route to the correct execution panel.
+  - Implemented durable event replay on session open/switch without duplicate rendering.
+  - Resolved double task execution on `/new` by atomically detaching prior session event listeners, clearing frontend turn mappings, and resetting coding agent session state.
+  - Fixed `_recovery_candidates` in `AgentChatGateway` to strictly filter by `session_id`, preventing cancelled or interrupted tasks of prior sessions from resurrecting in fresh sessions.
+  - Added thread-safe execution-level idempotency guard in `CodexCodingAgentShim` keyed by `(session_id, authoritative_id)` to reject duplicate dispatches while preserving internal retry lifecycles.
+  - Added early `_turn_in_progress` submission guard in `ManaChatApp` to prevent rapid concurrent submissions.
+  - Added structured diagnostic logging for Codex lifecycle transitions (`session_reset`, `dispatch_received`, `execution_started`, `execution_idempotent_reuse`, `attempt_started`, `attempt_completed`, `execution_completed`, `execution_failed`).
+  - Added comprehensive regression test suite in `tests/test_codex_tui_lifecycle.py` covering all 11 lifecycle scenarios.
+  - User verification required: `pytest tests/test_codex_tui_lifecycle.py -v`.
 
 ## 2026-09-05
 

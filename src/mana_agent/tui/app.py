@@ -45,6 +45,7 @@ import asyncio
 import getpass
 import json
 from pathlib import Path
+import threading
 from typing import Any
 
 from textual.app import App, ComposeResult
@@ -163,7 +164,12 @@ class ManaChatApp(App):
         self._transactional_modal_queue: list[str] = []
         self._transactional_modal_active = False
         self._unsubscribe_computer_permissions = None
+        self._unsubscribe_session_events = None
         self._unsubscribe_api_approval_events = None
+        self._delivered_coding_event_ids: set[str] = set()
+        self._execution_to_frontend_turn: dict[str, str] = {}
+        self._current_frontend_turn_id: str | None = None
+        self._ui_thread_id: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -199,16 +205,12 @@ class ManaChatApp(App):
                     [definition.canonical_name for definition in registry.definitions()]
                 )
             self.input.focus()
+        self._ui_thread_id = threading.get_ident()
         self._unsubscribe_computer_permissions = self.history.subscribe(
             self._handle_computer_permission_event
         )
         if self._gateway_session_id:
-            from mana_agent.services.execution_event_hub import get_execution_event_hub
-
-            self._unsubscribe_api_approval_events = get_execution_event_hub().subscribe(
-                self._gateway_session_id,
-                self._handle_api_approval_event,
-            )
+            self._subscribe_session_events(self._gateway_session_id)
 
         # Safe immediate footer (avoids any early watcher issues)
         self.sub_title = "Ready"
@@ -301,21 +303,169 @@ class ManaChatApp(App):
             transactional=bool(metadata.get("transactional_action_approval")),
         ))
 
-    def _handle_api_approval_event(self, event: dict[str, Any]) -> None:
-        """Bridge a preview-time API approval to the active TUI modal immediately."""
-        if str(event.get("type") or event.get("event_type") or "") != "api.waiting_approval":
+    def _subscribe_session_events(self, session_id: str) -> None:
+        """Subscribe the active TUI session to general execution events from ExecutionEventHub."""
+        if self._unsubscribe_session_events is not None:
+            try:
+                self._unsubscribe_session_events()
+            except Exception:
+                pass
+            self._unsubscribe_session_events = None
+        self._unsubscribe_api_approval_events = None
+
+        sid = str(session_id or "").strip()
+        if not sid:
             return
-        if str(event.get("conversation_id") or "") != str(self._gateway_session_id or ""):
+
+        try:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            unsub = get_execution_event_hub().subscribe(
+                sid,
+                self._handle_hub_session_event,
+            )
+            self._unsubscribe_session_events = unsub
+            self._unsubscribe_api_approval_events = unsub
+        except Exception:
+            logger.debug("Failed to subscribe to ExecutionEventHub for session %s", sid, exc_info=True)
+
+    def _handle_hub_session_event(self, event: dict[str, Any]) -> None:
+        """Handle execution events from ExecutionEventHub as durable fallback and source of truth."""
+        sid = str(event.get("conversation_id") or "")
+        if sid and sid != str(self._gateway_session_id or ""):
             return
-        self.history.add(CodingActivityEvent(
-            activity={
+
+        event_type = str(event.get("type") or event.get("event_type") or "").strip()
+        event_id = str(event.get("event_id") or event.get("id") or "").strip()
+
+        # Handle API approval modal trigger
+        if event_type == "api.waiting_approval":
+            if event_id:
+                if event_id in self._delivered_coding_event_ids:
+                    return
+                self._delivered_coding_event_ids.add(event_id)
+            execution_id = str(event.get("execution_id") or "")
+            target_turn_id = (
+                self._execution_to_frontend_turn.get(execution_id)
+                or self._current_frontend_turn_id
+                or execution_id
+            )
+            act = {
+                "event_id": event_id,
                 "event_type": "api.waiting_approval",
                 "title": str(event.get("title") or "API request approval required"),
                 "status": str(event.get("status") or "running"),
                 "metadata": dict(event.get("metadata") or {}),
-            },
-            turn_id=str(event.get("execution_id") or ""),
-        ))
+            }
+            self._safe_post_activity(act, target_turn_id)
+            return
+
+        # Deduplicate scope + hub delivery using original event_id
+        if event_id and event_id in self._delivered_coding_event_ids:
+            return
+
+        from mana_agent.coding.event_visibility import (
+            classify_coding_event,
+            is_user_publishable,
+            progress_event_payload,
+        )
+
+        metadata = dict(event.get("metadata") or {})
+        tool_name = str(event.get("tool_name") or metadata.get("tool_name") or "")
+        semantic_kind, visibility = classify_coding_event(event_type, tool_name=tool_name)
+        if not is_user_publishable(visibility):
+            # Internal reasoning, raw assistant generation / deltas, and provider internals remain hidden!
+            return
+
+        if event_id:
+            self._delivered_coding_event_ids.add(event_id)
+
+        execution_id = str(event.get("execution_id") or event.get("task_id") or "")
+        target_turn_id = (
+            self._execution_to_frontend_turn.get(execution_id)
+            or self._current_frontend_turn_id
+            or execution_id
+        )
+
+        safe = progress_event_payload(event)
+        if event_id and not safe.get("event_id"):
+            safe["event_id"] = event_id
+
+        self._safe_post_activity(safe, target_turn_id)
+
+    def _handle_api_approval_event(self, event: dict[str, Any]) -> None:
+        """Backward-compatible hook delegating to _handle_hub_session_event."""
+        self._handle_hub_session_event(event)
+
+    def _safe_post_activity(self, activity: dict[str, Any], turn_id: str) -> None:
+        def _post() -> None:
+            self.history.add(CodingActivityEvent(activity=activity, turn_id=turn_id))
+
+        if hasattr(self, "call_from_thread") and threading.get_ident() != getattr(self, "_ui_thread_id", None):
+            try:
+                self.call_from_thread(_post)
+            except Exception:
+                _post()
+        else:
+            _post()
+
+    def _handle_session_replacement(self, new_session_id: str, *, clear_view: bool = True) -> str:
+        """Atomically detach previous chat/session, reset state, and attach fresh session."""
+        if self._unsubscribe_session_events is not None:
+            try:
+                self._unsubscribe_session_events()
+            except Exception:
+                pass
+            self._unsubscribe_session_events = None
+        self._unsubscribe_api_approval_events = None
+
+        self._execution_to_frontend_turn.clear()
+        self._delivered_coding_event_ids.clear()
+        self._current_frontend_turn_id = None
+        self._computer_permission_requests_shown.clear()
+        self._transactional_modal_queue.clear()
+        self._transactional_modal_active = False
+        self.active_flow_id = None
+        self._tool_cid_map.clear()
+
+        if clear_view:
+            self._clear_conversation_view()
+
+        self._gateway_session_id = new_session_id
+        self._subscribe_session_events(new_session_id)
+        self._replay_durable_session_events(new_session_id)
+        return new_session_id
+
+    def _replay_durable_session_events(self, session_id: str) -> None:
+        """Replay durable execution events from ExecutionEventHub when switching/reopening session."""
+        if not session_id:
+            return
+        try:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+            from mana_agent.coding.event_visibility import classify_coding_event, is_user_publishable, progress_event_payload
+
+            hub = get_execution_event_hub()
+            events = hub.history(conversation_id=session_id, limit=500)
+            for ev in events:
+                event_type = str(ev.get("type") or ev.get("event_type") or "").strip()
+                event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
+                if event_id and event_id in self._delivered_coding_event_ids:
+                    continue
+                metadata = dict(ev.get("metadata") or {})
+                tool_name = str(ev.get("tool_name") or metadata.get("tool_name") or "")
+                semantic_kind, visibility = classify_coding_event(event_type, tool_name=tool_name)
+                if not is_user_publishable(visibility):
+                    continue
+                if event_id:
+                    self._delivered_coding_event_ids.add(event_id)
+                execution_id = str(ev.get("execution_id") or ev.get("task_id") or "")
+                target_turn_id = self._execution_to_frontend_turn.get(execution_id) or execution_id
+                safe = progress_event_payload(ev)
+                if event_id and not safe.get("event_id"):
+                    safe["event_id"] = event_id
+                self._safe_post_activity(safe, target_turn_id)
+        except Exception:
+            logger.debug("Failed to replay durable events for session %s", session_id, exc_info=True)
 
     def _queue_outstanding_transactional_approvals(self) -> None:
         if self.gateway is None:
@@ -641,10 +791,11 @@ class ManaChatApp(App):
         if not text.strip():
             return
 
+        if self._turn_in_progress:
+            self.notify("Wait for the current turn to finish before sending another message or command.", severity="warning")
+            return
+
         if text == "/models" or text.startswith("/models "):
-            if self._turn_in_progress:
-                self.notify("Wait for the current turn to finish before changing models.", severity="warning")
-                return
             if text == "/models":
                 from mana_agent.tui.model_management import ModelManagementScreen
 
@@ -675,8 +826,7 @@ class ManaChatApp(App):
             if result is not None:
                 new_session_id = str(result.data.get("session_id") or "")
                 if new_session_id:
-                    self._gateway_session_id = new_session_id
-                    self.active_flow_id = None
+                    self._handle_session_replacement(new_session_id, clear_view=False)
                 for event in result.events:
                     if event.get("type") == "timeline.replace":
                         self._replace_timeline(event.get("messages") or [])
@@ -695,13 +845,7 @@ class ManaChatApp(App):
                 self.update_status("Ready")
                 return
 
-        if text == "/new":
-            if self._turn_in_progress:
-                self.notify("Wait for the current turn to finish before starting a new conversation.", severity="warning")
-                return
-            if self.gateway is None or not hasattr(self.gateway, "start_new_conversation"):
-                self.history.add(AssistantMessageEvent(content="A gateway session is required to start a new conversation."))
-                return
+        if text.strip() == "/new" and self.gateway is not None and hasattr(self.gateway, "start_new_conversation"):
             if not self._gateway_session_id:
                 self._gateway_session_id = self.gateway.create_session(frontend="tui")
             self._start_new_conversation()
@@ -735,12 +879,10 @@ class ManaChatApp(App):
             raise RuntimeError("A gateway session is required to start a new conversation.")
         if not self._gateway_session_id:
             self._gateway_session_id = self.gateway.create_session(frontend="tui")
-        self._gateway_session_id = self.gateway.start_new_conversation(
+        new_sid = self.gateway.start_new_conversation(
             self._gateway_session_id, frontend="tui"
         )
-        self.active_flow_id = None
-        self._clear_conversation_view()
-        return self._gateway_session_id
+        return self._handle_session_replacement(new_sid, clear_view=True)
 
     def _replace_timeline(self, messages: list[dict[str, Any]]) -> None:
         """Replace visible state from canonical chronological durable messages."""
@@ -781,9 +923,9 @@ class ManaChatApp(App):
             return
         replacement_id = str(result.data.get("session_id") or "")
         if replacement_id:
-            self._gateway_session_id = replacement_id
+            self._handle_session_replacement(replacement_id, clear_view=False)
         elif action.action == "switch":
-            self._gateway_session_id = action.session_id
+            self._handle_session_replacement(action.session_id, clear_view=False)
         for event in result.events:
             if event.get("type") == "timeline.replace":
                 self._replace_timeline(event.get("messages") or [])
@@ -818,8 +960,10 @@ class ManaChatApp(App):
 
     async def _handle_real_turn_guarded(self, user_event: UserMessageEvent) -> None:
         try:
+            self._current_frontend_turn_id = user_event.turn_id
             await self._handle_real_turn(user_event)
         finally:
+            self._current_frontend_turn_id = None
             self._turn_in_progress = False
 
     def _apply_model_selection(self, selection: Any) -> None:
@@ -1043,6 +1187,14 @@ class ManaChatApp(App):
 
         def _on_coding_event(event: Any) -> None:
             payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else dict(event)
+            event_id = str(payload.get("event_id") or payload.get("id") or "").strip()
+            if event_id:
+                if event_id in self._delivered_coding_event_ids:
+                    return
+                self._delivered_coding_event_ids.add(event_id)
+            task_id = str(payload.get("task_id") or payload.get("execution_id") or "").strip()
+            if task_id:
+                self._execution_to_frontend_turn[task_id] = turn_id
             # The frontend turn is authoritative for presentation. Provider turn
             # IDs remain available inside the normalized activity payload.
             self.history.add(CodingActivityEvent(activity=payload, turn_id=turn_id))
@@ -1118,6 +1270,8 @@ class ManaChatApp(App):
                             index_dir=self.index_dir,
                             index_dirs=self.index_dirs,
                             callbacks=ask_callbacks or None,
+                            turn_id=turn_id,
+                            user_message_id=user_event.event_id,
                         )
 
                     tools_before = self._count_tool_events_for_turn(turn_id)
@@ -1682,9 +1836,10 @@ class ManaChatApp(App):
         if self._unsubscribe_computer_permissions is not None:
             self._unsubscribe_computer_permissions()
             self._unsubscribe_computer_permissions = None
-        if self._unsubscribe_api_approval_events is not None:
-            self._unsubscribe_api_approval_events()
-            self._unsubscribe_api_approval_events = None
+        if self._unsubscribe_session_events is not None:
+            self._unsubscribe_session_events()
+            self._unsubscribe_session_events = None
+        self._unsubscribe_api_approval_events = None
         if self.gateway is not None and hasattr(self.gateway, "request_shutdown"):
             self.gateway.request_shutdown(source="tui_quit", session_id=self._gateway_session_id)
         elif self.gateway is not None and hasattr(self.gateway, "close_session"):

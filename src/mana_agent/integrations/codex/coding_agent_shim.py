@@ -29,6 +29,11 @@ from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.client import CodexCancellationOutcome
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.exceptions import CodexCapabilityError
+from mana_agent.integrations.codex.runtime_environment import cleanup_codex_session_home
+from mana_agent.integrations.codex.session_store import (
+    clear_codex_session_thread,
+    load_codex_session_thread,
+)
 from mana_agent.integrations.codex.terminal_summary import (
     build_coding_terminal_answer,
     terminal_reason_from_result,
@@ -130,10 +135,22 @@ class CodexCodingAgentShim:
         ).expanduser().resolve()
         self.codex_settings = codex_settings
         self.repository_id = str(repository_id or "").strip() or None
-        self.session_id = str(session_id or "").strip()
+        if not self.repository_id:
+            try:
+                from mana_agent.workspaces.paths import repository_id_for_path
+
+                self.repository_id = repository_id_for_path(self.repo_root)
+            except Exception:
+                pass
+        self._session_id = str(session_id or "").strip()
+        persisted_th = (
+            load_codex_session_thread(self.repository_id or "", self._session_id)
+            if self._session_id
+            else ""
+        )
         self.event_sink = event_sink
         self.workspace_task_id = str(workspace_task_id or "").strip()
-        self.resume_thread_id = str(resume_thread_id or "").strip()
+        self.resume_thread_id = str(resume_thread_id or "").strip() or persisted_th
         self.workspace_id = str(workspace_id or "").strip()
         self.context_cost_governor = context_cost_governor
         if routing_authority is None:
@@ -144,6 +161,8 @@ class CodexCodingAgentShim:
         self._backend_factory = backend_factory or (
             lambda: CodexCodingBackend(
                 self.codex_settings,
+                session_id=self.session_id,
+                repository_id=self.repository_id or "",
                 resume_thread_id=self.resume_thread_id,
                 context_cost_governor=self.context_cost_governor,
             )
@@ -161,6 +180,32 @@ class CodexCodingAgentShim:
         self._flow_results: dict[str, dict[str, Any]] = {}
         self._active_flow_id: str | None = None
         self._active_backend: tuple[str, Any] | None = None
+        self._execution_lock = threading.RLock()
+        self._active_executions: dict[tuple[str, str], tuple[threading.Event, list[Any]]] = {}
+        self._completed_executions: dict[tuple[str, str], dict[str, Any]] = {}
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        new_sid = str(value or "").strip()
+        if new_sid != self._session_id:
+            self.cancel()
+            self._session_id = new_sid
+            self.resume_thread_id = (
+                load_codex_session_thread(self.repository_id or "", self._session_id)
+                if self._session_id
+                else ""
+            )
+            if self._session_backend is not None:
+                try:
+                    self._runner.run(self._session_backend.close(), timeout=2.0)
+                except Exception:
+                    pass
+                self._session_backend = None
+                self._session_backend_key = None
 
     def cancel(self, task_id: str | None = None) -> bool:
         """Propagate bounded cancellation to the active Codex backend/turn if in flight."""
@@ -198,10 +243,20 @@ class CodexCodingAgentShim:
     def reset_session(self, session_id: str = "") -> None:
         """Explicitly reset session state, cancel active backend, and reset thread/flow IDs."""
         self.cancel()
-        self.session_id = str(session_id or "").strip()
-        self.resume_thread_id = ""
+        prev_session_id = self._session_id
+        self._session_id = str(session_id or "").strip()
+        self.resume_thread_id = (
+            load_codex_session_thread(self.repository_id or "", self._session_id)
+            if self._session_id
+            else ""
+        )
         self._active_flow_id = None
         self._flow_results.clear()
+        with self._execution_lock:
+            if prev_session_id:
+                keys_to_remove = [k for k in self._completed_executions if k[0] == prev_session_id]
+                for k in keys_to_remove:
+                    self._completed_executions.pop(k, None)
         if self._session_backend is not None:
             try:
                 self._runner.run(self._session_backend.close(), timeout=2.0)
@@ -209,6 +264,23 @@ class CodexCodingAgentShim:
                 pass
             self._session_backend = None
             self._session_backend_key = None
+        logger.info(
+            "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+            self.session_id or prev_session_id,
+            "",
+            "",
+            "reset_session",
+            "session_reset",
+        )
+
+    def delete_session(self, session_id: str = "") -> None:
+        """Explicitly delete durable session state for a deleted session."""
+        target_session_id = str(session_id or self.session_id).strip()
+        if target_session_id:
+            if target_session_id == self.session_id:
+                self.reset_session()
+            cleanup_codex_session_home(self.repository_id or "", target_session_id)
+            clear_codex_session_thread(self.repository_id or "", target_session_id)
 
     def close(self) -> None:
         """Close the coding agent shim, active backend, and runtime executor."""
@@ -241,6 +313,9 @@ class CodexCodingAgentShim:
             requires_repository_write=requires_write,
             flow_id=kwargs.get("flow_id"),
             gateway_task_id=kwargs.get("gateway_task_id"),
+            turn_id=kwargs.get("turn_id"),
+            user_message_id=kwargs.get("user_message_id"),
+            dispatch_source=kwargs.get("dispatch_source") or "generate",
         )
 
     def generate_dir_mode(self, request: str, **kwargs: Any) -> dict[str, Any]:
@@ -253,6 +328,9 @@ class CodexCodingAgentShim:
             requires_repository_write=mode not in {"plan", "plan_only"},
             flow_id=kwargs.get("flow_id"),
             gateway_task_id=kwargs.get("gateway_task_id"),
+            turn_id=kwargs.get("turn_id"),
+            user_message_id=kwargs.get("user_message_id"),
+            dispatch_source=kwargs.get("dispatch_source") or "generate_auto_execute",
         )
 
     def flow_summary(self, flow_id: str | None = None) -> dict[str, Any] | None:
@@ -318,6 +396,9 @@ class CodexCodingAgentShim:
         requires_repository_write: bool,
         flow_id: Any = None,
         gateway_task_id: Any = None,
+        turn_id: Any = None,
+        user_message_id: Any = None,
+        dispatch_source: str = "",
         _mutation_recovery: bool = False,
     ) -> dict[str, Any]:
         """Run a coding turn with bounded mutation recovery (explicit attempt loop).
@@ -330,71 +411,188 @@ class CodexCodingAgentShim:
             raise ValueError("Codex coding request is required")
         validate_prepared_repository(self.repo_root, self.working_directory)
 
-        original_goal = goal
-        # When called as recovery from the attempt loop, goal already includes
-        # recovery instructions; track the user-facing original separately only
-        # on the public entry path (_mutation_recovery=False).
-        prior_terminal = ""
-        combined_warnings: list[str] = []
-        last_payload: dict[str, Any] | None = None
-
-        max_attempts = (
-            1
-            if _mutation_recovery or not requires_repository_write
-            else self._MAX_MUTATION_ATTEMPTS
+        auth_key = str(gateway_task_id or turn_id or user_message_id or "").strip()
+        effective_source = dispatch_source or ("mutation_recovery" if _mutation_recovery else "execute_turn")
+        logger.info(
+            "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+            self.session_id,
+            str(turn_id or ""),
+            auth_key or str(gateway_task_id or ""),
+            effective_source,
+            "dispatch_received",
         )
 
-        for attempt_index in range(max_attempts):
-            is_recovery = attempt_index > 0 or _mutation_recovery
-            attempt_goal = goal
-            if attempt_index > 0:
-                attempt_goal = self._mutation_recovery_goal(
-                    original_goal if not _mutation_recovery else goal.split("\n\n[mutation_required recovery]")[0],
-                    prior_terminal,
-                )
-                record_current(
-                    "codex.mutation_recovery.started",
-                    {
-                        "attempt": attempt_index + 1,
-                        "prior_terminal_reason": prior_terminal,
-                    },
-                )
+        exec_key = (self.session_id, auth_key) if (self.session_id and auth_key and not _mutation_recovery) else None
+        completion_event: threading.Event | None = None
+        result_container: list[Any] | None = None
 
-            payload = self._run_single_attempt(
-                attempt_goal,
-                requires_repository_write=requires_repository_write,
-                flow_id=None if is_recovery else flow_id,
-                gateway_task_id=gateway_task_id,
-                is_recovery=is_recovery,
+        if exec_key is not None:
+            wait_for_active = False
+            wait_event = None
+            wait_container = None
+            with self._execution_lock:
+                if exec_key in self._completed_executions:
+                    logger.info(
+                        "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+                        self.session_id,
+                        str(turn_id or ""),
+                        auth_key,
+                        effective_source,
+                        "execution_idempotent_reuse",
+                    )
+                    return dict(self._completed_executions[exec_key])
+                if exec_key in self._active_executions:
+                    logger.info(
+                        "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+                        self.session_id,
+                        str(turn_id or ""),
+                        auth_key,
+                        effective_source,
+                        "execution_idempotent_reuse",
+                    )
+                    wait_for_active = True
+                    wait_event, wait_container = self._active_executions[exec_key]
+                else:
+                    completion_event = threading.Event()
+                    result_container = []
+                    self._active_executions[exec_key] = (completion_event, result_container)
+
+            if wait_for_active and wait_event is not None:
+                wait_event.wait(timeout=600.0)
+                with self._execution_lock:
+                    if wait_container and isinstance(wait_container[0], Exception):
+                        raise wait_container[0]
+                    if wait_container:
+                        return dict(wait_container[0])
+                    if exec_key in self._completed_executions:
+                        return dict(self._completed_executions[exec_key])
+
+        try:
+            logger.info(
+                "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+                self.session_id,
+                str(turn_id or ""),
+                auth_key or str(gateway_task_id or ""),
+                effective_source,
+                "execution_started",
             )
-            last_payload = payload
-            combined_warnings.extend(str(w) for w in (payload.get("warnings") or []) if str(w).strip())
-            terminal = str(payload.get("auto_execute_terminal_reason") or "").strip()
-            if not requires_repository_write:
-                break
-            if terminal not in self._MUTATION_FAILURE_REASONS:
-                break
-            if attempt_index + 1 >= max_attempts:
-                break
-            prior_terminal = terminal
-            if is_recovery or attempt_index > 0:
-                # Already consumed recovery budget.
-                break
 
-        assert last_payload is not None
-        if prior_terminal:
-            last_payload = dict(last_payload)
-            last_payload["mutation_recovery"] = True
-            last_payload["prior_terminal_reason"] = prior_terminal
-            last_payload["warnings"] = [
-                *combined_warnings,
-                f"mutation_recovery_after:{prior_terminal}",
-            ]
-        else:
-            last_payload = dict(last_payload)
-            if combined_warnings:
-                last_payload["warnings"] = list(dict.fromkeys(combined_warnings))
-        return last_payload
+            original_goal = goal
+            # When called as recovery from the attempt loop, goal already includes
+            # recovery instructions; track the user-facing original separately only
+            # on the public entry path (_mutation_recovery=False).
+            prior_terminal = ""
+            combined_warnings: list[str] = []
+            last_payload: dict[str, Any] | None = None
+
+            max_attempts = (
+                1
+                if _mutation_recovery or not requires_repository_write
+                else self._MAX_MUTATION_ATTEMPTS
+            )
+
+            for attempt_index in range(max_attempts):
+                is_recovery = attempt_index > 0 or _mutation_recovery
+                attempt_goal = goal
+                if attempt_index > 0:
+                    attempt_goal = self._mutation_recovery_goal(
+                        original_goal if not _mutation_recovery else goal.split("\n\n[mutation_required recovery]")[0],
+                        prior_terminal,
+                    )
+                    record_current(
+                        "codex.mutation_recovery.started",
+                        {
+                            "attempt": attempt_index + 1,
+                            "prior_terminal_reason": prior_terminal,
+                        },
+                    )
+
+                logger.info(
+                    "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+                    self.session_id,
+                    str(turn_id or ""),
+                    auth_key or str(gateway_task_id or ""),
+                    effective_source,
+                    f"attempt_started:{attempt_index + 1}",
+                )
+
+                payload = self._run_single_attempt(
+                    attempt_goal,
+                    requires_repository_write=requires_repository_write,
+                    flow_id=None if is_recovery else flow_id,
+                    gateway_task_id=gateway_task_id,
+                    turn_id=turn_id,
+                    is_recovery=is_recovery,
+                )
+                last_payload = payload
+                combined_warnings.extend(str(w) for w in (payload.get("warnings") or []) if str(w).strip())
+                terminal = str(payload.get("auto_execute_terminal_reason") or "").strip()
+
+                logger.info(
+                    "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+                    self.session_id,
+                    str(turn_id or ""),
+                    auth_key or str(gateway_task_id or ""),
+                    effective_source,
+                    f"attempt_completed:{attempt_index + 1}",
+                )
+
+                if not requires_repository_write:
+                    break
+                if terminal not in self._MUTATION_FAILURE_REASONS:
+                    break
+                if attempt_index + 1 >= max_attempts:
+                    break
+                prior_terminal = terminal
+                if is_recovery or attempt_index > 0:
+                    # Already consumed recovery budget.
+                    break
+
+            assert last_payload is not None
+            if prior_terminal:
+                last_payload = dict(last_payload)
+                last_payload["mutation_recovery"] = True
+                last_payload["prior_terminal_reason"] = prior_terminal
+                last_payload["warnings"] = [
+                    *combined_warnings,
+                    f"mutation_recovery_after:{prior_terminal}",
+                ]
+            else:
+                last_payload = dict(last_payload)
+                if combined_warnings:
+                    last_payload["warnings"] = list(dict.fromkeys(combined_warnings))
+
+            logger.info(
+                "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+                self.session_id,
+                str(turn_id or ""),
+                auth_key or str(gateway_task_id or ""),
+                effective_source,
+                "execution_completed",
+            )
+            if exec_key is not None and result_container is not None:
+                with self._execution_lock:
+                    result_container.append(dict(last_payload))
+                    self._completed_executions[exec_key] = dict(last_payload)
+            return last_payload
+        except Exception as exc:
+            logger.info(
+                "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
+                self.session_id,
+                str(turn_id or ""),
+                auth_key or str(gateway_task_id or ""),
+                effective_source,
+                f"execution_failed:{type(exc).__name__}",
+            )
+            if exec_key is not None and result_container is not None:
+                with self._execution_lock:
+                    result_container.append(exc)
+            raise
+        finally:
+            if exec_key is not None and completion_event is not None:
+                with self._execution_lock:
+                    self._active_executions.pop(exec_key, None)
+                    completion_event.set()
 
     def _mutation_recovery_goal(self, goal: str, terminal: str) -> str:
         return (
@@ -421,6 +619,7 @@ class CodexCodingAgentShim:
         requires_repository_write: bool,
         flow_id: Any = None,
         gateway_task_id: Any = None,
+        turn_id: Any = None,
         is_recovery: bool = False,
     ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
@@ -428,7 +627,7 @@ class CodexCodingAgentShim:
         # context-cost admission, transactional ownership, live events, and
         # lane completion must all refer to the registered gateway task.
         task_id = (
-            str(gateway_task_id or "").strip()
+            str(gateway_task_id or turn_id or "").strip()
             or f"codex_task_{uuid.uuid4().hex[:16]}"
         )
         routing_budgets = routing_budgets_from_settings(self.routing_authority.settings)
@@ -610,11 +809,10 @@ class CodexCodingAgentShim:
 
         events: list[AgentEvent] = []
         backend_key = (
+            str(self.session_id or ""),
             str(self.codex_settings.model or ""),
             str(self.codex_settings.provider or ""),
             str(self.codex_settings.approval_policy or ""),
-            str(workspace.sandbox),
-            str(workspace.worktree_path),
         )
         backend_client = getattr(self._session_backend, "_client", None)
         client_running = getattr(backend_client, "running", True) if backend_client is not None else True
@@ -626,6 +824,10 @@ class CodexCodingAgentShim:
             backend = self._session_backend
             if hasattr(backend, "resume_thread_id"):
                 backend.resume_thread_id = self.resume_thread_id
+            if hasattr(backend, "session_id"):
+                backend.session_id = self.session_id
+            if hasattr(backend, "repository_id"):
+                backend.repository_id = self.repository_id or ""
         else:
             if self._session_backend is not None:
                 try:
@@ -634,6 +836,10 @@ class CodexCodingAgentShim:
                     pass
             backend = self._backend_factory()
             backend.resume_thread_id = self.resume_thread_id
+            if hasattr(backend, "session_id"):
+                backend.session_id = self.session_id
+            if hasattr(backend, "repository_id"):
+                backend.repository_id = self.repository_id or ""
             self._session_backend = backend
             self._session_backend_key = backend_key
 
