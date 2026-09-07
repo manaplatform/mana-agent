@@ -33,11 +33,15 @@ _REMOVED_ENVIRONMENT_KEYS = {
 }
 
 
+import hashlib
+import re
+
 @dataclass(slots=True)
 class CodexRuntimeContext:
     config: CodexRuntimeConfig
     home: Path
     environment: dict[str, str] = field(repr=False)
+    durable: bool = False
     _closed: bool = False
 
     def close(self) -> None:
@@ -49,7 +53,8 @@ class CodexRuntimeContext:
                 bridge.release()
             except Exception:
                 pass
-        shutil.rmtree(self.home, ignore_errors=True)
+        if not self.durable:
+            shutil.rmtree(self.home, ignore_errors=True)
         self._closed = True
 
     def __enter__(self) -> "CodexRuntimeContext":
@@ -59,13 +64,51 @@ class CodexRuntimeContext:
         self.close()
 
 
+def get_session_state_hash(repository_id: str, session_id: str) -> str:
+    """Return a safe non-secret hash identifier for a repository/session pair."""
+    token = f"{str(repository_id or '').strip()}:{str(session_id or '').strip()}".encode("utf-8")
+    return hashlib.sha256(token).hexdigest()[:16]
+
+
+def get_codex_session_home(repository_id: str, session_id: str) -> Path:
+    """Return a stable, durable directory for Codex session state."""
+    repo_clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(repository_id or "").strip()).strip("_")[:32]
+    sess_clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(session_id or "").strip()).strip("_")[:32]
+    state_hash = get_session_state_hash(repository_id, session_id)
+    folder_name = f"{repo_clean}_{sess_clean}_{state_hash}" if (repo_clean or sess_clean) else state_hash
+    session_home = mana_home() / "runtime" / "codex" / "sessions" / folder_name
+    session_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return session_home
+
+
+def cleanup_codex_session_home(repository_id: str, session_id: str) -> None:
+    """Explicitly remove a session's durable Codex home directory."""
+    repo_clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(repository_id or "").strip()).strip("_")[:32]
+    sess_clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(session_id or "").strip()).strip("_")[:32]
+    state_hash = get_session_state_hash(repository_id, session_id)
+    folder_name = f"{repo_clean}_{sess_clean}_{state_hash}" if (repo_clean or sess_clean) else state_hash
+    session_home = mana_home() / "runtime" / "codex" / "sessions" / folder_name
+    if session_home.exists():
+        shutil.rmtree(session_home, ignore_errors=True)
+
+
 class CodexRuntimeEnvironment:
     @staticmethod
-    def create(config: CodexRuntimeConfig) -> CodexRuntimeContext:
-        root = mana_home() / "runtime" / "codex"
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        home = Path(tempfile.mkdtemp(prefix="run-", dir=root))
-        home.chmod(0o700)
+    def create(
+        config: CodexRuntimeConfig,
+        *,
+        home: Path | None = None,
+        durable: bool = False,
+    ) -> CodexRuntimeContext:
+        is_durable = durable or (home is not None)
+        if home is None:
+            root = mana_home() / "runtime" / "codex"
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            home_dir = Path(tempfile.mkdtemp(prefix="run-", dir=root))
+        else:
+            home_dir = Path(home).expanduser().resolve()
+            home_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        home_dir.chmod(0o700)
         # Keep the secret only in the child environment. The on-disk config is
         # rendered from non-secret fields so credentials are never written in clear text.
         api_key = config.api_key
@@ -79,25 +122,32 @@ class CodexRuntimeEnvironment:
                 raise CodexConfigurationError(
                     "Refusing to write Codex configuration that contains credential material."
                 )
-            config_path = home / "config.toml"
+            config_path = home_dir / "config.toml"
             config_path.write_text(rendered, encoding="utf-8")
             config_path.chmod(0o600)
         except (OSError, tomllib.TOMLDecodeError) as exc:
-            shutil.rmtree(home, ignore_errors=True)
+            if not is_durable:
+                shutil.rmtree(home_dir, ignore_errors=True)
             raise CodexConfigurationError(
                 "Unable to create valid isolated Codex configuration."
             ) from exc
         except CodexConfigurationError:
-            shutil.rmtree(home, ignore_errors=True)
+            if not is_durable:
+                shutil.rmtree(home_dir, ignore_errors=True)
             raise
         environment = {
             key: value
             for key, value in os.environ.copy().items()
             if key not in _REMOVED_ENVIRONMENT_KEYS
         }
-        environment["CODEX_HOME"] = str(home)
+        environment["CODEX_HOME"] = str(home_dir)
         environment[RUNTIME_API_KEY_ENV] = api_key
-        return CodexRuntimeContext(config=config, home=home, environment=environment)
+        return CodexRuntimeContext(
+            config=config,
+            home=home_dir,
+            environment=environment,
+            durable=is_durable,
+        )
 
 
 @contextmanager
@@ -121,5 +171,8 @@ def isolated_codex_probe_environment() -> Iterator[dict[str, str]]:
 __all__ = [
     "CodexRuntimeContext",
     "CodexRuntimeEnvironment",
+    "cleanup_codex_session_home",
+    "get_codex_session_home",
+    "get_session_state_hash",
     "isolated_codex_probe_environment",
 ]

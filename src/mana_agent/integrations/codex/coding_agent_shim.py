@@ -29,6 +29,11 @@ from mana_agent.integrations.codex.backend import CodexCodingBackend
 from mana_agent.integrations.codex.client import CodexCancellationOutcome
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.exceptions import CodexCapabilityError
+from mana_agent.integrations.codex.runtime_environment import cleanup_codex_session_home
+from mana_agent.integrations.codex.session_store import (
+    clear_codex_session_thread,
+    load_codex_session_thread,
+)
 from mana_agent.integrations.codex.terminal_summary import (
     build_coding_terminal_answer,
     terminal_reason_from_result,
@@ -137,10 +142,15 @@ class CodexCodingAgentShim:
                 self.repository_id = repository_id_for_path(self.repo_root)
             except Exception:
                 pass
-        self.session_id = str(session_id or "").strip()
+        self._session_id = str(session_id or "").strip()
+        persisted_th = (
+            load_codex_session_thread(self.repository_id or "", self._session_id)
+            if self._session_id
+            else ""
+        )
         self.event_sink = event_sink
         self.workspace_task_id = str(workspace_task_id or "").strip()
-        self.resume_thread_id = str(resume_thread_id or "").strip()
+        self.resume_thread_id = str(resume_thread_id or "").strip() or persisted_th
         self.workspace_id = str(workspace_id or "").strip()
         self.context_cost_governor = context_cost_governor
         if routing_authority is None:
@@ -151,6 +161,8 @@ class CodexCodingAgentShim:
         self._backend_factory = backend_factory or (
             lambda: CodexCodingBackend(
                 self.codex_settings,
+                session_id=self.session_id,
+                repository_id=self.repository_id or "",
                 resume_thread_id=self.resume_thread_id,
                 context_cost_governor=self.context_cost_governor,
             )
@@ -171,6 +183,29 @@ class CodexCodingAgentShim:
         self._execution_lock = threading.RLock()
         self._active_executions: dict[tuple[str, str], tuple[threading.Event, list[Any]]] = {}
         self._completed_executions: dict[tuple[str, str], dict[str, Any]] = {}
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        new_sid = str(value or "").strip()
+        if new_sid != self._session_id:
+            self.cancel()
+            self._session_id = new_sid
+            self.resume_thread_id = (
+                load_codex_session_thread(self.repository_id or "", self._session_id)
+                if self._session_id
+                else ""
+            )
+            if self._session_backend is not None:
+                try:
+                    self._runner.run(self._session_backend.close(), timeout=2.0)
+                except Exception:
+                    pass
+                self._session_backend = None
+                self._session_backend_key = None
 
     def cancel(self, task_id: str | None = None) -> bool:
         """Propagate bounded cancellation to the active Codex backend/turn if in flight."""
@@ -208,9 +243,13 @@ class CodexCodingAgentShim:
     def reset_session(self, session_id: str = "") -> None:
         """Explicitly reset session state, cancel active backend, and reset thread/flow IDs."""
         self.cancel()
-        prev_session_id = self.session_id
-        self.session_id = str(session_id or "").strip()
-        self.resume_thread_id = ""
+        prev_session_id = self._session_id
+        self._session_id = str(session_id or "").strip()
+        self.resume_thread_id = (
+            load_codex_session_thread(self.repository_id or "", self._session_id)
+            if self._session_id
+            else ""
+        )
         self._active_flow_id = None
         self._flow_results.clear()
         with self._execution_lock:
@@ -233,6 +272,15 @@ class CodexCodingAgentShim:
             "reset_session",
             "session_reset",
         )
+
+    def delete_session(self, session_id: str = "") -> None:
+        """Explicitly delete durable session state for a deleted session."""
+        target_session_id = str(session_id or self.session_id).strip()
+        if target_session_id:
+            if target_session_id == self.session_id:
+                self.reset_session()
+            cleanup_codex_session_home(self.repository_id or "", target_session_id)
+            clear_codex_session_thread(self.repository_id or "", target_session_id)
 
     def close(self) -> None:
         """Close the coding agent shim, active backend, and runtime executor."""
@@ -761,11 +809,10 @@ class CodexCodingAgentShim:
 
         events: list[AgentEvent] = []
         backend_key = (
+            str(self.session_id or ""),
             str(self.codex_settings.model or ""),
             str(self.codex_settings.provider or ""),
             str(self.codex_settings.approval_policy or ""),
-            str(workspace.sandbox),
-            str(workspace.worktree_path),
         )
         backend_client = getattr(self._session_backend, "_client", None)
         client_running = getattr(backend_client, "running", True) if backend_client is not None else True
@@ -777,6 +824,10 @@ class CodexCodingAgentShim:
             backend = self._session_backend
             if hasattr(backend, "resume_thread_id"):
                 backend.resume_thread_id = self.resume_thread_id
+            if hasattr(backend, "session_id"):
+                backend.session_id = self.session_id
+            if hasattr(backend, "repository_id"):
+                backend.repository_id = self.repository_id or ""
         else:
             if self._session_backend is not None:
                 try:
@@ -785,6 +836,10 @@ class CodexCodingAgentShim:
                     pass
             backend = self._backend_factory()
             backend.resume_thread_id = self.resume_thread_id
+            if hasattr(backend, "session_id"):
+                backend.session_id = self.session_id
+            if hasattr(backend, "repository_id"):
+                backend.repository_id = self.repository_id or ""
             self._session_backend = backend
             self._session_backend_key = backend_key
 

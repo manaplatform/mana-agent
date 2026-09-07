@@ -1,6 +1,19 @@
 # Change Log
 
 All notable repository changes should be recorded here.
+## 2026-09-07
+
+- Fixed Codex thread resume failure (-32600 no rollout found for thread id) on follow-up turns:
+  - Scoped durable Codex session homes to `repository_id + session_id` under `~/.mana/runtime/codex/sessions/<safe_slug>_<hash>`, ensuring rollouts persist across backend lifecycles and turns.
+  - Decoupled process and app-server lifecycle from durable rollout storage by setting `durable=True` on `CodexRuntimeContext`, preserving rollout data when closing backends and only purging files on explicit session deletion (`delete_session`).
+  - Removed per-turn and task-specific properties (`worktree_path`, `sandbox`) from `_session_backend_key` in `CodexCodingAgentShim`, preventing unnecessary backend destruction and recreation between turns in the same session.
+  - Added runtime process generation tracking to `AsyncCodexAppServer` and `CodexCodingBackend`, preventing loaded thread state in one process generation from being erroneously treated as loaded in a subsequent generation.
+  - Added atomic, durable, credential-free thread state persistence in `src/mana_agent/integrations/codex/session_store.py` (`save_codex_session_thread`, `load_codex_session_thread`, `clear_codex_session_thread`).
+  - Added typed `CodexThreadStateMissingError` (`CODING_PROVIDER_THREAD_STATE_MISSING`) when Codex returns JSON-RPC error `-32600` (`"no rollout found for thread id"`).
+  - Implemented graceful recovery for missing rollouts in `CodexCodingBackend`: invalidates the stale thread ID, emits an explicit recovery warning event, transparently starts a fresh thread via `thread/start`, and completes the turn without crashing the chat session or deleting history.
+  - Integrated `delete_session` in `AgentChatGateway` to clean up durable session state upon explicit session removal while maintaining `/new` reset semantics.
+  - Added regression test suite in `tests/test_codex_runtime_lifecycle.py` and `tests/gateway/test_codex_session_lifecycle.py` covering durable home reuse, multi-worktree turns, missing rollout recovery, process generation boundaries, credential safety, session switching, and explicit session deletion.
+  - User verification required: `pytest tests/test_codex_runtime_lifecycle.py tests/gateway/test_codex_session_lifecycle.py -v`.
 
 ## 2026-09-06
 

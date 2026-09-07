@@ -14,6 +14,7 @@ from mana_agent._version import get_version
 from mana_agent.integrations.codex.exceptions import (
     CodexBadRequestError,
     CodexProtocolError,
+    CodexThreadStateMissingError,
     CodexTimeoutError,
     CodexToolProtocolError,
     CodexUnavailableError,
@@ -86,21 +87,30 @@ class AsyncCodexAppServer:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._notifications: defaultdict[str, asyncio.Queue[dict[str, Any]]] = defaultdict(asyncio.Queue)
+        self.generation = 0
         self._loaded_threads: set[str] = set()
         self._stderr: list[str] = []
         self._write_lock = asyncio.Lock()
 
     @property
+    def client_generation(self) -> int:
+        return self.generation
+
+    @property
     def loaded_thread_ids(self) -> frozenset[str]:
         return frozenset(self._loaded_threads)
 
-    def is_thread_loaded(self, thread_id: str) -> bool:
+    def is_thread_loaded(self, thread_id: str, *, generation: int | None = None) -> bool:
         th = str(thread_id or "").strip()
-        return bool(th and th in self._loaded_threads)
+        if not th or not self.running:
+            return False
+        if generation is not None and generation != self.generation:
+            return False
+        return th in self._loaded_threads
 
     def mark_thread_loaded(self, thread_id: str) -> None:
         th = str(thread_id or "").strip()
-        if th:
+        if th and self.running:
             self._loaded_threads.add(th)
 
     def clear_loaded_threads(self) -> None:
@@ -130,6 +140,8 @@ class AsyncCodexAppServer:
                 env=self._environment,
                 cwd=spawn_cwd,
             )
+            self.generation += 1
+            self._loaded_threads.clear()
         except (FileNotFoundError, OSError) as exc:
             raise CodexUnavailableError(f"Unable to start Codex app-server: {exc}") from exc
         self._reader_task = asyncio.create_task(self._read_stdout(), name="codex-app-server-stdout")
@@ -408,6 +420,18 @@ class AsyncCodexAppServer:
             formatted = self._format_provider_error(error_str)
             lowered = (formatted + " " + error_str).lower()
             http_status = None
+            if "no rollout found" in lowered or ("-32600" in lowered and "rollout" in lowered):
+                future.set_exception(
+                    CodexThreadStateMissingError(
+                        formatted,
+                        provider=self._provider_name,
+                        model=self._model,
+                        http_status=404,
+                        original_error=error_str,
+                        error_code="CODING_PROVIDER_THREAD_STATE_MISSING",
+                    )
+                )
+                return
             if "400" in lowered or "invalid_request" in lowered:
                 http_status = 400
                 if (

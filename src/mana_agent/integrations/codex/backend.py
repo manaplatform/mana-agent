@@ -23,6 +23,7 @@ from mana_agent.integrations.codex.exceptions import (
     CodexError,
     CodexExecutionError,
     CodexInterruptionError,
+    CodexThreadStateMissingError,
     CodexTimeoutError,
     CodexUnavailableError,
 )
@@ -30,7 +31,17 @@ from mana_agent.integrations.codex.health import check_codex_health
 from mana_agent.integrations.codex.prompt_builder import build_codex_prompt
 from mana_agent.integrations.codex.result_parser import parse_codex_result
 from mana_agent.integrations.codex.runtime_config import CodexRuntimeConfigBuilder
-from mana_agent.integrations.codex.runtime_environment import CodexRuntimeContext, CodexRuntimeEnvironment
+from mana_agent.integrations.codex.runtime_environment import (
+    CodexRuntimeContext,
+    CodexRuntimeEnvironment,
+    get_codex_session_home,
+    get_session_state_hash,
+)
+from mana_agent.integrations.codex.session_store import (
+    clear_codex_session_thread,
+    load_codex_session_thread,
+    save_codex_session_thread,
+)
 from mana_agent.context_cost import ContextCostGovernor
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.context_cost.models import ContextSegment
@@ -55,11 +66,18 @@ class CodexCodingBackend:
         worker_id: str | None = None,
         resume_thread_id: str = "",
         context_cost_governor: ContextCostGovernor | None = None,
+        session_id: str = "",
+        repository_id: str = "",
     ) -> None:
         self.settings = settings
         self.worker_id = worker_id or f"codex-{uuid.uuid4().hex[:8]}"
+        self._session_id = str(session_id or "").strip()
+        self._repository_id = str(repository_id or "").strip()
         self.resume_thread_id = str(resume_thread_id or "").strip()
+        if not self.resume_thread_id and self._session_id:
+            self.resume_thread_id = load_codex_session_thread(self._repository_id, self._session_id)
         self._loaded_thread_id = ""
+        self._loaded_thread_generation: int | None = None
         self.context_cost_governor = context_cost_governor
         self._uses_default_client = client_factory is None
         self._client_factory = client_factory or (lambda command: AsyncCodexAppServer(command))
@@ -70,12 +88,37 @@ class CodexCodingBackend:
         self._run_lock = asyncio.Lock()
 
     @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        self._session_id = str(value or "").strip()
+        if self._session_id and not self.resume_thread_id:
+            self.resume_thread_id = load_codex_session_thread(self._repository_id, self._session_id)
+
+    @property
+    def repository_id(self) -> str:
+        return self._repository_id
+
+    @repository_id.setter
+    def repository_id(self, value: str) -> None:
+        self._repository_id = str(value or "").strip()
+
+    @property
+    def client_generation(self) -> int:
+        if self._client is not None and hasattr(self._client, "generation"):
+            return int(getattr(self._client, "generation", 0))
+        return 0
+
+    @property
     def loaded_thread_id(self) -> str:
         return self._loaded_thread_id
 
     @loaded_thread_id.setter
     def loaded_thread_id(self, value: str) -> None:
         self._loaded_thread_id = str(value or "").strip()
+        self._loaded_thread_generation = self.client_generation
         if self._loaded_thread_id and self._client is not None:
             if hasattr(self._client, "mark_thread_loaded"):
                 self._client.mark_thread_loaded(self._loaded_thread_id)
@@ -88,8 +131,8 @@ class CodexCodingBackend:
         if not client_running:
             return False
         if hasattr(self._client, "is_thread_loaded"):
-            return bool(self._client.is_thread_loaded(th))
-        return self._loaded_thread_id == th
+            return bool(self._client.is_thread_loaded(th, generation=self.client_generation))
+        return self._loaded_thread_id == th and self._loaded_thread_generation == self.client_generation
 
     async def _restart_client(self, workspace: WorkspaceContext) -> None:
         await self.close()
@@ -132,7 +175,16 @@ class CodexCodingBackend:
             )
         command = (executable, "app-server")
         if self._uses_default_client:
-            self._runtime_context = CodexRuntimeEnvironment.create(runtime_config)
+            session_home = (
+                get_codex_session_home(self.repository_id, self.session_id)
+                if self.session_id
+                else None
+            )
+            self._runtime_context = CodexRuntimeEnvironment.create(
+                runtime_config,
+                home=session_home,
+                durable=session_home is not None,
+            )
             # Prefer the repository as the child CWD so Codex project discovery
             # is correct; fall back to the isolated CODEX_HOME when the repo was
             # deleted under a live process (SWE-bench thrash).
@@ -226,27 +278,95 @@ class CodexCodingBackend:
                     "worker_claimed_at": worker_claimed_at.isoformat(),
                 },
             )
+            state_hash = get_session_state_hash(self.repository_id, self.session_id)
+            if not self.resume_thread_id and self.session_id:
+                self.resume_thread_id = load_codex_session_thread(self.repository_id, self.session_id)
             try:
+                gen = self.client_generation
                 if self.is_thread_loaded(self.resume_thread_id):
                     thread_id = self.resume_thread_id
                     logger.info(
-                        "codex_thread.resident task_id=%s thread_id=%s reusing resident thread without thread/resume",
-                        task.task_id,
+                        "codex_thread.resident session_id=%s repository_id=%s thread_id=%s client_generation=%s session_state_hash=%s task_id=%s operation=resident reusing resident thread without thread/resume",
+                        self.session_id,
+                        self.repository_id,
                         thread_id,
+                        gen,
+                        state_hash,
+                        task.task_id,
                     )
                 elif not self.resume_thread_id:
+                    logger.info(
+                        "codex_thread.start session_id=%s repository_id=%s thread_id=%s client_generation=%s session_state_hash=%s task_id=%s operation=start starting fresh thread",
+                        self.session_id,
+                        self.repository_id,
+                        "",
+                        gen,
+                        state_hash,
+                        task.task_id,
+                    )
                     thread_response = await self._client.request("thread/start", self._thread_params(workspace))
                     thread_id = _response_id(thread_response, "thread")
                     if not thread_id:
                         raise CodexExecutionError("Codex thread/start returned no thread id")
                     self.loaded_thread_id = thread_id
                     self.resume_thread_id = thread_id
+                    if self.session_id:
+                        save_codex_session_thread(self.repository_id, self.session_id, thread_id)
                 else:
+                    logger.info(
+                        "codex_thread.resume session_id=%s repository_id=%s thread_id=%s client_generation=%s session_state_hash=%s task_id=%s operation=resume resuming thread on app-server",
+                        self.session_id,
+                        self.repository_id,
+                        self.resume_thread_id,
+                        gen,
+                        state_hash,
+                        task.task_id,
+                    )
                     try:
                         thread_response = await self._client.request(
                             "thread/resume",
                             {"threadId": self.resume_thread_id, **self._thread_params(workspace)},
                         )
+                    except CodexThreadStateMissingError as exc:
+                        stale_thread_id = self.resume_thread_id
+                        logger.warning(
+                            "codex_thread.recovery session_id=%s repository_id=%s thread_id=%s client_generation=%s session_state_hash=%s task_id=%s stale_thread=%s operation=recovery error=%s; recovering with fresh thread",
+                            self.session_id,
+                            self.repository_id,
+                            "",
+                            gen,
+                            state_hash,
+                            task.task_id,
+                            stale_thread_id,
+                            exc,
+                        )
+                        if self.session_id:
+                            clear_codex_session_thread(self.repository_id, self.session_id)
+                        self.resume_thread_id = ""
+                        self.loaded_thread_id = ""
+                        sequence += 1
+                        yield AgentEvent(
+                            event_type="warning",
+                            task_id=task.task_id,
+                            backend="codex",
+                            sequence=sequence,
+                            title="Codex thread recovered",
+                            summary=f"Stale Codex rollout {stale_thread_id} missing; started fresh thread for session",
+                            payload={
+                                "recovery_reason": "thread_state_missing",
+                                "stale_thread_id": stale_thread_id,
+                                "session_id": self.session_id,
+                                "operation": "recovery",
+                            },
+                        )
+                        thread_response = await self._client.request("thread/start", self._thread_params(workspace))
+                        thread_id = _response_id(thread_response, "thread")
+                        if not thread_id:
+                            raise CodexExecutionError("Codex thread/start returned no thread id during recovery")
+                        self.loaded_thread_id = thread_id
+                        self.resume_thread_id = thread_id
+                        if self.session_id:
+                            save_codex_session_thread(self.repository_id, self.session_id, thread_id)
                     except (CodexTimeoutError, CodexUnavailableError) as exc:
                         logger.warning(
                             "codex_stream.resume_failed task_id=%s thread_id=%s error=%s; closing and recreating unhealthy app-server",
@@ -255,14 +375,64 @@ class CodexCodingBackend:
                             exc,
                         )
                         await self._restart_client(workspace)
-                        thread_response = await self._client.request(
-                            "thread/resume",
-                            {"threadId": self.resume_thread_id, **self._thread_params(workspace)},
-                        )
-                    thread_id = _response_id(thread_response, "thread") or self.resume_thread_id
-                    if not thread_id:
-                        raise CodexExecutionError("Codex thread/resume returned no thread id")
-                    self.loaded_thread_id = thread_id
+                        try:
+                            thread_response = await self._client.request(
+                                "thread/resume",
+                                {"threadId": self.resume_thread_id, **self._thread_params(workspace)},
+                            )
+                            thread_id = _response_id(thread_response, "thread") or self.resume_thread_id
+                            if not thread_id:
+                                raise CodexExecutionError("Codex thread/resume returned no thread id")
+                            self.loaded_thread_id = thread_id
+                            if self.session_id:
+                                save_codex_session_thread(self.repository_id, self.session_id, thread_id)
+                        except CodexThreadStateMissingError as missing_exc:
+                            stale_thread_id = self.resume_thread_id
+                            logger.warning(
+                                "codex_thread.recovery session_id=%s repository_id=%s thread_id=%s client_generation=%s session_state_hash=%s task_id=%s stale_thread=%s operation=recovery error=%s; recovering with fresh thread after restart",
+                                self.session_id,
+                                self.repository_id,
+                                "",
+                                self.client_generation,
+                                state_hash,
+                                task.task_id,
+                                stale_thread_id,
+                                missing_exc,
+                            )
+                            if self.session_id:
+                                clear_codex_session_thread(self.repository_id, self.session_id)
+                            self.resume_thread_id = ""
+                            self.loaded_thread_id = ""
+                            sequence += 1
+                            yield AgentEvent(
+                                event_type="warning",
+                                task_id=task.task_id,
+                                backend="codex",
+                                sequence=sequence,
+                                title="Codex thread recovered",
+                                summary=f"Stale Codex rollout {stale_thread_id} missing; started fresh thread for session",
+                                payload={
+                                    "recovery_reason": "thread_state_missing",
+                                    "stale_thread_id": stale_thread_id,
+                                    "session_id": self.session_id,
+                                    "operation": "recovery",
+                                },
+                            )
+                            thread_response = await self._client.request("thread/start", self._thread_params(workspace))
+                            thread_id = _response_id(thread_response, "thread")
+                            if not thread_id:
+                                raise CodexExecutionError("Codex thread/start returned no thread id during recovery")
+                            self.loaded_thread_id = thread_id
+                            self.resume_thread_id = thread_id
+                            if self.session_id:
+                                save_codex_session_thread(self.repository_id, self.session_id, thread_id)
+                    else:
+                        thread_id = _response_id(thread_response, "thread") or self.resume_thread_id
+                        if not thread_id:
+                            raise CodexExecutionError("Codex thread/resume returned no thread id")
+                        self.loaded_thread_id = thread_id
+                        if self.session_id:
+                            save_codex_session_thread(self.repository_id, self.session_id, thread_id)
                 sequence += 1
                 yield AgentEvent(
                     event_type="turn.starting",
@@ -635,6 +805,7 @@ class CodexCodingBackend:
             self._client = None
             self._active.clear()
             self._loaded_thread_id = ""
+            self._loaded_thread_generation = None
             if self._runtime_context is not None:
                 self._runtime_context.close()
                 self._runtime_context = None

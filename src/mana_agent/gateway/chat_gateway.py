@@ -3559,6 +3559,8 @@ class AgentChatGateway:
                 conversation_id=session_id,
             )
         if self._coding_agent is not None and hasattr(self._coding_agent, "session_id"):
+            if hasattr(self._coding_agent, "repository_id") and self._stack.repository_id:
+                self._coding_agent.repository_id = self._stack.repository_id
             self._coding_agent.session_id = session_id
         memory = self._stack.coding_memory_service
         if memory is not None and str(getattr(memory, "session_id", "")) != session_id:
@@ -3714,7 +3716,12 @@ class AgentChatGateway:
             self.cancel(session_id, reason="session deleted", source="delete")
         except Exception:
             pass
-        if self._coding_agent is not None and hasattr(self._coding_agent, "reset_session"):
+        if self._coding_agent is not None and hasattr(self._coding_agent, "delete_session"):
+            try:
+                self._coding_agent.delete_session(session_id)
+            except Exception:
+                pass
+        elif self._coding_agent is not None and hasattr(self._coding_agent, "reset_session"):
             try:
                 self._coding_agent.reset_session()
             except Exception:
