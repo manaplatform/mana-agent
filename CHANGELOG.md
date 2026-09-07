@@ -15,6 +15,12 @@ All notable repository changes should be recorded here.
   - Added regression test suite in `tests/test_codex_runtime_lifecycle.py` and `tests/gateway/test_codex_session_lifecycle.py` covering durable home reuse, multi-worktree turns, missing rollout recovery, process generation boundaries, credential safety, session switching, and explicit session deletion.
   - User verification required: `pytest tests/test_codex_runtime_lifecycle.py tests/gateway/test_codex_session_lifecycle.py -v`.
 
+- Fixed cross-session recovery candidate resolution in `AgentChatGateway._recovery_candidates`:
+  - Replaced overly restrictive `session_id` exact-match check with `_fenced_sessions` exclusion in `_recovery_candidates` and chat turn recovery, allowing tasks from prior non-fenced sessions to be eligible for cross-session recovery, checkpoint resume, retry, and replan within the workspace and repository.
+  - Preserved `/new` conversation reset protection: sessions explicitly replaced via `start_new_conversation` or removed via `delete_session` are recorded in `_fenced_sessions` and their tasks remain strictly excluded from new session recovery candidates.
+  - Updated `tests/gateway/test_lane_coordinator.py` to verify both inclusion of failed tasks from prior non-fenced sessions and exclusion of tasks from fenced sessions.
+  - User verification required: `pytest tests/gateway/test_lane_coordinator.py tests/test_codex_tui_lifecycle.py -v`.
+
 ## 2026-09-06
 
 - Fixed Codex thread resume timeout on follow-up turns in active sessions:

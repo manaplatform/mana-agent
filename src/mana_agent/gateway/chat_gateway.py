@@ -5756,7 +5756,6 @@ class AgentChatGateway:
                             str(item.get("state") or "") != LaneTaskState.COMPLETED.value
                             and not bool(item.get("deadline_exceeded"))
                             and str(item.get("lane") or "") == lane_id.value
-                            and (not session_id or not item.get("session_id") or str(item.get("session_id")) == str(session_id))
                         )
                     ]
                     followup_model = getattr(self._entry_router, "llm", None)
@@ -8585,6 +8584,7 @@ class AgentChatGateway:
             reverse=True,
         )
         now = datetime.now(timezone.utc)
+        fenced_sessions = getattr(self, "_fenced_sessions", None) or set()
         seen: set[str] = set()
         for task in durable_tasks:
             execution = executions.get(task.task_id)
@@ -8610,7 +8610,7 @@ class AgentChatGateway:
                 or not (supervisor_recoverable or lane_recoverable)
                 or task.workspace_id != workspace_id
                 or task.repository_id != repository_id
-                or (session_id and task.session_id and str(task.session_id) != str(session_id))
+                or (task.session_id and str(task.session_id) in fenced_sessions)
             ):
                 continue
             
@@ -8721,7 +8721,7 @@ class AgentChatGateway:
                 if (
                     execution.workspace_id != workspace_id
                     or execution.repository_id != repository_id
-                    or (session_id and execution.session_id and str(execution.session_id) != str(session_id))
+                    or (execution.session_id and str(execution.session_id) in fenced_sessions)
                 ):
                     continue
                 if lane_id is not None and execution.owning_lane != lane_id:
