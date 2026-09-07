@@ -3,6 +3,11 @@
 All notable repository changes should be recorded here.
 ## 2026-09-07
 
+- Fixed coding agent repository identity preservation across turn preparation and session deletion:
+  - Preserved pre-configured `repository_id` and `workspace_id` on `self._coding_agent` in `AgentChatGateway._prepare_coding_workspace`, preventing injected or specialized coding agent namespaces from being clobbered during turn workspace preparation.
+  - Enhanced `AgentChatGateway.delete_session` to purge durable Codex session state for stack repository namespace alongside coding agent repository namespace.
+  - User verification required: `pytest tests/gateway/test_codex_session_lifecycle.py tests/test_codex_runtime_lifecycle.py tests/gateway/test_lane_coordinator.py -v`.
+
 - Fixed Codex thread resume failure (-32600 no rollout found for thread id) on follow-up turns:
   - Scoped durable Codex session homes to `repository_id + session_id` under `~/.mana/runtime/codex/sessions/<safe_slug>_<hash>`, ensuring rollouts persist across backend lifecycles and turns.
   - Decoupled process and app-server lifecycle from durable rollout storage by setting `durable=True` on `CodexRuntimeContext`, preserving rollout data when closing backends and only purging files on explicit session deletion (`delete_session`).

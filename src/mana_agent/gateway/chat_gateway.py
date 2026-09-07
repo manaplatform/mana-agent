@@ -3406,9 +3406,9 @@ class AgentChatGateway:
                 self._coding_agent.repo_root = prepared.repository_root
             if hasattr(self._coding_agent, "working_directory"):
                 self._coding_agent.working_directory = prepared.working_directory
-            if hasattr(self._coding_agent, "repository_id"):
+            if hasattr(self._coding_agent, "repository_id") and not getattr(self._coding_agent, "repository_id", None):
                 self._coding_agent.repository_id = prepared.repository_id
-            if hasattr(self._coding_agent, "workspace_id"):
+            if hasattr(self._coding_agent, "workspace_id") and not getattr(self._coding_agent, "workspace_id", None):
                 self._coding_agent.workspace_id = prepared.workspace_id
         if prepared.initialized:
             self._emit_workspace_initialized(prepared.working_directory)
@@ -3726,6 +3726,17 @@ class AgentChatGateway:
                 self._coding_agent.reset_session()
             except Exception:
                 pass
+        try:
+            from mana_agent.integrations.codex.runtime_environment import cleanup_codex_session_home
+            from mana_agent.integrations.codex.session_store import clear_codex_session_thread
+
+            stack_repo = str(getattr(self._stack, "repository_id", "") or "").strip()
+            coding_repo = str(getattr(self._coding_agent, "repository_id", "") or "").strip()
+            if stack_repo and stack_repo != coding_repo:
+                cleanup_codex_session_home(stack_repo, session_id)
+                clear_codex_session_thread(stack_repo, session_id)
+        except Exception:
+            pass
         self.session_service.delete(session_id, gateway=self)
         self._sessions.pop(session_id, None)
         self._active.discard(session_id)
