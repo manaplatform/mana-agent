@@ -960,7 +960,7 @@ class ToolWorkerClient:
         *,
         api_key: str,
         model: str,
-        session_id: str,
+        session_id: str = "",
         repo_root: Path,
         project_root: Path,
         base_url: str | None = None,
@@ -970,6 +970,7 @@ class ToolWorkerClient:
         workspace_id: str | None = None,
         repository_id: str | None = None,
     ) -> None:
+        import uuid
         from mana_agent.config.user_config import get_setting, load_effective_settings
 
         resolved_base_url = str(base_url or "").strip() or None
@@ -983,10 +984,11 @@ class ToolWorkerClient:
                 resolved_base_url = mapped_base or None
             except Exception:
                 resolved_base_url = str(get_setting("OPENAI_BASE_URL", "") or "").strip() or None
+        effective_session_id = str(session_id or "").strip() or f"sess-{uuid.uuid4().hex}"
         self._init_payload = WorkerInitPayload(
             api_key=api_key,
             model=model,
-            session_id=session_id,
+            session_id=effective_session_id,
             base_url=resolved_base_url,
             project_root=str(project_root.resolve()),
             repo_root=str(repo_root.resolve()),

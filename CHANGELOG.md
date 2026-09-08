@@ -2,6 +2,14 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-08
+
+- Fixed chat stack worker initialization and tool worker client session identification:
+  - Made `session_id` optional with a fallback UUID generator in `ToolWorkerClient.__init__`.
+  - Conditioned `ToolWorkerClient` instantiation in `build_chat_stack` on custom coding agents (`coding_agent_is_custom`), preserving Codex's direct tool ownership while supporting classic test harness fakes.
+  - Forwarded `session_id` to `ToolWorkerClient` in `chat_cli.py` and `build_chat_stack`.
+  - User verification required: `pytest tests/gateway/test_chat_gateway.py tests/gateway/test_codex_session_lifecycle.py tests/gateway/test_entry_routing.py tests/gateway/test_gateway_repository_preparation.py tests/gateway/test_multi_task_orchestration.py tests/gateway/test_task_cancellation_shutdown.py tests/test_ask_service.py tests/test_cli_flow.py tests/test_cli_smoke.py tests/test_codex_tui_lifecycle.py -v`.
+
 - Fixed CLI chat stack initialization, non-coding auto-execute pipeline, and test environment isolation:
   - Initialized `ToolWorkerClient` in `build_chat_stack` when `cfg.tool_worker_process` is True and client is uninitialized, passing `repo_root` and `project_root`.
   - Conditioned coding backend resolution on `cfg.coding_agent`, preventing Codex requirement errors when `--no-coding-agent` is specified.
@@ -11,7 +19,6 @@ All notable repository changes should be recorded here.
   - Mocked background indexing in `tests/test_cli_smoke.py` fixture to prevent background thread disk writes during CLI smoke tests.
   - User verification required: `pytest tests/test_cli_smoke.py -k "test_chat_root_dir_applies_to_worker_and_coding_agent_in_classic_mode or test_chat_coding_agent_uses_worker_lifecycle_once or test_chat_plan_trigger_auto_execute_without_coding_agent_hides_progress or test_chat_redis_backend_falls_back_to_local_executor_when_unavailable or test_chat_coding_read_budget_cli_value_is_passed_to_coding_agent_cap or test_chat_balanced_profile_keeps_coding_agent_non_full_auto_mode or test_chat_full_auto_tools_manager_path_auto_resumes_docs_update_pass_cap" -v`.
 
-## 2026-09-08
 
 - Enforced authoritative Coding → Codex route and deleted internal coding tooling:
   - Deleted legacy internal coding agent runtime, models, prompt, shim, and internal test suite (`src/mana_agent/multi_agent/runtime/coding_agent.py`, `src/mana_agent/multi_agent/runtime/coding_agent_models.py`, `src/mana_agent/multi_agent/runtime/coding_agent_prompt.py`, `src/mana_agent/coding/internal_agent_shim.py`, `tests/test_coding_agent.py`).

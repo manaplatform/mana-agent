@@ -1379,6 +1379,7 @@ def chat(
                 tool_worker_client = tool_worker_client_cls(
                     api_key=effective_api_key,
                     model=effective_tool_worker_model,
+                    session_id=chat_ui_state.session_id,
                     base_url=effective_base_url,
                     repo_root=root,
                     project_root=root,

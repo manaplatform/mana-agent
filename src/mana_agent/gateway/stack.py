@@ -450,11 +450,12 @@ def build_chat_stack(
             redis_executor_cls=_public_symbol("RedisRQToolsExecutor", RedisRQToolsExecutor),
         )
 
-    if tool_worker_client is None and cfg.tool_worker_process:
+    if tool_worker_client is None and cfg.tool_worker_process and coding_agent_is_custom:
         tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
         tool_worker_client = tool_worker_client_cls(
             api_key=inference_connection.api_key,
             model=effective_tool_worker_model,
+            session_id=session_id,
             base_url=effective_base_url,
             repo_root=root,
             project_root=root,
