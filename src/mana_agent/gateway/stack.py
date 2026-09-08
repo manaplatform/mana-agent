@@ -429,7 +429,7 @@ def build_chat_stack(
     tools_manager_orchestrator = cfg.tools_orchestrator
     tools_executor_instance = None
     public_coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
-    coding_selection = resolve_coding_backend(settings)
+    coding_selection = resolve_coding_backend(settings) if cfg.coding_agent else None
     coding_agent_cls = public_coding_agent_cls
     coding_agent_is_custom = public_coding_agent_cls is not CodexCodingAgentShim
 
@@ -448,6 +448,21 @@ def build_chat_stack(
             warning_key=f"gateway:{root}:{tools_execution_config.redis_url}:{tools_execution_config.queue_name}",
             local_executor_cls=_public_symbol("LocalToolsExecutor", LocalToolsExecutor),
             redis_executor_cls=_public_symbol("RedisRQToolsExecutor", RedisRQToolsExecutor),
+        )
+
+    if tool_worker_client is None and cfg.tool_worker_process:
+        tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
+        tool_worker_client = tool_worker_client_cls(
+            api_key=inference_connection.api_key,
+            model=effective_tool_worker_model,
+            base_url=effective_base_url,
+            repo_root=root,
+            project_root=root,
+            allowed_prefixes=None,
+            tools_only_strict=cfg.tool_worker_strict,
+            model_level=tool_worker_model_assignment.model_level,
+            workspace_id=workspace_id,
+            repository_id=repository_id,
         )
 
     if coding_agent_instance is None and cfg.coding_agent:
@@ -481,8 +496,28 @@ def build_chat_stack(
             )
         else:
             coding_agent_instance = coding_agent_cls(
+                api_key=inference_connection.api_key,
+                base_url=effective_base_url,
                 repo_root=coding_repository_root,
+                project_root=coding_repository_root,
                 working_directory=coding_working_directory,
+                ask_agent=getattr(ask_service, "ask_agent", None),
+                allowed_prefixes=None,
+                coding_memory_service=coding_memory_service,
+                coding_memory_enabled=cfg.coding_memory,
+                plan_max_steps=max(1, int(cfg.coding_plan_max_steps or settings.coding_plan_max_steps)),
+                search_budget=max(1, int(cfg.coding_search_budget or settings.coding_search_budget)),
+                read_budget=max(1, int(cfg.coding_read_budget or settings.coding_read_budget)),
+                require_read_files=max(
+                    1, int(cfg.coding_require_read_files or settings.coding_require_read_files)
+                ),
+                tool_worker_client=tool_worker_client,
+                full_auto_mode=(cfg.execution_profile == "full-auto"),
+                planner_model=(
+                    planner_model_assignment.resolved_model
+                    if planner_model_assignment is not None
+                    else effective_model
+                ),
                 session_id=session_id,
                 context_cost_governor=context_cost_governor,
             )

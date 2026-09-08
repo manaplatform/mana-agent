@@ -8,6 +8,7 @@ import uuid
 
 from .cli_internal import *
 from .cli_internal import _build_project_llm_analyzer
+from .ui_helpers import log_worker_event
 from .chat_analyze_command import (
     analyze_command_args,
     handle_analyze_command,
@@ -1435,7 +1436,7 @@ def chat(
             # We may adopt the flow id the preview attached to, so this name is
             # rebound here rather than only read from the enclosing scope.
             nonlocal active_flow_id
-            if isinstance(coding_agent_instance, CodexCodingAgentShim):
+            if coding_agent_instance is not None and hasattr(coding_agent_instance, "generate_auto_execute"):
                 payload = coding_agent_instance.generate_auto_execute(
                     user_question,
                     auto_chat_mode=(auto_chat_mode.value if auto_chat_mode is not None else "edit"),
@@ -1447,7 +1448,234 @@ def chat(
                 if terminal_reason and not payload.get("terminal_reason"):
                     payload["terminal_reason"] = terminal_reason
                 return payload, ""
-            return {}, ""
+            if not agent_tools or not auto_execute_plan:
+                return {}, ""
+            orchestrator = _ensure_tools_manager_orchestrator()
+            if orchestrator is None:
+                return {
+                    "answer": "Auto-execute requested but tools manager worker is unavailable.",
+                    "warnings": [
+                        "auto_execute_worker_unavailable",
+                        *[str(item).strip() for item in tools_execution_boot_warnings if str(item).strip()],
+                    ],
+                    "trace": [],
+                    "sources": [],
+                    "changed_files": [],
+                    "plan": None,
+                    "passes": 0,
+                    "terminal_reason": "worker_unavailable",
+                    "toolsmanager_requests_count": 0,
+                    "pass_logs": [],
+                    "planner_decisions": [],
+                    "prechecklist": None,
+                    "prechecklist_source": "",
+                    "prechecklist_warning": "",
+                }, ""
+            if dir_mode:
+                if not dir_mode_index_dirs:
+                    return {
+                        "answer": "Auto-execute unavailable: no dir-mode indexes resolved.",
+                        "warnings": [
+                            "auto_execute_missing_index_dirs",
+                            *[str(item).strip() for item in tools_execution_boot_warnings if str(item).strip()],
+                        ],
+                        "trace": [],
+                        "sources": [],
+                        "changed_files": [],
+                        "plan": None,
+                        "passes": 0,
+                        "terminal_reason": "missing_indexes",
+                        "toolsmanager_requests_count": 0,
+                        "pass_logs": [],
+                        "planner_decisions": [],
+                        "prechecklist": None,
+                        "prechecklist_source": "",
+                        "prechecklist_warning": "",
+                    }, ""
+                target_index_dir: Path | None = None
+                target_index_dirs: list[Path] | None = list(dir_mode_index_dirs)
+            else:
+                target_index_dir = resolved_index_dir
+                target_index_dirs = None
+
+            flow_context_text: str | None = None
+            if coding_agent_instance is not None and active_flow_id:
+                try:
+                    summary = coding_agent_instance.flow_summary(active_flow_id)
+                except Exception:
+                    summary = None
+                if isinstance(summary, dict):
+                    lines: list[str] = []
+                    objective = str(summary.get("objective", "") or "").strip()
+                    if objective:
+                        lines.append(f"Current objective: {objective}")
+                    checklist = summary.get("checklist")
+                    if isinstance(checklist, dict):
+                        steps = checklist.get("steps") if isinstance(checklist.get("steps"), list) else []
+                        if steps:
+                            lines.append("Current checklist:")
+                            for step in steps[:20]:
+                                if not isinstance(step, dict):
+                                    continue
+                                status = str(step.get("status", "pending") or "pending")
+                                title = str(step.get("title", "step") or "step")
+                                lines.append(f"- [{status}] {title}")
+                    if lines:
+                        flow_context_text = "\n".join(lines)
+
+            if analysis_context_text:
+                flow_context_text = (
+                    f"{analysis_context_text}\n\n{flow_context_text}"
+                    if flow_context_text
+                    else analysis_context_text
+                )
+
+            preview_payload: dict[str, Any] = {}
+            if hasattr(orchestrator, "preview_plan"):
+                try:
+                    preview_payload = orchestrator.preview_plan(
+                        request=user_question,
+                        flow_context=flow_context_text,
+                        flow_id=active_flow_id,
+                        pass_cap=auto_execute_max_passes,
+                    )
+                except Exception as exc:
+                    _log_exception("tools_manager.preview_plan", exc)
+                    preview_payload = {
+                        "prechecklist": None,
+                        "prechecklist_source": "",
+                        "prechecklist_warning": f"Planner preview failed: {exc}",
+                        "warnings": [],
+                    }
+            else:
+                preview_payload = {
+                    "prechecklist": None,
+                    "prechecklist_source": "",
+                    "prechecklist_warning": "",
+                    "warnings": [],
+                }
+            preview_flow_id = preview_payload.get("flow_id")
+            if isinstance(preview_flow_id, str) and preview_flow_id.strip():
+                active_flow_id = preview_flow_id.strip()
+            preview_checklist = (
+                preview_payload.get("prechecklist")
+                if isinstance(preview_payload.get("prechecklist"), dict)
+                else None
+            )
+            preview_warning = str(preview_payload.get("prechecklist_warning", "") or "").strip()
+            preview_steps = (
+                preview_checklist.get("steps", [])
+                if isinstance(preview_checklist, dict) and isinstance(preview_checklist.get("steps"), list)
+                else []
+            )
+            chat_ui_state.record_event(
+                make_event(
+                    "agent.planning",
+                    title="Planner preview",
+                    message=f"Prepared {len(preview_steps)} planned step(s).",
+                    status="success" if not preview_warning else "skipped",
+                    session_id=chat_ui_state.session_id,
+                    turn_id=chat_ui_state.tracker.current_turn_id,
+                    step_id="06",
+                    metadata={
+                        "flow_id": active_flow_id or "",
+                        "prechecklist_source": str(preview_payload.get("prechecklist_source", "") or ""),
+                        "warning": preview_warning,
+                    },
+                ).finish(status="success" if not preview_warning else "skipped")
+            )
+            if render_progress and preview_checklist is not None:
+                _render_flow_checklist(console, preview_checklist)
+                if preview_warning:
+                    console.print(f"[yellow]Warning: {preview_warning}[/yellow]")
+
+            if render_progress:
+                console.print(
+                    f"[cyan]Auto-executing plan:[/cyan] max passes {auto_execute_max_passes} (same turn, no extra confirmation)."
+                )
+
+            def _call(callbacks: list[Any]):
+                _ = callbacks
+                preview_requires_edit = preview_payload.get("requires_edit")
+                preview_targets = preview_payload.get("target_files")
+                return orchestrator.run(
+                    request=user_question,
+                    flow_context=flow_context_text,
+                    index_dir=target_index_dir,
+                    index_dirs=target_index_dirs,
+                    k=resolved_k,
+                    max_steps=chat_agent_max_steps,
+                    timeout_seconds=agent_timeout_seconds,
+                    tool_policy=_base_auto_execute_tool_policy(user_question, auto_chat_mode=auto_chat_mode),
+                    pass_cap=auto_execute_max_passes,
+                    on_event=log_worker_event,
+                    flow_id=active_flow_id,
+                    run_id=run_id,
+                    requires_edit=preview_requires_edit if isinstance(preview_requires_edit, bool) else None,
+                    target_files=tuple(preview_targets) if isinstance(preview_targets, list) else (),
+                )
+
+            result_obj, debug_tail = _run_with_live_buffer(
+                console,
+                spinner_text="Auto-executing…",
+                fn=_call,
+                callbacks=[],
+                show_all_logs=_cli_verbose_enabled(),
+            )
+            if hasattr(result_obj, "model_dump"):
+                payload = result_obj.model_dump()
+            elif isinstance(result_obj, dict):
+                payload = dict(result_obj)
+            else:
+                payload = {"answer": str(result_obj)}
+            merged_executor_warnings = [str(item).strip() for item in tools_execution_boot_warnings if str(item).strip()]
+            existing_payload_warnings = (
+                [str(item).strip() for item in payload.get("warnings", []) if str(item).strip()]
+                if isinstance(payload.get("warnings"), list)
+                else []
+            )
+            payload["warnings"] = [*existing_payload_warnings, *merged_executor_warnings]
+            payload["prechecklist"] = preview_checklist
+            payload["prechecklist_source"] = str(preview_payload.get("prechecklist_source", "") or "")
+            payload["prechecklist_warning"] = preview_warning
+            plan_payload = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+            objective = str(plan_payload.get("objective", "")).strip()
+            if render_progress:
+                for item in payload.get("pass_logs", []) if isinstance(payload.get("pass_logs"), list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    _render_auto_execute_pass_status(
+                        console,
+                        objective=objective,
+                        pass_index=int(item.get("pass_index", 0) or 0),
+                        pass_cap=auto_execute_max_passes,
+                        planner_step_id=str(item.get("planner_step_id", "") or ""),
+                        planner_step_title=str(item.get("planner_step_title", "") or ""),
+                        planner_decision=str(item.get("planner_decision", "") or ""),
+                        planner_decision_reason=str(item.get("planner_decision_reason", "") or ""),
+                        batch_reason=str(item.get("batch_reason", "") or ""),
+                        expected_progress=str(item.get("expected_progress", "") or ""),
+                    )
+            for item in payload.get("pass_logs", []) if isinstance(payload.get("pass_logs"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                pass_index = int(item.get("pass_index", 0) or 0)
+                step_title = str(item.get("planner_step_title", "") or item.get("planner_step_id", "") or "planner pass")
+                decision = str(item.get("planner_decision", "") or "").strip()
+                expected = str(item.get("expected_progress", "") or "").strip()
+                chat_ui_state.record_event(
+                    make_event(
+                        "agent.routing",
+                        title=f"Pass {pass_index}",
+                        message="; ".join(part for part in (step_title, decision, expected) if part),
+                        status="success",
+                        session_id=chat_ui_state.session_id,
+                        turn_id=chat_ui_state.tracker.current_turn_id,
+                        step_id="07",
+                        metadata=dict(item),
+                    ).finish(status="success")
+                )
+            return payload, debug_tail
 
         def _build_full_auto_resume_request(
             *,

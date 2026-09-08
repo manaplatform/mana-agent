@@ -2,6 +2,15 @@
 
 All notable repository changes should be recorded here.
 
+- Fixed CLI chat stack initialization, non-coding auto-execute pipeline, and test environment isolation:
+  - Initialized `ToolWorkerClient` in `build_chat_stack` when `cfg.tool_worker_process` is True and client is uninitialized, passing `repo_root` and `project_root`.
+  - Conditioned coding backend resolution on `cfg.coding_agent`, preventing Codex requirement errors when `--no-coding-agent` is specified.
+  - Forwarded parameters (`read_budget`, `search_budget`, `plan_max_steps`, `require_read_files`, `tool_worker_client`, `full_auto_mode`, `planner_model`) when a custom `coding_agent_cls` is supplied.
+  - Restored orchestrator (`QueueManager`) plan preview and execution in `_run_auto_execute_pipeline` when `coding_agent_instance` is None.
+  - Fixed `_remove_test_home` in `tests/conftest.py` to preserve directory execute permissions and ignore non-existent files during cleanup.
+  - Mocked background indexing in `tests/test_cli_smoke.py` fixture to prevent background thread disk writes during CLI smoke tests.
+  - User verification required: `pytest tests/test_cli_smoke.py -k "test_chat_root_dir_applies_to_worker_and_coding_agent_in_classic_mode or test_chat_coding_agent_uses_worker_lifecycle_once or test_chat_plan_trigger_auto_execute_without_coding_agent_hides_progress or test_chat_redis_backend_falls_back_to_local_executor_when_unavailable or test_chat_coding_read_budget_cli_value_is_passed_to_coding_agent_cap or test_chat_balanced_profile_keeps_coding_agent_non_full_auto_mode or test_chat_full_auto_tools_manager_path_auto_resumes_docs_update_pass_cap" -v`.
+
 ## 2026-09-08
 
 - Enforced authoritative Coding → Codex route and deleted internal coding tooling:

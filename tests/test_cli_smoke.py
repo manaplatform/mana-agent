@@ -20,6 +20,10 @@ def _isolated_mana_home(tmp_path: Path, monkeypatch) -> None:
     """Keep persistent state and model routing isolated between CLI tests."""
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana-home"))
     monkeypatch.setattr(
+        "mana_agent.commands.chat_cli._start_background_index",
+        lambda **kwargs: SimpleNamespace(is_alive=lambda: False, join=lambda *a, **k: None),
+    )
+    monkeypatch.setattr(
         "mana_agent.commands.chat_cli._decide_chat_route",
         lambda **_kwargs: AgentDecision(
             intent="answer",
