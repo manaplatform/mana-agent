@@ -8,6 +8,7 @@ import uuid
 
 from .cli_internal import *
 from .cli_internal import _build_project_llm_analyzer
+from .ui_helpers import log_worker_event
 from .chat_analyze_command import (
     analyze_command_args,
     handle_analyze_command,
@@ -1378,6 +1379,7 @@ def chat(
                 tool_worker_client = tool_worker_client_cls(
                     api_key=effective_api_key,
                     model=effective_tool_worker_model,
+                    session_id=chat_ui_state.session_id,
                     base_url=effective_base_url,
                     repo_root=root,
                     project_root=root,
@@ -1435,7 +1437,7 @@ def chat(
             # We may adopt the flow id the preview attached to, so this name is
             # rebound here rather than only read from the enclosing scope.
             nonlocal active_flow_id
-            if isinstance(coding_agent_instance, CodexCodingAgentShim):
+            if coding_agent_instance is not None and hasattr(coding_agent_instance, "generate_auto_execute"):
                 payload = coding_agent_instance.generate_auto_execute(
                     user_question,
                     auto_chat_mode=(auto_chat_mode.value if auto_chat_mode is not None else "edit"),
@@ -1522,7 +1524,6 @@ def chat(
                     if lines:
                         flow_context_text = "\n".join(lines)
 
-            # Ground the turn in the most recent /analyze output when available.
             if analysis_context_text:
                 flow_context_text = (
                     f"{analysis_context_text}\n\n{flow_context_text}"
@@ -1554,9 +1555,6 @@ def chat(
                     "prechecklist_warning": "",
                     "warnings": [],
                 }
-            # Adopt the flow the preview attached to so the run, its memory turn,
-            # and the todo ledger all share one flow id (preview may have created
-            # the flow when none was active yet).
             preview_flow_id = preview_payload.get("flow_id")
             if isinstance(preview_flow_id, str) and preview_flow_id.strip():
                 active_flow_id = preview_flow_id.strip()
@@ -1597,10 +1595,8 @@ def chat(
                     f"[cyan]Auto-executing plan:[/cyan] max passes {auto_execute_max_passes} (same turn, no extra confirmation)."
                 )
 
-            def _call(callbacks: list[BaseCallbackHandler]):
+            def _call(callbacks: list[Any]):
                 _ = callbacks
-                # Carry the accurate preview decision into execution so the run
-                # and the previewed plan agree on edit intent and target files.
                 preview_requires_edit = preview_payload.get("requires_edit")
                 preview_targets = preview_payload.get("target_files")
                 return orchestrator.run(
@@ -1613,7 +1609,7 @@ def chat(
                     timeout_seconds=agent_timeout_seconds,
                     tool_policy=_base_auto_execute_tool_policy(user_question, auto_chat_mode=auto_chat_mode),
                     pass_cap=auto_execute_max_passes,
-                    on_event=CodingAgent._log_worker_event,
+                    on_event=log_worker_event,
                     flow_id=active_flow_id,
                     run_id=run_id,
                     requires_edit=preview_requires_edit if isinstance(preview_requires_edit, bool) else None,

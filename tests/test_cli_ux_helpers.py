@@ -20,10 +20,10 @@ from mana_agent.commands.ui_helpers import (
     _run_with_live_buffer,
     _use_live_tool_activity,
     emit_tool_event,
+    log_worker_event,
     set_active_chat_ui_state,
     set_active_tool_activity,
 )
-from mana_agent.multi_agent.runtime.coding_agent import CodingAgent
 
 runner = CliRunner()
 
@@ -428,7 +428,7 @@ def test_worker_request_error_renders_one_tool_activity_box_without_tool_call() 
 
     def _call(callbacks):
         _ = callbacks
-        CodingAgent._log_worker_event(
+        log_worker_event(
             {
                 "name": "worker_request_start",
                 "data": {
@@ -437,7 +437,7 @@ def test_worker_request_error_renders_one_tool_activity_box_without_tool_call() 
                 },
             }
         )
-        CodingAgent._log_worker_event(
+        log_worker_event(
             {
                 "name": "worker_request_error",
                 "data": {

@@ -182,7 +182,10 @@ def _cleanup_workspace_dbs_per_test() -> Iterator[None]:
 def _remove_test_home(path: Path) -> None:
     def retry_onerror(function, failed_path, exc_info):  # noqa: ANN001
         try:
-            os.chmod(failed_path, stat.S_IWRITE | stat.S_IREAD)
+            if not os.path.exists(failed_path):
+                return
+            mode = stat.S_IRWXU if os.path.isdir(failed_path) else (stat.S_IWRITE | stat.S_IREAD)
+            os.chmod(failed_path, mode)
             function(failed_path)
         except OSError:
             pass
@@ -199,9 +202,16 @@ def _remove_test_home(path: Path) -> None:
 
     def strict_onerror(function, failed_path, exc_info):  # noqa: ANN001
         try:
-            os.chmod(failed_path, stat.S_IWRITE | stat.S_IREAD)
+            if not os.path.exists(failed_path):
+                return
+            mode = stat.S_IRWXU if os.path.isdir(failed_path) else (stat.S_IWRITE | stat.S_IREAD)
+            os.chmod(failed_path, mode)
             function(failed_path)
+        except FileNotFoundError:
+            return
         except OSError as cleanup_error:
+            if not os.path.exists(failed_path):
+                return
             raise RuntimeError(f"Could not remove isolated Mana test home {path}: {failed_path}") from cleanup_error
 
     if path.exists():

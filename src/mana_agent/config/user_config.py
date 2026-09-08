@@ -343,9 +343,8 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
         "flow_cards": True,
         "experimental_sharing": False,
     },
-    # Empty is the compatibility sentinel; the configuration TUI persists an
-    # explicit value when the user saves its coding-runtime screen.
-    "MANA_CODING_BACKEND": "",
+    # Authoritative coding runtime: Codex is the single execution route (Coding -> Codex).
+    "MANA_CODING_BACKEND": "codex",
     "MANA_CODEX_ENABLED": True,
     "MANA_CODEX_MAX_WORKERS": 2,
     "MANA_CODEX_STREAM_EVENTS": True,
@@ -1221,6 +1220,18 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
             ),
             timeout_seconds=float(cleaned.get("MANA_MEMORY_TIMEOUT_SECONDS") or 15),
         ).validate()
+    if "MANA_CODING_BACKEND" in cleaned:
+        backend_val = str(cleaned.get("MANA_CODING_BACKEND") or "").strip().lower()
+        if backend_val == "internal":
+            raise UserConfigError(
+                "Internal coding engine has been removed. Codex is the single authoritative "
+                "coding engine. No internal coding engine can be selected or invoked."
+            )
+        if backend_val and backend_val != "codex":
+            raise UserConfigError(
+                f"MANA_CODING_BACKEND must be 'codex' (got '{backend_val}')."
+            )
+        cleaned["MANA_CODING_BACKEND"] = "codex"
     for name in (
         "MANA_MODEL_MAIN",
         "MANA_MODEL_HEAD_DECISION",

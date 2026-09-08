@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
-from mana_agent.multi_agent.runtime.coding_agent_models import CodingAgentStateMachine
 from mana_agent.tools.contracts import coding_tool_contracts
 from mana_agent.config.settings import default_logs_dir
 from mana_agent.tools.apply_patch import safe_apply_patch
@@ -168,19 +167,3 @@ class Runner:
     edges = result["edges"]
     assert {"file": "pkg/demo.py", "line": 6, "caller": "Runner.run", "callee": "helper"} in edges
     assert {"file": "pkg/demo.py", "line": 7, "caller": "Runner.run", "callee": "self.finish"} in edges
-
-
-def test_coding_agent_phase_machine_blocks_patch_until_read() -> None:
-    machine = CodingAgentStateMachine()
-    machine.transition("plan", reason="request understood")
-    machine.transition("search", reason="need files")
-    machine.transition("read", reason="inspect target")
-
-    with pytest.raises(ValueError):
-        machine.transition("patch", targets=["src/a.py"])
-
-    machine.mark_read("src/a.py")
-    machine.transition("patch", targets=["src/a.py"])
-    machine.transition("verify")
-    machine.transition("finalize")
-    assert machine.phase == "finalize"

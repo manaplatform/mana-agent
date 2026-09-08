@@ -14,18 +14,10 @@ from mana_agent.integrations.codex.event_adapter import adapt_codex_event
 from mana_agent.services.execution_event_hub import ExecutionEventHub
 
 
-def test_legacy_backend_selection_uses_codex_only_while_enabled() -> None:
+def test_backend_selection_requires_codex_enabled() -> None:
     assert resolve_coding_backend(SimpleNamespace(mana_codex_enabled=True)).backend == "codex"
-    assert resolve_coding_backend(SimpleNamespace(mana_codex_enabled=False)).backend == "internal"
-
-
-def test_explicit_internal_backend_does_not_require_codex() -> None:
-    selection = resolve_coding_backend(SimpleNamespace(
-        mana_coding_backend="internal",
-        mana_codex_enabled=False,
-    ))
-    assert selection.backend == "internal"
-    assert selection.source == "explicit"
+    with pytest.raises(CodingBackendConfigurationError, match="MANA_CODEX_ENABLED is false"):
+        resolve_coding_backend(SimpleNamespace(mana_codex_enabled=False))
 
 
 def test_explicit_disabled_codex_configuration_is_rejected() -> None:
@@ -75,7 +67,7 @@ def test_event_hub_ignores_duplicate_ids_for_live_subscribers() -> None:
 def test_scoped_live_events_are_isolated() -> None:
     first: list[str] = []
     second: list[str] = []
-    event = AgentEvent(event_type="turn.started", task_id="task", backend="internal")
+    event = AgentEvent(event_type="turn.started", task_id="task", backend="codex")
     from mana_agent.coding.live_events import publish_coding_event
 
     with coding_event_scope(lambda item: first.append(item.task_id)):

@@ -33,7 +33,7 @@ from mana_agent.workspaces.preparation import RepositoryValidationError
 
 
 class _Backend:
-    name = "native"
+    name = "codex"
 
     async def start(self) -> None: ...
     async def execute(self, task, workspace): ...
@@ -149,10 +149,10 @@ def test_registry_executes_only_model_selected_backend() -> None:
     decision = CodingBackendDecision(
         decision_id="decision-1",
         coding_required=True,
-        selected_backend="native",
+        selected_backend="codex",
         estimated_complexity="low",
         requires_repository_write=True,
-        reasons=["The model selected the native backend"],
+        reasons=["The model selected Codex"],
         safe_to_continue=True,
     )
     assert registry.resolve(decision) is backend
@@ -160,7 +160,6 @@ def test_registry_executes_only_model_selected_backend() -> None:
 
 def test_registry_does_not_fallback_when_selected_backend_is_missing() -> None:
     registry = CodingBackendRegistry()
-    registry.register(_Backend())
     decision = CodingBackendDecision(
         decision_id="decision-2",
         coding_required=True,
@@ -172,6 +171,15 @@ def test_registry_does_not_fallback_when_selected_backend_is_missing() -> None:
     )
     with pytest.raises(CodingBackendDecisionError, match="No fallback backend was executed"):
         registry.resolve(decision)
+
+
+def test_registry_rejects_non_codex_registration() -> None:
+    class _OtherBackend:
+        name = "internal"
+
+    registry = CodingBackendRegistry()
+    with pytest.raises(ValueError, match="Cannot register coding backend 'internal'"):
+        registry.register(_OtherBackend())
 
 
 def test_invalid_backend_decision_stops_safely() -> None:

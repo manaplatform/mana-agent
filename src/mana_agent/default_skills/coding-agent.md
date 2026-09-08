@@ -17,6 +17,6 @@ Use this skill when a task requires tools, patching, file writes, code edits, or
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/test_coding_agent.py tests/test_agent_work_queue.py -q
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_codex_integration.py tests/test_agent_work_queue.py -q
 ```
 

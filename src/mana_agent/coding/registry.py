@@ -18,6 +18,11 @@ class CodingBackendRegistry:
         name = str(getattr(backend, "name", "") or "").strip()
         if not name:
             raise ValueError("coding backend name is required")
+        if name != "codex":
+            raise ValueError(
+                f"Cannot register coding backend '{name}'. "
+                "Codex is the single authoritative coding engine."
+            )
         if name in self._backends:
             raise ValueError(f"coding backend is already registered: {name}")
         self._backends[name] = backend
@@ -30,6 +35,11 @@ class CodingBackendRegistry:
         if not decision.coding_required:
             raise CodingBackendDecisionError("Coding backend execution was requested for a non-coding decision.")
         selected = str(decision.selected_backend or "").strip()
+        if selected != "codex":
+            raise CodingBackendDecisionError(
+                f"Model-selected coding backend is invalid: {selected or '<missing>'}. "
+                "Codex is the single authoritative coding engine; no internal coding engine can be selected or invoked."
+            )
         backend = self._backends.get(selected)
         if backend is None:
             raise CodingBackendDecisionError(
