@@ -142,11 +142,6 @@ class ModelDocsGoalProfile(GoalProfile):
         if not text.startswith("src/") or not text.endswith(".py"):
             return False
         content = _read_text(Path(repo_root) / text)
-        if text.endswith("/coding_agent_models.py"):
-            return bool(
-                re.search(r"\bclass\s+\w+\s*\([^)]*(?:BaseModel|TypedDict|Enum|models\.Model)[^)]*\)", content)
-                or re.search(r"@dataclass\b", content)
-            )
         if text.endswith("/models.py") or text.endswith("_models.py"):
             return True
         if text.endswith(".py"):

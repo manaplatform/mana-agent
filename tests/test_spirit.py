@@ -11,7 +11,6 @@ from mana_agent.config.user_config import validate_config_values
 from mana_agent.integrations.codex.prompt_builder import build_codex_prompt
 from mana_agent.multi_agent.core.types import AgentRole, ExecutionContext
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
-from mana_agent.multi_agent.runtime.coding_agent_prompt import CODING_SYSTEM_PROMPT
 from mana_agent.multi_agent.runtime.prompts import (
     ASK_AGENT_SYSTEM_PROMPT,
     CONVERSATION_SYSTEM_PROMPT,
@@ -212,7 +211,6 @@ def test_prompt_constants_do_not_embed_spirit() -> None:
     marker = "Mana's Spirit"
     assert marker not in SYSTEM_PROMPT
     assert marker not in ASK_AGENT_SYSTEM_PROMPT
-    assert marker not in CODING_SYSTEM_PROMPT
     assert marker not in CONVERSATION_SYSTEM_PROMPT
     assert "when asked who" not in CONVERSATION_SYSTEM_PROMPT.lower()
     assert "chatgpt" not in CONVERSATION_SYSTEM_PROMPT.lower()

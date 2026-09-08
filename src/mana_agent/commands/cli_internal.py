@@ -46,7 +46,8 @@ from mana_agent.utils.project_discovery import discover_subprojects  # noqa: F40
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter
 from mana_agent.multi_agent.runtime.qna_chain import QnAChain
-from mana_agent.multi_agent.runtime.coding_agent import CodingAgent
+from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim as CodingAgent
+from mana_agent.commands.ui_helpers import log_worker_event
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
 from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient, ToolWorkerProcessError  # noqa: F401 - error class consumed by chat_cli through wildcard command wiring
@@ -1440,7 +1441,7 @@ def continue_command(
                 timeout_seconds=timeout_seconds,
                 tool_policy={},
                 pass_cap=pass_cap,
-                on_event=CodingAgent._log_worker_event,
+                on_event=log_worker_event,
                 max_no_progress_passes=max_no_progress_passes,
             )
             result_passes = int(getattr(result, "passes", 0) or 0)

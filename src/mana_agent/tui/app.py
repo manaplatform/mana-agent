@@ -1136,7 +1136,7 @@ class ManaChatApp(App):
                     row = None
             if not isinstance(row, dict):
                 continue
-            if row.get("backend") in {"codex", "internal"} and row.get("event_type"):
+            if row.get("backend") == "codex" and row.get("event_type"):
                 # Already rendered live in the backend-neutral execution panel.
                 continue
             tname = str(row.get("tool_name") or row.get("tool") or "tool")

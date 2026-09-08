@@ -240,15 +240,15 @@ class ManaConfigurationApp(App[bool]):
             with TabPane("Coding runtime", id="coding-runtime"):
                 yield Label("Coding backend", classes="section-title")
                 yield Select(
-                    [("Codex app-server", "codex"), ("Mana-Agent internal", "internal")],
-                    value=str(values.get("MANA_CODING_BACKEND") or ("codex" if values.get("MANA_CODEX_ENABLED", True) else "internal")),
+                    [("Codex app-server", "codex")],
+                    value="codex",
                     id="coding-backend",
                     allow_blank=False,
                 )
                 yield Switch(value=bool(values.get("MANA_CODEX_ENABLED", True)), id="codex-enabled")
                 yield Label("Enable the Codex integration", classes="hint")
                 yield Static(
-                    "Backend selection is fixed before each coding turn. Codex failures are never retried through the internal backend.",
+                    "Codex is the single authoritative coding engine (Coding -> Codex). No internal coding engine can be selected or invoked.",
                     classes="hint",
                 )
             with TabPane("Memory", id="memory"):
@@ -465,7 +465,7 @@ class ManaConfigurationApp(App[bool]):
             f"Web search        {search}\n"
             f"GitHub            {github}\n"
             f"Memory            {memory}"
-            f"\nCoding backend    {v.get('MANA_CODING_BACKEND') or ('codex' if v.get('MANA_CODEX_ENABLED', True) else 'internal')}"
+            f"\nCoding backend    {v.get('MANA_CODING_BACKEND') or 'codex'}"
         )
 
     def _role_mapping_text(self) -> str:

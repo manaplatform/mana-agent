@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Literal, NamedTuple
 
 
-CodingBackendName = Literal["codex", "internal"]
+CodingBackendName = Literal["codex"]
 
 
 class CodingBackendConfigurationError(ValueError):
@@ -25,30 +25,31 @@ class CodingBackendSelection(NamedTuple):
 def resolve_coding_backend(settings: object) -> CodingBackendSelection:
     """Resolve and validate the configured backend without probing Codex.
 
-    Existing configurations predate ``MANA_CODING_BACKEND``.  Their documented
-    migration rule is: select Codex while it is enabled, otherwise select the
-    internal runtime.  Once the setting is explicit, contradictory settings are
-    rejected rather than silently rewritten.
+    Codex is the single authoritative coding engine: Coding -> Codex.
+    No internal coding engine can be selected or invoked.
     """
 
     configured = str(getattr(settings, "mana_coding_backend", "") or "").strip().lower()
     codex_enabled = bool(getattr(settings, "mana_codex_enabled", True))
-    if not configured:
-        return CodingBackendSelection(
-            "codex" if codex_enabled else "internal",
-            codex_enabled,
-            "migration-default",
-        )
-    if configured not in {"codex", "internal"}:
+
+    if configured == "internal":
         raise CodingBackendConfigurationError(
-            "MANA_CODING_BACKEND must be 'codex' or 'internal'. No coding backend was started."
+            "Internal coding engine has been removed. Codex is the single authoritative "
+            "coding engine. No internal coding engine can be selected or invoked."
         )
-    if configured == "codex" and not codex_enabled:
+
+    if not codex_enabled:
         raise CodingBackendConfigurationError(
-            "MANA_CODING_BACKEND is 'codex' but MANA_CODEX_ENABLED is false. "
-            "Enable Codex or explicitly select the internal backend. No coding backend was started."
+            "Codex is the single authoritative coding engine but MANA_CODEX_ENABLED is false. "
+            "Enable Codex to execute coding tasks."
         )
-    return CodingBackendSelection(configured, codex_enabled, "explicit")  # type: ignore[arg-type]
+
+    if configured and configured != "codex":
+        raise CodingBackendConfigurationError(
+            f"MANA_CODING_BACKEND must be 'codex' (got '{configured}'). No coding backend was started."
+        )
+
+    return CodingBackendSelection("codex", codex_enabled, "explicit" if configured else "migration-default")
 
 
 __all__ = [

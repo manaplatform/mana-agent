@@ -683,6 +683,45 @@ def emit_tool_event(
         state.record_event(event)
 
 
+def log_worker_event(event: Any) -> None:
+    """Stream worker tool events into the live tool-activity panel."""
+    name = ""
+    data: dict[str, Any] = {}
+
+    if isinstance(event, dict):
+        name = str(event.get("name", "") or "")
+        maybe_data = event.get("data")
+        if isinstance(maybe_data, dict):
+            data = maybe_data
+    else:
+        name = str(getattr(event, "name", "") or "")
+        maybe_data = getattr(event, "data", None)
+        if isinstance(maybe_data, dict):
+            data = maybe_data
+
+    status = str(data.get("status", "") or "").lower()
+    tool = str(data.get("tool", "") or name).strip()
+    args_str = str(data.get("args", "") or "")
+    duration = data.get("duration")
+    error = str(data.get("error", "") or "")
+    event_id = str(data.get("event_id", "") or "") or None
+
+    kind = "start" if status == "start" else ("end" if status == "ok" else "error")
+    emit_tool_event(
+        kind,
+        tool,
+        args=args_str,
+        duration=duration if isinstance(duration, (int, float)) else None,
+        error=error,
+        event_id=event_id,
+        agent_id=str(data.get("agent_id", "") or ""),
+        subagent_id=str(data.get("subagent_id", "") or ""),
+        agent_role=str(data.get("agent_role", "") or ""),
+        model_level=str(data.get("model_level", "") or ""),
+        resolved_model=str(data.get("resolved_model", "") or ""),
+    )
+
+
 # -----------------------------------------
 # "Full logging" helpers (added, non-breaking)
 # -----------------------------------------

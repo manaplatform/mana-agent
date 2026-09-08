@@ -113,7 +113,7 @@ class AgentEvent(BaseModel):
     event_type: str
     task_id: str
     parent_event_id: str | None = None
-    backend: Literal["codex", "internal"] = "codex"
+    backend: Literal["codex"] = "codex"
     sequence: int = Field(default=0, ge=0)
     status: Literal["queued", "running", "success", "failed", "cancelled"] = "running"
     title: str = ""
@@ -240,6 +240,11 @@ class CodingBackendDecision(BaseModel):
     def _validate_selection(self) -> "CodingBackendDecision":
         if self.coding_required and not str(self.selected_backend or "").strip():
             raise ValueError("selected_backend is required for coding tasks")
+        if self.coding_required and self.selected_backend != "codex":
+            raise ValueError(
+                f"Invalid backend '{self.selected_backend}'. "
+                "Codex is the single authoritative coding engine; no internal coding engine can be selected or invoked."
+            )
         if not self.safe_to_continue and self.selected_backend:
             raise ValueError("an unsafe decision must not select a backend")
         return self

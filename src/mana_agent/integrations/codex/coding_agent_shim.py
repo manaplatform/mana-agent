@@ -111,6 +111,12 @@ class CodexCodingAgentShim:
 
     supports_gateway_task_identity = True
 
+    @staticmethod
+    def _log_worker_event(event: Any) -> None:
+        from mana_agent.commands.ui_helpers import log_worker_event
+
+        log_worker_event(event)
+
     def __init__(
         self,
         *,

@@ -1,9 +1,6 @@
-# Coding runtimes: Codex and internal
+# Coding runtime: Codex
 
-Mana-Agent selects one coding backend before each coding turn. Codex remains
-the default authoritative runtime when enabled; the internal backend uses
-Mana-Agent's model-driven planner, repository tools, queue, reviewer, and
-verifier when Codex is explicitly disabled or the internal backend is selected.
+Mana-Agent enforces Codex as the single authoritative coding engine for all coding requests (`Coding → Codex`). Internal coding backends, shims, and fallback execution paths have been removed.
 Once the shared model route selects a Codex coding turn, one Codex turn owns repository inspection, coding
 decisions, planning, edits, review, and proportional verification. Mana-Agent
 retains the outer chat route, worktree allocation, permissions, event streaming,
@@ -41,8 +38,8 @@ decision; Codex never chooses an arbitrary backup model.
 
 There is no runtime fallback. A turn selected for Codex stays on Codex: if the
 app-server is unavailable, authentication fails, the protocol fails, or the
-result is invalid, the turn stops with an explicit Codex error. The internal
-backend is selected only before execution begins. An underspecified edit request must be
+result is invalid, the turn stops with an explicit Codex error. Coding never
+falls back to an internal engine. An underspecified edit request must be
 clarified by Codex; the shim instructs it not to invent a repository change.
 
 Writing tasks require a separate clean Git worktree. The Codex prompt prohibits
@@ -89,12 +86,10 @@ MANA_CODEX_MODEL = ""
 # rewrites this, but interactive runs honor the pin.
 ```
 
-New configurations explicitly store `MANA_CODING_BACKEND` as `codex` or
-`internal`. For backward compatibility, configurations without this key select
-Codex when `MANA_CODEX_ENABLED = true` and the internal backend when it is
-false. Explicitly selecting `codex` while disabling Codex is a configuration
-error; Mana-Agent never silently rewrites the choice. Internal mode neither
-starts the Codex process nor requires Codex login or credentials. Network access remains disabled by policy unless
+Configurations store `MANA_CODING_BACKEND = "codex"`. Coding requests strictly
+require Codex (`MANA_CODEX_ENABLED = true`). Configuring any backend other than
+`codex` or disabling Codex raises a configuration error without fallback; Mana-Agent
+never silently rewrites the choice. Network access remains disabled by policy unless
 a future validated execution decision and sandbox implementation explicitly
 support it.
 
@@ -111,8 +106,8 @@ isolated managed worktree under Mana's state directory.
   prompts, event mapping, result parsing, health checks, per-run provider
   configuration/environment isolation, and backend.
 - The gateway stack is the shared CLI, TUI, API, and dashboard selection surface.
-- `CodexCodingAgentShim` and `InternalCodingAgentShim` preserve the same frontend
-  coding-agent surface and publish the same normalized live event contract.
+- `CodexCodingAgentShim` provides the frontend coding-agent surface and publishes
+  the normalized live event contract.
 - `CodexWorkerPool` bounds concurrency and serializes tasks whose declared file
   scopes overlap. Empty scopes are treated conservatively as overlapping.
 - Each logical coding task starts one Codex thread. Repair turns may reuse that
@@ -125,7 +120,7 @@ silently merge the branch.
 
 ## Live execution events
 
-Both backends publish ordered, task- and turn-associated events for backend and
+Codex publishes ordered, task- and turn-associated events for backend and
 turn lifecycle, approved reasoning summaries, plans, tools, commands, files,
 patches, tests, warnings, failures, timing, and provider-reported usage. The
 Codex adapter normalizes protocol notifications immediately and does not expose

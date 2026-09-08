@@ -1,6 +1,20 @@
 # Change Log
 
 All notable repository changes should be recorded here.
+
+## 2026-09-08
+
+- Enforced authoritative Coding → Codex route and deleted internal coding tooling:
+  - Deleted legacy internal coding agent runtime, models, prompt, shim, and internal test suite (`src/mana_agent/multi_agent/runtime/coding_agent.py`, `src/mana_agent/multi_agent/runtime/coding_agent_models.py`, `src/mana_agent/multi_agent/runtime/coding_agent_prompt.py`, `src/mana_agent/coding/internal_agent_shim.py`, `tests/test_coding_agent.py`).
+  - Preserved shared non-coding tools and utilities (`safe_apply_patch`, `QueueManager`, `CodingMemoryService`, `AskAgent`, `EvidenceLedger`).
+  - Constrained `CodingBackendName` and `CodingBackendSelection` to `"codex"`, rejecting `"internal"` configuration or disabled Codex during coding requests with explicit `CodingBackendConfigurationError` without fallback.
+  - Enforced `selected_backend == "codex"` in `CodingBackendDecision` model and `CodingBackendRegistry`, ensuring non-Codex backend registrations or invocations fail safely.
+  - Extracted UI worker logging to standalone `log_worker_event` in `src/mana_agent/commands/ui_helpers.py` and exposed static compatibility hook on `CodexCodingAgentShim`.
+  - Updated gateway stack (`src/mana_agent/gateway/stack.py`) and CLI entrypoints (`src/mana_agent/commands/cli_internal.py`, `src/mana_agent/commands/chat_cli.py`) to bind `CodingAgent = CodexCodingAgentShim`, removing internal coding instantiation paths and fallback auto-execute branches.
+  - Updated configuration schemas, settings, and TUI config screens (`src/mana_agent/config/settings.py`, `src/mana_agent/config/user_config.py`, `src/mana_agent/tui/app.py`, `src/mana_agent/tui/configuration_app.py`) to remove internal coding options and validate Codex-only requirements.
+  - Updated documentation (`docs/20-codex-integration.md`) and test suites (`tests/gateway/test_chat_gateway.py`, `tests/test_coding_runtime_selection_events.py`, `tests/test_codex_integration.py`, `tests/test_coding_tool_system.py`, `tests/test_spirit.py`, `tests/test_cli_ux_helpers.py`) to guarantee that every coding request resolves exclusively to Codex and that disabling Codex or specifying internal engines stops safely without fallback.
+  - User verification required: `pytest tests/test_coding_runtime_selection_events.py tests/test_codex_integration.py tests/gateway/test_chat_gateway.py tests/test_coding_tool_system.py tests/test_spirit.py tests/test_cli_ux_helpers.py -v`.
+
 ## 2026-09-07
 
 - Fixed coding agent repository identity preservation across turn preparation and session deletion:

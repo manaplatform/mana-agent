@@ -16,6 +16,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+import pytest   
 
 from mana_agent.config.settings import Settings
 from mana_agent.gateway import (
@@ -42,7 +43,7 @@ from mana_agent.human_inbox.repository import (
 from mana_agent.human_inbox.service import HumanInboxService
 from mana_agent.human_inbox.tokens import ResponseTokenSigner
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
-from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
+from mana_agent.coding.selection import CodingBackendConfigurationError
 from mana_agent.memory import MemoryContent, MemoryRecord
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 from mana_agent.remote_execution.models import RemoteExecutionRequest
@@ -923,24 +924,22 @@ def test_gateway_uses_codex_shim_without_legacy_coding_workers(
     assert "tool_worker=disabled" in model_log
 
 
-def test_gateway_uses_internal_runtime_when_codex_is_disabled(
+def test_gateway_rejects_disabled_codex_when_coding_agent_is_enabled(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(
         "mana_agent.commands.cli_internal.build_ask_service",
         lambda *a, **k: _DummyAskService(),
     )
-    gateway = AgentChatGateway(
-        tmp_path,
-        coding_agent=True,
-        agent_tools=True,
-        tool_worker_process=False,
-        auto_execute_plan=False,
-        settings=Settings(MANA_CODEX_ENABLED=False, OPENAI_API_KEY="test-key"),
-    )
-    context = gateway.get_rich_context()
-    assert isinstance(context.coding_agent, InternalCodingAgentShim)
-    assert not isinstance(context.coding_agent, CodexCodingAgentShim)
+    with pytest.raises(CodingBackendConfigurationError, match="MANA_CODEX_ENABLED is false"):
+        AgentChatGateway(
+            tmp_path,
+            coding_agent=True,
+            agent_tools=True,
+            tool_worker_process=False,
+            auto_execute_plan=False,
+            settings=Settings(MANA_CODEX_ENABLED=False, OPENAI_API_KEY="test-key"),
+        )
 
 
 def test_gateway_process_turn_ask_path(tmp_path: Path, monkeypatch) -> None:

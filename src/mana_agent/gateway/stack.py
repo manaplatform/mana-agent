@@ -22,7 +22,6 @@ from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.coding.selection import resolve_coding_backend
-from mana_agent.coding.internal_agent_shim import InternalCodingAgentShim
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import pin_model_for_role, resolve_model_for_role
 from mana_agent.model_routing.repository import RepositoryMetadataInspector
@@ -431,11 +430,7 @@ def build_chat_stack(
     tools_executor_instance = None
     public_coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
     coding_selection = resolve_coding_backend(settings)
-    coding_agent_cls = (
-        public_coding_agent_cls
-        if public_coding_agent_cls is not CodexCodingAgentShim
-        else (CodexCodingAgentShim if coding_selection.backend == "codex" else InternalCodingAgentShim)
-    )
+    coding_agent_cls = public_coding_agent_cls
     coding_agent_is_custom = public_coding_agent_cls is not CodexCodingAgentShim
 
     def _build_tools_executor(worker_client: Any) -> Any:
@@ -485,58 +480,10 @@ def build_chat_stack(
                 context_cost_governor=context_cost_governor,
             )
         else:
-            if not cfg.agent_tools:
-                raise ValueError("internal/custom coding_agent requires agent_tools (needs tool loop).")
-            if ask_service is None or getattr(ask_service, "ask_agent", None) is None:
-                raise ValueError("custom coding_agent requires AskService.ask_agent to be configured.")
-
-            if cfg.coding_memory:
-                coding_memory_service = CodingMemoryService(
-                    project_root=root,
-                    max_turns=settings.coding_flow_max_turns,
-                    max_tasks=settings.coding_flow_max_tasks,
-                    session_id=session_id,
-                )
-
-            if hasattr(ask_service.ask_agent, "update_model"):
-                ask_service.ask_agent.update_model(coding_model_assignment.resolved_model)
-            elif hasattr(ask_service.ask_agent, "model"):
-                ask_service.ask_agent.model = coding_model_assignment.resolved_model
-
-            if cfg.tool_worker_process:
-                tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
-                tool_worker_client = tool_worker_client_cls(
-                    api_key=inference_connection.api_key,
-                    model=effective_tool_worker_model,
-                    session_id=session_id,
-                    base_url=effective_base_url,
-                    repo_root=coding_repository_root,
-                    project_root=coding_working_directory,
-                    allowed_prefixes=None,
-                    tools_only_strict=cfg.tool_worker_strict,
-                    model_level=tool_worker_model_assignment.model_level,
-                    workspace_id=workspace_id,
-                    repository_id=repository_id,
-                )
-
             coding_agent_instance = coding_agent_cls(
-                api_key=inference_connection.api_key,
-                base_url=effective_base_url,
                 repo_root=coding_repository_root,
-                project_root=coding_working_directory,
-                ask_agent=ask_service.ask_agent,
-                allowed_prefixes=None,
-                coding_memory_service=coding_memory_service,
-                coding_memory_enabled=cfg.coding_memory,
-                plan_max_steps=max(1, int(cfg.coding_plan_max_steps or settings.coding_plan_max_steps)),
-                search_budget=max(1, int(cfg.coding_search_budget or settings.coding_search_budget)),
-                read_budget=max(1, int(cfg.coding_read_budget or settings.coding_read_budget)),
-                require_read_files=max(
-                    1, int(cfg.coding_require_read_files or settings.coding_require_read_files)
-                ),
-                tool_worker_client=tool_worker_client,
-                full_auto_mode=(cfg.execution_profile == "full-auto"),
-                planner_model=planner_model_assignment.resolved_model,
+                working_directory=coding_working_directory,
+                session_id=session_id,
                 context_cost_governor=context_cost_governor,
             )
 
@@ -587,10 +534,10 @@ def build_chat_stack(
         )
         planner_model = "codex-owned"
     elif coding_agent_instance is not None:
-        coding_backend = "internal" if isinstance(coding_agent_instance, InternalCodingAgentShim) else type(coding_agent_instance).__name__
+        coding_backend = "codex"
         coding_model = coding_model_assignment.resolved_model
         routed_coding_model = coding_model
-        planner_model = planner_model_assignment.resolved_model
+        planner_model = "codex-owned"
     else:
         coding_backend = "disabled"
         coding_model = "disabled"

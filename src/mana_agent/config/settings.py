@@ -542,8 +542,8 @@ class Settings(BaseSettings):
     mana_transactional_always_approve: bool = Field(
         default=False, alias="MANA_TRANSACTIONAL_ALWAYS_APPROVE"
     )
-    # Empty preserves pre-0.0.19 configurations: Codex when enabled, internal otherwise.
-    mana_coding_backend: str = Field(default="", alias="MANA_CODING_BACKEND")
+    # Authoritative coding runtime: Codex is the single execution route (Coding -> Codex).
+    mana_coding_backend: str = Field(default="codex", alias="MANA_CODING_BACKEND")
     mana_codex_enabled: bool = Field(default=True, alias="MANA_CODEX_ENABLED")
     mana_codex_max_workers: int = Field(default=2, alias="MANA_CODEX_MAX_WORKERS")
     mana_codex_stream_events: bool = Field(
