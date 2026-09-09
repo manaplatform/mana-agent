@@ -102,6 +102,8 @@ class ChatLog(VerticalScroll):
         self._assistant_widgets: dict[str, SelectableText] = {}  # event_id -> widget
         self._tool_cards: dict[str, ToolCard] = {}  # call_id -> card
         self._execution_panels: dict[str, ExecutionPanel] = {}
+        self._user_widgets_by_turn: dict[str, SelectableText] = {}
+        self._latest_user_widget: SelectableText | None = None
         self._current_turn_id: str | None = None
         # Deduplicate live + replay so the same event_id is only painted once
         self._rendered_ids: set[str] = set()
@@ -237,9 +239,28 @@ class ChatLog(VerticalScroll):
     # Individual renderers
     # ------------------------------------------------------------------
 
+    def get_execution_panel(self, turn_id: str) -> ExecutionPanel | None:
+        return self._execution_panels.get(turn_id)
+
+    def _get_or_create_execution_panel(self, turn_id: str) -> ExecutionPanel:
+        panel = self._execution_panels.get(turn_id)
+        if panel is None:
+            panel = ExecutionPanel(turn_id=turn_id)
+            self._execution_panels[turn_id] = panel
+            user_widget = self._user_widgets_by_turn.get(turn_id) or self._latest_user_widget
+            if user_widget is not None and user_widget in self.children:
+                self.mount(panel, after=user_widget)
+            else:
+                self.mount(panel)
+        return panel
+
     def _add_user_message(self, event: UserMessageEvent) -> SelectableText:
         widget = SelectableText(event.content, classes="user-message")
         self.mount(widget)
+        turn_id = event.turn_id or self._current_turn_id
+        if turn_id:
+            self._user_widgets_by_turn[turn_id] = widget
+        self._latest_user_widget = widget
         return widget
 
     def _add_or_update_assistant(self, event: AssistantMessageEvent) -> SelectableText:
@@ -253,6 +274,14 @@ class ChatLog(VerticalScroll):
         # If we already have a streaming assistant for this turn, replace its content
         # Remove previous placeholder if present for same turn (simple heuristic)
         if event.turn_id:
+            panel = self._execution_panels.get(event.turn_id)
+            if panel is not None:
+                panel.update_event({
+                    "event_type": "turn.completed",
+                    "title": "Completed",
+                    "status": "success",
+                    "detail": "Response generated",
+                })
             for existing_id, w in list(self._assistant_widgets.items()):
                 if getattr(w, "_turn_id", None) == event.turn_id and existing_id != event.event_id:
                     try:
@@ -265,12 +294,33 @@ class ChatLog(VerticalScroll):
         return widget
 
     def _add_tool_call(self, event: ToolCallEvent) -> ToolCard:
+        if event.turn_id:
+            panel = self._get_or_create_execution_panel(event.turn_id)
+            panel.update_event({
+                "event_type": "tool.started",
+                "title": f"Tool: {event.tool_name}",
+                "tool_name": event.tool_name,
+                "tool_call_id": event.call_id,
+                "status": "running",
+                "detail": event.summary or "",
+            })
         card = ToolCard(event)
         self._tool_cards[event.call_id] = card
         self.mount(card)
         return card
 
     def _add_tool_result(self, event: ToolResultEvent) -> Static | ToolCard:
+        if event.turn_id:
+            panel = self._get_or_create_execution_panel(event.turn_id)
+            panel.update_event({
+                "event_type": "tool.finished",
+                "title": f"Tool: {event.tool_name}",
+                "tool_name": event.tool_name,
+                "tool_call_id": event.call_id,
+                "status": "success" if event.success else "failed",
+                "detail": event.summary or event.error or "",
+                "duration_ms": event.duration_ms,
+            })
         card = self._tool_cards.get(event.call_id)
         if card is not None:
             card.set_result(event)
@@ -300,11 +350,7 @@ class ChatLog(VerticalScroll):
         return None
 
     def _add_coding_activity(self, event: CodingActivityEvent) -> ExecutionPanel:
-        panel = self._execution_panels.get(event.turn_id)
-        if panel is None:
-            panel = ExecutionPanel(turn_id=event.turn_id)
-            self._execution_panels[event.turn_id] = panel
-            self.mount(panel)
+        panel = self._get_or_create_execution_panel(event.turn_id)
         panel.update_event(event.activity)
         return panel
 
@@ -324,6 +370,8 @@ class ChatLog(VerticalScroll):
         self._assistant_widgets.clear()
         self._tool_cards.clear()
         self._execution_panels.clear()
+        self._user_widgets_by_turn.clear()
+        self._latest_user_widget = None
         self._rendered_ids.clear()
 
     def on_mount(self) -> None:

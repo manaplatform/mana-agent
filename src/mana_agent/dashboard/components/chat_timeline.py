@@ -19,6 +19,11 @@ _ROLE_AVATAR = {
 
 _EVENT_ICONS = {
     "routing": "🧭",
+    "context": "📚",
+    "coding": "💻",
+    "model": "🧠",
+    "completion": "✅",
+    "failure": "❌",
     "plan_step": "📋",
     "reasoning": "💭",
     "tool": "🛠️",

@@ -5291,6 +5291,16 @@ class AgentChatGateway:
             if ask_service is not None and getattr(ask_service, "ask_agent", None) is not None:
                 if hasattr(ask_service.ask_agent, "set_context_retrieval_tools"):
                     ask_service.ask_agent.set_context_retrieval_tools(context_retrieval_tools)
+            if callable(sink):
+                sink(
+                    "routing_started",
+                    "Routing",
+                    metadata={
+                        "turn_id": turn_id,
+                        "session_id": session_id,
+                        "status": "running",
+                    },
+                )
             entry_model_decision = self.routing_authority.route(
                 RoutingRequest(
                     role="head_decision",
@@ -5320,6 +5330,17 @@ class AgentChatGateway:
                     context=route_context,
                 )
             except EntryRoutingError as exc:
+                if callable(sink):
+                    sink(
+                        "routing_failed",
+                        f"Routing failed: {exc}",
+                        metadata={
+                            "turn_id": turn_id,
+                            "session_id": session_id,
+                            "status": "failed",
+                            "error": str(exc),
+                        },
+                    )
                 state.pop("_memory_task_binding", None)
                 state.pop("_conversation_context_tool", None)
                 state.pop("_context_retrieval_tools", None)
@@ -5346,6 +5367,18 @@ class AgentChatGateway:
 
 
             else:
+                if callable(sink):
+                    sink(
+                        "routing_completed",
+                        f"Route selected: {entry_decision.route}",
+                        metadata={
+                            "turn_id": turn_id,
+                            "session_id": session_id,
+                            "route": entry_decision.route,
+                            "status": "success",
+                            "detail": entry_decision.route,
+                        },
+                    )
                 record_current(
                     "gateway.entry_route",
                     {"decision": entry_decision.to_dict(), "turn_id": turn_id},
@@ -8897,6 +8930,16 @@ class AgentChatGateway:
                 callbacks=options.get("callbacks"),
             )
         if decision.route == "conversation":
+            if callable(sink):
+                sink(
+                    "model_execution_started",
+                    "Model execution",
+                    metadata={
+                        "turn_id": context.turn_id,
+                        "session_id": context.session_id,
+                        "status": "running",
+                    },
+                )
             try:
                 answer = self._invoke_conversation(
                     execution_text,
