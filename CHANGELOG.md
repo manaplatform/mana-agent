@@ -5,11 +5,13 @@ All notable repository changes should be recorded here.
 ## 2026-09-10
 
 - Implemented Codex-style live chat execution stats for every turn in both TUI and Dashboard:
-  - Created normalized `ExecutionTrace` and `ExecutionStep` model (`src/mana_agent/chat/execution_trace.py`) providing chronological phase tracking (`routing`, `context`, `coding`, `tool`, `model`, `completion`, `failure`) and generic fallback for future phases.
+  - Created normalized `ExecutionTrace` and `ExecutionStep` model (`src/mana_agent/chat/execution_trace.py`) providing chronological phase tracking (`routing`, `context`, `search`, `coding`, `tool`, `model`, `completion`, `failure`) and generic fallback for future phases.
+  - Resolved hardcoded "coding" header/title in `ExecutionPanel`, dynamically deriving the active phase title (`routing`, `searching`, `coding`, `model execution`, etc.) and restricting "coding activity" to turns that actually perform coding.
+  - Added dedicated `search` / `Searching` phase recognizing search tools (`web_search`, `repo_search`, `find_by_name`, `grep_search`) and search routes across TUI, Gateway, and Dashboard.
   - Embedded `ExecutionTrace` into `ExecutionPanel` with subtle/dim running visual indicator (`◌ <phase> · running`) and durable completed history (`✓ <phase> (duration)`).
-  - Updated `ChatLog` to mount turn-scoped `ExecutionPanel` immediately beneath each user message, routing tool calls and coding activities directly to the corresponding turn panel, and clearing panels on `/new`.
+  - Updated `ChatLog` to mount turn-scoped `ExecutionPanel` immediately beneath each user message, routing tool calls, search queries, and coding activities directly to the corresponding turn panel, and clearing panels on `/new`.
   - Upgraded Dashboard `live_chat.js` with client-side `executionTraces`, chronological progression directly beneath user messages, subtle low-opacity running treatment, in-place live updates, collapsible coding activity and tool details, and clean reset on `/new`.
-  - Emitted observational routing and model execution lifecycle events via gateway sink in `chat_gateway.py` and bridged live into TUI via `app.py`.
+  - Emitted observational routing, search, coding, and model execution lifecycle events via gateway sink in `chat_gateway.py` and bridged live into TUI via `app.py`.
   - Added test suites for execution trace progression, in-place updates, failure cleanup, and TUI/dashboard integration in `tests/test_execution_trace.py` and `tests/dashboard/live_chat_reducer.test.mjs`.
   - User verification required: `pytest tests/test_execution_trace.py tests/test_tui_message_layout.py tests/test_tui_auto_chat_tool_events.py tests/test_codex_tui_lifecycle.py tests/gateway/test_chat_gateway.py -v && node --test tests/dashboard/live_chat_reducer.test.mjs`.
 

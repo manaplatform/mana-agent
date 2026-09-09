@@ -413,3 +413,28 @@ test("execution trace derives generic fallback cleanly for future runtime phases
   assert.equal(trace.steps[0].title, "Audit");
 });
 
+test("execution trace recognizes searching phase correctly for search tools and routes", () => {
+  const state = createState("session-search");
+  reduce(state, {
+    type: "optimistic",
+    message: { message_id: "client-s", content: "search repo" },
+  });
+  reduce(state, {
+    type: "event",
+    event: event(1, "routing_completed", { execution_id: "client-s", metadata: { route: "search" } }),
+  });
+  reduce(state, {
+    type: "event",
+    event: event(2, "tool.started", {
+      event_id: "t-search",
+      execution_id: "client-s",
+      metadata: { tool_name: "web_search", tool_call_id: "t-search" },
+    }),
+  });
+  const trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.steps.length, 2);
+  assert.equal(trace.steps[0].phase, "routing");
+  assert.equal(trace.steps[1].phase, "search");
+  assert.equal(trace.steps[1].title, "Searching");
+});
+

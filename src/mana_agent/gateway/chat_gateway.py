@@ -9426,6 +9426,19 @@ class AgentChatGateway:
             required_tool = (
                 "github_search" if decision.route == "github" else "web_search"
             )
+            if callable(sink):
+                sink(
+                    "search_started",
+                    "Searching",
+                    metadata={
+                        "turn_id": context.turn_id,
+                        "session_id": context.session_id,
+                        "route": decision.route,
+                        "tool_name": required_tool,
+                        "status": "running",
+                        "detail": f"{decision.route} search",
+                    },
+                )
             try:
                 search_operation = decide_search_operation(
                     ask_service=ask_service,
@@ -9470,6 +9483,30 @@ class AgentChatGateway:
             mapped = search_operation
         else:
             mapped = None
+        if decision.route == "coding" and callable(sink):
+            sink(
+                "coding_started",
+                "Coding",
+                metadata={
+                    "turn_id": context.turn_id,
+                    "session_id": context.session_id,
+                    "backend": "codex",
+                    "status": "running",
+                },
+            )
+        elif decision.route == "repository" and callable(sink):
+            sink(
+                "search_started",
+                "Searching",
+                metadata={
+                    "turn_id": context.turn_id,
+                    "session_id": context.session_id,
+                    "route": "repository",
+                    "tool_name": "repo_search",
+                    "status": "running",
+                    "detail": "repository search",
+                },
+            )
         mapped = {
             "coding": AgentDecision(
                 intent="edit",

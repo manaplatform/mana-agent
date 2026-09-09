@@ -71,6 +71,19 @@ class ExecutionStep:
         }
 
 
+SEARCH_TOOLS = {
+    "web_search",
+    "github_search",
+    "repo_search",
+    "code_search",
+    "find_by_name",
+    "grep_search",
+    "search_files",
+    "search",
+    "document_query",
+}
+
+
 def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = None) -> tuple[str, str]:
     """Map a runtime event type to (phase, title).
 
@@ -78,17 +91,20 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
     """
     et = str(event_type or "").strip().lower()
     meta = dict(metadata or {})
+    tool_name = str(meta.get("tool_name") or meta.get("name") or "").strip()
 
     # Routing
     if et in {
         "routing_started",
         "routing_envelope_created",
         "agent.routing",
+        "agent.decision",
         "entry_route_decided",
         "routing_completed",
         "routing_failed",
         "gateway.entry_route",
         "followup_classified",
+        "route_selected",
     }:
         return "routing", "Routing"
 
@@ -106,25 +122,36 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
     } or et.startswith(("context.", "budget.", "cost.")):
         return "context", "Context preparation"
 
+    # Search
+    if (
+        et in {"search_started", "search_completed", "search_failed", "search"}
+        or et.startswith("search.")
+        or tool_name in SEARCH_TOOLS
+        or (bool(tool_name) and "search" in tool_name.lower())
+        or meta.get("route") in {"search", "repository", "github"}
+    ):
+        return "search", "Searching"
+
     # Coding / Codex Backend
     if (
         et in {
             "coding_started",
-            "backend.selected",
-            "turn.starting",
             "coding.terminal",
+            "coding.progress",
             "coding",
         }
         or et.startswith(("command.", "patch.", "file."))
-        or meta.get("backend") in {"codex", "coding"}
+        or (
+            meta.get("backend") == "codex"
+            and not et.startswith(("turn.", "error", "routing", "tool", "search", "model"))
+        )
     ):
         backend = str(meta.get("backend") or "coding")
         title = "Codex" if backend == "codex" else "Coding"
         return "coding", title
 
-    # Tool Execution
+    # Tool Execution (non-search)
     if et.startswith("tool.") or et in {"tool_started", "tool_finished", "tool_failed", "tool_cancelled"}:
-        tool_name = str(meta.get("tool_name") or "").strip()
         title = f"Tool: {tool_name}" if tool_name else "Tool execution"
         return "tool", title
 
@@ -135,7 +162,7 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
         "model.completed",
         "assistant.started",
         "assistant.delta",
-        "agent.decision",
+        "thinking_started",
     }:
         return "model", "Model execution"
 
@@ -172,6 +199,12 @@ class ExecutionTrace:
         self.is_failed: bool = False
         self.is_cancelled: bool = False
         self._seen_sub_event_ids: set[str] = set()
+
+    @property
+    def active_step(self) -> ExecutionStep | None:
+        if self.active_step_id:
+            return self._step_by_id.get(self.active_step_id)
+        return None
 
     def get_step(self, step_id: str) -> ExecutionStep | None:
         return self._step_by_id.get(step_id)

@@ -23,16 +23,32 @@
     const et = text(eventType || "").trim().toLowerCase();
     const meta = metadata || {};
 
+    const SEARCH_TOOLS = new Set([
+      "web_search",
+      "github_search",
+      "repo_search",
+      "code_search",
+      "find_by_name",
+      "grep_search",
+      "search_files",
+      "search",
+      "document_query",
+    ]);
+
+    const toolName = text(meta.tool_name || meta.name || "").trim();
+
     // Routing
     if (
       et === "routing_started" ||
       et === "routing_envelope_created" ||
       et === "agent.routing" ||
+      et === "agent.decision" ||
       et === "entry_route_decided" ||
       et === "routing_completed" ||
       et === "routing_failed" ||
       et === "gateway.entry_route" ||
-      et === "followup_classified"
+      et === "followup_classified" ||
+      et === "route_selected"
     ) {
       return ["routing", "Routing"];
     }
@@ -55,25 +71,42 @@
       return ["context", "Context preparation"];
     }
 
+    // Search
+    if (
+      et === "search_started" ||
+      et === "search_completed" ||
+      et === "search_failed" ||
+      et.startsWith("search.") ||
+      SEARCH_TOOLS.has(toolName) ||
+      (toolName && toolName.toLowerCase().includes("search")) ||
+      meta.route === "search" ||
+      meta.route === "repository" ||
+      meta.route === "github"
+    ) {
+      return ["search", "Searching"];
+    }
+
     // Coding / Codex Backend
     if (
       et === "coding_started" ||
-      et === "backend.selected" ||
-      et === "turn.starting" ||
       et === "coding.terminal" ||
+      et === "coding.progress" ||
       et === "coding" ||
       et.startsWith("command.") ||
       et.startsWith("patch.") ||
       et.startsWith("file.") ||
-      meta.backend === "codex" ||
-      meta.backend === "coding"
+      (meta.backend === "codex" &&
+        !et.startsWith("turn.") &&
+        !et.startsWith("tool.") &&
+        !et.startsWith("search.") &&
+        !et.startsWith("routing."))
     ) {
       const backend = text(meta.backend || "coding");
       const title = backend === "codex" ? "Codex" : "Coding";
       return ["coding", title];
     }
 
-    // Tool Execution
+    // Tool Execution (non-search)
     if (
       et.startsWith("tool.") ||
       et === "tool_started" ||
@@ -81,7 +114,6 @@
       et === "tool_failed" ||
       et === "tool_cancelled"
     ) {
-      const toolName = text(meta.tool_name || meta.name || "").trim();
       const title = toolName ? `Tool: ${toolName}` : "Tool execution";
       return ["tool", title];
     }
@@ -93,7 +125,7 @@
       et === "model.completed" ||
       et === "assistant.started" ||
       et === "assistant.delta" ||
-      et === "agent.decision"
+      et === "thinking_started"
     ) {
       return ["model", "Model execution"];
     }
@@ -829,8 +861,8 @@
                   }
                   if (subLogs.length > 0) addText(codingBox, "pre", subLogs.join("\n"));
                   stepRow.appendChild(codingBox);
-                } else if (step.phase === "tool") {
-                  const toolCallId = text(step.metadata.tool_call_id || step.metadata.call_id || step.stepId.split(":tool:")[1]);
+                } else if (step.phase === "tool" || step.phase === "search") {
+                  const toolCallId = text(step.metadata.tool_call_id || step.metadata.call_id || step.stepId.split(":tool:")[1] || step.stepId.split(":search:")[1]);
                   const toolObj = state.tools.get(toolCallId);
                   const args = toolObj ? toolObj.arguments : (step.metadata.arguments || step.metadata.args_summary);
                   const logs = toolObj ? toolObj.logs : [];
@@ -858,7 +890,7 @@
         } else if (row.kind === "tool") {
           const tool = row.value;
           const alreadyInTrace = [...state.executionTraces.values()].some((t) =>
-            t.steps.some((s) => s.phase === "tool" && (s.stepId.endsWith(`:${tool.id}`) || text(s.metadata.tool_call_id) === tool.id))
+            t.steps.some((s) => (s.phase === "tool" || s.phase === "search") && (s.stepId.endsWith(`:${tool.id}`) || text(s.metadata.tool_call_id) === tool.id))
           );
           if (alreadyInTrace) continue;
           const node = document.createElement("details");

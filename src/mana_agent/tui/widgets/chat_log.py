@@ -296,10 +296,16 @@ class ChatLog(VerticalScroll):
     def _add_tool_call(self, event: ToolCallEvent) -> ToolCard:
         if event.turn_id:
             panel = self._get_or_create_execution_panel(event.turn_id)
+            tool_name = str(event.tool_name or "").strip()
+            is_search = "search" in tool_name.lower() or tool_name in {
+                "find_by_name", "grep_search", "document_query"
+            }
+            evt_type = "search.started" if is_search else "tool.started"
+            evt_title = f"Searching ({tool_name})" if is_search else f"Tool: {tool_name}"
             panel.update_event({
-                "event_type": "tool.started",
-                "title": f"Tool: {event.tool_name}",
-                "tool_name": event.tool_name,
+                "event_type": evt_type,
+                "title": evt_title,
+                "tool_name": tool_name,
                 "tool_call_id": event.call_id,
                 "status": "running",
                 "detail": event.summary or "",
@@ -312,10 +318,16 @@ class ChatLog(VerticalScroll):
     def _add_tool_result(self, event: ToolResultEvent) -> Static | ToolCard:
         if event.turn_id:
             panel = self._get_or_create_execution_panel(event.turn_id)
+            tool_name = str(event.tool_name or "").strip()
+            is_search = "search" in tool_name.lower() or tool_name in {
+                "find_by_name", "grep_search", "document_query"
+            }
+            evt_type = "search.finished" if is_search else "tool.finished"
+            evt_title = f"Searching ({tool_name})" if is_search else f"Tool: {tool_name}"
             panel.update_event({
-                "event_type": "tool.finished",
-                "title": f"Tool: {event.tool_name}",
-                "tool_name": event.tool_name,
+                "event_type": evt_type,
+                "title": evt_title,
+                "tool_name": tool_name,
                 "tool_call_id": event.call_id,
                 "status": "success" if event.success else "failed",
                 "detail": event.summary or event.error or "",

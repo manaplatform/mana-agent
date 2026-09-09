@@ -59,10 +59,23 @@ def test_classify_runtime_phase_known_and_generic_fallback() -> None:
     phase, title = classify_runtime_phase("command.started")
     assert phase == "coding"
 
-    # Tool
+    # Search
+    phase, title = classify_runtime_phase("search_started")
+    assert phase == "search"
+    assert title == "Searching"
+
     phase, title = classify_runtime_phase("tool.started", {"tool_name": "repo_search"})
+    assert phase == "search"
+    assert title == "Searching"
+
+    phase, title = classify_runtime_phase("tool.started", {"tool_name": "web_search"})
+    assert phase == "search"
+    assert title == "Searching"
+
+    # Tool (non-search)
+    phase, title = classify_runtime_phase("tool.started", {"tool_name": "bash"})
     assert phase == "tool"
-    assert title == "Tool: repo_search"
+    assert title == "Tool: bash"
 
     # Model
     phase, title = classify_runtime_phase("model_execution_started")
@@ -288,6 +301,11 @@ def test_execution_panel_renders_trace_steps_with_subtle_running() -> None:
     assert "routing" in rendered.lower()
     assert "running" in rendered.lower()
     assert "◌" in rendered
+    # Header should say routing, NOT coding
+    header_text = str(panel.header.render()).lower()
+    assert "routing" in header_text
+    assert "coding" not in header_text
+    assert panel.details.title == "activity"
 
     # Complete routing step
     panel.update_trace_event({
@@ -299,6 +317,20 @@ def test_execution_panel_renders_trace_steps_with_subtle_running() -> None:
     assert "✓" in rendered_done
     assert "50ms" in rendered_done
 
+    # Start searching step
+    panel.update_trace_event({
+        "event_id": "search-1",
+        "event_type": "search.started",
+        "status": "running",
+        "title": "Searching (web_search)",
+        "tool_name": "web_search",
+    })
+    search_rendered = str(panel.steps_view.render()).lower()
+    assert "searching" in search_rendered
+    search_header = str(panel.header.render()).lower()
+    assert "searching" in search_header
+    assert "coding" not in search_header
+
     # Start coding step with activity
     panel.update_trace_event({
         "event_id": "act-1",
@@ -306,6 +338,7 @@ def test_execution_panel_renders_trace_steps_with_subtle_running() -> None:
         "status": "running",
         "metadata": {"backend": "codex"},
     })
+    assert panel.details.title == "coding activity"
     panel.update_trace_event({
         "event_id": "act-2",
         "event_type": "command.started",

@@ -22,7 +22,7 @@ class ExecutionPanel(Vertical):
         super().__init__()
         self.turn_id = turn_id
         self.trace = ExecutionTrace(turn_id=turn_id)
-        self.backend = "coding"
+        self.backend = ""
         self.model = ""
         self.phase = "queued"
         self.events: list[dict] = []
@@ -31,13 +31,13 @@ class ExecutionPanel(Vertical):
         self.steps_view = Static("", classes="execution-steps")
         self.activity_log = SelectableText("Waiting for backend…", classes="execution-log")
         self.footer = Static("0 events", classes="execution-footer")
-        self.details = Collapsible(title="coding activity", collapsed=False)
+        self.details = Collapsible(title="activity", collapsed=False)
         self.context_meter: dict = {}
 
     def compose(self):
         yield self.header
         yield self.steps_view
-        with Collapsible(title="coding activity", collapsed=False) as details:
+        with Collapsible(title="activity", collapsed=False) as details:
             self.details = details
             yield self.activity_log
         yield self.footer
@@ -93,19 +93,39 @@ class ExecutionPanel(Vertical):
         self.steps_view.update("\n".join(lines))
 
     def _render_state(self, event: dict) -> None:
-        self.backend = str(event.get("backend") or self.backend)
+        backend_val = event.get("backend")
+        if backend_val:
+            self.backend = str(backend_val)
         self.model = str(event.get("model") or self.model)
         event_type = str(event.get("event_type") or event.get("type") or "activity")
         if event_type.startswith(("context.", "cost.", "budget.")):
             self.context_meter.update(event.get("payload") or event.get("metadata") or {})
         self.phase = event_type
         status = str(event.get("status") or "running")
-        icon = {"success": "✓", "failed": "✗", "cancelled": "■"}.get(status, "●")
+
+        # Determine current display phase & title from trace active/latest step
+        current_step = self.trace.active_step or (self.trace.steps[-1] if self.trace.steps else None)
+        if current_step is not None:
+            current_title = current_step.title
+            current_status = current_step.status
+        else:
+            current_title = str(event.get("title") or event_type.replace(".", " ").replace("_", " ").title())
+            current_status = status
+
+        icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(current_status, "◌")
         if self.header:
             model = f" · {self.model}" if self.model else ""
-            self.header.update(f"{icon} {self.backend}{model} · {event_type.replace('.', ' ')}")
+            if self.backend and self.backend.lower() not in {"coding", "local"}:
+                self.header.update(f"{icon} {self.backend}{model} · {current_title.lower()}")
+            else:
+                self.header.update(f"{icon} {current_title.lower()}{model}")
 
         self._render_steps()
+
+        # Update details title: only call it "coding activity" if a coding step is present
+        has_coding = any(s.phase == "coding" for s in self.trace.steps)
+        if self.details:
+            self.details.title = "coding activity" if has_coding else "activity"
 
         # Activity log (for coding / command / progress items)
         lines: list[str] = []
