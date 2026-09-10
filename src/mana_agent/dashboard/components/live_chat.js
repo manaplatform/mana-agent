@@ -13,6 +13,351 @@
   const eventSequence = (event) => Number(event.sequence || 0);
   const eventTime = (event) => text(event.started_at || event.timestamp || event.created_at);
 
+  const formatDuration = (ms) => {
+    if (ms == null || isNaN(ms)) return "";
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  };
+
+  function classifyRuntimePhase(eventType, metadata) {
+    const et = text(eventType || "").trim().toLowerCase();
+    const meta = metadata || {};
+
+    const SEARCH_TOOLS = new Set([
+      "web_search",
+      "github_search",
+      "repo_search",
+      "code_search",
+      "find_by_name",
+      "grep_search",
+      "search_files",
+      "search",
+      "document_query",
+    ]);
+
+    const toolName = text(meta.tool_name || meta.name || "").trim();
+
+    // Routing
+    if (
+      et === "routing_started" ||
+      et === "routing_envelope_created" ||
+      et === "agent.routing" ||
+      et === "agent.decision" ||
+      et === "entry_route_decided" ||
+      et === "routing_completed" ||
+      et === "routing_failed" ||
+      et === "gateway.entry_route" ||
+      et === "followup_classified" ||
+      et === "route_selected"
+    ) {
+      return ["routing", "Routing"];
+    }
+
+    // Context Preparation
+    if (
+      et === "context_preparation_started" ||
+      et === "context_retrieval_started" ||
+      et === "context_retrieval_completed" ||
+      et === "context_retrieval" ||
+      et === "context.budget" ||
+      et === "context.compacted" ||
+      et === "context.capabilities_loaded" ||
+      et === "context.capabilities_unloaded" ||
+      et === "workspace.repository_initialized" ||
+      et.startsWith("context.") ||
+      et.startsWith("budget.") ||
+      et.startsWith("cost.")
+    ) {
+      return ["context", "Context preparation"];
+    }
+
+    // Search
+    if (
+      et === "search_started" ||
+      et === "search_completed" ||
+      et === "search_failed" ||
+      et.startsWith("search.") ||
+      SEARCH_TOOLS.has(toolName) ||
+      (toolName && toolName.toLowerCase().includes("search")) ||
+      meta.route === "search" ||
+      meta.route === "repository" ||
+      meta.route === "github"
+    ) {
+      return ["search", "Searching"];
+    }
+
+    // Coding / Codex Backend
+    if (
+      et === "coding_started" ||
+      et === "coding.terminal" ||
+      et === "coding.progress" ||
+      et === "coding" ||
+      et.startsWith("command.") ||
+      et.startsWith("patch.") ||
+      et.startsWith("file.") ||
+      (meta.backend === "codex" &&
+        !et.startsWith("turn.") &&
+        !et.startsWith("tool.") &&
+        !et.startsWith("search.") &&
+        !et.startsWith("routing."))
+    ) {
+      const backend = text(meta.backend || "coding");
+      const title = backend === "codex" ? "Codex" : "Coding";
+      return ["coding", title];
+    }
+
+    // Tool Execution (non-search)
+    if (
+      et.startsWith("tool.") ||
+      et === "tool_started" ||
+      et === "tool_finished" ||
+      et === "tool_failed" ||
+      et === "tool_cancelled"
+    ) {
+      const title = toolName ? `Tool: ${toolName}` : "Tool execution";
+      return ["tool", title];
+    }
+
+    // Model Execution
+    if (
+      et === "model_execution_started" ||
+      et === "model.started" ||
+      et === "model.completed" ||
+      et === "assistant.started" ||
+      et === "assistant.delta" ||
+      et === "thinking_started"
+    ) {
+      return ["model", "Model execution"];
+    }
+
+    // Completion
+    if (
+      et === "turn.completed" ||
+      et === "turn.finished" ||
+      et === "conversation_response_created" ||
+      et === "assistant.completed"
+    ) {
+      return ["completion", "Completed"];
+    }
+
+    // Failure / Cancellation
+    if (
+      et === "error" ||
+      et === "turn.cancelled" ||
+      et === "turn.timeout" ||
+      et === "tool.timeout" ||
+      et === "cancelled"
+    ) {
+      return ["failure", et.includes("cancelled") ? "Cancelled" : "Failed"];
+    }
+
+    // Generic Fallback
+    const parts = et.replaceAll("_", ".").split(".");
+    const phase = parts[0] || "activity";
+    const title = phase.charAt(0).toUpperCase() + phase.slice(1);
+    return [phase, title];
+  }
+
+  function createTrace(turnId) {
+    return {
+      turnId: text(turnId),
+      aliases: new Set([text(turnId)]),
+      steps: [],
+      stepById: new Map(),
+      activeStepId: null,
+      isCompleted: false,
+      isFailed: false,
+      isCancelled: false,
+    };
+  }
+
+  function cleanTrace(trace) {
+    return {
+      turnId: trace.turnId,
+      activeStepId: trace.activeStepId,
+      isCompleted: trace.isCompleted,
+      isFailed: trace.isFailed,
+      isCancelled: trace.isCancelled,
+      steps: trace.steps.map((step) => ({
+        stepId: step.stepId,
+        turnId: step.turnId,
+        phase: step.phase,
+        title: step.title,
+        status: step.status,
+        detail: step.detail,
+        startedAt: step.startedAt,
+        endedAt: step.endedAt,
+        durationMs: step.durationMs,
+        subEvents: [...step.subEvents],
+        metadata: { ...step.metadata },
+      })),
+    };
+  }
+
+  function resolveTrace(state, turnId) {
+    const id = text(turnId);
+    if (!id) return null;
+    if (state.executionTraces.has(id)) return state.executionTraces.get(id);
+    for (const trace of state.executionTraces.values()) {
+      if (trace.turnId === id || trace.aliases.has(id)) {
+        return trace;
+      }
+    }
+    for (const msg of state.messages.values()) {
+      if (msg.role === "user") {
+        const mId = text(msg.message_id || msg.id);
+        const execId = text(msg.execution_id || msg.run_id);
+        if ((mId === id || execId === id) && (state.executionTraces.has(mId) || state.executionTraces.has(execId))) {
+          const existing = state.executionTraces.get(mId) || state.executionTraces.get(execId);
+          existing.aliases.add(id);
+          state.executionTraces.set(id, existing);
+          return existing;
+        }
+      }
+    }
+    return null;
+  }
+
+  function getTurnId(state, event) {
+    const meta = metaOf(event);
+    const direct = text(event.execution_id || event.turn_id || meta.execution_id || meta.turn_id || meta.client_message_id);
+    if (direct) return direct;
+    const userMessages = [...state.messages.values()].filter((m) => m.role === "user");
+    if (userMessages.length > 0) {
+      const latest = userMessages[userMessages.length - 1];
+      return text(latest.execution_id || latest.message_id || latest.id);
+    }
+    return "turn_default";
+  }
+
+  function applyTraceEvent(state, event) {
+    if (!event || typeof event !== "object") return;
+    const type = eventType(event);
+    if (!type) return;
+    const meta = metaOf(event);
+    const status = eventStatus(event);
+    const rawStatus = status.toLowerCase();
+    const title = text(event.title);
+    const detail = eventSummary(event) || text(event.error);
+    const durationMs = event.duration_ms != null ? Number(event.duration_ms) : null;
+    const eventId = text(event.event_id || event.id);
+
+    const [phase, defaultTitle] = classifyRuntimePhase(type, meta);
+    const stepTitle = title || defaultTitle;
+
+    const turnId = getTurnId(state, event);
+    let trace = resolveTrace(state, turnId);
+    if (!trace) {
+      trace = createTrace(turnId);
+      state.executionTraces.set(turnId, trace);
+    }
+
+    if (event.execution_id) trace.aliases.add(text(event.execution_id));
+    if (event.turn_id) trace.aliases.add(text(event.turn_id));
+    if (meta.client_message_id) trace.aliases.add(text(meta.client_message_id));
+    if (meta.message_id) trace.aliases.add(text(meta.message_id));
+
+    let stepId;
+    if (phase === "tool") {
+      const toolCallId = text(event.tool_call_id || meta.tool_call_id || meta.call_id || eventId);
+      stepId = toolCallId ? `${trace.turnId}:tool:${toolCallId}` : `${trace.turnId}:tool:${type}`;
+    } else {
+      stepId = `${trace.turnId}:${phase}`;
+    }
+
+    const isTerminalStep = terminal.has(rawStatus) || rawStatus === "completed" || rawStatus === "done";
+
+    if (phase === "completion" || phase === "failure") {
+      if (phase === "completion") {
+        trace.isCompleted = true;
+      } else if (rawStatus === "cancelled" || rawStatus === "interrupted" || type.includes("cancelled")) {
+        trace.isCancelled = true;
+      } else {
+        trace.isFailed = true;
+      }
+
+      for (const step of trace.steps) {
+        if (step.status === "running") {
+          step.status = trace.isCompleted ? "completed" : (trace.isCancelled ? "cancelled" : "failed");
+          if (detail && !step.detail) {
+            step.detail = detail;
+          }
+          step.endedAt = eventTime(event) || new Date().toISOString();
+          if (step.durationMs == null && step.startedAt) {
+            step.durationMs = Math.max(0, Date.parse(step.endedAt) - Date.parse(step.startedAt));
+          }
+        }
+      }
+      trace.activeStepId = null;
+    }
+
+    let existing = trace.stepById.get(stepId);
+
+    if (existing) {
+      if (isTerminalStep) {
+        existing.status = rawStatus === "success" || rawStatus === "done" ? "completed" : rawStatus;
+        if (detail && !existing.detail) existing.detail = detail;
+        existing.endedAt = eventTime(event) || new Date().toISOString();
+        if (durationMs != null) {
+          existing.durationMs = durationMs;
+        } else if (existing.durationMs == null && existing.startedAt) {
+          existing.durationMs = Math.max(0, Date.parse(existing.endedAt) - Date.parse(existing.startedAt));
+        }
+        if (trace.activeStepId === stepId) {
+          trace.activeStepId = null;
+        }
+      } else {
+        if (detail) existing.detail = detail;
+        if (stepTitle && existing.title === defaultTitle) existing.title = stepTitle;
+      }
+
+      if (eventId) {
+        const alreadyHas = existing.subEvents.some((se) => text(se.event_id || se.id) === eventId);
+        if (!alreadyHas) existing.subEvents.push({ ...event });
+      } else {
+        existing.subEvents.push({ ...event });
+      }
+      return existing;
+    }
+
+    if (trace.activeStepId && trace.stepById.has(trace.activeStepId)) {
+      const activeStep = trace.stepById.get(trace.activeStepId);
+      if (activeStep.phase !== phase && activeStep.status === "running") {
+        activeStep.status = "completed";
+        activeStep.endedAt = eventTime(event) || new Date().toISOString();
+        if (activeStep.durationMs == null && activeStep.startedAt) {
+          activeStep.durationMs = Math.max(0, Date.parse(activeStep.endedAt) - Date.parse(activeStep.startedAt));
+        }
+      }
+    }
+
+    const newStep = {
+      stepId,
+      turnId: trace.turnId,
+      phase,
+      title: stepTitle,
+      status: isTerminalStep ? (rawStatus === "success" || rawStatus === "done" ? "completed" : rawStatus) : "running",
+      detail,
+      startedAt: eventTime(event) || new Date().toISOString(),
+      endedAt: isTerminalStep ? (eventTime(event) || new Date().toISOString()) : "",
+      durationMs,
+      subEvents: eventId ? [{ ...event }] : (event ? [{ ...event }] : []),
+      metadata: meta,
+    };
+
+    if (!isTerminalStep) {
+      trace.activeStepId = stepId;
+    } else {
+      if (newStep.durationMs == null && newStep.startedAt && newStep.endedAt) {
+        newStep.durationMs = Math.max(0, Date.parse(newStep.endedAt) - Date.parse(newStep.startedAt));
+      }
+    }
+
+    trace.steps.push(newStep);
+    trace.stepById.set(stepId, newStep);
+    return newStep;
+  }
+
   function createState(sessionId) {
     return {
       sessionId: text(sessionId),
@@ -28,6 +373,7 @@
       runStatus: "idle",
       error: "",
       contextBudget: {},
+      executionTraces: new Map(),
     };
   }
 
@@ -70,6 +416,9 @@
       error: "",
       created_at: text(message.created_at || new Date().toISOString()),
     });
+    if (!state.executionTraces.has(id)) {
+      state.executionTraces.set(id, createTrace(id));
+    }
     state.submitting = true;
     state.runStatus = "starting";
     return state;
@@ -214,6 +563,23 @@
         message.optimistic = false;
       }
     }
+    const trace = resolveTrace(state, runId);
+    if (trace) {
+      const isCancelled = eventType(event).includes("cancelled") || eventStatus(event) === "cancelled";
+      trace.isCancelled = isCancelled;
+      trace.isFailed = !isCancelled;
+      for (const step of trace.steps) {
+        if (step.status === "running") {
+          step.status = isCancelled ? "cancelled" : "failed";
+          step.detail = error;
+          step.endedAt = eventTime(event) || new Date().toISOString();
+          if (step.durationMs == null && step.startedAt) {
+            step.durationMs = Math.max(0, Date.parse(step.endedAt) - Date.parse(step.startedAt));
+          }
+        }
+      }
+      trace.activeStepId = null;
+    }
     state.error = error;
     state.submitting = false;
     state.runStatus = eventStatus(event);
@@ -231,6 +597,7 @@
       if (state.seenUnsequenced.has(key)) return state;
       state.seenUnsequenced.add(key);
     }
+    applyTraceEvent(state, event);
     const type = eventType(event);
     const metadata = metaOf(event);
     if (type.startsWith("context.") || type.startsWith("cost.") || type.startsWith("budget.")) {
@@ -323,6 +690,18 @@
         message.error = text(message.error || action.error || "Submission failed.");
         message.optimistic = false;
       }
+      const trace = resolveTrace(state, action.messageId);
+      if (trace) {
+        trace.isFailed = true;
+        for (const step of trace.steps) {
+          if (step.status === "running") {
+            step.status = "failed";
+            step.detail = text(action.error || "Submission failed.");
+            step.endedAt = new Date().toISOString();
+          }
+        }
+        trace.activeStepId = null;
+      }
       state.submitting = false;
       state.runStatus = "failed";
       state.error = text(action.error || "Submission failed.");
@@ -350,6 +729,7 @@
       runStatus: state.runStatus,
       error: state.error,
       contextBudget: { ...state.contextBudget },
+      executionTraces: [...state.executionTraces.values()].map(cleanTrace),
     };
   }
 
@@ -380,6 +760,24 @@
         .permission-actions button{min-height:34px;padding:6px 12px}.permission-actions .deny{background:#b91c1c}
         .permission-state{margin-top:7px;color:#aeb4bd}.permission-error{margin-top:7px;color:#fca5a5}
         .error{color:#fca5a5}.logs{font-size:12px;color:#aeb4bd;white-space:pre-wrap}
+        .execution-trace{display:flex;flex-direction:column;gap:4px;margin:6px 0 10px 8px;padding:8px 12px;background:#13161c;border-left:2px solid #3b82f644;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px}
+        .trace-step{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:2px 0;line-height:1.4}
+        .trace-step.running{opacity:.68;color:#94a3b8}
+        .trace-step.completed{opacity:.95;color:#cbd5e1}
+        .trace-step.failed{opacity:1;color:#fca5a5}
+        .trace-step.cancelled{opacity:.8;color:#fcd34d}
+        .step-icon{font-size:13px;width:14px;text-align:center;flex-shrink:0}
+        .trace-step.running .step-icon{color:#60a5fa;animation:pulse 1.6s ease-in-out infinite}
+        .trace-step.completed .step-icon{color:#22c55e}
+        .trace-step.failed .step-icon{color:#ef4444}
+        .trace-step.cancelled .step-icon{color:#f59e0b}
+        .step-title{font-weight:500}
+        .step-meta{color:#64748b;font-size:11px}
+        .coding-box,.step-details{width:100%;margin-top:4px;margin-bottom:4px;background:#1a1e26;border:1px solid #ffffff14;border-radius:6px;padding:6px 8px;font-size:11px}
+        .coding-box summary,.step-details summary{cursor:pointer;color:#93c5fd;font-weight:500;user-select:none}
+        .coding-box pre,.step-details pre{margin:6px 0 0 0;white-space:pre-wrap;max-height:160px;overflow:auto;color:#cbd5e1}
+        .step-error{width:100%;color:#fca5a5;font-size:11px;margin-top:2px}
+        @keyframes pulse{0%,100%{opacity:.45}50%{opacity:1}}
         @media(max-width:520px){.message{max-width:96%}.shell{border-radius:7px}.timeline{padding:8px}}
       </style>
       <div class="shell"><div class="status"><span class="dot"></span><span class="statusText">Connecting to live events…</span><span class="contextMeter"></span></div>
@@ -418,8 +816,83 @@
           const meta = item.error ? `${item.status} · ${item.error}` : item.optimistic ? "sending…" : item.status === "streaming" ? "streaming…" : "";
           if (meta) addText(node, "div", meta, `meta ${item.error ? "error" : ""}`);
           timeline.appendChild(node);
+
+          if (item.role === "user") {
+            const trace = resolveTrace(state, item.execution_id || item.message_id || item.id);
+            if (trace && trace.steps.length > 0) {
+              const traceNode = document.createElement("div");
+              traceNode.className = "execution-trace";
+              for (const step of trace.steps) {
+                const stepRow = document.createElement("div");
+                stepRow.className = `trace-step ${step.status}`;
+
+                const icon = step.status === "running" ? "◌" : step.status === "completed" ? "✓" : step.status === "failed" ? "✗" : "⊘";
+                addText(stepRow, "span", icon, "step-icon");
+                addText(stepRow, "span", step.title, "step-title");
+
+                if (step.status === "running") {
+                  const elapsed = step.startedAt ? ` · ${formatDuration(Math.max(0, Date.now() - Date.parse(step.startedAt)))}` : "";
+                  addText(stepRow, "span", `· running${elapsed}`, "step-meta");
+                } else if (step.status === "completed" && step.durationMs != null) {
+                  addText(stepRow, "span", `(${formatDuration(step.durationMs)})`, "step-meta");
+                } else if (step.status === "failed") {
+                  addText(stepRow, "span", "· failed", "step-meta");
+                } else if (step.status === "cancelled") {
+                  addText(stepRow, "span", "· cancelled", "step-meta");
+                }
+
+                if (step.phase === "coding" && step.subEvents.length > 0) {
+                  const codingBox = document.createElement("details");
+                  codingBox.className = "coding-box";
+                  if (step.status === "running") codingBox.open = true;
+                  const cmdCount = step.subEvents.filter((se) => {
+                    const st = eventType(se);
+                    return st.startsWith("command.") || st.startsWith("tool.") || st.includes("terminal");
+                  }).length;
+                  const summaryLabel = cmdCount > 0 ? `Coding activity (${cmdCount} commands)` : `Coding activity (${step.subEvents.length} actions)`;
+                  addText(codingBox, "summary", summaryLabel);
+                  const subLogs = [];
+                  for (const se of step.subEvents) {
+                    const sum = eventSummary(se);
+                    const seMeta = metaOf(se);
+                    const cmd = seMeta.command || seMeta.cmd || se.title || "";
+                    if (cmd && !subLogs.includes(`$ ${cmd}`)) subLogs.push(`$ ${cmd}`);
+                    if (sum && !subLogs.includes(sum)) subLogs.push(sum);
+                  }
+                  if (subLogs.length > 0) addText(codingBox, "pre", subLogs.join("\n"));
+                  stepRow.appendChild(codingBox);
+                } else if (step.phase === "tool" || step.phase === "search") {
+                  const toolCallId = text(step.metadata.tool_call_id || step.metadata.call_id || step.stepId.split(":tool:")[1] || step.stepId.split(":search:")[1]);
+                  const toolObj = state.tools.get(toolCallId);
+                  const args = toolObj ? toolObj.arguments : (step.metadata.arguments || step.metadata.args_summary);
+                  const logs = toolObj ? toolObj.logs : [];
+                  const result = toolObj ? toolObj.result : step.detail;
+                  if (args || logs.length > 0 || result) {
+                    const toolBox = document.createElement("details");
+                    toolBox.className = "step-details";
+                    addText(toolBox, "summary", "Details");
+                    if (args) addText(toolBox, "div", `Arguments: ${typeof args === "string" ? args : JSON.stringify(args)}`, "logs");
+                    if (logs.length > 0) addText(toolBox, "div", logs.join("\n"), "logs");
+                    if (result) addText(toolBox, "div", `Result: ${result}`, "logs");
+                    stepRow.appendChild(toolBox);
+                  }
+                }
+
+                if (step.status === "failed" && step.detail) {
+                  addText(stepRow, "div", step.detail, "step-error");
+                }
+
+                traceNode.appendChild(stepRow);
+              }
+              timeline.appendChild(traceNode);
+            }
+          }
         } else if (row.kind === "tool") {
           const tool = row.value;
+          const alreadyInTrace = [...state.executionTraces.values()].some((t) =>
+            t.steps.some((s) => (s.phase === "tool" || s.phase === "search") && (s.stepId.endsWith(`:${tool.id}`) || text(s.metadata.tool_call_id) === tool.id))
+          );
+          if (alreadyInTrace) continue;
           const node = document.createElement("details");
           node.className = `tool ${tool.status === "running" ? "running" : tool.status === "success" ? "success" : "failed-card"}`;
           const elapsed = tool.status === "running" && tool.started_at ? ` · ${Math.max(0, (Date.now() - Date.parse(tool.started_at)) / 1000).toFixed(1)}s` : tool.duration_ms != null ? ` · ${(tool.duration_ms / 1000).toFixed(2)}s` : "";
@@ -516,6 +989,10 @@
               }
             }
           } else {
+            const inTrace = [...state.executionTraces.values()].some((t) =>
+              t.steps.some((s) => s.subEvents.some((se) => text(se.event_id || se.id) === text(event.event_id || event.id)))
+            );
+            if (inTrace) continue;
             node.className = "activity";
             addText(node, "div", `${event.title || type} · ${eventStatus(event)}`);
             if (eventSummary(event)) addText(node, "div", eventSummary(event), "logs");
@@ -576,6 +1053,7 @@
       state.runStatus = "idle";
       state.error = "";
       state.contextBudget = {};
+      state.executionTraces.clear();
       reduce(state, { type: "socket", ready: false });
       // Keep the Streamlit shell informed when it later gains a message bridge.
       // The embedded client itself immediately reconnects to the new session.
@@ -657,7 +1135,9 @@
       }
     });
     const elapsedTimer = setInterval(() => {
-      if ([...state.tools.values()].some((tool) => tool.status === "running")) render();
+      const hasRunningTools = [...state.tools.values()].some((tool) => tool.status === "running");
+      const hasRunningTraces = [...state.executionTraces.values()].some((t) => t.steps.some((s) => s.status === "running"));
+      if (hasRunningTools || hasRunningTraces) render();
     }, 250);
     window.addEventListener("beforeunload", () => {
       closed = true;

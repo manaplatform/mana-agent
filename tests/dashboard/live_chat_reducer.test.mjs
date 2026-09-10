@@ -274,3 +274,167 @@ test("persisted history reconstructs tools, logs, cancellation, and a fresh sess
   assert.equal(snapshot(state).runStatus, "cancelled");
   assert.equal(snapshot(createState("session-2")).messages.length, 0);
 });
+
+test("execution trace progresses chronologically and updates in-place without duplicate steps", () => {
+  const state = createState("session-1");
+  reduce(state, {
+    type: "optimistic",
+    message: { message_id: "client-1", content: "implement feature" },
+  });
+
+  // 1. Routing phase
+  reduce(state, {
+    type: "event",
+    event: event(1, "routing_started", { execution_id: "client-1", status: "running" }),
+  });
+  let traces = snapshot(state).executionTraces;
+  assert.equal(traces.length, 1);
+  assert.equal(traces[0].steps.length, 1);
+  assert.equal(traces[0].steps[0].phase, "routing");
+  assert.equal(traces[0].steps[0].status, "running");
+
+  reduce(state, {
+    type: "event",
+    event: event(2, "routing_completed", { execution_id: "client-1", status: "success", duration_ms: 40 }),
+  });
+  traces = snapshot(state).executionTraces;
+  assert.equal(traces[0].steps.length, 1); // Updated in-place, no duplicate
+  assert.equal(traces[0].steps[0].status, "completed");
+  assert.equal(traces[0].steps[0].durationMs, 40);
+
+  // 2. Context phase
+  reduce(state, {
+    type: "event",
+    event: event(3, "context_preparation_started", { execution_id: "client-1", status: "running" }),
+  });
+  traces = snapshot(state).executionTraces;
+  assert.equal(traces[0].steps.length, 2);
+  assert.equal(traces[0].steps[1].phase, "context");
+
+  // 3. Coding phase with command sub-events
+  reduce(state, {
+    type: "event",
+    event: event(4, "coding_started", {
+      execution_id: "client-1",
+      status: "running",
+      metadata: { backend: "codex" },
+    }),
+  });
+  traces = snapshot(state).executionTraces;
+  assert.equal(traces[0].steps.length, 3);
+  assert.equal(traces[0].steps[2].title, "Codex");
+
+  reduce(state, {
+    type: "event",
+    event: event(5, "command.started", {
+      event_id: "cmd-1",
+      execution_id: "client-1",
+      status: "running",
+      metadata: { command: "git diff" },
+    }),
+  });
+  traces = snapshot(state).executionTraces;
+  assert.equal(traces[0].steps.length, 3); // Sub-event attached to coding step
+  assert.equal(traces[0].steps[2].subEvents.length, 2);
+
+  // 4. Tool phase
+  reduce(state, {
+    type: "event",
+    event: event(6, "tool.started", {
+      event_id: "tool-1",
+      execution_id: "client-1",
+      metadata: { tool_call_id: "tool-1", tool_name: "read_file" },
+    }),
+  });
+  reduce(state, {
+    type: "event",
+    event: event(7, "tool.finished", {
+      event_id: "tool-1",
+      execution_id: "client-1",
+      status: "success",
+      duration_ms: 25,
+      metadata: { tool_call_id: "tool-1", tool_name: "read_file", result_summary: "contents" },
+    }),
+  });
+  traces = snapshot(state).executionTraces;
+  assert.equal(traces[0].steps.length, 4);
+  assert.equal(traces[0].steps[3].phase, "tool");
+  assert.equal(traces[0].steps[3].status, "completed");
+
+  // 5. Model phase and 6. Completion
+  reduce(state, {
+    type: "event",
+    event: event(8, "assistant.started", { execution_id: "client-1", status: "running" }),
+  });
+  reduce(state, {
+    type: "event",
+    event: event(9, "turn.finished", { execution_id: "client-1", status: "success" }),
+  });
+  traces = snapshot(state).executionTraces;
+  assert.equal(traces[0].isCompleted, true);
+  assert.equal(traces[0].activeStepId, null);
+  assert.equal(traces[0].steps.length, 6);
+  assert.equal(traces[0].steps[4].status, "completed"); // Model step finalized
+  assert.equal(traces[0].steps[5].phase, "completion");
+});
+
+test("execution trace cleans up running steps on error or cancellation", () => {
+  const state = createState("session-fail");
+  reduce(state, {
+    type: "optimistic",
+    message: { message_id: "client-f", content: "fail test" },
+  });
+  reduce(state, {
+    type: "event",
+    event: event(1, "routing_started", { execution_id: "client-f", status: "running" }),
+  });
+  assert.equal(snapshot(state).executionTraces[0].steps[0].status, "running");
+
+  reduce(state, {
+    type: "event",
+    event: event(2, "error", { execution_id: "client-f", status: "failed", summary: "gateway unreachable" }),
+  });
+  const trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.isFailed, true);
+  assert.equal(trace.activeStepId, null);
+  assert.equal(trace.steps[0].status, "failed");
+  assert.equal(trace.steps[0].detail, "gateway unreachable");
+});
+
+test("execution trace derives generic fallback cleanly for future runtime phases", () => {
+  const state = createState("session-fallback");
+  reduce(state, {
+    type: "event",
+    event: event(1, "audit_verification.started", { status: "running" }),
+  });
+  const trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.steps.length, 1);
+  assert.equal(trace.steps[0].phase, "audit");
+  assert.equal(trace.steps[0].title, "Audit");
+});
+
+test("execution trace recognizes searching phase correctly for search tools and routes", () => {
+  const state = createState("session-search");
+  reduce(state, {
+    type: "optimistic",
+    message: { message_id: "client-s", content: "search repo" },
+  });
+  reduce(state, {
+    type: "event",
+    event: event(1, "routing_completed", { execution_id: "client-s", metadata: { route: "search" } }),
+  });
+  reduce(state, {
+    type: "event",
+    event: event(2, "tool.started", {
+      event_id: "t-search",
+      execution_id: "client-s",
+      metadata: { tool_name: "web_search", tool_call_id: "t-search" },
+    }),
+  });
+  const trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.steps.length, 2);
+  assert.equal(trace.steps[0].phase, "routing");
+  assert.equal(trace.steps[1].phase, "search");
+  assert.equal(trace.steps[1].title, "Searching");
+});
+

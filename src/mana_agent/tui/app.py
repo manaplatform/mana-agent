@@ -1263,6 +1263,25 @@ class ManaChatApp(App):
                         tool_cb = None
                     ask_callbacks = [tool_cb] if tool_cb is not None else []
 
+                    def _on_gateway_sink_event(event_type: str, title: str = "", **kwargs: Any) -> None:
+                        metadata = dict(kwargs.get("metadata") or {})
+                        display_title = title or event_type.replace("_", " ").title()
+                        event_payload = {
+                            "event_type": event_type,
+                            "title": display_title,
+                            "turn_id": turn_id,
+                            "status": kwargs.get("status") or metadata.get("status") or "running",
+                            **kwargs,
+                        }
+                        self._safe_post_activity(event_payload, turn_id)
+                        try:
+                            if hasattr(self, "call_from_thread"):
+                                self.call_from_thread(self.update_status, f"{display_title}…")
+                            else:
+                                self.update_status(f"{display_title}…")
+                        except Exception:
+                            pass
+
                     def _run_gateway_turn() -> Any:
                         return self.gateway.process_turn(
                             sid,
@@ -1272,16 +1291,41 @@ class ManaChatApp(App):
                             callbacks=ask_callbacks or None,
                             turn_id=turn_id,
                             user_message_id=user_event.event_id,
+                            event_sink=_on_gateway_sink_event,
                         )
 
                     tools_before = self._count_tool_events_for_turn(turn_id)
-                    self.update_status("Routing via gateway (auto-chat / coding)…")
+                    self.update_status("Routing…")
                     from mana_agent.coding.live_events import coding_event_scope
 
                     with coding_event_scope(_on_coding_event):
-                        result = await asyncio.to_thread(_run_gateway_turn)
+                        try:
+                            result = await asyncio.to_thread(_run_gateway_turn)
+                        except Exception as exc:
+                            self._safe_post_activity(
+                                {
+                                    "event_type": "error",
+                                    "title": "Execution failed",
+                                    "status": "failed",
+                                    "error": str(exc),
+                                    "detail": str(exc),
+                                },
+                                turn_id,
+                            )
+                            raise
                     answer = str(getattr(result, "answer", "") or "")
                     result_payload = dict(getattr(result, "payload", {}) or {})
+                    if getattr(result, "error", None) and not answer:
+                        self._safe_post_activity(
+                            {
+                                "event_type": "error",
+                                "title": "Execution failed",
+                                "status": "failed",
+                                "error": str(result.error),
+                                "detail": str(result.error),
+                            },
+                            turn_id,
+                        )
                     if str(getattr(result, "mode", "") or "") == "command":
                         active_session_id = str(result_payload.get("session_id") or "")
                         if active_session_id:
