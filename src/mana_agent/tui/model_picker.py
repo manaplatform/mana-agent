@@ -7,15 +7,18 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from mana_agent.config.user_config import load_model_cache, save_model_cache
+from mana_agent.config.catalog_service import (
+    ModelFetchError,
+    ModelListFetchFailedError,
+    ProviderAuthenticationFailedError,
+    ProviderConnectionFailedError,
+    ProviderValidationError,
+)
 from mana_agent.config.model_catalog import ModelCapability, ModelPurpose, descriptors_from_catalog, filter_models
 from mana_agent.config.provider_registry import PROVIDERS
 from mana_agent.tui.forms import text_input
 from mana_agent.tui.menu import MenuOption, select_option
 from mana_agent.tui.status import error, info
-
-
-class ModelFetchError(RuntimeError):
-    pass
 
 
 def parse_model_ids(payload: dict[str, Any]) -> list[str]:
@@ -24,6 +27,24 @@ def parse_model_ids(payload: dict[str, Any]) -> list[str]:
         return []
     ids = [str(item.get("id", "")).strip() for item in data if isinstance(item, dict)]
     return sorted(dict.fromkeys(model_id for model_id in ids if model_id))
+
+
+def parse_openai_model_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Preserve model IDs and lifecycle/deprecation metadata from OpenAI models API."""
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    records: dict[str, dict[str, Any]] = {}
+    for raw in data:
+        if isinstance(raw, str) and raw.strip():
+            model_id = raw.strip()
+            records[model_id] = {"id": model_id}
+        elif isinstance(raw, dict) and str(raw.get("id") or "").strip():
+            item = dict(raw)
+            model_id = str(item["id"]).strip()
+            item["id"] = model_id
+            records[model_id] = item
+    return [records[key] for key in sorted(records)]
 
 
 def parse_openai_compatible_model_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -140,23 +161,45 @@ def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [records[key] for key in sorted(records)]
 
 
+def _handle_http_error(provider_label: str, exc: urllib.error.HTTPError) -> None:
+    code = int(exc.code)
+    if code in {401, 403}:
+        raise ProviderAuthenticationFailedError(
+            f"{provider_label} authentication failed (HTTP {code}). Check the API key and account access."
+        ) from exc
+    if code == 404:
+        raise ModelListFetchFailedError(
+            f"{provider_label} model-list fetch failed: endpoint was not found (HTTP 404). "
+            "Verify the base URL ends with /v1 for OpenAI-compatible hosts."
+        ) from exc
+    if code == 429:
+        raise ModelListFetchFailedError(
+            f"{provider_label} model-list fetch failed: rate limit or quota was exceeded (HTTP 429)."
+        ) from exc
+    if code >= 500:
+        raise ModelListFetchFailedError(
+            f"{provider_label} model-list fetch failed: service failure (HTTP {code})."
+        ) from exc
+    raise ModelListFetchFailedError(f"{provider_label} model-list fetch failed with HTTP {code}.") from exc
+
+
 def _http_error_message(provider_label: str, exc: urllib.error.HTTPError) -> str:
     code = int(exc.code)
     if code in {401, 403}:
         return (
-            f"{provider_label} authentication or permission failed (HTTP {code}). "
+            f"{provider_label} authentication failed (HTTP {code}). "
             "Check the API key and account access."
         )
     if code == 404:
         return (
-            f"{provider_label} model catalog endpoint was not found (HTTP 404). "
+            f"{provider_label} model-list fetch failed: endpoint was not found (HTTP 404). "
             "Verify the base URL ends with /v1 for OpenAI-compatible hosts."
         )
     if code == 429:
-        return f"{provider_label} rate limit or quota was exceeded (HTTP 429)."
+        return f"{provider_label} model-list fetch failed: rate limit or quota was exceeded (HTTP 429)."
     if code >= 500:
-        return f"{provider_label} service failure (HTTP {code})."
-    return f"{provider_label} model fetch failed with HTTP {code}."
+        return f"{provider_label} model-list fetch failed: service failure (HTTP {code})."
+    return f"{provider_label} model-list fetch failed with HTTP {code}."
 
 
 def fetch_openai_compatible_models(
@@ -166,35 +209,41 @@ def fetch_openai_compatible_models(
     timeout_seconds: int = 15,
 ) -> list[str | dict[str, Any]]:
     if not api_key.strip():
-        raise ModelFetchError("API key is required to fetch models.")
+        raise ProviderAuthenticationFailedError("API key is required to fetch models.")
     url = base_url.rstrip("/") + "/models"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
     try:
         with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ModelFetchError(_http_error_message("Provider", exc)) from exc
+        _handle_http_error("Provider", exc)
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
         if "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
-            raise ModelFetchError(f"Provider model fetch timed out: {reason}.") from exc
-        raise ModelFetchError(f"Model fetch failed: {reason}.") from exc
+            raise ProviderConnectionFailedError(
+                f"Provider provider connection failed: timed out: {reason}."
+            ) from exc
+        raise ProviderConnectionFailedError(
+            f"Provider provider connection failed: Model fetch failed: {reason}."
+        ) from exc
     except (OSError, json.JSONDecodeError) as exc:
-        raise ModelFetchError(f"Model fetch failed: {exc}.") from exc
-    models = parse_model_ids(payload)
+        raise ModelListFetchFailedError(
+            f"Provider model-list fetch failed: Model fetch failed: {exc}."
+        ) from exc
+    models = parse_openai_model_records(payload)
     if not models:
-        raise ModelFetchError("Model fetch succeeded, but no model IDs were returned.")
+        raise ModelListFetchFailedError("Provider model-list fetch failed: no model IDs were returned.")
     return models
 
 
 def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout_seconds: int = 15) -> list[str | dict[str, Any]]:
     """Fetch one provider catalog without converting multi-tenant hosts into aliases."""
     if not api_key.strip():
-        raise ModelFetchError("API key is required to fetch models.")
+        raise ProviderAuthenticationFailedError("API key is required to fetch models.")
     try:
         definition = PROVIDERS.get(provider)
     except KeyError as exc:
-        raise ModelFetchError(str(exc)) from exc
+        raise ModelListFetchFailedError(str(exc)) from exc
 
     headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
     base = (base_url or definition.default_base_url).rstrip("/")
@@ -205,16 +254,20 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
             with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise ModelFetchError(_http_error_message(definition.display_name, exc)) from exc
+            _handle_http_error(definition.display_name, exc)
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
             if "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
-                raise ModelFetchError(
-                    f"{definition.display_name} model fetch timed out: {reason}."
+                raise ProviderConnectionFailedError(
+                    f"{definition.display_name} provider connection failed: timed out: {reason}."
                 ) from exc
-            raise ModelFetchError(f"{definition.display_name} model fetch failed: {reason}.") from exc
+            raise ProviderConnectionFailedError(
+                f"{definition.display_name} provider connection failed: Model fetch failed: {reason}."
+            ) from exc
         except (OSError, json.JSONDecodeError) as exc:
-            raise ModelFetchError(f"{definition.display_name} model fetch failed: {exc}.") from exc
+            raise ModelListFetchFailedError(
+                f"{definition.display_name} model-list fetch failed: Model fetch failed: {exc}."
+            ) from exc
 
     if provider == "openrouter":
         all_data: list[Any] = []
@@ -234,16 +287,16 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
                 if endpoint == "/models":
                     raise
         models: list[str | dict[str, Any]] = parse_openrouter_models({"data": all_data})
+    elif provider == "nvidia":
+        payload = _fetch("/models")
+        models = parse_openai_compatible_model_records(payload)
     else:
         payload = _fetch("/models")
-        if provider == "nvidia":
-            models = parse_openai_compatible_model_records(payload)
-        else:
-            models = parse_model_ids(payload)
+        models = parse_openai_model_records(payload)
 
     if not models:
-        raise ModelFetchError(
-            f"{definition.display_name} model fetch succeeded, but no model IDs were returned."
+        raise ModelListFetchFailedError(
+            f"{definition.display_name} model-list fetch failed: no model IDs were returned."
         )
     return models
 

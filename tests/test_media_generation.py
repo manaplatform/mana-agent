@@ -535,3 +535,149 @@ def test_openai_provider_does_not_retry_non_transient_authentication_failure(
         )
     assert raised.value.code == "media_authentication_failed"
     assert calls == 1
+
+
+def test_openai_provider_normalizes_gpt_image_parameters() -> None:
+    # Test landscape size from DALL-E 3 resolution normalized for GPT image
+    payload1 = OpenAIMediaProvider._image_payload(
+        ImageGenerationRequest(
+            prompt="A majestic lion",
+            model="gpt-image-2.5-flare",
+            size="1792x1024",
+            quality="hd",
+        )
+    )
+    assert payload1["model"] == "gpt-image-2.5-flare"
+    assert payload1["size"] == "1536x1024"
+    assert payload1["quality"] == "high"
+    assert payload1["response_format"] == "b64_json"
+
+    # Test aspect ratio 16:9 with auto size
+    payload2 = OpenAIMediaProvider._image_payload(
+        ImageGenerationRequest(
+            prompt="A mountain sunset",
+            model="gpt-image-2.5-flare",
+            size="auto",
+            aspect_ratio="16:9",
+            quality="standard",
+        )
+    )
+    assert payload2["size"] == "1536x1024"
+    assert payload2["quality"] == "medium"
+
+    # Test portrait orientation
+    payload3 = OpenAIMediaProvider._image_payload(
+        ImageGenerationRequest(
+            prompt="A tall tower",
+            model="gpt-image-2.5-flare",
+            size="1024x1792",
+            quality="low",
+        )
+    )
+    assert payload3["size"] == "1024x1536"
+    assert payload3["quality"] == "low"
+
+    # Test auto quality omitted so provider defaults apply
+    payload4 = OpenAIMediaProvider._image_payload(
+        ImageGenerationRequest(
+            prompt="A simple sketch",
+            model="gpt-image-2.5-flare",
+            size="1024x1024",
+            quality="auto",
+        )
+    )
+    assert payload4["size"] == "1024x1024"
+    assert "quality" not in payload4
+
+
+def test_openai_provider_normalizes_dalle_parameters() -> None:
+    # Test DALL-E 3 clamps count to 1 and maps high quality to hd
+    payload1 = OpenAIMediaProvider._image_payload(
+        ImageGenerationRequest(
+            prompt="A fantasy forest",
+            model="dall-e-3",
+            size="1536x1024",
+            quality="high",
+            count=3,
+        )
+    )
+    assert payload1["model"] == "dall-e-3"
+    assert payload1["size"] == "1792x1024"
+    assert payload1["quality"] == "hd"
+    assert payload1["n"] == 1
+    assert payload1["response_format"] == "b64_json"
+
+    # Test DALL-E 3 with portrait orientation
+    payload2 = OpenAIMediaProvider._image_payload(
+        ImageGenerationRequest(
+            prompt="A lighthouse",
+            model="dall-e-3",
+            size="1024x1536",
+            quality="medium",
+        )
+    )
+    assert payload2["size"] == "1024x1792"
+    assert payload2["quality"] == "standard"
+
+    # Test DALL-E 2 ignores quality and normalizes size
+    payload3 = OpenAIMediaProvider._image_payload(
+        ImageGenerationRequest(
+            prompt="An icon",
+            model="dall-e-2",
+            size="1792x1024",
+            quality="hd",
+            count=2,
+        )
+    )
+    assert payload3["size"] == "1024x1024"
+    assert "quality" not in payload3
+    assert payload3["n"] == 2
+
+
+def test_openai_provider_video_and_speech_parameter_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_speech = None
+
+    def fake_request_bytes(_self, _method, _path, body, **_kwargs):
+        nonlocal captured_speech
+        captured_speech = json.loads(body.decode("utf-8"))
+        return b"fake_mp3_data", "req-123", "audio/mpeg"
+
+    monkeypatch.setattr(OpenAIMediaProvider, "_request_bytes", fake_request_bytes)
+    provider = OpenAIMediaProvider(api_key="sk-test")
+
+    # Speech generation with tts-1 ignores instructions safely without error
+    out = provider.generate_speech(
+        VoiceGenerationRequest(
+            text="Welcome to Mana",
+            model="tts-1",
+            instructions="Speak with excitement",
+        )
+    )
+    assert out.status == GenerationStatus.COMPLETED
+    assert captured_speech is not None
+    assert "instructions" not in captured_speech
+    assert captured_speech["input"] == "Welcome to Mana"
+
+    # Video generation with aspect_ratio 16:9 and non-standard duration normalizes safely
+    captured_video = None
+
+    def fake_request_json_bytes(_self, _method, _path, body, **_kwargs):
+        nonlocal captured_video
+        captured_video = body
+        return {"id": "vid-123", "status": "queued"}, "vid-123", "application/json"
+
+    monkeypatch.setattr(OpenAIMediaProvider, "_request_json_bytes", fake_request_json_bytes)
+    vout = provider.generate_video(
+        VideoGenerationRequest(
+            prompt="Ocean waves",
+            model="sora-2",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+        )
+    )
+    assert vout.provider_request_id == "vid-123"
+    assert b'name="seconds"\r\n\r\n4' in captured_video
+    assert b'name="size"\r\n\r\n1280x720' in captured_video
+

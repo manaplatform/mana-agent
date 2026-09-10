@@ -43,7 +43,7 @@ def render(root: Path | None = None) -> None:
                 )
             runs = service.status(automation.id).get("recent_runs", [])
             if runs:
-                st.dataframe(runs, use_container_width=True)
+                st.dataframe(runs, width="stretch")
             if st.button("Delete", key=f"delete_{automation.id}", type="secondary"):
                 service.delete(automation.id)
                 st.rerun()

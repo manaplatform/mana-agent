@@ -81,7 +81,7 @@ def render(root: Path) -> None:
         if st.button(
             "Save edit and revalidate",
             disabled=manifest.status not in {"pending_review", "needs_attention"},
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 SkillCreator(storage=storage).edit(proposal_id, markdown=edited)
@@ -99,7 +99,7 @@ def render(root: Path) -> None:
     if install_col.button(
         "Install",
         disabled=manifest.status not in {"pending_review", "needs_attention"},
-        use_container_width=True,
+        width="stretch",
     ):
         try:
             storage.install(proposal_id, approved=True, version=manifest.version)
@@ -110,7 +110,7 @@ def render(root: Path) -> None:
     if reject_col.button(
         "Reject",
         disabled=manifest.status in {"installed", "quarantined"},
-        use_container_width=True,
+        width="stretch",
     ):
         try:
             storage.reject(proposal_id, reason)
@@ -121,7 +121,7 @@ def render(root: Path) -> None:
     if quarantine_col.button(
         "Quarantine",
         disabled=manifest.status in {"installed", "quarantined"} or not reason.strip(),
-        use_container_width=True,
+        width="stretch",
     ):
         try:
             storage.quarantine(proposal_id, reason)

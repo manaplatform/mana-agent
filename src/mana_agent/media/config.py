@@ -36,8 +36,8 @@ class MediaModalityConfig(BaseModel):
 
     @model_validator(mode="after")
     def enabled_requires_selection(self) -> "MediaModalityConfig":
-        if self.enabled and (not self.provider or not self.model):
-            raise ValueError("enabled media configuration requires provider and model")
+        if self.enabled and not self.model:
+            raise ValueError("enabled media configuration requires model")
         return self
 
 
@@ -55,11 +55,15 @@ class MediaConfig(BaseModel):
             max_duration_seconds=120,
         )
     )
+    realtime: MediaModalityConfig = Field(default_factory=MediaModalityConfig)
+    transcription: MediaModalityConfig = Field(default_factory=MediaModalityConfig)
     permissions: dict[str, str] = Field(
         default_factory=lambda: {
             "media.image.generate": "allow",
             "media.voice.generate": "allow",
             "media.video.generate": "allow",
+            "media.realtime.generate": "allow",
+            "media.transcription.generate": "allow",
             "media.artifact.write": "allow",
             "media.status.read": "allow",
             "media.generation.cancel": "allow",
@@ -70,14 +74,25 @@ class MediaConfig(BaseModel):
     @classmethod
     def load(cls, values: dict[str, Any] | None = None) -> "MediaConfig":
         source = values if values is not None else load_effective_settings(include_env=False)
-        raw = source.get("media") if isinstance(source, dict) else {}
-        return cls.model_validate(raw if isinstance(raw, dict) else {})
+        raw = dict(source.get("media")) if isinstance(source.get("media"), dict) else {}
+        active_provider = str(source.get("MANA_AI_PROVIDER") or "openai").strip()
+        for mod_key in ("image", "voice", "video", "realtime", "transcription"):
+            if mod_key in raw and isinstance(raw[mod_key], dict):
+                if not raw[mod_key].get("provider"):
+                    raw[mod_key]["provider"] = active_provider
+        config = cls.model_validate(raw)
+        for mod in (config.image, config.voice, config.video, config.realtime, config.transcription):
+            if not mod.provider:
+                mod.provider = active_provider
+        return config
 
     def modality(self, media_type: MediaType) -> MediaModalityConfig:
         return {
             MediaType.IMAGE: self.image,
             MediaType.VOICE: self.voice,
             MediaType.VIDEO: self.video,
+            MediaType.REALTIME: self.realtime,
+            MediaType.TRANSCRIPTION: self.transcription,
         }[media_type]
 
     def api_key(self, media_type: MediaType, values: dict[str, Any] | None = None) -> str:
@@ -87,7 +102,8 @@ class MediaConfig(BaseModel):
         if not reference:
             from mana_agent.config.provider_registry import provider_credential_env_names
 
-            reference = provider_credential_env_names(str(modality.provider or "openai"))[0]
+            provider_name = modality.provider or str(settings.get("MANA_AI_PROVIDER") or "openai")
+            reference = provider_credential_env_names(provider_name)[0]
         return str(settings.get(reference) or "").strip()
 
     def require(self, media_type: MediaType) -> MediaModalityConfig:
@@ -98,6 +114,8 @@ class MediaConfig(BaseModel):
                 f"media_{media_type.value}_disabled",
                 f"{label} generation is disabled.",
             )
+        if not modality.provider:
+            modality.provider = str(load_effective_settings(include_env=False).get("MANA_AI_PROVIDER") or "openai")
         if not modality.provider:
             raise MediaConfigurationError(
                 "media_provider_not_configured",

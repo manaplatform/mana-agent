@@ -19,6 +19,8 @@ class MediaType(str, Enum):
     IMAGE = "image"
     VOICE = "voice"
     VIDEO = "video"
+    REALTIME = "realtime"
+    TRANSCRIPTION = "transcription"
 
 
 class GenerationStatus(str, Enum):

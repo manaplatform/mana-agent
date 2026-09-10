@@ -16,18 +16,23 @@ class ModelCapability(str, Enum):
     IMAGE_INPUT = "image_input"
     EMBEDDING = "embedding"
     IMAGE_GENERATION = "image_generation"
+    IMAGE_EDITING = "image_editing"
     SPEECH_TO_TEXT = "speech_to_text"
     TEXT_TO_SPEECH = "text_to_speech"
     AUDIO_GENERATION = "audio_generation"
     VIDEO_GENERATION = "video_generation"
+    REALTIME = "realtime"
 
 
 class ModelPurpose(str, Enum):
     AGENT = "agent"
     EMBEDDING = "embedding"
     IMAGE = "image"
+    IMAGE_EDIT = "image_edit"
     VOICE = "voice"
     VIDEO = "video"
+    REALTIME = "realtime"
+    TRANSCRIPTION = "transcription"
     MULTIMODAL_INPUT = "multimodal_input"
 
 
@@ -48,10 +53,14 @@ class ModelDescriptor:
         return qualify_model_id(self.provider, self.id)
 
     def supports(self, purpose: ModelPurpose) -> bool:
+        if not self.available:
+            return False
         if purpose is ModelPurpose.EMBEDDING:
             return ModelCapability.EMBEDDING in self.capabilities
         if purpose is ModelPurpose.IMAGE:
             return ModelCapability.IMAGE_GENERATION in self.capabilities
+        if purpose is ModelPurpose.IMAGE_EDIT:
+            return ModelCapability.IMAGE_EDITING in self.capabilities
         if purpose is ModelPurpose.VOICE:
             return bool(
                 self.capabilities
@@ -59,6 +68,10 @@ class ModelDescriptor:
             )
         if purpose is ModelPurpose.VIDEO:
             return ModelCapability.VIDEO_GENERATION in self.capabilities
+        if purpose is ModelPurpose.REALTIME:
+            return ModelCapability.REALTIME in self.capabilities
+        if purpose is ModelPurpose.TRANSCRIPTION:
+            return ModelCapability.SPEECH_TO_TEXT in self.capabilities
         if purpose is ModelPurpose.MULTIMODAL_INPUT:
             return ModelCapability.IMAGE_INPUT in self.capabilities
         return ModelCapability.TEXT_GENERATION in self.capabilities
@@ -256,25 +269,61 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
             ModelCapability.TOOL_CALLING,
         }
     ),
-    "gpt-image-1": frozenset({ModelCapability.IMAGE_GENERATION}),
-    "gpt-image-1-mini": frozenset({ModelCapability.IMAGE_GENERATION}),
-    "dall-e-2": frozenset({ModelCapability.IMAGE_GENERATION}),
+    "gpt-image-1": frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING}),
+    "gpt-image-1-mini": frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING}),
+    "dall-e-2": frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING}),
     "dall-e-3": frozenset({ModelCapability.IMAGE_GENERATION}),
-    "tts-1": frozenset({ModelCapability.TEXT_TO_SPEECH}),
-    "tts-1-hd": frozenset({ModelCapability.TEXT_TO_SPEECH}),
-    "gpt-4o-mini-tts": frozenset({ModelCapability.TEXT_TO_SPEECH}),
+    "tts-1": frozenset({ModelCapability.TEXT_TO_SPEECH, ModelCapability.AUDIO_GENERATION}),
+    "tts-1-hd": frozenset({ModelCapability.TEXT_TO_SPEECH, ModelCapability.AUDIO_GENERATION}),
+    "gpt-4o-mini-tts": frozenset({ModelCapability.TEXT_TO_SPEECH, ModelCapability.AUDIO_GENERATION}),
     "sora-2": frozenset({ModelCapability.VIDEO_GENERATION}),
     "sora-2-pro": frozenset({ModelCapability.VIDEO_GENERATION}),
 }
 
 _NON_TEXT_MARKERS: tuple[tuple[ModelCapability, tuple[str, ...]], ...] = (
     (ModelCapability.EMBEDDING, ("embed", "embedding")),
-    (ModelCapability.IMAGE_GENERATION, ("dall-e", "image-gen", "image_generation")),
+    (ModelCapability.IMAGE_GENERATION, ("dall-e", "image-gen", "image_generation", "gpt-image-")),
     (ModelCapability.SPEECH_TO_TEXT, ("whisper", "transcri", "speech-to-text", "stt")),
     (ModelCapability.TEXT_TO_SPEECH, ("tts", "text-to-speech")),
     (ModelCapability.VIDEO_GENERATION, ("sora", "video-gen", "video_generation")),
-    (ModelCapability.AUDIO_GENERATION, ("audio", "voice", "realtime")),
+    (ModelCapability.AUDIO_GENERATION, ("audio", "voice")),
 )
+
+
+def _is_model_available(metadata: dict[str, Any]) -> bool:
+    if not metadata:
+        return True
+    if metadata.get("available") is False:
+        return False
+    if metadata.get("deprecated") is True:
+        return False
+    status = str(metadata.get("status") or "").strip().lower()
+    if status in {"deprecated", "shutdown", "disabled", "inactive"}:
+        return False
+    shutdown = metadata.get("shutdown_date") or metadata.get("deprecation_date")
+    if shutdown is not None:
+        import time
+        from datetime import datetime, timezone
+
+        if isinstance(shutdown, (int, float)):
+            if shutdown < time.time():
+                return False
+        elif isinstance(shutdown, str) and shutdown.strip():
+            raw_str = shutdown.strip()
+            try:
+                ts = float(raw_str)
+                if ts < time.time():
+                    return False
+            except ValueError:
+                try:
+                    dt = datetime.fromisoformat(raw_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt < datetime.now(timezone.utc):
+                        return False
+                except Exception:
+                    pass
+    return True
 
 
 def normalize_capabilities(
@@ -300,11 +349,24 @@ def normalize_capabilities(
         if parsed:
             return frozenset(parsed)
     model = str(model_id or "").strip()
+    lowered = model.lower()
+    provider_id = str(provider or "").strip().lower()
+
+    if lowered.startswith("gpt-image-"):
+        return frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING})
+    if lowered == "dall-e-2":
+        return frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING})
+    if lowered == "dall-e-3":
+        return frozenset({ModelCapability.IMAGE_GENERATION})
+    if "sora" in lowered or (provider_id in {"openai", "openrouter"} and "video" in lowered):
+        return frozenset({ModelCapability.VIDEO_GENERATION})
+    if "realtime" in lowered:
+        return frozenset({ModelCapability.REALTIME, ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
+
     if model in _MAINTAINED:
         return _MAINTAINED[model]
     # Dated / build-suffixed ids (e.g. deepseek-ai/deepseek-v4-flash-0731)
     # inherit the maintained family entry when they share the same prefix.
-    lowered = model.lower()
     for key, caps in _MAINTAINED.items():
         key_l = key.lower()
         if lowered.startswith(key_l) and (
@@ -313,8 +375,11 @@ def normalize_capabilities(
             return caps
     for capability, markers in _NON_TEXT_MARKERS:
         if any(marker in lowered for marker in markers):
+            if capability is ModelCapability.IMAGE_GENERATION and "gpt-image-" in lowered:
+                return frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING})
+            if capability is ModelCapability.TEXT_TO_SPEECH:
+                return frozenset({ModelCapability.TEXT_TO_SPEECH, ModelCapability.AUDIO_GENERATION})
             return frozenset({capability})
-    provider_id = str(provider or "").strip().lower()
     if provider_id == "openrouter":
         if "grok" in lowered:
             return frozenset(
@@ -403,6 +468,7 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
             if maintained is not None:
                 context_window = context_window or maintained[0]
                 max_output_tokens = max_output_tokens or maintained[1]
+        available = _is_model_available(metadata)
         result.append(ModelDescriptor(
             provider=provider,
             id=model_id,
@@ -411,6 +477,7 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
             max_output_tokens=max_output_tokens,
             tokenizer=str(metadata.get("tokenizer") or "") or None,
             source=source,
+            available=available,
             metadata=metadata,
         ))
     # Catalog endpoints can contain duplicate IDs while an upstream changes.

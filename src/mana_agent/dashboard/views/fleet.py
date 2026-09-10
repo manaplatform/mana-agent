@@ -71,7 +71,7 @@ def render(_root: Path | None = None) -> None:
                         item.model_dump(mode="json")
                         for item in run.summary.platform_results
                     ],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
             with st.expander("Jobs, logs, artifacts, and cleanup"):
