@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-10
 
+- Fixed Python 3.10 compatibility for ISO 8601 shutdown and deprecation date parsing in model catalog:
+  - Added normalization of trailing `Z` and `z` UTC timezone specifiers to `+00:00` in `_is_model_available` (`src/mana_agent/config/model_catalog.py`), restoring compatibility with Python 3.10's `datetime.fromisoformat`.
+  - Added explicit handling for `datetime` instances in `_is_model_available`.
+  - Expanded lifecycle metadata test cases in `tests/test_single_provider_model_catalog.py`.
+  - User verification required: `pytest tests/test_single_provider_model_catalog.py -k test_deprecation_and_lifecycle_metadata -v`.
+
 - Consolidated provider configuration and model catalog into a single Provider tab:
   - Made the Provider tab the single source of truth for active provider selection, credentials, base URL, and connection testing.
   - Removed duplicate provider selectors, credentials, and custom base URL inputs from all capability/model tabs (`Image generation`, `Voice generation`, `Video generation`, `Realtime`, `Transcription`); capability tabs automatically inherit and use the active provider.

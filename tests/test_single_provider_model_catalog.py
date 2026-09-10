@@ -162,7 +162,11 @@ def test_deprecation_and_lifecycle_metadata() -> None:
     assert _is_model_available({"status": "deprecated"}) is False
     assert _is_model_available({"status": "shutdown"}) is False
     assert _is_model_available({"shutdown_date": "2020-01-01T00:00:00Z"}) is False
+    assert _is_model_available({"shutdown_date": "2020-01-01T00:00:00z"}) is False
+    assert _is_model_available({"deprecation_date": "2020-01-01T00:00:00Z"}) is False
+    assert _is_model_available({"shutdown_date": datetime(2020, 1, 1, tzinfo=timezone.utc)}) is False
     assert _is_model_available({"shutdown_date": "2099-01-01T00:00:00Z"}) is True
+    assert _is_model_available({"shutdown_date": datetime(2099, 1, 1, tzinfo=timezone.utc)}) is True
 
     records = [
         {"id": "gpt-4o-active", "status": "active"},

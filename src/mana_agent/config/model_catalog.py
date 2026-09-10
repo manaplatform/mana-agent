@@ -308,6 +308,12 @@ def _is_model_available(metadata: dict[str, Any]) -> bool:
         if isinstance(shutdown, (int, float)):
             if shutdown < time.time():
                 return False
+        elif isinstance(shutdown, datetime):
+            dt = shutdown
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt < datetime.now(timezone.utc):
+                return False
         elif isinstance(shutdown, str) and shutdown.strip():
             raw_str = shutdown.strip()
             try:
@@ -316,7 +322,8 @@ def _is_model_available(metadata: dict[str, Any]) -> bool:
                     return False
             except ValueError:
                 try:
-                    dt = datetime.fromisoformat(raw_str)
+                    iso_str = raw_str[:-1] + "+00:00" if raw_str.endswith(("Z", "z")) else raw_str
+                    dt = datetime.fromisoformat(iso_str)
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     if dt < datetime.now(timezone.utc):
