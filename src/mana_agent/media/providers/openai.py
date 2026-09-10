@@ -72,35 +72,39 @@ class OpenAIMediaProvider:
         request: ImageGenerationRequest,
         reference_artifacts: tuple[MediaArtifact, ...] = (),
     ) -> ProviderOutput:
-        payload = self._image_payload(request)
+        payload = self._image_payload(request, for_edit=bool(reference_artifacts))
+        is_gpt_image = self._is_gpt_image_model(request.model)
+
         if reference_artifacts:
-            if request.model == "dall-e-3":
+            if self._is_dalle3_model(request.model):
                 raise MediaProviderError(
                     "media_reference_unsupported",
                     "DALL-E 3 does not support reference-image editing.",
                 )
-            if len(reference_artifacts) != 1:
+
+            # GPT Image supports one or more reference images. Legacy DALL-E 2
+            # editing accepts a single image.
+            if not is_gpt_image and len(reference_artifacts) != 1:
                 raise MediaProviderError(
                     "media_reference_count_rejected",
-                    "The selected provider accepts one image reference per request.",
+                    "The selected legacy image model accepts one image reference per request.",
                 )
-            reference = reference_artifacts[0]
+
             multipart_fields = {
-                key: str(value)
+                key: self._multipart_scalar(value)
                 for key, value in payload.items()
-                if key not in {"n"} or int(value) != 1
             }
-            body, boundary = self._multipart(
-                multipart_fields,
-                files=(
-                    (
-                        "image",
-                        Path(reference.local_path).name,
-                        reference.mime_type,
-                        self._reference_bytes(reference),
-                    ),
-                ),
+            image_field = "image[]" if is_gpt_image else "image"
+            files = tuple(
+                (
+                    image_field,
+                    Path(reference.local_path).name,
+                    reference.mime_type,
+                    self._reference_bytes(reference),
+                )
+                for reference in reference_artifacts
             )
+            body, boundary = self._multipart(multipart_fields, files=files)
             response, request_id, _ = self._request_json_bytes(
                 "POST",
                 "/images/edits",
@@ -109,38 +113,53 @@ class OpenAIMediaProvider:
                 idempotency_key=request.idempotency_key,
             )
         else:
+            wire_payload = dict(payload)
+            if is_gpt_image:
+                # GPT Image returns base64 data natively. Keep response_format
+                # in _image_payload() only for compatibility with existing
+                # callers/tests, but never send the legacy DALL-E parameter.
+                wire_payload.pop("response_format", None)
+
             response, request_id, _ = self._request_json(
                 "POST",
                 "/images/generations",
-                payload,
+                wire_payload,
                 idempotency_key=request.idempotency_key,
             )
+
         content: list[bytes] = []
         urls: list[str] = []
+        revised_prompts: list[str] = []
+
         for item in response.get("data") or []:
             if not isinstance(item, dict):
                 continue
+
             encoded = str(item.get("b64_json") or "")
             if encoded:
                 try:
                     content.append(base64.b64decode(encoded, validate=True))
-                except ValueError as exc:
+                except (ValueError, TypeError) as exc:
                     raise MediaProviderError(
                         "media_provider_invalid_output",
                         "The image provider returned invalid encoded output.",
                     ) from exc
             elif item.get("url"):
                 urls.append(str(item["url"]))
+
+            revised_prompt = str(item.get("revised_prompt") or "").strip()
+            if revised_prompt:
+                revised_prompts.append(revised_prompt)
+
         if not content and not urls:
             raise MediaProviderError(
                 "media_provider_empty_output",
                 "The image provider returned no downloadable output.",
             )
-        mime = f"image/{'jpeg' if request.output_format == 'jpeg' else request.output_format}"
-        dimensions = request.size.split("x", 1)
-        metadata: dict[str, Any] = {}
-        if len(dimensions) == 2 and all(value.isdigit() for value in dimensions):
-            metadata = {"width": int(dimensions[0]), "height": int(dimensions[1])}
+
+        mime = self._image_mime_type(request, payload)
+        metadata = self._image_metadata(request, payload, response, revised_prompts)
+
         return ProviderOutput(
             provider_request_id=request_id,
             status=GenerationStatus.COMPLETED,
@@ -151,80 +170,323 @@ class OpenAIMediaProvider:
         )
 
     @staticmethod
-    def _image_payload(request: ImageGenerationRequest) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": request.model,
-            "prompt": request.prompt,
-            "n": request.count,
+    def _is_gpt_image_model(model: str) -> bool:
+        normalized = str(model or "").strip().lower()
+        return normalized.startswith("gpt-image-") or normalized == "chatgpt-image-latest"
+
+    @staticmethod
+    def _is_gpt_image_25_model(model: str) -> bool:
+        return str(model or "").strip().lower().startswith("gpt-image-2.5-")
+
+    @staticmethod
+    def _is_gpt_image_2_model(model: str) -> bool:
+        normalized = str(model or "").strip().lower()
+        return normalized == "gpt-image-2" or normalized.startswith("gpt-image-2-202")
+
+    @staticmethod
+    def _is_dalle2_model(model: str) -> bool:
+        return str(model or "").strip().lower() == "dall-e-2"
+
+    @classmethod
+    def _is_dalle3_model(cls, model: str) -> bool:
+        normalized = str(model or "").strip().lower()
+        return normalized.startswith("dall-e") and not cls._is_dalle2_model(normalized)
+
+    @staticmethod
+    def _resolve_orientation(aspect_ratio: str, size: str) -> str:
+        ar = str(aspect_ratio or "").lower().strip()
+        if ar in {"16:9", "16/9", "3:2", "3/2", "4:3", "4/3", "landscape", "wide"}:
+            return "landscape"
+        if ar in {"9:16", "9/16", "2:3", "2/3", "3:4", "3/4", "portrait", "tall"}:
+            return "portrait"
+        if ar in {"1:1", "1/1", "square"}:
+            return "square"
+
+        s = str(size or "").lower().strip()
+        if "x" in s:
+            parts = s.split("x", 1)
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                width, height = int(parts[0]), int(parts[1])
+                if width > height:
+                    return "landscape"
+                if height > width:
+                    return "portrait"
+                return "square"
+        return "square"
+
+    @staticmethod
+    def _valid_flexible_gpt_image_size(size: str) -> bool:
+        value = str(size or "").lower().strip()
+        if value == "auto":
+            return True
+        if "x" not in value:
+            return False
+
+        width_text, height_text = value.split("x", 1)
+        if not width_text.isdigit() or not height_text.isdigit():
+            return False
+
+        width, height = int(width_text), int(height_text)
+        if width <= 0 or height <= 0:
+            return False
+        if width > 3840 or height > 3840:
+            return False
+        if width % 16 != 0 or height % 16 != 0:
+            return False
+
+        short_edge = min(width, height)
+        long_edge = max(width, height)
+        if short_edge == 0 or long_edge / short_edge > 3:
+            return False
+
+        pixels = width * height
+        return 655_360 <= pixels <= 8_294_400
+
+    @classmethod
+    def _resolve_gpt_image_size(
+        cls,
+        *,
+        model: str,
+        requested_size: str,
+        orientation: str,
+    ) -> str:
+        size = str(requested_size or "").lower().strip()
+
+        # Normalize legacy DALL-E 3 portrait/landscape dimensions to the
+        # recommended GPT Image dimensions. The 2.5 models also accept custom
+        # sizes, but these two legacy values are normalized intentionally.
+        legacy_size_map = {
+            "1792x1024": "1536x1024",
+            "1024x1792": "1024x1536",
         }
-        if request.model.startswith("dall-e"):
-            if request.output_format != "png" or request.background:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E models require PNG output and do not support background control.",
-                )
-            if request.model == "dall-e-3" and request.count != 1:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E 3 accepts one image per request.",
-                )
-            allowed_sizes = (
-                {"256x256", "512x512", "1024x1024"}
-                if request.model == "dall-e-2"
-                else {"1024x1024", "1024x1792", "1792x1024"}
-            )
-            if request.size != "auto" and request.size not in allowed_sizes:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "The selected DALL-E model does not support the requested size.",
-                )
-            if request.model == "dall-e-2" and request.quality != "auto":
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E 2 does not accept a quality setting.",
-                )
-            if request.model == "dall-e-3" and request.quality not in {
-                "auto",
-                "standard",
-                "hd",
-            }:
-                raise MediaProviderError(
-                    "media_provider_parameter_rejected",
-                    "DALL-E 3 quality must be auto, standard, or hd.",
-                )
-            payload["response_format"] = "b64_json"
-            if request.size != "auto":
-                payload["size"] = request.size
-            if request.quality != "auto" and request.model == "dall-e-3":
-                payload["quality"] = request.quality
-            return payload
-        if request.size not in {"auto", "1024x1024", "1024x1536", "1536x1024"}:
-            raise MediaProviderError(
-                "media_provider_parameter_rejected",
-                "The GPT image model does not support the requested size.",
-            )
-        if request.quality not in {"auto", "low", "medium", "high"}:
-            raise MediaProviderError(
-                "media_provider_parameter_rejected",
-                "GPT image quality must be auto, low, medium, or high.",
-            )
-        payload.update(
-            {
-                "size": request.size,
-                "quality": request.quality,
-                "output_format": request.output_format,
+        if size in legacy_size_map:
+            return legacy_size_map[size]
+
+        # Preserve deterministic provider behavior when an older caller uses
+        # size="auto" together with an aspect-ratio hint.
+        if size == "auto":
+            if orientation == "landscape":
+                return "1536x1024"
+            if orientation == "portrait":
+                return "1024x1536"
+            return "1024x1024"
+
+        # GPT Image 2/2.5 accept valid custom dimensions too.
+        if cls._is_gpt_image_25_model(model) or cls._is_gpt_image_2_model(model):
+            if cls._valid_flexible_gpt_image_size(size):
+                return size
+        elif size in {"1024x1024", "1024x1536", "1536x1024"}:
+            return size
+
+        if orientation == "landscape":
+            return "1536x1024"
+        if orientation == "portrait":
+            return "1024x1536"
+        return "1024x1024"
+
+    @classmethod
+    def _normalize_gpt_image_quality(cls, model: str, quality: str) -> str | None:
+        value = str(quality or "").lower().strip()
+
+        # Omit auto/empty so OpenAI applies the model-native default.
+        if not value or value == "auto":
+            return None
+
+        aliases = {
+            "standard": "medium",
+            "hd": "high",
+        }
+        value = aliases.get(value, value)
+
+        if cls._is_gpt_image_25_model(model):
+            allowed = {"low", "medium", "high", "xhigh", "max"}
+        else:
+            allowed = {"low", "medium", "high"}
+
+        return value if value in allowed else None
+
+    @staticmethod
+    def _normalize_background(background: str) -> str:
+        value = str(background or "").lower().strip()
+        return value if value in {"transparent", "opaque", "auto"} else ""
+
+    @staticmethod
+    def _normalize_output_format(output_format: str) -> str:
+        value = str(output_format or "").lower().strip()
+        return value if value in {"png", "jpeg", "webp"} else "png"
+
+    @staticmethod
+    def _optional_int(request: ImageGenerationRequest, name: str) -> int | None:
+        value = getattr(request, name, None)
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _image_payload(
+        cls,
+        request: ImageGenerationRequest,
+        *,
+        for_edit: bool = False,
+    ) -> dict[str, Any]:
+        model = str(request.model or "").strip()
+        orientation = cls._resolve_orientation(request.aspect_ratio, request.size)
+
+        if cls._is_dalle2_model(model):
+            payload: dict[str, Any] = {
+                "model": model,
+                "prompt": request.prompt,
+                "response_format": "b64_json",
+                "n": max(1, min(4, request.count)),
             }
-        )
-        if request.background:
-            payload["background"] = request.background
+            payload["size"] = (
+                request.size
+                if request.size in {"256x256", "512x512", "1024x1024"}
+                else "1024x1024"
+            )
+            return payload
+
+        if cls._is_dalle3_model(model):
+            payload = {
+                "model": model,
+                "prompt": request.prompt,
+                "response_format": "b64_json",
+                "n": 1,
+            }
+            if request.size in {"1024x1024", "1024x1792", "1792x1024"}:
+                payload["size"] = request.size
+            elif orientation == "landscape":
+                payload["size"] = "1792x1024"
+            elif orientation == "portrait":
+                payload["size"] = "1024x1792"
+            else:
+                payload["size"] = "1024x1024"
+
+            quality = str(request.quality or "").lower().strip()
+            if quality in {"hd", "high"}:
+                payload["quality"] = "hd"
+            elif quality in {"standard", "medium", "low"}:
+                payload["quality"] = "standard"
+            return payload
+
+        # Current GPT Image API.
+        #
+        # Do not send the legacy DALL-E response_format parameter here.
+        # GPT Image returns base64-encoded image data in data[].b64_json.
+        payload = {
+            "model": model,
+            "prompt": request.prompt,
+            "n": max(1, min(4, request.count)),
+            "size": cls._resolve_gpt_image_size(
+                model=model,
+                requested_size=request.size,
+                orientation=orientation,
+            ),
+            # Backward-compatible helper output. generate_image() removes this
+            # legacy field before sending GPT Image requests to OpenAI.
+            "response_format": "b64_json",
+        }
+
+        quality = cls._normalize_gpt_image_quality(model, request.quality)
+        if quality is not None:
+            payload["quality"] = quality
+
+        output_format = cls._normalize_output_format(request.output_format)
+        background = cls._normalize_background(request.background)
+
+        # Transparent outputs require PNG or WebP. Prefer PNG rather than
+        # submitting a provider-invalid transparent JPEG request.
+        if background == "transparent" and output_format == "jpeg":
+            output_format = "png"
+
+        payload["output_format"] = output_format
+        if background:
+            payload["background"] = background
+
+        output_compression = cls._optional_int(request, "output_compression")
+        if output_format in {"jpeg", "webp"} and output_compression is not None:
+            payload["output_compression"] = max(0, min(100, output_compression))
+
+        moderation = str(getattr(request, "moderation", "") or "").lower().strip()
+        if moderation in {"auto", "low"}:
+            payload["moderation"] = moderation
+
+        # Only forward input_fidelity for edit requests on older GPT Image
+        # models where the request schema exposes it. GPT Image 2 rejects
+        # this parameter, and the GPT Image 2.5 guide does not document a
+        # caller-selectable input_fidelity setting.
+        input_fidelity = str(getattr(request, "input_fidelity", "") or "").lower().strip()
+        if (
+            for_edit
+            and input_fidelity in {"low", "high"}
+            and not cls._is_gpt_image_2_model(model)
+            and not cls._is_gpt_image_25_model(model)
+        ):
+            payload["input_fidelity"] = input_fidelity
+
         return payload
 
+    @staticmethod
+    def _multipart_scalar(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    @classmethod
+    def _image_mime_type(
+        cls,
+        request: ImageGenerationRequest,
+        payload: dict[str, Any],
+    ) -> str:
+        if str(request.model or "").lower().startswith("dall-e"):
+            return "image/png"
+
+        output_format = str(payload.get("output_format") or "png").lower()
+        if output_format == "jpeg":
+            return "image/jpeg"
+        if output_format == "webp":
+            return "image/webp"
+        return "image/png"
+
+    @staticmethod
+    def _image_metadata(
+        request: ImageGenerationRequest,
+        payload: dict[str, Any],
+        response: dict[str, Any],
+        revised_prompts: list[str],
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "model": str(request.model or ""),
+            "size": str(payload.get("size") or request.size or ""),
+            "quality": str(payload.get("quality") or request.quality or ""),
+        }
+
+        dimensions = str(payload.get("size") or request.size or "").split("x", 1)
+        if len(dimensions) == 2 and all(value.isdigit() for value in dimensions):
+            metadata["width"] = int(dimensions[0])
+            metadata["height"] = int(dimensions[1])
+
+        output_format = payload.get("output_format")
+        if output_format:
+            metadata["output_format"] = str(output_format)
+
+        background = payload.get("background")
+        if background:
+            metadata["background"] = str(background)
+
+        if revised_prompts:
+            metadata["revised_prompts"] = tuple(revised_prompts)
+
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            metadata["usage"] = usage
+
+        return metadata
+
     def generate_speech(self, request: VoiceGenerationRequest) -> ProviderOutput:
-        if request.instructions and request.model in {"tts-1", "tts-1-hd"}:
-            raise MediaProviderError(
-                "media_provider_parameter_rejected",
-                "The selected TTS model does not support voice instructions.",
-            )
         payload: dict[str, Any] = {
             "model": request.model,
             "input": request.text,
@@ -232,7 +494,7 @@ class OpenAIMediaProvider:
             "response_format": request.output_format,
             "speed": request.speed,
         }
-        if request.instructions:
+        if request.instructions and request.model not in {"tts-1", "tts-1-hd"}:
             payload["instructions"] = request.instructions
         content, request_id, content_type = self._request_bytes(
             "POST",
@@ -261,31 +523,41 @@ class OpenAIMediaProvider:
         request: VideoGenerationRequest,
         reference_artifacts: tuple[MediaArtifact, ...] = (),
     ) -> ProviderOutput:
-        if request.aspect_ratio:
-            raise MediaProviderError(
-                "media_provider_parameter_rejected",
-                "The OpenAI video endpoint selects framing through resolution and does not accept a separate aspect ratio.",
+        orientation = self._resolve_orientation(request.aspect_ratio, request.resolution)
+        if request.aspect_ratio and orientation == "landscape":
+            resolved_resolution = (
+                "1792x1024" if request.resolution == "1024x1792" else "1280x720"
             )
-        if request.duration_seconds not in {4, 8, 12}:
-            raise MediaProviderError(
-                "media_provider_duration_rejected",
-                "The provider accepts video durations of 4, 8, or 12 seconds.",
+        elif request.aspect_ratio and orientation == "portrait":
+            resolved_resolution = (
+                "1024x1792" if request.resolution == "1792x1024" else "720x1280"
             )
-        if request.resolution not in {
+        elif request.resolution in {
             "720x1280",
             "1280x720",
             "1024x1792",
             "1792x1024",
         }:
-            raise MediaProviderError(
-                "media_provider_resolution_rejected",
-                "The provider rejected the requested video resolution.",
-            )
+            resolved_resolution = request.resolution
+        elif orientation == "landscape":
+            resolved_resolution = "1280x720"
+        else:
+            resolved_resolution = "720x1280"
+
+        duration = request.duration_seconds
+        if duration not in {4, 8, 12}:
+            if duration <= 5:
+                duration = 4
+            elif duration <= 10:
+                duration = 8
+            else:
+                duration = 12
+
         fields = {
             "model": request.model,
             "prompt": request.prompt,
-            "seconds": str(request.duration_seconds),
-            "size": request.resolution,
+            "seconds": str(duration),
+            "size": resolved_resolution,
         }
         if len(reference_artifacts) > 1:
             raise MediaProviderError(

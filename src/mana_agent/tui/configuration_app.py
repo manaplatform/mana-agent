@@ -12,7 +12,13 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, Switch, TabbedContent, TabPane
 
-from mana_agent.config.catalog_service import ModelCatalogService, ProviderValidationError
+from mana_agent.config.catalog_service import (
+    ModelCatalogService,
+    ModelListFetchFailedError,
+    ProviderAuthenticationFailedError,
+    ProviderConnectionFailedError,
+    ProviderValidationError,
+)
 from mana_agent.config.inference_provider import credentials_from_mapping
 from mana_agent.config.model_catalog import ModelPurpose, filter_models, search_models
 from mana_agent.config.provider_registry import PROVIDERS, provider_credential_env_names
@@ -116,6 +122,7 @@ class ManaConfigurationApp(App[bool]):
         self.catalog_service = catalog_service or ModelCatalogService()
         self.saved = False
         self._models: list[Any] = []
+        self._current_provider = str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")
         self._provider_validated = bool(
             self._provider_api_key(self.draft.original, str(self.draft.original.get("MANA_AI_PROVIDER") or "openai"))
             and self._provider_base_url(self.draft.original, str(self.draft.original.get("MANA_AI_PROVIDER") or "openai"))
@@ -152,13 +159,10 @@ class ManaConfigurationApp(App[bool]):
         image_media = media.get("image") if isinstance(media.get("image"), dict) else {}
         voice_media = media.get("voice") if isinstance(media.get("voice"), dict) else {}
         video_media = media.get("video") if isinstance(media.get("video"), dict) else {}
+        realtime_media = media.get("realtime") if isinstance(media.get("realtime"), dict) else {}
+        transcription_media = media.get("transcription") if isinstance(media.get("transcription"), dict) else {}
         provider_id = str(values.get("MANA_AI_PROVIDER") or "openai")
         provider_options = [(item.display_name, item.id) for item in PROVIDERS.all()]
-        media_provider_options = [
-            (item.display_name, item.id)
-            for item in PROVIDERS.all()
-            if item.id in {"openai", "custom", "openrouter"}
-        ]
         search_options = [("Disabled", "disabled"), *((item.display_name, item.id) for item in SEARCH_PROVIDERS)]
         github_source = str(values.get("MANA_GITHUB_CREDENTIAL_SOURCE") or "disabled")
         yield Header()
@@ -166,7 +170,7 @@ class ManaConfigurationApp(App[bool]):
             with TabPane("Overview", id="overview"):
                 yield Static(self._overview_text(), id="overview-grid")
                 yield Static("Use Continue or the tabs to review every section. Secrets are stored separately and never displayed.", classes="hint")
-            with TabPane("AI providers", id="providers"):
+            with TabPane("Provider", id="providers"):
                 yield Label("Inference provider", classes="section-title")
                 yield Select(provider_options, value=provider_id, id="provider-select", allow_blank=False)
                 yield Input(value=self._provider_base_url(values, provider_id), placeholder="https://api.example.com/v1", id="provider-base-url")
@@ -200,11 +204,9 @@ class ManaConfigurationApp(App[bool]):
             with TabPane("Image generation", id="media-image"):
                 yield Switch(value=bool(image_media.get("enabled", False)), id="media-image-enabled")
                 yield Label("Enable image generation", classes="hint")
-                yield Select(media_provider_options, value=str(image_media.get("provider") or "openai"), id="media-image-provider", allow_blank=False)
+                yield Static(self._active_provider_text(), id="media-image-active-provider", classes="hint")
                 yield Input(placeholder="Search compatible image models", id="media-image-search")
-                yield Select(self._media_model_options(image_media, "gpt-image-1"), id="media-image-model", allow_blank=False)
-                yield Input(value=str(image_media.get("credential_ref") or ""), placeholder="Credential reference (defaults to provider key)", id="media-image-credential")
-                yield Input(value=str(image_media.get("base_url") or ""), placeholder="Custom base URL (optional)", id="media-image-base-url")
+                yield Select(self._media_model_options(image_media, "gpt-image-1", purpose="image"), id="media-image-model", allow_blank=False)
                 yield Input(value=str(image_media.get("timeout_seconds") or 120), placeholder="Timeout seconds", id="media-image-timeout")
                 yield Input(value=str(image_media.get("max_output_bytes") or 52428800), placeholder="Maximum output bytes", id="media-image-max-bytes")
                 yield Input(value=str((image_media.get("defaults") or {}).get("size") or "1024x1024"), placeholder="Default size", id="media-image-default-size")
@@ -214,11 +216,9 @@ class ManaConfigurationApp(App[bool]):
             with TabPane("Voice generation", id="media-voice"):
                 yield Switch(value=bool(voice_media.get("enabled", False)), id="media-voice-enabled")
                 yield Label("Enable voice/audio generation", classes="hint")
-                yield Select(media_provider_options, value=str(voice_media.get("provider") or "openai"), id="media-voice-provider", allow_blank=False)
+                yield Static(self._active_provider_text(), id="media-voice-active-provider", classes="hint")
                 yield Input(placeholder="Search compatible voice models", id="media-voice-search")
-                yield Select(self._media_model_options(voice_media, "gpt-4o-mini-tts"), id="media-voice-model", allow_blank=False)
-                yield Input(value=str(voice_media.get("credential_ref") or ""), placeholder="Credential reference (defaults to provider key)", id="media-voice-credential")
-                yield Input(value=str(voice_media.get("base_url") or ""), placeholder="Custom base URL (optional)", id="media-voice-base-url")
+                yield Select(self._media_model_options(voice_media, "gpt-4o-mini-tts", purpose="voice"), id="media-voice-model", allow_blank=False)
                 yield Input(value=str(voice_media.get("timeout_seconds") or 120), placeholder="Timeout seconds", id="media-voice-timeout")
                 yield Input(value=str(voice_media.get("max_output_bytes") or 52428800), placeholder="Maximum output bytes", id="media-voice-max-bytes")
                 yield Input(value=str((voice_media.get("defaults") or {}).get("voice") or "alloy"), placeholder="Default voice", id="media-voice-default")
@@ -227,16 +227,26 @@ class ManaConfigurationApp(App[bool]):
             with TabPane("Video generation", id="media-video"):
                 yield Switch(value=bool(video_media.get("enabled", False)), id="media-video-enabled")
                 yield Label("Enable video generation", classes="hint")
-                yield Select(media_provider_options, value=str(video_media.get("provider") or "openai"), id="media-video-provider", allow_blank=False)
+                yield Static(self._active_provider_text(), id="media-video-active-provider", classes="hint")
                 yield Input(placeholder="Search compatible video models", id="media-video-search")
-                yield Select(self._media_model_options(video_media, "sora-2"), id="media-video-model", allow_blank=False)
-                yield Input(value=str(video_media.get("credential_ref") or ""), placeholder="Credential reference (defaults to provider key)", id="media-video-credential")
-                yield Input(value=str(video_media.get("base_url") or ""), placeholder="Custom base URL (optional)", id="media-video-base-url")
+                yield Select(self._media_model_options(video_media, "sora-2", purpose="video"), id="media-video-model", allow_blank=False)
                 yield Input(value=str(video_media.get("timeout_seconds") or 600), placeholder="Timeout seconds", id="media-video-timeout")
                 yield Input(value=str(video_media.get("max_output_bytes") or 524288000), placeholder="Maximum output bytes", id="media-video-max-bytes")
                 yield Input(value="" if video_media.get("max_duration_seconds") is None else str(video_media.get("max_duration_seconds")), placeholder="Maximum duration seconds (optional)", id="media-video-max-duration")
                 yield Input(value=str((video_media.get("defaults") or {}).get("duration_seconds") or 4), placeholder="Default duration seconds", id="media-video-default-duration")
                 yield Input(value=str((video_media.get("defaults") or {}).get("resolution") or "720x1280"), placeholder="Default resolution", id="media-video-default-resolution")
+            with TabPane("Realtime", id="media-realtime"):
+                yield Switch(value=bool(realtime_media.get("enabled", False)), id="media-realtime-enabled")
+                yield Label("Enable realtime multimodal agent sessions", classes="hint")
+                yield Static(self._active_provider_text(), id="media-realtime-active-provider", classes="hint")
+                yield Input(placeholder="Search compatible realtime models", id="media-realtime-search")
+                yield Select(self._media_model_options(realtime_media, "", purpose="realtime"), id="media-realtime-model", allow_blank=False)
+            with TabPane("Transcription", id="media-transcription"):
+                yield Switch(value=bool(transcription_media.get("enabled", False)), id="media-transcription-enabled")
+                yield Label("Enable speech-to-text transcription", classes="hint")
+                yield Static(self._active_provider_text(), id="media-transcription-active-provider", classes="hint")
+                yield Input(placeholder="Search compatible transcription models", id="media-transcription-search")
+                yield Select(self._media_model_options(transcription_media, "", purpose="transcription"), id="media-transcription-model", allow_blank=False)
             with TabPane("Coding runtime", id="coding-runtime"):
                 yield Label("Coding backend", classes="section-title")
                 yield Select(
@@ -394,10 +404,14 @@ class ManaConfigurationApp(App[bool]):
             levels.append((f"Direct: {current}", current))
         return levels
 
+    def _active_provider_text(self, provider: str = "") -> str:
+        prov = provider or str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")
+        return f"Active provider: {prov} (configured in Provider tab)"
+
     @staticmethod
     def _media_model_options(
         values: dict[str, Any],
-        default: str,
+        default: str = "",
         *,
         provider: str = "",
         purpose: str = "image",
@@ -406,8 +420,10 @@ class ManaConfigurationApp(App[bool]):
         from mana_agent.config.provider_registry import PROVIDERS
         from mana_agent.config.user_config import load_model_cache
 
-        model = str(values.get("model") or default)
-        options = [(f"{model}  · current/manual", model)]
+        model = str(values.get("model") or default).strip()
+        options: list[tuple[str, str]] = []
+        if model:
+            options.append((f"{model}  · current/manual", model))
         target_provider = provider or str(values.get("provider") or "openai")
         base_url = str(values.get("base_url") or "").strip()
         if not base_url:
@@ -425,7 +441,10 @@ class ManaConfigurationApp(App[bool]):
             if isinstance(item, dict):
                 model_id = str(item.get("id") or "").strip()
                 caps = item.get("capabilities") or []
-                if purpose == "image" and ModelCapability.IMAGE_GENERATION.value in caps:
+                if purpose == "image" and (
+                    ModelCapability.IMAGE_GENERATION.value in caps
+                    or ModelCapability.IMAGE_EDITING.value in caps
+                ):
                     if model_id != model:
                         options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
                 elif purpose == "voice" and (
@@ -437,6 +456,14 @@ class ManaConfigurationApp(App[bool]):
                 elif purpose == "video" and ModelCapability.VIDEO_GENERATION.value in caps:
                     if model_id != model:
                         options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+                elif purpose == "realtime" and ModelCapability.REALTIME.value in caps:
+                    if model_id != model:
+                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+                elif purpose == "transcription" and ModelCapability.SPEECH_TO_TEXT.value in caps:
+                    if model_id != model:
+                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+        if not options:
+            options.append(("No models discovered", ""))
         return options
 
     def _input_int(self, selector: str, default: int) -> int:
@@ -550,13 +577,14 @@ class ManaConfigurationApp(App[bool]):
         self.draft.values["computer_control"] = computer
         existing_media = self.draft.values.get("media")
         media = dict(existing_media) if isinstance(existing_media, dict) else {}
+        image_model = self.query_one("#media-image-model", Select).value
         media["image"] = {
             **(dict(media.get("image") or {}) if isinstance(media.get("image"), dict) else {}),
             "enabled": self.query_one("#media-image-enabled", Switch).value,
-            "provider": str(self.query_one("#media-image-provider", Select).value),
-            "model": str(self.query_one("#media-image-model", Select).value),
-            "credential_ref": self.query_one("#media-image-credential", Input).value.strip(),
-            "base_url": self.query_one("#media-image-base-url", Input).value.strip(),
+            "provider": provider,
+            "model": "" if image_model == Select.BLANK else str(image_model or ""),
+            "credential_ref": "",
+            "base_url": "",
             "timeout_seconds": self._input_int("#media-image-timeout", 120),
             "max_output_bytes": self._input_int("#media-image-max-bytes", 52428800),
             "defaults": {
@@ -566,13 +594,14 @@ class ManaConfigurationApp(App[bool]):
                 "output_format": self.query_one("#media-image-default-format", Input).value.strip() or "png",
             },
         }
+        voice_model = self.query_one("#media-voice-model", Select).value
         media["voice"] = {
             **(dict(media.get("voice") or {}) if isinstance(media.get("voice"), dict) else {}),
             "enabled": self.query_one("#media-voice-enabled", Switch).value,
-            "provider": str(self.query_one("#media-voice-provider", Select).value),
-            "model": str(self.query_one("#media-voice-model", Select).value),
-            "credential_ref": self.query_one("#media-voice-credential", Input).value.strip(),
-            "base_url": self.query_one("#media-voice-base-url", Input).value.strip(),
+            "provider": provider,
+            "model": "" if voice_model == Select.BLANK else str(voice_model or ""),
+            "credential_ref": "",
+            "base_url": "",
             "timeout_seconds": self._input_int("#media-voice-timeout", 120),
             "max_output_bytes": self._input_int("#media-voice-max-bytes", 52428800),
             "defaults": {
@@ -581,13 +610,14 @@ class ManaConfigurationApp(App[bool]):
                 "speed": self._input_float("#media-voice-default-speed", 1.0),
             },
         }
+        video_model = self.query_one("#media-video-model", Select).value
         media["video"] = {
             **(dict(media.get("video") or {}) if isinstance(media.get("video"), dict) else {}),
             "enabled": self.query_one("#media-video-enabled", Switch).value,
-            "provider": str(self.query_one("#media-video-provider", Select).value),
-            "model": str(self.query_one("#media-video-model", Select).value),
-            "credential_ref": self.query_one("#media-video-credential", Input).value.strip(),
-            "base_url": self.query_one("#media-video-base-url", Input).value.strip(),
+            "provider": provider,
+            "model": "" if video_model == Select.BLANK else str(video_model or ""),
+            "credential_ref": "",
+            "base_url": "",
             "timeout_seconds": self._input_int("#media-video-timeout", 600),
             "max_output_bytes": self._input_int("#media-video-max-bytes", 524288000),
             "max_duration_seconds": self._optional_input_int("#media-video-max-duration"),
@@ -595,6 +625,24 @@ class ManaConfigurationApp(App[bool]):
                 "duration_seconds": self._input_int("#media-video-default-duration", 4),
                 "resolution": self.query_one("#media-video-default-resolution", Input).value.strip() or "720x1280",
             },
+        }
+        realtime_model = self.query_one("#media-realtime-model", Select).value
+        media["realtime"] = {
+            **(dict(media.get("realtime") or {}) if isinstance(media.get("realtime"), dict) else {}),
+            "enabled": self.query_one("#media-realtime-enabled", Switch).value,
+            "provider": provider,
+            "model": "" if realtime_model == Select.BLANK else str(realtime_model or ""),
+            "credential_ref": "",
+            "base_url": "",
+        }
+        transcription_model = self.query_one("#media-transcription-model", Select).value
+        media["transcription"] = {
+            **(dict(media.get("transcription") or {}) if isinstance(media.get("transcription"), dict) else {}),
+            "enabled": self.query_one("#media-transcription-enabled", Switch).value,
+            "provider": provider,
+            "model": "" if transcription_model == Select.BLANK else str(transcription_model or ""),
+            "credential_ref": "",
+            "base_url": "",
         }
         self.draft.values["media"] = media
         self.draft.set_secret(self._provider_secret_name(provider), self.query_one("#provider-api-key", Input).value)
@@ -632,7 +680,20 @@ class ManaConfigurationApp(App[bool]):
                     thread=True,
                     exclusive=True,
                 ).wait()
+            except ProviderAuthenticationFailedError as exc:
+                self._provider_validated = False
+                status.update(f"Authentication failed: {exc}")
+                return
+            except ProviderConnectionFailedError as exc:
+                self._provider_validated = False
+                status.update(f"Provider connection failed: {exc}")
+                return
+            except ModelListFetchFailedError as exc:
+                self._provider_validated = False
+                status.update(f"Model-list fetch failed: {exc}")
+                return
             except ProviderValidationError as exc:
+                self._provider_validated = False
                 status.update(f"Validation failed: {exc}")
                 return
             self._models = models
@@ -643,35 +704,45 @@ class ManaConfigurationApp(App[bool]):
                 "#media-image-model": filter_models(models, ModelPurpose.IMAGE),
                 "#media-voice-model": filter_models(models, ModelPurpose.VOICE),
                 "#media-video-model": filter_models(models, ModelPurpose.VIDEO),
+                "#media-realtime-model": filter_models(models, ModelPurpose.REALTIME),
+                "#media-transcription-model": filter_models(models, ModelPurpose.TRANSCRIPTION),
             }
             for selector in ("#high-model", "#coding-model", "#fast-model"):
                 widget = self.query_one(selector, Select)
-                current = str(widget.value)
+                current = str(widget.value) if widget.value != Select.BLANK else ""
                 options = [(self._model_label(item), item.id) for item in text_models]
-                if current and current not in {value for _, value in options}:
+                if not options:
+                    options = [("No compatible models discovered", "")]
+                elif current and current not in {value for _, value in options}:
                     options.append((f"{current} · manual", current))
                 widget.set_options(options)
-                widget.value = current if current in {value for _, value in options} else (options[0][1] if options else Select.BLANK)
+                widget.value = current if current in {value for _, value in options} else options[0][1]
             embed = self.query_one("#embedding-model", Select)
-            current_embed = str(embed.value)
+            current_embed = str(embed.value) if embed.value != Select.BLANK else ""
             embed_options = [(self._model_label(item), item.id) for item in embedding_models]
-            if current_embed and current_embed not in {value for _, value in embed_options}:
+            if not embed_options:
+                embed_options = [("No compatible models discovered", "")]
+            elif current_embed and current_embed not in {value for _, value in embed_options}:
                 embed_options.append((f"{current_embed} · manual", current_embed))
             embed.set_options(embed_options)
-            embed.value = current_embed if current_embed in {value for _, value in embed_options} else (embed_options[0][1] if embed_options else Select.BLANK)
+            embed.value = current_embed if current_embed in {value for _, value in embed_options} else embed_options[0][1]
             for selector, compatible in media_models.items():
                 widget = self.query_one(selector, Select)
-                current = str(widget.value)
+                current = str(widget.value) if widget.value != Select.BLANK else ""
                 options = [(self._model_label(item), item.id) for item in compatible]
-                if current and current not in {value for _, value in options}:
+                if not options:
+                    options = [("No compatible models discovered", "")]
+                elif current and current not in {value for _, value in options}:
                     options.append((f"{current} · manual", current))
                 widget.set_options(options)
-                widget.value = current if current in {value for _, value in options} else (options[0][1] if options else Select.BLANK)
+                widget.value = current if current in {value for _, value in options} else options[0][1]
             status.update(
                 f"Connected · {len(text_models)} agent, {len(embedding_models)} embedding, "
                 f"{len(media_models['#media-image-model'])} image, "
                 f"{len(media_models['#media-voice-model'])} voice, "
-                f"{len(media_models['#media-video-model'])} video model(s)"
+                f"{len(media_models['#media-video-model'])} video, "
+                f"{len(media_models['#media-realtime-model'])} realtime, "
+                f"{len(media_models['#media-transcription-model'])} transcription model(s)"
             )
             return
         if button_id == "test-memory":
@@ -732,7 +803,24 @@ class ManaConfigurationApp(App[bool]):
             self.action_cancel()
         elif button_id in {"continue", "back"}:
             tabs = self.query_one(TabbedContent)
-            order = ["overview", "providers", "models", "embeddings", "media-image", "media-voice", "media-video", "coding-runtime", "memory", "search", "github", "protocols", "computer-control", "review"]
+            order = [
+                "overview",
+                "providers",
+                "models",
+                "embeddings",
+                "media-image",
+                "media-voice",
+                "media-video",
+                "media-realtime",
+                "media-transcription",
+                "coding-runtime",
+                "memory",
+                "search",
+                "github",
+                "protocols",
+                "computer-control",
+                "review",
+            ]
             current = order.index(tabs.active)
             tabs.active = order[min(len(order) - 1, current + (1 if button_id == "continue" else -1))]
 
@@ -780,10 +868,72 @@ class ManaConfigurationApp(App[bool]):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "provider-select":
-            self._provider_validated = False
             provider = str(event.value)
+            if provider == getattr(self, "_current_provider", ""):
+                return
+            self._current_provider = provider
+            self._provider_validated = False
+            self._models = []
+            self.draft.values["MANA_AI_PROVIDER"] = provider
             self.query_one("#provider-base-url", Input).value = self._provider_base_url(self.draft.values, provider)
             self.query_one("#provider-api-key", Input).placeholder = self._secret_placeholder(self._provider_secret_name(provider))
+            status = self.query_one("#provider-status", Static)
+            status.update("Provider changed · test connection to discover models")
+
+            empty_options = [("Test provider to discover models", "")]
+            for selector in (
+                "#high-model",
+                "#coding-model",
+                "#fast-model",
+                "#embedding-model",
+                "#media-image-model",
+                "#media-voice-model",
+                "#media-video-model",
+                "#media-realtime-model",
+                "#media-transcription-model",
+            ):
+                try:
+                    w = self.query_one(selector, Select)
+                    w.set_options(empty_options)
+                    w.value = ""
+                except Exception:
+                    pass
+
+            for key in (
+                "OPENAI_CHAT_MODEL",
+                "LLM_MODEL",
+                "MANA_PRIMARY_MODEL",
+                "MANA_EMBEDDING_MODEL",
+                "OPENAI_EMBED_MODEL",
+                "MANA_MODEL_MAIN",
+                "MANA_MODEL_HEAD_DECISION",
+                "MANA_MODEL_PLANNER",
+                "MANA_MODEL_CODING",
+                "MANA_MODEL_VERIFIER",
+                "MANA_MODEL_REVIEWER",
+                "MANA_MODEL_TOOL",
+                "MANA_MODEL_SUMMARIZER",
+            ):
+                self.draft.values.pop(key, None)
+
+            media = self.draft.values.get("media")
+            if isinstance(media, dict):
+                for modality in ("image", "voice", "video", "realtime", "transcription"):
+                    if isinstance(media.get(modality), dict):
+                        media[modality]["model"] = ""
+                        media[modality]["provider"] = provider
+
+            for sid in (
+                "#media-image-active-provider",
+                "#media-voice-active-provider",
+                "#media-video-active-provider",
+                "#media-realtime-active-provider",
+                "#media-transcription-active-provider",
+            ):
+                try:
+                    self.query_one(sid, Static).update(self._active_provider_text(provider))
+                except Exception:
+                    pass
         elif event.select.id == "search-provider":
             self._search_validated = False
         elif event.select.id == "github-source":
@@ -797,22 +947,26 @@ class ManaConfigurationApp(App[bool]):
             "media-image-search": ("#media-image-model", ModelPurpose.IMAGE),
             "media-voice-search": ("#media-voice-model", ModelPurpose.VOICE),
             "media-video-search": ("#media-video-model", ModelPurpose.VIDEO),
+            "media-realtime-search": ("#media-realtime-model", ModelPurpose.REALTIME),
+            "media-transcription-search": ("#media-transcription-model", ModelPurpose.TRANSCRIPTION),
         }.get(str(event.input.id or ""))
         if media_search and self._models:
             selector, purpose = media_search
             widget = self.query_one(selector, Select)
-            current = str(widget.value)
+            current = str(widget.value) if widget.value != Select.BLANK else ""
             compatible = search_models(
                 self._models, purpose=purpose, query=event.value
             )
             options = [(self._model_label(item), item.id) for item in compatible]
-            if current and current not in {value for _, value in options}:
+            if not options:
+                options = [("No matching models", "")]
+            elif current and current not in {value for _, value in options}:
                 options.append((f"{current} · current", current))
             widget.set_options(options)
             widget.value = (
                 current
                 if current in {value for _, value in options}
-                else (options[0][1] if options else Select.BLANK)
+                else options[0][1]
             )
             return
         if event.input.id in {"provider-api-key", "provider-base-url"} and event.value:

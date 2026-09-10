@@ -31,7 +31,7 @@ def render(root: Path | None = None) -> None:
     with st.sidebar:
         st.markdown("### Conversations")
         if st.button(
-            "➕ New conversation", use_container_width=True, key="chat_new_conv"
+            "➕ New conversation", width="stretch", key="chat_new_conv"
         ):
             created = service.create(title="New conversation")
             st.session_state.active_conversation_id = created.conversation_id
@@ -79,7 +79,7 @@ def render(root: Path | None = None) -> None:
             key=f"rename_{conversation_id}",
         )
         if st.button(
-            "Rename", use_container_width=True, key=f"rename_button_{conversation_id}"
+            "Rename", width="stretch", key=f"rename_button_{conversation_id}"
         ):
             service.rename(conversation_id, rename_title)
             st.rerun()
@@ -89,7 +89,7 @@ def render(root: Path | None = None) -> None:
         if st.button(
             "Delete chat",
             type="secondary",
-            use_container_width=True,
+            width="stretch",
             disabled=not confirm_delete,
             key=f"delete_{conversation_id}",
         ):

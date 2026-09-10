@@ -119,7 +119,7 @@ def render(_root: Path) -> None:
             }
             for item in report.capabilities
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 

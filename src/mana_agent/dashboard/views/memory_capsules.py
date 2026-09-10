@@ -65,7 +65,7 @@ def render(_root: Path | None = None) -> None:
                 "provider": item.get("provider"),
             }
             for item in rows
-        ], use_container_width=True, hide_index=True)
+        ], width="stretch", hide_index=True)
         with st.expander("Authorized capsule projections"):
             st.json(rows, expanded=False)
     else:

@@ -11,7 +11,23 @@ class ProviderValidationError(RuntimeError):
     pass
 
 
-@dataclass(slots=True)
+class ModelFetchError(ProviderValidationError):
+    pass
+
+
+class ProviderConnectionFailedError(ModelFetchError):
+    pass
+
+
+class ProviderAuthenticationFailedError(ModelFetchError):
+    pass
+
+
+class ModelListFetchFailedError(ModelFetchError):
+    pass
+
+
+@dataclass
 class ModelCatalogService:
     """Provider-layer model discovery used by both configuration and chat UI."""
 
@@ -34,6 +50,8 @@ class ModelCatalogService:
 
                 fetch = fetch_provider_models
             model_ids = fetch(provider=provider, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
+        except ProviderValidationError:
+            raise
         except Exception as exc:
             raise ProviderValidationError(str(exc)) from exc
         save_model_cache(provider, base_url, model_ids)

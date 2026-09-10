@@ -589,7 +589,7 @@ def run_dashboard_chat(
     )
     answer = str(getattr(turn, "answer", "") or "").strip()
     if getattr(turn, "error", None):
-        raise RuntimeError(str(turn.error))
+        raise RuntimeError(answer or str(turn.error))
     if not answer:
         raise RuntimeError("Model decision completed without an assistant response.")
     return {

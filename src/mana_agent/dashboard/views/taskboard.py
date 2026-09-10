@@ -62,7 +62,7 @@ def render(root: Path | None = None) -> None:
                 }
                 for item in supervised
             ]
-            st.dataframe(pd.DataFrame(execution_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(execution_rows), width="stretch", hide_index=True)
         except Exception:
             st.json([item.model_dump(mode="json") for item in supervised])
     else:
@@ -84,7 +84,7 @@ def render(root: Path | None = None) -> None:
                 }
                 for t in tasks
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         except Exception:
             st.json({"task_count": len(tasks), "sample": tasks[:2]})
     else:

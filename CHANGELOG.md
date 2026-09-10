@@ -4,6 +4,36 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-10
 
+- Fixed Python 3.10 compatibility for ISO 8601 shutdown and deprecation date parsing in model catalog:
+  - Added normalization of trailing `Z` and `z` UTC timezone specifiers to `+00:00` in `_is_model_available` (`src/mana_agent/config/model_catalog.py`), restoring compatibility with Python 3.10's `datetime.fromisoformat`.
+  - Added explicit handling for `datetime` instances in `_is_model_available`.
+  - Expanded lifecycle metadata test cases in `tests/test_single_provider_model_catalog.py`.
+  - User verification required: `pytest tests/test_single_provider_model_catalog.py -k test_deprecation_and_lifecycle_metadata -v`.
+
+- Consolidated provider configuration and model catalog into a single Provider tab:
+  - Made the Provider tab the single source of truth for active provider selection, credentials, base URL, and connection testing.
+  - Removed duplicate provider selectors, credentials, and custom base URL inputs from all capability/model tabs (`Image generation`, `Voice generation`, `Video generation`, `Realtime`, `Transcription`); capability tabs automatically inherit and use the active provider.
+  - Replaced hard-coded static model catalogs with authoritative live model discovery from the provider's Models API upon successful test.
+  - Unified dynamic capability detection for novel models (e.g. OpenAI `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare` as image generation/editing, `sora-2` as video, `*-realtime-*` as realtime, `whisper-*` as transcription, `tts-*` as text-to-speech) without classifying unknown models as universally compatible.
+  - Added strict deprecation and lifecycle metadata filtering (`shutdown_date`, `deprecated`, status), excluding deprecated models from capability selection.
+  - Added specific error classification for model discovery failures (`ProviderAuthenticationFailedError` for 401/403, `ProviderConnectionFailedError` for network/timeout, `ModelListFetchFailedError` for 404/429/5xx/empty), and graceful handling for connected providers with 0 models discovered for a capability.
+  - Implemented provider switching logic in TUI that immediately clears cached models, resets all model dropdowns, and invalidates stale model selections in configuration drafts.
+  - Added test suite in `tests/test_single_provider_model_catalog.py`.
+  - User verification required: `pytest tests/test_single_provider_model_catalog.py tests/test_tui_user_config.py -v`.
+
+- Normalized media provider parameters for OpenAI image, speech, and video generation:
+  - Added intelligent parameter and orientation normalization in `OpenAIMediaProvider._image_payload`, gracefully mapping requested aspect ratios (`16:9`, `9:16`, `1:1`, etc.) and dimensions to model-supported resolutions across GPT image models (`gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-1`) and DALL-E models (`dall-e-3`, `dall-e-2`).
+  - Added bidirectional quality mapping (`hd`/`high` -> `high` / `hd`, `standard`/`medium` -> `medium` / `standard`, omitting `auto` to let provider defaults apply cleanly) preventing `media_provider_parameter_rejected`.
+  - Added video orientation mapping from `aspect_ratio` and valid duration clamping (`{4, 8, 12}` seconds) in `OpenAIMediaProvider.generate_video`.
+  - Allowed `tts-1` / `tts-1-hd` speech requests with instructions to execute safely without throwing rejection errors.
+  - Surfaced descriptive assistant error explanations rather than raw error codes in dashboard chat execution.
+  - Added comprehensive unit tests in `tests/test_media_generation.py`.
+  - User verification required: `pytest tests/test_media_generation.py tests/test_single_provider_model_catalog.py -v`.
+
+- Replaced deprecated Streamlit `use_container_width=True` with `width='stretch'`:
+  - Updated all dashboard view components (`automations.py`, `chat.py`, `computer_control.py`, `fleet.py`, `memory_capsules.py`, `skills.py`, `taskboard.py`).
+  - User verification required: `pytest tests/test_single_provider_model_catalog.py tests/test_media_generation.py -v`.
+
 - Implemented Codex-style live chat execution stats for every turn in both TUI and Dashboard:
   - Created normalized `ExecutionTrace` and `ExecutionStep` model (`src/mana_agent/chat/execution_trace.py`) providing chronological phase tracking (`routing`, `context`, `search`, `coding`, `tool`, `model`, `completion`, `failure`) and generic fallback for future phases.
   - Resolved hardcoded "coding" header/title in `ExecutionPanel`, dynamically deriving the active phase title (`routing`, `searching`, `coding`, `model execution`, etc.) and restricting "coding activity" to turns that actually perform coding.
