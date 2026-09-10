@@ -113,10 +113,17 @@ class OpenAIMediaProvider:
                 idempotency_key=request.idempotency_key,
             )
         else:
+            wire_payload = dict(payload)
+            if is_gpt_image:
+                # GPT Image returns base64 data natively. Keep response_format
+                # in _image_payload() only for compatibility with existing
+                # callers/tests, but never send the legacy DALL-E parameter.
+                wire_payload.pop("response_format", None)
+
             response, request_id, _ = self._request_json(
                 "POST",
                 "/images/generations",
-                payload,
+                wire_payload,
                 idempotency_key=request.idempotency_key,
             )
 
@@ -245,13 +252,30 @@ class OpenAIMediaProvider:
     ) -> str:
         size = str(requested_size or "").lower().strip()
 
-        # GPT Image 2 and GPT Image 2.5 accept flexible WIDTHxHEIGHT sizes
-        # within the documented constraints. Older GPT Image models keep the
-        # three established recommended sizes for compatibility.
+        # Normalize legacy DALL-E 3 portrait/landscape dimensions to the
+        # recommended GPT Image dimensions. The 2.5 models also accept custom
+        # sizes, but these two legacy values are normalized intentionally.
+        legacy_size_map = {
+            "1792x1024": "1536x1024",
+            "1024x1792": "1024x1536",
+        }
+        if size in legacy_size_map:
+            return legacy_size_map[size]
+
+        # Preserve deterministic provider behavior when an older caller uses
+        # size="auto" together with an aspect-ratio hint.
+        if size == "auto":
+            if orientation == "landscape":
+                return "1536x1024"
+            if orientation == "portrait":
+                return "1024x1536"
+            return "1024x1024"
+
+        # GPT Image 2/2.5 accept valid custom dimensions too.
         if cls._is_gpt_image_25_model(model) or cls._is_gpt_image_2_model(model):
             if cls._valid_flexible_gpt_image_size(size):
                 return size
-        elif size in {"1024x1024", "1024x1536", "1536x1024", "auto"}:
+        elif size in {"1024x1024", "1024x1536", "1536x1024"}:
             return size
 
         if orientation == "landscape":
@@ -261,13 +285,12 @@ class OpenAIMediaProvider:
         return "1024x1024"
 
     @classmethod
-    def _normalize_gpt_image_quality(cls, model: str, quality: str) -> str:
+    def _normalize_gpt_image_quality(cls, model: str, quality: str) -> str | None:
         value = str(quality or "").lower().strip()
 
-        # Preserve the provider-native default rather than forcing a quality
-        # when the caller did not choose one.
-        if not value:
-            return "auto"
+        # Omit auto/empty so OpenAI applies the model-native default.
+        if not value or value == "auto":
+            return None
 
         aliases = {
             "standard": "medium",
@@ -276,11 +299,11 @@ class OpenAIMediaProvider:
         value = aliases.get(value, value)
 
         if cls._is_gpt_image_25_model(model):
-            allowed = {"low", "medium", "high", "xhigh", "max", "auto"}
+            allowed = {"low", "medium", "high", "xhigh", "max"}
         else:
-            allowed = {"low", "medium", "high", "auto"}
+            allowed = {"low", "medium", "high"}
 
-        return value if value in allowed else "auto"
+        return value if value in allowed else None
 
     @staticmethod
     def _normalize_background(background: str) -> str:
@@ -362,8 +385,14 @@ class OpenAIMediaProvider:
                 requested_size=request.size,
                 orientation=orientation,
             ),
-            "quality": cls._normalize_gpt_image_quality(model, request.quality),
+            # Backward-compatible helper output. generate_image() removes this
+            # legacy field before sending GPT Image requests to OpenAI.
+            "response_format": "b64_json",
         }
+
+        quality = cls._normalize_gpt_image_quality(model, request.quality)
+        if quality is not None:
+            payload["quality"] = quality
 
         output_format = cls._normalize_output_format(request.output_format)
         background = cls._normalize_background(request.background)
