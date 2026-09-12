@@ -896,6 +896,89 @@ def delete_managed_user_secret(name: str) -> None:
     _write_toml(secrets_file(), current, mode=0o600)
 
 
+def save_ssh_password(name: str, password: str) -> str:
+    """Securely persist an SSH password in Mana's protected secrets store (0o600)."""
+    clean_name = str(name).strip()
+    if not clean_name:
+        raise UserConfigError("SSH profile name cannot be empty.")
+    if not password:
+        raise UserConfigError("SSH password cannot be empty.")
+    current = load_user_secrets()
+    ssh_passwords = current.get("ssh_passwords", {})
+    if not isinstance(ssh_passwords, dict):
+        ssh_passwords = {}
+    ssh_passwords[clean_name] = password
+    current["ssh_passwords"] = ssh_passwords
+    _write_toml(secrets_file(), current, mode=0o600)
+    return f"secret://ssh/{clean_name}"
+
+
+def get_ssh_password(ref: str | None = None, *, profile_name: str | None = None) -> str | None:
+    """Resolve an SSH password from environment variables or Mana's secure secrets store."""
+    target_name = (profile_name or "").strip()
+    normalized_ref = str(ref or "").strip()
+
+    if normalized_ref:
+        if normalized_ref.startswith("env://"):
+            var_name = normalized_ref.removeprefix("env://")
+            val = os.environ.get(var_name)
+            return str(val) if val is not None else None
+        if normalized_ref.startswith("mana-secret://"):
+            sec_key = normalized_ref.removeprefix("mana-secret://")
+            secrets = load_user_secrets()
+            val = secrets.get(sec_key)
+            return str(val) if val is not None else None
+        if normalized_ref.startswith("secret://ssh/"):
+            sec_name = normalized_ref.removeprefix("secret://ssh/")
+            secrets = load_user_secrets()
+            passwords = secrets.get("ssh_passwords", {})
+            if isinstance(passwords, dict) and sec_name in passwords:
+                return str(passwords[sec_name])
+            val = secrets.get(f"SSH_PASSWORD_{sec_name.upper()}")
+            if val is not None:
+                return str(val)
+            env_val = os.environ.get(f"SSH_PASSWORD_{sec_name.upper()}") or os.environ.get(f"MANA_SSH_PASSWORD_{sec_name.upper()}")
+            if env_val is not None:
+                return str(env_val)
+            return None
+        secrets = load_user_secrets()
+        passwords = secrets.get("ssh_passwords", {})
+        if isinstance(passwords, dict) and normalized_ref in passwords:
+            return str(passwords[normalized_ref])
+        if normalized_ref in secrets:
+            return str(secrets[normalized_ref])
+        env_val = os.environ.get(normalized_ref)
+        if env_val is not None:
+            return str(env_val)
+
+    if target_name:
+        secrets = load_user_secrets()
+        passwords = secrets.get("ssh_passwords", {})
+        if isinstance(passwords, dict) and target_name in passwords:
+            return str(passwords[target_name])
+        upper_key = f"SSH_PASSWORD_{target_name.upper()}"
+        if upper_key in secrets:
+            return str(secrets[upper_key])
+        env_val = os.environ.get(upper_key) or os.environ.get(f"MANA_SSH_PASSWORD_{target_name.upper()}")
+        if env_val is not None:
+            return str(env_val)
+
+    return None
+
+
+def delete_ssh_password(name: str) -> None:
+    """Remove a saved SSH password from Mana's protected store."""
+    clean_name = str(name).strip()
+    if not clean_name:
+        return
+    current = load_user_secrets()
+    passwords = current.get("ssh_passwords", {})
+    if isinstance(passwords, dict) and clean_name in passwords:
+        del passwords[clean_name]
+        current["ssh_passwords"] = passwords
+        _write_toml(secrets_file(), current, mode=0o600)
+
+
 def save_effective_user_config(values: dict[str, Any], *, merge: bool = True) -> None:
     save_user_config(values, merge=merge)
     save_user_secrets(values, merge=merge)

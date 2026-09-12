@@ -29,7 +29,16 @@ def classify_ssh_failure(stderr: str, exit_code: int | None = None) -> Transport
         return TransportFailure.CONNECTION_REFUSED
     if "connection timed out" in text or "operation timed out" in text:
         return TransportFailure.TIMEOUT
-    if any(item in text for item in ("host key verification failed", "remote host identification has changed", "no matching host key type")):
+    if any(item in text for item in (
+        "host key verification failed",
+        "remote host identification has changed",
+        "no matching host key type",
+        "strict checking",
+        "strict host key checking",
+        "and you have requested strict checking",
+        "host key has changed",
+        "offending key in",
+    )):
         return TransportFailure.HOST_KEY_FAILURE
     if any(item in text for item in ("permission denied", "too many authentication failures", "publickey")):
         return TransportFailure.AUTHENTICATION_FAILURE

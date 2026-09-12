@@ -2,6 +2,20 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-12
+
+- Added explicit password authentication support to `mana-agent ssh` without breaking SSH key flow:
+  - Preserved key authentication as default behavior with strict host-key verification (`StrictHostKeyChecking=yes`).
+  - Added explicit `auth_mode` selection (`key` or `password`) with validation preventing cross-mode configuration and silent downgrades.
+  - Implemented secure password secret storage abstractions `save_ssh_password` and `get_ssh_password` in `src/mana_agent/config/user_config.py` backed by `~/.mana/secrets.toml` (`0o600` file permissions), with support for `secret://ssh/<name>`, `mana-secret://<key>`, and `env://<var>`.
+  - Prohibited plaintext passwords in CLI arguments, adding `--password` interactive prompt (`hide_input=True`), `--password-ref`, and `mana-agent ssh set-password <name>`.
+  - Implemented non-interactive password delivery for `LocalSSHProvider` via permission-isolated ephemeral `SSH_ASKPASS` script (`0o700`) and secret token (`0o600`) with `SSH_ASKPASS_REQUIRE=force`, `stdin=DEVNULL`, and secure cleanup in `finally:`.
+  - Updated `classify_ssh_failure` to separate strict host-key verification failures from authentication failures, preventing strict checking errors from being misclassified as password failures.
+  - Updated server enrollment and connection factory to support password-authenticated SSH profiles.
+  - Added unit and CLI test coverage in `tests/remote_execution/test_ssh_profiles.py` and `tests/remote_execution/test_remote_execution.py`.
+  - Documented password-mode configuration in `docs/remote_execution.md`.
+  - User verification required: `pytest tests/remote_execution/test_ssh_profiles.py tests/remote_execution/test_remote_execution.py -v`.
+
 ## 2026-09-10
 
 - Fixed Python 3.10 compatibility for ISO 8601 shutdown and deprecation date parsing in model catalog:

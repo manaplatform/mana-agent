@@ -3,11 +3,51 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import os
 import shlex
+import stat
+import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 from mana_agent.remote_execution.models import RemoteExecutionEvent, RemoteExecutionRequest
+
+
+@contextmanager
+def _askpass_environment(password: str):
+    temp_dir = tempfile.mkdtemp(prefix="mana_ssh_")
+    dir_path = Path(temp_dir)
+    try:
+        dir_path.chmod(stat.S_IRWXU)
+        secret_file = dir_path / "secret.tok"
+        secret_file.write_text(password, encoding="utf-8")
+        secret_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+        if sys.platform == "win32":
+            helper = dir_path / "askpass.bat"
+            helper.write_text(f"@type \"{secret_file}\"\r\n", encoding="utf-8")
+        else:
+            helper = dir_path / "askpass.sh"
+            helper.write_text(f"#!/bin/sh\nexec cat \"{secret_file}\"\n", encoding="utf-8")
+            helper.chmod(stat.S_IRWXU)
+
+        env = os.environ.copy()
+        env["SSH_ASKPASS"] = str(helper)
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env["DISPLAY"] = env.get("DISPLAY", ":0")
+        yield env
+    finally:
+        try:
+            for p in dir_path.iterdir():
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            dir_path.rmdir()
+        except OSError:
+            pass
 
 
 def build_ssh_argv(
@@ -21,7 +61,22 @@ def build_ssh_argv(
     target = request.target
     effective_timeout = connect_timeout_seconds or request.connect_timeout_seconds
     effective_known_hosts = known_hosts_file or request.known_hosts_file
-    args = [ssh_binary, "-p", str(target.port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", f"ConnectTimeout={effective_timeout}"]
+    args = [ssh_binary, "-p", str(target.port)]
+    if request.authentication.mode == "password":
+        args.extend([
+            "-o", "BatchMode=no",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", f"ConnectTimeout={effective_timeout}",
+            "-o", "PreferredAuthentications=password,keyboard-interactive",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+        ])
+    else:
+        args.extend([
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", f"ConnectTimeout={effective_timeout}",
+        ])
     if effective_known_hosts:
         args.extend(["-o", f"UserKnownHostsFile={str(Path(effective_known_hosts).expanduser())}"])
     if request.keepalive_seconds:
@@ -64,7 +119,40 @@ class LocalSSHProvider:
         emit(RemoteExecutionEvent(job_id=request.job_id, session_id=request.session_id, kind="connection_started"))
         emit(RemoteExecutionEvent(job_id=request.job_id, session_id=request.session_id, kind="authenticating"))
         emit(RemoteExecutionEvent(job_id=request.job_id, session_id=request.session_id, kind="command_started"))
-        process = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+        if request.authentication.mode == "password":
+            from mana_agent.config.user_config import get_ssh_password
+
+            password = get_ssh_password(
+                request.authentication.password_ref,
+                profile_name=request.target.host,
+            )
+            if not password:
+                raise RuntimeError(
+                    f"Missing password credential for SSH target {request.target.user}@{request.target.host}. "
+                    "Please configure a password in ~/.mana/secrets.toml or provide a valid --password-ref."
+                )
+            with _askpass_environment(password) as env:
+                return await self._run_process(argv, request, emit, cancel, env=env)
+        else:
+            return await self._run_process(argv, request, emit, cancel, env=None)
+
+    async def _run_process(
+        self,
+        argv: list[str],
+        request: RemoteExecutionRequest,
+        emit: Callable[[RemoteExecutionEvent], None],
+        cancel: asyncio.Event,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
         async def read(stream, kind: str) -> str:
             chunks: list[bytes] = []
             while line := await stream.readline():

@@ -43,10 +43,14 @@ def server_enroll(
             "SSH profile must have an explicitly trusted host key. Run `mana-agent ssh trust-host` first."
         )
     credential_ref = None
-    auth_method = "ssh_agent"
-    if ssh.identity_file:
+    if ssh.auth_mode == "password":
+        auth_method = "password"
+        credential_ref = ssh.password_ref or f"secret://ssh/{ssh.name}"
+    elif ssh.identity_file:
         credential_ref = register_key_path(server_id, ssh.identity_file)
         auth_method = "ssh_key"
+    else:
+        auth_method = "ssh_agent"
     caps = set(capability or ["inspect"])
     ServerManagementService().registry.add(
         ServerDefinition(
