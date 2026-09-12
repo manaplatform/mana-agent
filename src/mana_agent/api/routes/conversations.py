@@ -411,10 +411,12 @@ def decide_server_approval_in_chat(
         "cancelled"
         if payload.decision == "deny"
         else "success"
-        if result.get("status") == "succeeded"
+        if result.get("status") in {"succeeded", "completed"}
         else "failed"
     )
-    completion_summary = str(result.get("message") or "").strip()
+    completion_summary = str(
+        result.get("answer") or result.get("message") or ""
+    ).strip()
     if not completion_summary:
         raise ManaApiError(
             409,

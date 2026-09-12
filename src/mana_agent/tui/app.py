@@ -338,8 +338,8 @@ class ManaChatApp(App):
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
         event_id = str(event.get("event_id") or event.get("id") or "").strip()
 
-        # Handle API approval modal trigger
-        if event_type == "api.waiting_approval":
+        # Handle API and server approval modal trigger
+        if event_type in {"api.waiting_approval", "server.waiting_approval"}:
             if event_id:
                 if event_id in self._delivered_coding_event_ids:
                     return
@@ -352,12 +352,50 @@ class ManaChatApp(App):
             )
             act = {
                 "event_id": event_id,
-                "event_type": "api.waiting_approval",
-                "title": str(event.get("title") or "API request approval required"),
+                "event_type": event_type,
+                "title": str(
+                    event.get("title")
+                    or (
+                        "Server action approval required"
+                        if event_type == "server.waiting_approval"
+                        else "API request approval required"
+                    )
+                ),
                 "status": str(event.get("status") or "running"),
                 "metadata": dict(event.get("metadata") or {}),
             }
             self._safe_post_activity(act, target_turn_id)
+            return
+
+        if event_type in {"server.approval_decided", "api.approval_decided"}:
+            metadata = dict(event.get("metadata") or {})
+            req_id = str(metadata.get("permission_request_id") or metadata.get("approval_request_id") or "")
+            from mana_agent.tui.computer_permission import ComputerPermissionScreen
+
+            if (
+                req_id
+                and isinstance(getattr(self, "screen", None), ComputerPermissionScreen)
+                and getattr(self.screen, "request_id", None) == req_id
+            ):
+                try:
+                    self.screen.dismiss(None)
+                except Exception:
+                    pass
+            decision = str(metadata.get("decision") or "")
+            if decision == "deny":
+                self.update_status(
+                    "Server action denied"
+                    if event_type == "server.approval_decided"
+                    else "API request denied"
+                )
+            return
+
+        if event_type == "turn.resume_requested":
+            metadata = dict(event.get("metadata") or {})
+            is_server = bool(metadata.get("server_approval"))
+            self.update_status(
+                "Resuming server execution…" if is_server else "Resuming execution…"
+            )
             return
 
         # Deduplicate scope + hub delivery using original event_id
@@ -579,9 +617,9 @@ class ManaChatApp(App):
                     command,
                     choice.request_id,
                     session_id=self._gateway_session_id or "",
+                    client_type="tui",
                 )
-                self.notify(result["message"])
-                self.history.add(AssistantMessageEvent(content=result["message"]))
+                self._record_server_approval_completion(choice.request_id, result)
                 return
             if choice.api:
                 command = (
@@ -636,6 +674,36 @@ class ManaChatApp(App):
                     content=f"API approval action failed: {exc}",
                     turn_id=choice.request_id,
                 ))
+            elif choice.server:
+                self.history.add(AssistantMessageEvent(
+                    content=f"Server approval action failed: {exc}",
+                    turn_id=choice.request_id,
+                ))
+
+    def _record_server_approval_completion(
+        self,
+        approval_request_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Show the validated approved server outcome as the TUI's terminal assistant message."""
+        message = str(result.get("answer") or result.get("message") or "").strip()
+        if not message:
+            raise ValueError("Server approval completed without a validated result message.")
+        status = str(result.get("status") or "")
+        self.history.add(AssistantMessageEvent(
+            content=message,
+            turn_id=approval_request_id,
+        ))
+        if status == "denied":
+            self.notify("Server action denied. No server command was executed.", severity="warning")
+            self.update_status("Server action denied")
+            return
+        if status in {"failed", "verification_failed"}:
+            self.notify(f"Server action failed: {message}", severity="error")
+            self.update_status("Server action failed")
+            return
+        self.notify("Server action completed. Response added to chat.")
+        self.update_status("Server action completed")
 
     def _record_api_approval_completion(
         self,

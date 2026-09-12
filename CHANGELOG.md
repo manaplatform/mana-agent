@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-12
 
+- Enabled TUI and Dashboard listening for server action approvals and added post-approval model continuation:
+  - Stored `task_intent`, `turn_id`, and `execution_id` in `pending_server_action` when `ServerApprovalRequired` is raised in `src/mana_agent/gateway/chat_gateway.py`.
+  - Published `server.waiting_approval` to `ExecutionEventHub` so both TUI and Dashboard receive the approval prompt regardless of client surface.
+  - Implemented `_resume_server_continuation` in `chat_gateway.py`, resuming model execution via `ask_agent.run` with validated remote execution output (exit code, argv, stdout, stderr) to complete the user's original task.
+  - Implemented `_finalize_server_approval_outcome` in `chat_gateway.py` to coordinate lane task completion, record session messages, and emit `server.approval_decided` and `turn.finished` on `ExecutionEventHub` and gateway event sinks.
+  - Updated `deny_server_approval_command` to finalize cleanly with status `"denied"` and emit cancellation events to `ExecutionEventHub`.
+  - Updated `decide_dashboard_server_approval` in `src/mana_agent/ui/streamlit_helpers.py` to pass `client_type="dashboard"`.
+  - Updated `decide_server_approval_in_chat` in `src/mana_agent/api/routes/conversations.py` to support `"completed"` status and model continuation answer in the returned assistant message.
+  - Updated TUI `_handle_hub_session_event` in `src/mana_agent/tui/app.py` to listen for `server.waiting_approval`, `server.approval_decided`, and `turn.resume_requested`.
+  - Added `_record_server_approval_completion` in `src/mana_agent/tui/app.py` to record resumed assistant messages and status notifications.
+  - Updated `_PROGRESS_TYPES` and `_TERMINAL_TYPES` in `src/mana_agent/coding/event_visibility.py` to include approval and turn completion events.
+  - Added unit test suite in `tests/gateway/test_server_approval_continuation.py`.
+  - User verification required: `pytest tests/gateway/test_server_approval_continuation.py tests/gateway/test_chat_gateway.py -k server_approval -v`.
+
 - Added explicit password authentication support to `mana-agent ssh` without breaking SSH key flow:
   - Preserved key authentication as default behavior with strict host-key verification (`StrictHostKeyChecking=yes`).
   - Added explicit `auth_mode` selection (`key` or `password`) with validation preventing cross-mode configuration and silent downgrades.

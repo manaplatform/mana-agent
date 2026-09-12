@@ -2112,8 +2112,9 @@ class AgentChatGateway:
         approval_request_id: str,
         *,
         session_id: str,
+        client_type: str = "tui",
     ) -> dict[str, Any]:
-        """Consume and execute one exact session-bound server approval."""
+        """Consume and execute one exact session-bound server approval, then resume model continuation."""
         from mana_agent.execution.manager import run_sync
         from mana_agent.human_inbox.models import (
             InboxStatus,
@@ -2273,19 +2274,42 @@ class AgentChatGateway:
                 "exit_code": outcome.exit_code,
             },
         )
-        supervision_error = ""
-        if lane_task_id:
-            finished = self._finish_lane(
-                lane_task_id,
-                state=LaneTaskState.COMPLETED if succeeded else LaneTaskState.FAILED,
-                verification_state={"server_result": serialized},
-                error="" if succeeded else "Approved server action did not complete successfully.",
-            )
-            if succeeded and finished.state is not LaneTaskState.COMPLETED:
-                supervision_error = (
-                    finished.error
-                    or "server result did not satisfy its durable completion contract"
-                )
+        return self._resume_server_continuation(
+            approval_request_id,
+            session_id=session_id,
+            decision=decision,
+            outcome=outcome,
+            pending=pending,
+            supervised_action=supervised_action,
+            client_type=client_type,
+        )
+
+    def _resume_server_continuation(
+        self,
+        approval_request_id: str,
+        *,
+        session_id: str,
+        decision: Any,
+        outcome: Any,
+        pending: dict[str, Any],
+        supervised_action: Any | None = None,
+        client_type: str = "tui",
+    ) -> dict[str, Any]:
+        """Resume model turn after approved server action execution."""
+        from mana_agent.config.settings import default_index_dir
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        from mana_agent.workspaces.paths import repository_id_for_path
+
+        serialized = outcome.model_dump(mode="json")
+        succeeded = (
+            outcome.exit_code == 0 and not outcome.timed_out and not outcome.cancelled
+        )
+        lane_task_id = str(pending.get("lane_task_id") or "")
+        task_intent = str(pending.get("task_intent") or "").strip() or "Server action execution"
+        execution_id = str(pending.get("execution_id") or approval_request_id)
+        repo_id = repository_id_for_path(Path(self.root).resolve())
+        hub = get_execution_event_hub()
+
         output = "\n".join(
             value
             for value in (str(outcome.stdout).strip(), str(outcome.stderr).strip())
@@ -2296,29 +2320,336 @@ class AgentChatGateway:
             if succeeded
             else f"Approved server action exited with code {outcome.exit_code}."
         )
+        if output:
+            summary = f"{summary}\n\nRemote command output:\n{output}"
+
+        if not succeeded:
+            return self._finalize_server_approval_outcome(
+                approval_request_id,
+                session_id=session_id,
+                status="failed",
+                message=summary,
+                answer=summary,
+                execution_evidence=serialized,
+                lane_task_id=lane_task_id,
+                execution_id=execution_id,
+                client_type=client_type,
+                repo_id=repo_id,
+                hub=hub,
+            )
+
+        resume_metadata = {
+            "approval_request_id": approval_request_id,
+            "permission_request_id": approval_request_id,
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "server_approval": True,
+        }
+        if callable(self._event_sink):
+            self._event_sink(
+                "turn.resume_requested",
+                "Server action continuation resumed",
+                conversation_id=session_id,
+                execution_id=execution_id,
+                metadata=resume_metadata,
+            )
+        hub.emit(
+            "turn.resume_requested",
+            title="Server action continuation resumed",
+            conversation_id=session_id,
+            execution_id=execution_id,
+            repository_id=repo_id,
+            status="running",
+            metadata=resume_metadata,
+        )
+
+        ask_agent = None
+        if hasattr(self, "_stack") and self._stack and hasattr(self._stack, "ask_service"):
+            ask_agent = getattr(self._stack.ask_service, "ask_agent", None)
+        if ask_agent is None:
+            try:
+                from mana_agent.services.ask_service import AskService
+
+                ask_agent = AskService(self.root).ask_agent
+            except Exception:
+                ask_agent = None
+
+        final_answer = ""
+        if ask_agent is not None and callable(getattr(ask_agent, "run", None)):
+            argv_str = shlex.join(list(pending.get("argv") or []))
+            continuation_prompt = (
+                f"The user's original request was:\n{task_intent}\n\n"
+                f"The approved server action has executed successfully on server '{decision.server_id}'.\n"
+                f"Validated Server Execution Evidence:\n"
+                f"Command: {argv_str}\n"
+                f"Exit Code: {outcome.exit_code}\n"
+                f"Stdout:\n{outcome.stdout}\n"
+                f"Stderr:\n{outcome.stderr}\n\n"
+                "Based on the validated server execution evidence above, complete the user's original request now. "
+                "Provide the full requested final response (including any analysis, summary, translations, or formatting requested by the user)."
+            )
+            try:
+                response = ask_agent.run(
+                    question=continuation_prompt,
+                    index_dir=self._index_dir or default_index_dir(self.root),
+                    k=self._resolved_k,
+                    max_steps=max(16, int(self.config.agent_max_steps or 6)),
+                    timeout_seconds=max(30, self._agent_timeout_seconds),
+                    flow_id=session_id,
+                    run_id=execution_id or approval_request_id,
+                    system_prompt=(
+                        "You are Mana-Agent. An approved server action has executed successfully on the remote host. "
+                        "The validated server execution evidence is provided in the prompt. "
+                        "Analyze and synthesize the results to fulfill the user's request. "
+                        "Do not call external tools again unless explicitly needed. "
+                        "Deliver the clear, complete, and helpful final response."
+                    ),
+                )
+                final_answer = str(getattr(response, "answer", response) or "").strip()
+            except Exception as exc:
+                logger.warning("Server continuation model step failed: %s", exc, exc_info=True)
+                return self._finalize_server_approval_outcome(
+                    approval_request_id,
+                    session_id=session_id,
+                    status="failed",
+                    error="continuation_model_failed",
+                    message=f"Server continuation model failed: {exc}",
+                    answer=summary,
+                    execution_evidence=serialized,
+                    lane_task_id=lane_task_id,
+                    execution_id=execution_id,
+                    client_type=client_type,
+                    repo_id=repo_id,
+                    hub=hub,
+                )
+
+        if final_answer and final_answer != summary:
+            full_message = f"{summary}\n\n{final_answer}"
+            display_answer = final_answer
+        else:
+            full_message = summary
+            display_answer = summary
+
+        return self._finalize_server_approval_outcome(
+            approval_request_id,
+            session_id=session_id,
+            status="succeeded",
+            message=full_message,
+            answer=display_answer,
+            execution_evidence=serialized,
+            lane_task_id=lane_task_id,
+            execution_id=execution_id,
+            client_type=client_type,
+            repo_id=repo_id,
+            hub=hub,
+        )
+
+    def _finalize_server_approval_outcome(
+        self,
+        approval_request_id: str,
+        *,
+        session_id: str,
+        status: str,
+        message: str,
+        answer: str = "",
+        error: str = "",
+        execution_evidence: dict[str, Any] | None = None,
+        lane_task_id: str = "",
+        execution_id: str = "",
+        client_type: str = "tui",
+        repo_id: str = "",
+        hub: Any | None = None,
+    ) -> dict[str, Any]:
+        """Authoritative lifecycle finalizer for all post-approval server outcomes."""
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        from mana_agent.workspaces.paths import repository_id_for_path
+
+        if not repo_id:
+            repo_id = repository_id_for_path(Path(self.root).resolve())
+        if hub is None:
+            hub = get_execution_event_hub()
+
+        exec_id = execution_id or approval_request_id
+        final_answer = answer or message
+        supervision_error = ""
+
+        if lane_task_id and self._lane_coordinator:
+            succeeded = status == "succeeded"
+            target_lane_state = (
+                LaneTaskState.COMPLETED
+                if succeeded
+                else (LaneTaskState.CANCELLED if status == "denied" else LaneTaskState.FAILED)
+            )
+            try:
+                finished = self._finish_lane(
+                    lane_task_id,
+                    state=target_lane_state,
+                    verification_state={"server_result": execution_evidence or {}},
+                    error="" if succeeded else message,
+                )
+                if succeeded and finished and finished.state is not LaneTaskState.COMPLETED:
+                    supervision_error = (
+                        finished.error
+                        or "server result did not satisfy its durable completion contract"
+                    )
+            except Exception:
+                logger.warning("Failed finishing lane task %s", lane_task_id, exc_info=True)
+
+            try:
+                execution_info = self._lane_coordinator.inspect_task(lane_task_id)
+                parent_id = getattr(execution_info, "parent_task_id", None)
+                if parent_id and parent_id in getattr(self._lane_coordinator, "_executions", {}):
+                    parent_exec = self._lane_coordinator.inspect_task(parent_id)
+                    if parent_exec.state == LaneTaskState.WAITING:
+                        active_siblings = any(
+                            child.task_id != lane_task_id
+                            and child.parent_task_id == parent_id
+                            and child.state in ACTIVE_LANE_STATES
+                            for child in self._lane_coordinator.executions
+                        )
+                        if not active_siblings:
+                            self._finish_lane(
+                                parent_id,
+                                state=target_lane_state,
+                                error="" if succeeded else message,
+                            )
+            except Exception:
+                logger.debug("Failed reconciling parent lane task %s", lane_task_id, exc_info=True)
+
+            if getattr(self._lane_coordinator, "taskboard", None):
+                try:
+                    execution_info = self._lane_coordinator.inspect_task(lane_task_id)
+                    board_task_id = getattr(execution_info, "taskboard_task_id", "") or lane_task_id
+                    if board_task_id in self._lane_coordinator.taskboard.tasks:
+                        task = self._lane_coordinator.taskboard.get_task(board_task_id)
+                        task.status = "done" if succeeded else ("cancelled" if status == "denied" else "failed")
+                        if execution_evidence:
+                            task.integration_evidence_records.append({
+                                "final_status": status,
+                                "evidence": execution_evidence,
+                            })
+                        self._lane_coordinator.taskboard.save()
+                except Exception:
+                    logger.debug("Failed reconciling taskboard task %s", lane_task_id, exc_info=True)
+
         if supervision_error:
-            summary = (
+            status = "verification_failed"
+            message = (
                 "The approved server action returned successfully, but task completion was "
                 f"not verified: {supervision_error}"
             )
-        if output:
-            summary = f"{summary}\n\nRemote command output:\n{output}"
-        return {
-            "status": (
-                "verification_failed"
-                if supervision_error
-                else "succeeded" if succeeded else "failed"
-            ),
-            "approval_request_id": approval_request_id,
-            "result": serialized,
-            "message": summary,
+            final_answer = message
+
+        msg_id = f"msg_{uuid.uuid4().hex[:16]}"
+        assistant_msg = {
+            "role": "assistant",
+            "content": final_answer,
+            "message_id": msg_id,
+            "execution_id": exec_id,
+            "metadata": {
+                "approval_request_id": approval_request_id,
+                "server_approval": True,
+                "resumed": status == "succeeded",
+                "status": status,
+            },
         }
+
+        if client_type != "dashboard":
+            try:
+                self._append_session_message(
+                    session_id,
+                    role="assistant",
+                    content=final_answer,
+                    turn_id=exec_id,
+                    message_id=msg_id,
+                    metadata={
+                        "approval_request_id": approval_request_id,
+                        "server_approval": True,
+                        "resumed": status == "succeeded",
+                        "status": status,
+                    },
+                )
+            except Exception:
+                pass
+
+        event_status = "success" if status == "succeeded" else ("cancelled" if status == "denied" else "failed")
+
+        if callable(self._event_sink):
+            self._event_sink(
+                "turn.finished",
+                "Server action completed" if status == "succeeded" else "Server action finished",
+                message=final_answer,
+                conversation_id=session_id,
+                execution_id=exec_id,
+                status=event_status,
+                metadata={
+                    "message_id": msg_id,
+                    "content": final_answer,
+                    "approval_request_id": approval_request_id,
+                    "server_approval": True,
+                    "resumed": status == "succeeded",
+                },
+            )
+
+        hub.emit(
+            "server.approval_decided",
+            title=(
+                "Server action approved"
+                if status == "succeeded"
+                else "Server action denied" if status == "denied"
+                else "Server action failed"
+            ),
+            conversation_id=session_id,
+            execution_id=exec_id,
+            repository_id=repo_id,
+            status=event_status,
+            metadata={
+                "permission_request_id": approval_request_id,
+                "approval_request_id": approval_request_id,
+                "decision": "deny" if status == "denied" else "approve",
+                "server_approval": True,
+            },
+        )
+        hub.emit(
+            "turn.finished",
+            title="Server action summary",
+            conversation_id=session_id,
+            execution_id=exec_id,
+            repository_id=repo_id,
+            message=final_answer,
+            status=event_status,
+            metadata={
+                "message_id": msg_id,
+                "content": final_answer,
+                "approval_request_id": approval_request_id,
+                "permission_request_id": approval_request_id,
+                "server_approval": True,
+                "resumed": status == "succeeded",
+            },
+        )
+
+        outcome = {
+            "status": status,
+            "approved": status == "succeeded",
+            "executed": status == "succeeded",
+            "resume": "completed" if status == "succeeded" else "failed",
+            "execution_id": exec_id,
+            "approval_request_id": approval_request_id,
+            "result": execution_evidence or {},
+            "answer": final_answer,
+            "message": message,
+            "assistant_message": assistant_msg,
+        }
+        if error:
+            outcome["error"] = error
+        return outcome
 
     def deny_server_approval_command(
         self,
         approval_request_id: str,
         *,
         session_id: str,
+        client_type: str = "tui",
     ) -> dict[str, Any]:
         """Deny and consume one exact session-bound server approval."""
         from mana_agent.human_inbox.models import (
@@ -2349,12 +2680,17 @@ class AgentChatGateway:
                 lane_task_id,
                 reason="Server action denied by the user.",
             )
-        self._pending_server_approvals.pop(approval_request_id)
-        return {
-            "status": "denied",
-            "approval_request_id": approval_request_id,
-            "message": "Server action denied. No server command was executed.",
-        }
+        self._pending_server_approvals.pop(approval_request_id, None)
+        return self._finalize_server_approval_outcome(
+            approval_request_id,
+            session_id=session_id,
+            status="denied",
+            message="Server action denied. No server command was executed.",
+            answer="Server action denied. No server command was executed.",
+            lane_task_id=lane_task_id,
+            execution_id=str(pending.get("execution_id") or approval_request_id),
+            client_type=client_type,
+        )
 
     def _server_inbox_pending(self, approval_request_id: str):
         """Load authoritative server approval state and recover protected intent."""
@@ -9126,6 +9462,9 @@ class AgentChatGateway:
                         ).items()
                     },
                     "lane_task_id": lane_task_id,
+                    "task_intent": getattr(context, "text", "") or text,
+                    "turn_id": context.turn_id,
+                    "execution_id": context.turn_id or approval_request_id,
                 }
                 from mana_agent.human_inbox.models import (
                     InboxRequestType,
@@ -9237,6 +9576,32 @@ class AgentChatGateway:
                         "Server action approval required",
                         metadata=approval_metadata,
                     )
+                if callable(getattr(self, "_event_sink", None)) and self._event_sink is not sink:
+                    try:
+                        self._event_sink(
+                            "server.waiting_approval",
+                            "Server action approval required",
+                            conversation_id=context.session_id,
+                            execution_id=context.turn_id or approval_request_id,
+                            metadata=approval_metadata,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    from mana_agent.services.execution_event_hub import get_execution_event_hub
+                    from mana_agent.workspaces.paths import repository_id_for_path
+
+                    get_execution_event_hub().emit(
+                        "server.waiting_approval",
+                        title="Server action approval required",
+                        conversation_id=context.session_id,
+                        execution_id=context.turn_id or approval_request_id,
+                        repository_id=repository_id_for_path(Path(self.root).resolve()),
+                        status="running",
+                        metadata=approval_metadata,
+                    )
+                except Exception:
+                    logger.debug("Server approval hub emission failed", exc_info=True)
                 return ChatTurnResult(
                     answer="Server action approval is waiting in the approval prompt.",
                     mode="server-awaiting-approval",
