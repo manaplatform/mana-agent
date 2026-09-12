@@ -2307,7 +2307,8 @@ class AgentChatGateway:
         lane_task_id = str(pending.get("lane_task_id") or "")
         task_intent = str(pending.get("task_intent") or "").strip() or "Server action execution"
         execution_id = str(pending.get("execution_id") or approval_request_id)
-        repo_id = repository_id_for_path(Path(self.root).resolve())
+        root = getattr(self, "root", None)
+        repo_id = repository_id_for_path(Path(root).resolve()) if root is not None else ""
         hub = get_execution_event_hub()
 
         output = "\n".join(
@@ -2345,8 +2346,9 @@ class AgentChatGateway:
             "execution_id": execution_id,
             "server_approval": True,
         }
-        if callable(self._event_sink):
-            self._event_sink(
+        event_sink = getattr(self, "_event_sink", None)
+        if callable(event_sink):
+            event_sink(
                 "turn.resume_requested",
                 "Server action continuation resumed",
                 conversation_id=session_id,
@@ -2366,11 +2368,11 @@ class AgentChatGateway:
         ask_agent = None
         if hasattr(self, "_stack") and self._stack and hasattr(self._stack, "ask_service"):
             ask_agent = getattr(self._stack.ask_service, "ask_agent", None)
-        if ask_agent is None:
+        if ask_agent is None and root is not None:
             try:
                 from mana_agent.services.ask_service import AskService
 
-                ask_agent = AskService(self.root).ask_agent
+                ask_agent = AskService(root).ask_agent
             except Exception:
                 ask_agent = None
 
@@ -2388,13 +2390,20 @@ class AgentChatGateway:
                 "Based on the validated server execution evidence above, complete the user's original request now. "
                 "Provide the full requested final response (including any analysis, summary, translations, or formatting requested by the user)."
             )
+            index_dir = getattr(self, "_index_dir", None) or (
+                default_index_dir(root) if root is not None else ""
+            )
+            resolved_k = getattr(self, "_resolved_k", 4)
+            cfg = getattr(self, "config", None)
+            max_steps = max(16, int(getattr(cfg, "agent_max_steps", 6) or 6)) if cfg else 16
+            timeout_seconds = max(30, getattr(self, "_agent_timeout_seconds", 60))
             try:
                 response = ask_agent.run(
                     question=continuation_prompt,
-                    index_dir=self._index_dir or default_index_dir(self.root),
-                    k=self._resolved_k,
-                    max_steps=max(16, int(self.config.agent_max_steps or 6)),
-                    timeout_seconds=max(30, self._agent_timeout_seconds),
+                    index_dir=index_dir,
+                    k=resolved_k,
+                    max_steps=max_steps,
+                    timeout_seconds=timeout_seconds,
                     flow_id=session_id,
                     run_id=execution_id or approval_request_id,
                     system_prompt=(
@@ -2465,7 +2474,8 @@ class AgentChatGateway:
         from mana_agent.workspaces.paths import repository_id_for_path
 
         if not repo_id:
-            repo_id = repository_id_for_path(Path(self.root).resolve())
+            root = getattr(self, "root", None)
+            repo_id = repository_id_for_path(Path(root).resolve()) if root is not None else ""
         if hub is None:
             hub = get_execution_event_hub()
 
@@ -2473,62 +2483,68 @@ class AgentChatGateway:
         final_answer = answer or message
         supervision_error = ""
 
-        if lane_task_id and self._lane_coordinator:
+        lane_coord = getattr(self, "_lane_coordinator", None)
+        finish_lane = getattr(self, "_finish_lane", None)
+        if lane_task_id and lane_coord:
             succeeded = status == "succeeded"
             target_lane_state = (
                 LaneTaskState.COMPLETED
                 if succeeded
                 else (LaneTaskState.CANCELLED if status == "denied" else LaneTaskState.FAILED)
             )
-            try:
-                finished = self._finish_lane(
-                    lane_task_id,
-                    state=target_lane_state,
-                    verification_state={"server_result": execution_evidence or {}},
-                    error="" if succeeded else message,
-                )
-                if succeeded and finished and finished.state is not LaneTaskState.COMPLETED:
-                    supervision_error = (
-                        finished.error
-                        or "server result did not satisfy its durable completion contract"
+            if callable(finish_lane):
+                try:
+                    finished = finish_lane(
+                        lane_task_id,
+                        state=target_lane_state,
+                        verification_state={"server_result": execution_evidence or {}},
+                        error="" if succeeded else message,
                     )
-            except Exception:
-                logger.warning("Failed finishing lane task %s", lane_task_id, exc_info=True)
+                    if succeeded and finished and finished.state is not LaneTaskState.COMPLETED:
+                        supervision_error = (
+                            finished.error
+                            or "server result did not satisfy its durable completion contract"
+                        )
+                except Exception:
+                    logger.warning("Failed finishing lane task %s", lane_task_id, exc_info=True)
 
             try:
-                execution_info = self._lane_coordinator.inspect_task(lane_task_id)
-                parent_id = getattr(execution_info, "parent_task_id", None)
-                if parent_id and parent_id in getattr(self._lane_coordinator, "_executions", {}):
-                    parent_exec = self._lane_coordinator.inspect_task(parent_id)
-                    if parent_exec.state == LaneTaskState.WAITING:
-                        active_siblings = any(
-                            child.task_id != lane_task_id
-                            and child.parent_task_id == parent_id
-                            and child.state in ACTIVE_LANE_STATES
-                            for child in self._lane_coordinator.executions
-                        )
-                        if not active_siblings:
-                            self._finish_lane(
-                                parent_id,
-                                state=target_lane_state,
-                                error="" if succeeded else message,
+                inspect_fn = getattr(lane_coord, "inspect_task", None)
+                if callable(inspect_fn):
+                    execution_info = inspect_fn(lane_task_id)
+                    parent_id = getattr(execution_info, "parent_task_id", None)
+                    if parent_id and parent_id in getattr(lane_coord, "_executions", {}):
+                        parent_exec = inspect_fn(parent_id)
+                        if parent_exec.state == LaneTaskState.WAITING:
+                            active_siblings = any(
+                                child.task_id != lane_task_id
+                                and child.parent_task_id == parent_id
+                                and child.state in getattr(lane_coord, "executions", [])
+                                for child in getattr(lane_coord, "executions", [])
                             )
+                            if not active_siblings and callable(finish_lane):
+                                finish_lane(
+                                    parent_id,
+                                    state=target_lane_state,
+                                    error="" if succeeded else message,
+                                )
             except Exception:
                 logger.debug("Failed reconciling parent lane task %s", lane_task_id, exc_info=True)
 
-            if getattr(self._lane_coordinator, "taskboard", None):
+            if getattr(lane_coord, "taskboard", None):
                 try:
-                    execution_info = self._lane_coordinator.inspect_task(lane_task_id)
+                    inspect_fn = getattr(lane_coord, "inspect_task", None)
+                    execution_info = inspect_fn(lane_task_id) if callable(inspect_fn) else None
                     board_task_id = getattr(execution_info, "taskboard_task_id", "") or lane_task_id
-                    if board_task_id in self._lane_coordinator.taskboard.tasks:
-                        task = self._lane_coordinator.taskboard.get_task(board_task_id)
+                    if board_task_id in lane_coord.taskboard.tasks:
+                        task = lane_coord.taskboard.get_task(board_task_id)
                         task.status = "done" if succeeded else ("cancelled" if status == "denied" else "failed")
                         if execution_evidence:
                             task.integration_evidence_records.append({
                                 "final_status": status,
                                 "evidence": execution_evidence,
                             })
-                        self._lane_coordinator.taskboard.save()
+                        lane_coord.taskboard.save()
                 except Exception:
                     logger.debug("Failed reconciling taskboard task %s", lane_task_id, exc_info=True)
 
@@ -2574,8 +2590,9 @@ class AgentChatGateway:
 
         event_status = "success" if status == "succeeded" else ("cancelled" if status == "denied" else "failed")
 
-        if callable(self._event_sink):
-            self._event_sink(
+        event_sink = getattr(self, "_event_sink", None)
+        if callable(event_sink):
+            event_sink(
                 "turn.finished",
                 "Server action completed" if status == "succeeded" else "Server action finished",
                 message=final_answer,
@@ -2675,12 +2692,15 @@ class AgentChatGateway:
         if item.status is not InboxStatus.DENIED:
             raise PermissionError(f"server action approval is {item.status.value}")
         lane_task_id = str(pending.get("lane_task_id") or "")
-        if lane_task_id:
-            self._lane_coordinator.cancel_task(
+        lane_coord = getattr(self, "_lane_coordinator", None)
+        if lane_task_id and lane_coord and callable(getattr(lane_coord, "cancel_task", None)):
+            lane_coord.cancel_task(
                 lane_task_id,
                 reason="Server action denied by the user.",
             )
-        self._pending_server_approvals.pop(approval_request_id, None)
+        pending_approvals = getattr(self, "_pending_server_approvals", None)
+        if isinstance(pending_approvals, dict):
+            pending_approvals.pop(approval_request_id, None)
         return self._finalize_server_approval_outcome(
             approval_request_id,
             session_id=session_id,
@@ -9591,12 +9611,13 @@ class AgentChatGateway:
                     from mana_agent.services.execution_event_hub import get_execution_event_hub
                     from mana_agent.workspaces.paths import repository_id_for_path
 
+                    root = getattr(self, "root", None)
                     get_execution_event_hub().emit(
                         "server.waiting_approval",
                         title="Server action approval required",
                         conversation_id=context.session_id,
                         execution_id=context.turn_id or approval_request_id,
-                        repository_id=repository_id_for_path(Path(self.root).resolve()),
+                        repository_id=repository_id_for_path(Path(root).resolve()) if root is not None else "",
                         status="running",
                         metadata=approval_metadata,
                     )

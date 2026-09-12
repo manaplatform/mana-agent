@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import getpass
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,10 +12,23 @@ from typing import Any
 from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent
 from mana_agent.chat.history import ChatHistory
 from mana_agent.gateway import AgentChatGateway
-from mana_agent.gateway.chat_gateway import _persist_server_approval
-from mana_agent.remote_execution.models import ServerCommandOutcome
+from mana_agent.human_inbox.identity import ReviewerIdentity, StaticIdentityDirectory
+from mana_agent.human_inbox.models import (
+    InboxRequest,
+    InboxRequestType,
+    ResponseOperation,
+    ReviewerAssignment,
+    ReviewerType,
+)
+from mana_agent.human_inbox.repository import LocalInboxRepository
+from mana_agent.human_inbox.service import HumanInboxService
+from mana_agent.human_inbox.tokens import ResponseTokenSigner
 from mana_agent.server.executor import ServerApprovalRequired
-from mana_agent.server.models import ServerAction, ServerActionDecision
+from mana_agent.server.models import (
+    RemoteCommandResult,
+    ServerActionDecision,
+    ServerActionKind,
+)
 from mana_agent.services.execution_event_hub import (
     get_execution_event_hub,
     reset_execution_event_hub_for_tests,
@@ -22,17 +37,79 @@ from mana_agent.tui.app import ManaChatApp
 from mana_agent.workspaces.paths import repository_id_for_path
 
 
-def _make_server_decision(action: ServerAction = ServerAction.COMMAND_EXECUTE) -> ServerActionDecision:
-    return ServerActionDecision(
-        action=action,
-        server_id="prod-srv-1",
-        tool_name="server_command_execute",
-        affected_resources=["server:prod-srv-1"],
-        arguments={"argv": ["uptime"]},
-        confidence=1.0,
-        explanation="check server uptime",
-        requires_approval=True,
+def _human_inbox(tmp_path: Path) -> HumanInboxService:
+    root = tmp_path / "inbox"
+    reviewer = getpass.getuser()
+    return HumanInboxService(
+        repository=LocalInboxRepository(root),
+        identities=StaticIdentityDirectory(
+            [
+                ReviewerIdentity(identity_id=reviewer),
+            ]
+        ),
+        token_signer=ResponseTokenSigner(root / "signing.key"),
     )
+
+
+def _persist_server_approval(
+    gateway: AgentChatGateway,
+    tmp_path: Path,
+    *,
+    request_id: str,
+    pending: dict[str, Any],
+) -> None:
+    gateway.human_inbox_service = _human_inbox(tmp_path)
+    decision = dict(pending.get("decision") or {})
+    reviewer = getpass.getuser()
+    gateway.human_inbox_service.create(
+        InboxRequest(
+            request_type=InboxRequestType.APPROVAL,
+            task_id=str(
+                pending.get("lane_task_id") or f"server:{pending['session_id']}"
+            ),
+            branch_id=str(
+                pending.get("lane_task_id") or f"server:{pending['session_id']}"
+            ),
+            policy_decision_id=str(
+                decision.get("decision_id") or "server-test-decision"
+            ),
+            permission_request_id=request_id,
+            action_intent_id=(
+                f"server:{decision.get('decision_id') or 'server-test-decision'}"
+            ),
+            action_digest=str(pending["exact_action_key"]),
+            requested_by_agent_id="chat_gateway",
+            reviewer=ReviewerAssignment(
+                reviewer_type=ReviewerType.PERSON,
+                reviewer_id=reviewer,
+            ),
+            title="Approve exact server action",
+            summary="Review one exact server operation.",
+            allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+            minimal_context={"action_count": 1, "resource_count": 1},
+            protected_context={"server_action": pending},
+            disclosed_fields=["action_count", "resource_count"],
+            expires_at=gateway.human_inbox_service.clock() + timedelta(minutes=15),
+            idempotency_key=f"server-test:{request_id}",
+            deduplication_key=f"server-test:{request_id}",
+        )
+    )
+
+
+def _make_server_decision(action: ServerActionKind = ServerActionKind.SHELL) -> ServerActionDecision:
+    return ServerActionDecision.model_validate({
+        "decision_id": "decision-srv-1",
+        "server_id": "prod-srv-1",
+        "action": action.value if hasattr(action, "value") else str(action),
+        "tool_name": "server_command_execute",
+        "arguments": {"argv": ["uptime"]},
+        "required_capability": "shell.execute",
+        "read_only": False,
+        "consequential": True,
+        "affected_resources": ["server:prod-srv-1"],
+        "safe_to_continue": True,
+        "reason": "check server uptime",
+    })
 
 
 def test_server_approval_yield_emits_hub_and_preserves_task_intent(tmp_path: Path) -> None:
@@ -118,20 +195,21 @@ def test_server_approval_command_resumes_model_continuation(tmp_path: Path) -> N
     )[1]
 
     # Server outcome
-    mock_outcome = ServerCommandOutcome(
+    mock_outcome = RemoteCommandResult(
+        server_id="prod-srv-1",
+        command_id="cmd-1",
+        command="uptime",
         exit_code=0,
         stdout=" 13:42:01 up 42 days, 3 users, load average: 0.08, 0.05, 0.01",
         stderr="",
-        server_id="prod-srv-1",
-        duration_ms=45,
+        started_at=datetime.now(timezone.utc),
     )
 
-    gateway.server_management_service = SimpleNamespace(
-        execute=lambda *args, **kwargs: (
-            executed.append(kwargs),
-            mock_outcome,
-        )[1]
-    )
+    async def _execute(*args, **kwargs):
+        executed.append(kwargs)
+        return mock_outcome
+
+    gateway.server_management_service = SimpleNamespace(execute=_execute)
 
     # Ask agent mock to verify continuation prompt
     prompts_received: list[str] = []
@@ -220,16 +298,19 @@ def test_server_approval_command_falls_back_to_summary_when_ask_agent_missing(tm
     gateway._event_sink = None
     gateway._stack = None
 
-    mock_outcome = ServerCommandOutcome(
+    mock_outcome = RemoteCommandResult(
+        server_id="prod-srv-1",
+        command_id="cmd-2",
+        command="uname -r",
         exit_code=0,
         stdout="kernel 6.8.0",
         stderr="",
-        server_id="prod-srv-1",
-        duration_ms=20,
+        started_at=datetime.now(timezone.utc),
     )
-    gateway.server_management_service = SimpleNamespace(
-        execute=lambda *args, **kwargs: mock_outcome
-    )
+    async def _execute(*args, **kwargs):
+        return mock_outcome
+
+    gateway.server_management_service = SimpleNamespace(execute=_execute)
 
     pending = {
         "session_id": "session-no-agent",
@@ -340,7 +421,7 @@ def test_tui_handles_server_waiting_approval_from_hub(tmp_path: Path) -> None:
 
     # Activity should be posted into history
     activities = [
-        item for item in history.all_events()
+        item for item in history.get_events()
         if isinstance(item, CodingActivityEvent)
     ]
     assert len(activities) == 1
@@ -363,7 +444,7 @@ def test_tui_record_server_approval_completion(tmp_path: Path) -> None:
     )
 
     assistant_events = [
-        item for item in history.all_events()
+        item for item in history.get_events()
         if isinstance(item, AssistantMessageEvent)
     ]
     assert len(assistant_events) == 1
