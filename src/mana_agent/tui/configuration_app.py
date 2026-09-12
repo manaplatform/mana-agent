@@ -159,7 +159,7 @@ class ManaConfigurationApp(App[bool]):
         image_media = media.get("image") if isinstance(media.get("image"), dict) else {}
         voice_media = media.get("voice") if isinstance(media.get("voice"), dict) else {}
         video_media = media.get("video") if isinstance(media.get("video"), dict) else {}
-        realtime_media = media.get("realtime") if isinstance(media.get("realtime"), dict) else {}
+        live_config = values.get("live") if isinstance(values.get("live"), dict) else {}
         transcription_media = media.get("transcription") if isinstance(media.get("transcription"), dict) else {}
         provider_id = str(values.get("MANA_AI_PROVIDER") or "openai")
         provider_options = [(item.display_name, item.id) for item in PROVIDERS.all()]
@@ -235,12 +235,35 @@ class ManaConfigurationApp(App[bool]):
                 yield Input(value="" if video_media.get("max_duration_seconds") is None else str(video_media.get("max_duration_seconds")), placeholder="Maximum duration seconds (optional)", id="media-video-max-duration")
                 yield Input(value=str((video_media.get("defaults") or {}).get("duration_seconds") or 4), placeholder="Default duration seconds", id="media-video-default-duration")
                 yield Input(value=str((video_media.get("defaults") or {}).get("resolution") or "720x1280"), placeholder="Default resolution", id="media-video-default-resolution")
-            with TabPane("Realtime", id="media-realtime"):
-                yield Switch(value=bool(realtime_media.get("enabled", False)), id="media-realtime-enabled")
-                yield Label("Enable realtime multimodal agent sessions", classes="hint")
-                yield Static(self._active_provider_text(), id="media-realtime-active-provider", classes="hint")
-                yield Input(placeholder="Search compatible realtime models", id="media-realtime-search")
-                yield Select(self._media_model_options(realtime_media, "", purpose="realtime"), id="media-realtime-model", allow_blank=False)
+            with TabPane("Live", id="live"):
+                yield Switch(value=bool(live_config.get("enabled", False)), id="live-enabled")
+                yield Label("Enable realtime voice interaction (mana-agent live)", classes="hint")
+                yield Static(self._active_provider_text(), id="live-active-provider", classes="hint")
+                yield Input(placeholder="Search compatible realtime models", id="live-model-search")
+                yield Select(self._media_model_options(live_config, "gpt-4o-realtime-preview", purpose="realtime", config_key="realtime_model"), id="live-model", allow_blank=False)
+                yield Label("Realtime voice model (e.g. gpt-4o-realtime-preview, gpt-live)", classes="hint")
+                yield Input(placeholder="Search delegation model for code/tasks", id="live-delegation-model-search")
+                yield Select(self._media_model_options(live_config, "", purpose="agent", config_key="delegation_model", allow_none=True), id="live-delegation-model", allow_blank=True)
+                yield Label("Delegation model for code/backend tasks (e.g. gpt-4o, o3, gpt-5.6-luna)", classes="hint")
+                yield Select(
+                    [("Alloy", "alloy"), ("Ash", "ash"), ("Ballad", "ballad"),
+                     ("Coral", "coral"), ("Echo", "echo"), ("Sage", "sage"),
+                     ("Shimmer", "shimmer"), ("Verse", "verse")],
+                    value=str(live_config.get("voice") or "alloy"),
+                    id="live-voice", allow_blank=False,
+                )
+                yield Label("Voice for Live responses", classes="hint")
+                yield Select(
+                    [("Server VAD (recommended)", "server"), ("Disabled (push-to-talk)", "disabled")],
+                    value=str(live_config.get("vad_mode") or "server"),
+                    id="live-vad", allow_blank=False,
+                )
+                yield Label("Voice activity detection mode", classes="hint")
+                yield Input(
+                    value=str(live_config.get("turn_detection_silence_ms") or 500),
+                    placeholder="Silence duration before turn ends (ms)",
+                    id="live-silence-ms",
+                )
             with TabPane("Transcription", id="media-transcription"):
                 yield Switch(value=bool(transcription_media.get("enabled", False)), id="media-transcription-enabled")
                 yield Label("Enable speech-to-text transcription", classes="hint")
@@ -415,13 +438,21 @@ class ManaConfigurationApp(App[bool]):
         *,
         provider: str = "",
         purpose: str = "image",
+        config_key: str = "model",
+        allow_none: bool = False,
     ) -> list[tuple[str, str]]:
         from mana_agent.config.model_catalog import ModelCapability
         from mana_agent.config.provider_registry import PROVIDERS
         from mana_agent.config.user_config import load_model_cache
 
-        model = str(values.get("model") or default).strip()
+        model = str(
+            values.get(config_key)
+            or (values.get("realtime_model") if config_key == "model" else values.get("model"))
+            or default
+        ).strip()
         options: list[tuple[str, str]] = []
+        if allow_none:
+            options.append(("(Default / Gateway model)", ""))
         if model:
             options.append((f"{model}  · current/manual", model))
         target_provider = provider or str(values.get("provider") or "openai")
@@ -460,6 +491,12 @@ class ManaConfigurationApp(App[bool]):
                     if model_id != model:
                         options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
                 elif purpose == "transcription" and ModelCapability.SPEECH_TO_TEXT.value in caps:
+                    if model_id != model:
+                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+                elif purpose == "agent" and (
+                    ModelCapability.TEXT_GENERATION.value in caps
+                    and ModelCapability.REALTIME.value not in caps
+                ):
                     if model_id != model:
                         options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
         if not options:
@@ -626,12 +663,26 @@ class ManaConfigurationApp(App[bool]):
                 "resolution": self.query_one("#media-video-default-resolution", Input).value.strip() or "720x1280",
             },
         }
-        realtime_model = self.query_one("#media-realtime-model", Select).value
+        # Live config
+        live = dict(self.draft.values.get("live") or {}) if isinstance(self.draft.values.get("live"), dict) else {}
+        live_model = self.query_one("#live-model", Select).value
+        live_delegation = self.query_one("#live-delegation-model", Select).value
+        live_model_str = "" if live_model == Select.BLANK else str(live_model or "")
+        live_delegation_str = "" if live_delegation in (Select.BLANK, None) else str(live_delegation or "")
+        live.update({
+            "enabled": self.query_one("#live-enabled", Switch).value,
+            "realtime_model": live_model_str,
+            "delegation_model": live_delegation_str or None,
+            "voice": str(self.query_one("#live-voice", Select).value or "alloy"),
+            "vad_mode": str(self.query_one("#live-vad", Select).value or "server"),
+            "turn_detection_silence_ms": self._input_int("#live-silence-ms", 500),
+        })
+        self.draft.values["live"] = live
         media["realtime"] = {
             **(dict(media.get("realtime") or {}) if isinstance(media.get("realtime"), dict) else {}),
-            "enabled": self.query_one("#media-realtime-enabled", Switch).value,
+            "enabled": live["enabled"],
             "provider": provider,
-            "model": "" if realtime_model == Select.BLANK else str(realtime_model or ""),
+            "model": live_model_str,
             "credential_ref": "",
             "base_url": "",
         }
@@ -704,7 +755,7 @@ class ManaConfigurationApp(App[bool]):
                 "#media-image-model": filter_models(models, ModelPurpose.IMAGE),
                 "#media-voice-model": filter_models(models, ModelPurpose.VOICE),
                 "#media-video-model": filter_models(models, ModelPurpose.VIDEO),
-                "#media-realtime-model": filter_models(models, ModelPurpose.REALTIME),
+                "#live-model": filter_models(models, ModelPurpose.REALTIME),
                 "#media-transcription-model": filter_models(models, ModelPurpose.TRANSCRIPTION),
             }
             for selector in ("#high-model", "#coding-model", "#fast-model"):
@@ -736,12 +787,19 @@ class ManaConfigurationApp(App[bool]):
                     options.append((f"{current} · manual", current))
                 widget.set_options(options)
                 widget.value = current if current in {value for _, value in options} else options[0][1]
+            delegation_widget = self.query_one("#live-delegation-model", Select)
+            current_del = str(delegation_widget.value) if delegation_widget.value not in (Select.BLANK, None) else ""
+            del_options = [("(Default / Gateway model)", "")] + [(self._model_label(item), item.id) for item in text_models]
+            if current_del and current_del not in {val for _, val in del_options}:
+                del_options.append((f"{current_del} · manual", current_del))
+            delegation_widget.set_options(del_options)
+            delegation_widget.value = current_del if current_del in {val for _, val in del_options} else ""
             status.update(
                 f"Connected · {len(text_models)} agent, {len(embedding_models)} embedding, "
                 f"{len(media_models['#media-image-model'])} image, "
                 f"{len(media_models['#media-voice-model'])} voice, "
                 f"{len(media_models['#media-video-model'])} video, "
-                f"{len(media_models['#media-realtime-model'])} realtime, "
+                f"{len(media_models['#live-model'])} live/realtime, "
                 f"{len(media_models['#media-transcription-model'])} transcription model(s)"
             )
             return
@@ -811,7 +869,7 @@ class ManaConfigurationApp(App[bool]):
                 "media-image",
                 "media-voice",
                 "media-video",
-                "media-realtime",
+                "live",
                 "media-transcription",
                 "coding-runtime",
                 "memory",
@@ -889,7 +947,8 @@ class ManaConfigurationApp(App[bool]):
                 "#media-image-model",
                 "#media-voice-model",
                 "#media-video-model",
-                "#media-realtime-model",
+                "#live-model",
+                "#live-delegation-model",
                 "#media-transcription-model",
             ):
                 try:
@@ -922,12 +981,16 @@ class ManaConfigurationApp(App[bool]):
                     if isinstance(media.get(modality), dict):
                         media[modality]["model"] = ""
                         media[modality]["provider"] = provider
+            live = self.draft.values.get("live")
+            if isinstance(live, dict):
+                live["model"] = ""
+                live["realtime_model"] = ""
 
             for sid in (
                 "#media-image-active-provider",
                 "#media-voice-active-provider",
                 "#media-video-active-provider",
-                "#media-realtime-active-provider",
+                "#live-active-provider",
                 "#media-transcription-active-provider",
             ):
                 try:
@@ -947,7 +1010,8 @@ class ManaConfigurationApp(App[bool]):
             "media-image-search": ("#media-image-model", ModelPurpose.IMAGE),
             "media-voice-search": ("#media-voice-model", ModelPurpose.VOICE),
             "media-video-search": ("#media-video-model", ModelPurpose.VIDEO),
-            "media-realtime-search": ("#media-realtime-model", ModelPurpose.REALTIME),
+            "live-model-search": ("#live-model", ModelPurpose.REALTIME),
+            "live-delegation-model-search": ("#live-delegation-model", ModelPurpose.AGENT),
             "media-transcription-search": ("#media-transcription-model", ModelPurpose.TRANSCRIPTION),
         }.get(str(event.input.id or ""))
         if media_search and self._models:

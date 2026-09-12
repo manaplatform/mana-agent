@@ -269,6 +269,13 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
         },
         "artifact_retention_days": 30,
     },
+    "live": {
+        "enabled": False,
+        "realtime_model": "gpt-4o-realtime-preview",
+        "voice": "alloy",
+        "vad_mode": "server",
+        "turn_detection_silence_ms": 500,
+    },
     "MANA_COMPUTER_CONTROL_ENABLED": False,
     # When true, multi-agent coding/tool routes allocate an isolated Git worktree
     # under ~/.mana/repositories/<id>/worktrees/ instead of editing the primary
@@ -405,6 +412,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
 FIELD_NAME_BY_ENV: dict[str, str] = {
     "media": "media",
     "spirit": "spirit",
+    "live": "live",
     "MANA_USER_ID": "mana_user_id",
     "MANA_AI_PROVIDER": "mana_ai_provider",
     "MANA_PRIMARY_MODEL": "mana_primary_model",
@@ -723,6 +731,7 @@ CONFIG_WRITE_ORDER = [
     "MANA_BROWSER_ARTIFACT_DIR",
     "MANA_BROWSER_PROFILE_MAX_AGE_DAYS",
     "media",
+    "live",
     "MANA_COMPUTER_CONTROL_ENABLED",
     "MANA_MANAGED_WORKTREES_ENABLED",
     "MANA_TRANSACTIONAL_ALWAYS_APPROVE",
@@ -1230,6 +1239,15 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw_teach, dict):
             raise UserConfigError("teach must be a TOML table.")
         cleaned["teach"] = TeachSettings.model_validate(raw_teach).model_dump(
+            mode="json"
+        )
+    if "live" in cleaned:
+        from mana_agent.live.config import LiveConfig
+
+        raw_live = cleaned["live"]
+        if not isinstance(raw_live, dict):
+            raise UserConfigError("live must be a TOML table.")
+        cleaned["live"] = LiveConfig.model_validate(raw_live).model_dump(
             mode="json"
         )
     if cleaned.get("OPENAI_BASE_URL"):

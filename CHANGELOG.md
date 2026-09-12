@@ -2,6 +2,60 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-13
+
+- Fixed test failures in `tests/test_live_mode.py`:
+  - Updated `LiveAdapter._delegate_to_gateway()` to accept optional `delegation_id` keyword argument, defaulting to `request.correlation_id`, and emitted `DELEGATION_STARTED` and `DELEGATION_COMPLETED` / `DELEGATION_ERROR` events.
+  - Added `LiveAdapter._handle_speech_started()` to handle `input_audio_buffer.speech_started` by interrupting audio playback, truncating session response, and emitting `LiveEventType.INTERRUPTION` without cancelling backend tasks.
+  - Updated `LiveRunner._build_gateway()` to propagate `delegation_model` to `openai_chat_model`, `mana_codex_model`, and `openai_coding_planner_model` on session settings.
+  - Updated `LiveRunner.stop()` to preserve component references on the runner after shutdown while maintaining idempotency via `_stopped`.
+  - Added `LiveSession._delegation_tool_schema()` static method returning the tool schema definition for `delegate_to_mana`.
+  - Updated `LiveSession.send_event()` exception message to match regex `Not connected`.
+  - User verification required: `pytest tests/test_live_mode.py`.
+
+- Added `mana-agent live` — realtime voice interaction mode using OpenAI Realtime API:
+  - Created dedicated `mana_agent.live` package with 7 modules: `__init__`, `config`, `models`, `audio_transport`, `session`, `adapter`, `runner`.
+  - `LiveRunner` orchestrates audio transport, WebSocket session, gateway adapter, and clean shutdown lifecycle.
+  - `LiveAdapter` bridges the Realtime session and the existing `AgentChatGateway` via `process_turn()`, reusing the same routing, tools, Codex, memory, and task system.
+  - `LiveSession` manages the WebSocket connection to `wss://api.openai.com/v1/realtime` with auto-reconnect and exponential backoff.
+  - `AudioTransport` handles microphone capture and speaker playback via `sounddevice` (optional `[live]` extra).
+  - `LiveConfig` Pydantic model loads from `[live]` section in `~/.mana/config.toml`.
+  - Typed data models: `LiveState`, `LiveEventType`, `LiveEvent`, `LiveTranscript`, `LiveUsage`, `DelegationRequest`, `DelegationResult`.
+  - Registered `live` command in CLI via `_replace_command("live", live_command)` in `cli.py`.
+  - Added `live_command()` to `cli_internal.py` with `--voice`, `--device`, `--model`, `--vad`, `--repo` flags.
+  - Consolidated Realtime and Live in configuration TUI (`configuration_app.py`):
+    - Removed redundant `Realtime` tab (`#media-realtime`) from configuration TUI.
+    - Merged realtime model selection into the `Live` tab (`#live-model`).
+    - Configured model discovery to populate `#live-model` with all discovered `ModelPurpose.REALTIME` models (e.g. `gpt-4o-realtime-preview`, `gpt-live`, `gpt-live-1`).
+    - Populated `#live-delegation-model` with discovered `ModelPurpose.AGENT` models for backend code/task delegation.
+    - Made `Live` tab permanently accessible across providers.
+  - Added `live` optional extra to `pyproject.toml`: `sounddevice>=0.5,<1.0`, `numpy>=1.24,<3.0`.
+  - Added `sounddevice` and `numpy` to the `full` extra.
+  - The realtime model (`gpt-4o-realtime-preview`) is never added to the normal model routing candidate pool.
+  - User interruptions stop/truncate audio playback but never cancel active backend tasks.
+  - Explicit cancellation uses the existing gateway task controls via delegation.
+  - Existing `mana-agent` behavior is completely unchanged — Live is purely additive.
+  - Added delegation model selection for Live mode:
+    - Added `delegation_model` field to `LiveConfig` in `src/mana_agent/live/config.py`.
+    - Added `--delegation-model` CLI flag to `live_command` in `src/mana_agent/commands/cli_internal.py`.
+    - Updated `LiveRunner._build_gateway()` to apply `delegation_model` to gateway session settings for code/agent task delegation.
+    - Added delegation model picker and search input to Live tab in configuration TUI (`configuration_app.py`).
+  - Fixed model catalog classification for realtime and live models:
+    - Classified `gpt-live`, `gpt-live-1`, and `gpt-4o-realtime-preview` with `ModelCapability.REALTIME` in `src/mana_agent/config/model_catalog.py`.
+    - Updated `ModelDescriptor.supports()` for `ModelPurpose.AGENT` to exclude models with `ModelCapability.REALTIME`, preventing realtime audio models from leaking into general text/coding agent model pickers.
+    - Maintained token limits and capability descriptors for `gpt-live` and `gpt-live-1`.
+  - Fixed configuration TUI and Live configuration validation:
+    - Restored missing `#media-video-default-resolution` input inside `TabPane("Video generation")` in `configuration_app.py` to fix `NoMatches` crash during provider test/collection.
+    - Updated `LiveConfig` in `src/mana_agent/live/config.py` with `@model_validator(mode="before")` to normalize `model` as an alias for `realtime_model` and normalize empty string delegation model, preventing `extra_forbidden` validation errors when reading user config.
+    - Registered `live` section in `user_config.py` (`DEFAULT_SETTINGS`, `FIELD_NAME_BY_ENV`, `CONFIG_WRITE_ORDER`, and `validate_config_values`).
+    - Added unit tests in `tests/test_live_mode.py` covering `LiveConfig` alias normalization and user config validation.
+    - Updated async test execution in `tests/test_live_mode.py` to use `asyncio.run(...)` instead of `asyncio.get_event_loop().run_until_complete(...)` for standard Python 3.12 compatibility.
+  - Added comprehensive test suite `tests/test_live_mode.py` and updated `tests/test_single_provider_model_catalog.py` covering classification and delegation.
+  - User verification required: `python -m pytest tests/test_single_provider_model_catalog.py tests/test_live_mode.py -v`
+  - User verification required: `mana-agent live --help`
+  - User verification required: `mana-agent --help` (confirm `live` appears in commands)
+  - User verification required: `mana-agent configure` (test provider connection and verify Live tab)
+
 ## 2026-09-12
 
 - Enabled TUI and Dashboard listening for server action approvals and added post-approval model continuation:
