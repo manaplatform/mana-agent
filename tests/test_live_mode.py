@@ -669,3 +669,105 @@ class TestLiveConfigNormalization:
         assert cleaned["live"]["realtime_model"] == "gpt-live-1"
         assert cleaned["live"]["delegation_model"] == "gpt-4o"
 
+
+# ---------------------------------------------------------------------------
+# Display stability tests
+# ---------------------------------------------------------------------------
+
+
+class TestLiveDisplayStability:
+    """Verify that live initialization does not duplicate boxes or leak logs."""
+
+    def test_tui_redirects_stdout_and_stderr(self):
+        """LivePulseDisplay must capture stdout and stderr to protect terminal coordinates."""
+        from mana_agent.live.tui import LivePulseDisplay
+
+        tui = LivePulseDisplay()
+        with patch("mana_agent.live.tui._FixedLive") as mock_live_cls:
+            mock_instance = MagicMock()
+            mock_live_cls.return_value = mock_instance
+
+            asyncio.run(tui.start())
+            try:
+                assert mock_live_cls.called
+                kwargs = mock_live_cls.call_args.kwargs
+                assert kwargs.get("redirect_stdout") is True
+                assert kwargs.get("redirect_stderr") is True
+                assert kwargs.get("vertical_overflow") == "crop"
+            finally:
+                asyncio.run(tui.stop())
+
+    def test_fixed_live_preserves_crop_on_stop(self):
+        """_FixedLive must prevent stop() from switching vertical_overflow to visible."""
+        from mana_agent.live.tui import _FixedLive
+        from rich.console import Console
+
+        console = Console(record=True)
+        live = _FixedLive("test", console=console, vertical_overflow="crop", auto_refresh=False)
+        live.start(refresh=False)
+        assert live.vertical_overflow == "crop"
+        live.stop()
+        assert live.vertical_overflow == "crop"
+
+    def test_live_runner_isolates_and_restores_console_logging(self):
+        """LiveRunner must detach console StreamHandlers during execution and restore on stop."""
+        import logging
+        import sys
+        from mana_agent.config.settings import Settings
+        from mana_agent.live.runner import LiveRunner
+
+        root_logger = logging.getLogger()
+        test_stream_handler = logging.StreamHandler(sys.stderr)
+        root_logger.addHandler(test_stream_handler)
+
+        runner = LiveRunner(settings=Settings())
+        try:
+            assert test_stream_handler in root_logger.handlers
+            runner._isolate_console_logging()
+            assert test_stream_handler not in root_logger.handlers
+            assert test_stream_handler in runner._isolated_stream_handlers
+        finally:
+            runner._restore_console_logging()
+            assert test_stream_handler in root_logger.handlers
+            root_logger.removeHandler(test_stream_handler)
+
+    def test_live_session_logs_at_debug_level(self, caplog):
+        """GPT-Live session connection/disconnection logs must be DEBUG, not INFO."""
+        import logging
+        from mana_agent.live.session import LiveSession
+
+        session = LiveSession(api_key="sk-fake-test-key")
+        session._ws = MagicMock()
+        session._ws.close = AsyncMock()
+
+        with caplog.at_level(logging.DEBUG):
+            # Test disconnect log level
+            asyncio.run(session.disconnect())
+
+        records = [r for r in caplog.records if r.name == "mana_agent.live.session"]
+        assert any("Disconnected from OpenAI GPT-Live API" in r.getMessage() for r in records)
+        for r in records:
+            if "Disconnected from OpenAI GPT-Live API" in r.getMessage():
+                assert r.levelno == logging.DEBUG
+
+    def test_live_adapter_logs_at_debug_level(self, mock_gateway, mock_live_session, mock_audio_transport, caplog):
+        """GPT-Live adapter session events must be logged at DEBUG, not INFO."""
+        import logging
+        from mana_agent.live.adapter import LiveAdapter
+
+        adapter = LiveAdapter(
+            session=mock_live_session,
+            audio_transport=mock_audio_transport,
+            gateway=mock_gateway,
+            gateway_session_id="test-session-id",
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            asyncio.run(adapter._handle_session_started({"session": {"id": "sess_123"}}))
+
+        records = [r for r in caplog.records if r.name == "mana_agent.live.adapter"]
+        created_records = [r for r in records if "GPT-Live session started" in r.getMessage()]
+        assert len(created_records) == 1
+        assert created_records[0].levelno == logging.DEBUG
+
+

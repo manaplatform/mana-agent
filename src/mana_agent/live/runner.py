@@ -65,6 +65,8 @@ class LiveRunner:
         self._shutdown_event = asyncio.Event()
 
         self._tui: LivePulseDisplay | None = None
+        self._isolated_stream_handlers: list[logging.Handler] = []
+        self._run_task: asyncio.Task[Any] | None = None
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -78,6 +80,10 @@ class LiveRunner:
         self._running = True
         self._stopping = False
         self._shutdown_event.clear()
+        self._run_task = asyncio.current_task()
+
+        # Isolate console logging streams so logs do not disrupt the Live TUI
+        self._isolate_console_logging()
 
         # 1. Load configuration.
         self._config = self._build_config()
@@ -163,9 +169,13 @@ class LiveRunner:
             # 10. Run until adapter/session shutdown.
             try:
                 await self._adapter.run()
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, KeyboardInterrupt):
                 # Cancellation is part of normal shutdown.
                 pass
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Clean shutdown on cancellation / interrupt
+            pass
 
         except Exception as exc:
             self._set_error(str(exc))
@@ -255,9 +265,10 @@ class LiveRunner:
                 "[bold cyan]Live mode ended.[/bold cyan]"
             )
 
-            logger.info("Live mode shutdown complete")
+            logger.debug("Live mode shutdown complete")
 
         finally:
+            self._restore_console_logging()
             self._stopping = False
             self._stopped = True
 
@@ -516,12 +527,37 @@ class LiveRunner:
 
     def _signal_handler(self) -> None:
         """Handle SIGINT/SIGTERM without bypassing normal cleanup."""
-        logger.info("Live mode shutdown signal received")
+        logger.debug("Live mode shutdown signal received")
 
         self._running = False
         self._shutdown_event.set()
+
+        if self._run_task is not None and not self._run_task.done():
+            self._run_task.cancel()
 
         if self._adapter is not None:
             asyncio.create_task(
                 self._adapter.shutdown()
             )
+
+    # ------------------------------------------------------------------
+    # Logging isolation
+    # ------------------------------------------------------------------
+
+    def _isolate_console_logging(self) -> None:
+        """Temporarily detach console StreamHandlers so logs do not disrupt the Live TUI."""
+        root = logging.getLogger()
+        self._isolated_stream_handlers = [
+            h for h in root.handlers
+            if type(h) is logging.StreamHandler
+        ]
+        for handler in self._isolated_stream_handlers:
+            root.removeHandler(handler)
+
+    def _restore_console_logging(self) -> None:
+        """Restore console StreamHandlers detached on start."""
+        root = logging.getLogger()
+        for handler in self._isolated_stream_handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        self._isolated_stream_handlers.clear()

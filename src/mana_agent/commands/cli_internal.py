@@ -1356,9 +1356,6 @@ def live_command(
     settings = Settings()
     workspace_path = _resolve_repo(repo)
 
-    if not no_banner:
-        console.print()
-        render_mode_header(str(workspace_path), "live", console)
 
     # Build config overrides from CLI flags
     config_overrides: dict[str, Any] = {}
@@ -1391,7 +1388,6 @@ def live_command(
     try:
         asyncio.run(runner.start())
     except KeyboardInterrupt:
-        console.print("\n[dim]Shutting down...[/dim]")
         asyncio.run(runner.stop())
 
 
@@ -1713,22 +1709,27 @@ def setup_logging(verbose: bool = False, log_dir: Path | str | None = None) -> P
     date_tag = datetime.now().strftime("%Y%m%d")
     log_file = effective_log_dir / f"mana_agent_{date_tag}.log"
 
-    logging.basicConfig(
-        level=log_level,
-        format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
-    )
+    formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.handlers.clear()
 
     if log_file:
         try:
             file_handler = logging.FileHandler(log_file, encoding="utf-8")
             file_handler.setLevel(log_level)
-            file_handler.setFormatter(
-                logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
-            )
-            logging.getLogger().addHandler(file_handler)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
         except Exception:
             pass
 
+    if verbose:
+        stream_handler = logging.StreamHandler(stream=sys.stderr)
+        stream_handler.setLevel(log_level)
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+    root_logger.propagate = False
     return log_file
 
 def _resolve_output_file(
