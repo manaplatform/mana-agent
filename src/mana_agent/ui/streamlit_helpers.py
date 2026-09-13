@@ -113,7 +113,11 @@ def decide_dashboard_server_approval(
         if approve
         else gateway.deny_server_approval_command
     )
-    return command(approval_request_id, session_id=conversation_id)
+    return command(
+        approval_request_id,
+        session_id=conversation_id,
+        client_type="dashboard",
+    )
 
 
 def decide_dashboard_api_approval(

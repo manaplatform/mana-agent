@@ -9,7 +9,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from typing import Literal
+
+from pydantic import Field, field_validator, model_validator
 
 from mana_agent.config.user_config import load_user_config, save_user_config
 from mana_agent.remote_execution.models import SSHAuthentication, SSHTarget, StrictModel
@@ -22,8 +24,10 @@ class SSHProfile(StrictModel):
     host: str = Field(min_length=1)
     port: int = Field(default=22, ge=1, le=65535)
     user: str = Field(min_length=1)
+    auth_mode: Literal["key", "password"] = "key"
     identity_file: str | None = None
     use_agent: bool = False
+    password_ref: str | None = None
     connect_timeout_seconds: int = Field(default=15, gt=0, le=600)
     strict_host_key_checking: bool = True
     known_hosts_file: str | None = None
@@ -42,7 +46,22 @@ class SSHProfile(StrictModel):
             raise ValueError("identity_file must reference an existing private-key path")
         return str(path)
 
+    @model_validator(mode="after")
+    def validate_authentication_configuration(self) -> "SSHProfile":
+        if self.auth_mode == "password":
+            if self.identity_file or self.use_agent:
+                raise ValueError("Password authentication profile cannot set identity_file or use_agent")
+        elif self.auth_mode == "key":
+            if self.password_ref:
+                raise ValueError("Key authentication profile cannot set password_ref")
+            if bool(self.identity_file) == bool(self.use_agent):
+                raise ValueError("Key authentication profile requires exactly one of identity_file or use_agent")
+        return self
+
     def authentication(self) -> SSHAuthentication:
+        if self.auth_mode == "password":
+            ref = self.password_ref or f"secret://ssh/{self.name}"
+            return SSHAuthentication(mode="password", password_ref=ref)
         if self.use_agent:
             return SSHAuthentication(mode="agent")
         if not self.identity_file:

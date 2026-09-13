@@ -74,6 +74,11 @@ class ModelDescriptor:
             return ModelCapability.SPEECH_TO_TEXT in self.capabilities
         if purpose is ModelPurpose.MULTIMODAL_INPUT:
             return ModelCapability.IMAGE_INPUT in self.capabilities
+        if purpose is ModelPurpose.AGENT:
+            return (
+                ModelCapability.TEXT_GENERATION in self.capabilities
+                and ModelCapability.REALTIME not in self.capabilities
+            )
         return ModelCapability.TEXT_GENERATION in self.capabilities
 
 
@@ -86,6 +91,9 @@ _MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
     "gpt-4.1-nano": (1_047_576, 32_768),
     "gpt-4o": (128_000, 16_384),
     "gpt-4o-mini": (128_000, 16_384),
+    "gpt-4o-realtime-preview": (128_000, 4_096),
+    "gpt-live": (128_000, 4_096),
+    "gpt-live-1": (128_000, 4_096),
     "gpt-5": (400_000, 128_000),
     "gpt-5-mini": (400_000, 128_000),
     "gpt-5-nano": (400_000, 128_000),
@@ -278,6 +286,9 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "gpt-4o-mini-tts": frozenset({ModelCapability.TEXT_TO_SPEECH, ModelCapability.AUDIO_GENERATION}),
     "sora-2": frozenset({ModelCapability.VIDEO_GENERATION}),
     "sora-2-pro": frozenset({ModelCapability.VIDEO_GENERATION}),
+    "gpt-4o-realtime-preview": frozenset({ModelCapability.REALTIME, ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING}),
+    "gpt-live": frozenset({ModelCapability.REALTIME, ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING}),
+    "gpt-live-1": frozenset({ModelCapability.REALTIME, ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING}),
 }
 
 _NON_TEXT_MARKERS: tuple[tuple[ModelCapability, tuple[str, ...]], ...] = (
@@ -367,7 +378,11 @@ def normalize_capabilities(
         return frozenset({ModelCapability.IMAGE_GENERATION})
     if "sora" in lowered or (provider_id in {"openai", "openrouter"} and "video" in lowered):
         return frozenset({ModelCapability.VIDEO_GENERATION})
-    if "realtime" in lowered:
+    if (
+        "realtime" in lowered
+        or "gpt-live" in lowered
+        or (provider_id == "openai" and ("-live" in lowered or lowered.startswith("gpt-live")))
+    ):
         return frozenset({ModelCapability.REALTIME, ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
 
     if model in _MAINTAINED:

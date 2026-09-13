@@ -48,6 +48,11 @@ class ServerConnectionFactory:
                 mode="key_path",
                 key_path=self.credentials.resolve_key_path(server.credential_ref or ""),
             )
+        elif server.auth_method == "password":
+            authentication = SSHAuthentication(
+                mode="password",
+                password_ref=server.credential_ref,
+            )
         else:
             self.credentials.require_external_secret(server.credential_ref or "")
             raise AssertionError("credential resolver must stop unsupported authentication")

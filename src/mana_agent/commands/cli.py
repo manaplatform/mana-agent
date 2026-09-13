@@ -69,6 +69,7 @@ _replace_command("api", _cli_internal.api_command)
 _replace_command("dashboard", _cli_internal.dashboard_command)
 _replace_command("git", _cli_internal.git_command, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 _replace_command("continue", _cli_internal.continue_command)
+_replace_command("live", _cli_internal.live_command)
 
 
 def _split_check_ids(values: list[str]) -> list[str]:

@@ -77,7 +77,7 @@ def test_single_provider_authority_in_ui() -> None:
                 "#media-image-active-provider",
                 "#media-voice-active-provider",
                 "#media-video-active-provider",
-                "#media-realtime-active-provider",
+                "#live-active-provider",
                 "#media-transcription-active-provider",
             ):
                 hint = app.query_one(hint_id)
@@ -200,6 +200,7 @@ def test_normalized_central_catalog_filtering() -> None:
         {"id": "gpt-image-2.5-sunburst"},
         {"id": "sora-2"},
         {"id": "gpt-4o-realtime-preview"},
+        {"id": "gpt-live-1"},
         {"id": "whisper-1"},
         {"id": "tts-1"},
     ]
@@ -214,14 +215,27 @@ def test_normalized_central_catalog_filtering() -> None:
     transcription_models = filter_models(descriptors, ModelPurpose.TRANSCRIPTION)
     voice_models = filter_models(descriptors, ModelPurpose.VOICE)
 
-    assert {m.id for m in agent_models} == {"gpt-4o", "o3", "gpt-4o-realtime-preview"}
+    assert {m.id for m in agent_models} == {"gpt-4o", "o3"}
     assert {m.id for m in embedding_models} == {"text-embedding-3-small"}
     assert {m.id for m in image_models} == {"gpt-image-2.5-sunburst"}
     assert {m.id for m in image_edit_models} == {"gpt-image-2.5-sunburst"}
     assert {m.id for m in video_models} == {"sora-2"}
-    assert {m.id for m in realtime_models} == {"gpt-4o-realtime-preview"}
+    assert {m.id for m in realtime_models} == {"gpt-4o-realtime-preview", "gpt-live-1"}
     assert {m.id for m in transcription_models} == {"whisper-1"}
     assert {m.id for m in voice_models} == {"tts-1"}
+
+
+def test_gpt_live_realtime_classification() -> None:
+    """Verify that gpt-live models show in REALTIME and are excluded from AGENT."""
+    descriptors = descriptors_from_catalog("openai", [{"id": "gpt-live"}, {"id": "gpt-live-1"}, {"id": "gpt-4o"}])
+    by_id = {d.id: d for d in descriptors}
+
+    assert by_id["gpt-live"].supports(ModelPurpose.REALTIME) is True
+    assert by_id["gpt-live"].supports(ModelPurpose.AGENT) is False
+    assert by_id["gpt-live-1"].supports(ModelPurpose.REALTIME) is True
+    assert by_id["gpt-live-1"].supports(ModelPurpose.AGENT) is False
+    assert by_id["gpt-4o"].supports(ModelPurpose.REALTIME) is False
+    assert by_id["gpt-4o"].supports(ModelPurpose.AGENT) is True
 
 
 def test_model_fetch_error_differentiation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -323,8 +337,8 @@ def test_tui_successful_test_populates_all_capability_dropdowns(monkeypatch: pyt
             video_select = app.query_one("#media-video-model")
             assert any(val == "sora-2" for _, val in video_select._options)
 
-            # Check realtime model dropdown has gpt-4o-realtime-preview
-            realtime_select = app.query_one("#media-realtime-model")
+            # Check realtime model dropdown has gpt-4o-realtime-preview in Live tab
+            realtime_select = app.query_one("#live-model")
             assert any(val == "gpt-4o-realtime-preview" for _, val in realtime_select._options)
 
             # Check transcription model dropdown has whisper-1
@@ -475,7 +489,7 @@ def test_tab_switching_does_not_make_duplicate_api_calls() -> None:
             await pilot.pause()
             tabs.active = "media-video"
             await pilot.pause()
-            tabs.active = "media-realtime"
+            tabs.active = "live"
             await pilot.pause()
             tabs.active = "media-transcription"
             await pilot.pause()

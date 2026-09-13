@@ -18,14 +18,24 @@ class StrictModel(BaseModel):
 
 
 class SSHAuthentication(StrictModel):
-    mode: Literal["agent", "key_path"]
+    mode: Literal["agent", "key_path", "password"]
     key_path: str | None = None
+    password_ref: str | None = None
 
     @field_validator("key_path")
     @classmethod
     def key_path_only_for_key_mode(cls, value: str | None, info):
         if info.data.get("mode") == "key_path" and not value:
             raise ValueError("key_path authentication requires key_path")
+        if info.data.get("mode") != "key_path" and value:
+            raise ValueError("key_path can only be set when mode is 'key_path'")
+        return value
+
+    @field_validator("password_ref")
+    @classmethod
+    def password_ref_only_for_password_mode(cls, value: str | None, info):
+        if info.data.get("mode") != "password" and value:
+            raise ValueError("password_ref can only be set when mode is 'password'")
         return value
 
 

@@ -1333,6 +1333,68 @@ def skill_create_from_session(
         raise typer.BadParameter("proposal validation failed; no normal proposal was stored")
 
 
+@app.command("live")
+def live_command(
+    voice: str = typer.Option("alloy", "--voice", help="OpenAI voice for spoken responses."),
+    device: int | None = typer.Option(None, "--device", help="Audio input device index (system default if omitted)."),
+    model: str | None = typer.Option(None, "--model", help="Override realtime model (default: gpt-4o-realtime-preview)."),
+    delegation_model: str | None = typer.Option(None, "--delegation-model", help="Override delegation model for code/backend tasks (e.g. gpt-4o, gpt-5.6-luna, o3)."),
+    vad: str = typer.Option("server", "--vad", help="Voice activity detection mode: 'server' or 'disabled'."),
+    no_banner: bool = typer.Option(False, "--no-banner", help="Hide the startup banner."),
+    repo: str | None = typer.Option(None, "--repo", "--root-dir", help="Repository root."),
+) -> None:
+    """Start Mana-Agent with realtime voice interaction (OpenAI Live).
+
+    Requires the optional extra: pip install "mana-agent[live]"
+
+    Live mode reuses the existing Mana-Agent gateway, sessions, tools,
+    routing, memory, and Codex coding engine. The realtime model is used
+    only for voice interaction and is never added to the normal model
+    routing candidate pool.
+    """
+    ensure_setup(console=console, no_interactive=False)
+    settings = Settings()
+    workspace_path = _resolve_repo(repo)
+
+    if not no_banner:
+        console.print()
+        render_mode_header(str(workspace_path), "live", console)
+
+    # Build config overrides from CLI flags
+    config_overrides: dict[str, Any] = {}
+    if voice:
+        config_overrides["voice"] = voice
+    if device is not None:
+        config_overrides["input_device"] = device
+    if model:
+        config_overrides["realtime_model"] = model
+    if delegation_model:
+        config_overrides["delegation_model"] = delegation_model
+    if vad:
+        config_overrides["vad_mode"] = vad
+
+    # Lazy import to keep startup fast and avoid requiring live deps unless used
+    try:
+        from mana_agent.live.runner import LiveRunner
+    except ImportError:
+        console.print("[red]Live mode requires optional dependencies.[/red]")
+        console.print("Install with: pip install 'mana-agent[live]'")
+        raise typer.Exit(code=1)
+
+    runner = LiveRunner(
+        settings=settings,
+        workspace_path=workspace_path,
+        config_overrides=config_overrides,
+        console=console,
+    )
+
+    try:
+        asyncio.run(runner.start())
+    except KeyboardInterrupt:
+        console.print("\n[dim]Shutting down...[/dim]")
+        asyncio.run(runner.stop())
+
+
 @app.command("continue")
 def continue_command(
     run_id: str = typer.Option(..., "--run-id", help="Run ID under .mana/runs to resume."),

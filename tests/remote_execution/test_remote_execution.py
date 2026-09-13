@@ -24,6 +24,22 @@ def test_authentication_failure_never_allows_worker_failover() -> None:
     assert classify_ssh_failure("Permission denied (publickey).", 255) is TransportFailure.AUTHENTICATION_FAILURE
     assert not permits_external_worker_failover(TransportFailure.AUTHENTICATION_FAILURE)
 
+
+def test_strict_host_key_failure_never_misclassified_as_password_failure() -> None:
+    strict_error = (
+        "No RSA host key is known for example.test and you have requested strict checking.\n"
+        "Host key verification failed.\n"
+        "Permission denied (publickey,password)."
+    )
+    assert classify_ssh_failure(strict_error, 255) is TransportFailure.HOST_KEY_FAILURE
+    assert classify_ssh_failure("No host key is known for example.test and you have requested strict checking.", 255) is TransportFailure.HOST_KEY_FAILURE
+    assert classify_ssh_failure("Host key verification failed.", 255) is TransportFailure.HOST_KEY_FAILURE
+
+
+def test_password_authentication_failure_classified() -> None:
+    assert classify_ssh_failure("Permission denied (password).", 255) is TransportFailure.AUTHENTICATION_FAILURE
+    assert classify_ssh_failure("Permission denied (keyboard-interactive,password).", 255) is TransportFailure.AUTHENTICATION_FAILURE
+
 def test_ssh_uses_argv_and_worker_only_key_path_expansion() -> None:
     args = build_ssh_argv(request())
     assert args[:7] == ["ssh", "-p", "22", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
