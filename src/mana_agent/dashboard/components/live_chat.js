@@ -19,6 +19,13 @@
     return `${(ms / 1000).toFixed(1)}s`;
   };
 
+  const formatSize = (bytes) => {
+    const b = Number(bytes || 0);
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   function classifyRuntimePhase(eventType, metadata) {
     const et = text(eventType || "").trim().toLowerCase();
     const meta = metadata || {};
@@ -393,6 +400,7 @@
       message_id: id,
       role: text(message.role || previous.role || "system"),
       content: text(message.content != null ? message.content : previous.content),
+      attachments: message.attachments || previous.attachments || [],
       status: text(message.status || previous.status || "success"),
       optimistic: false,
       error: text(message.error || previous.error),
@@ -411,6 +419,7 @@
       message_id: id,
       role: "user",
       content: text(message.content),
+      attachments: message.attachments || [],
       status: "sending",
       optimistic: true,
       error: "",
@@ -756,6 +765,17 @@
         summary{cursor:pointer}.tool pre{white-space:pre-wrap;max-height:220px;overflow:auto;color:#cbd5e1}
         form{display:flex;gap:8px;padding:10px;border-top:1px solid #ffffff18} textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;border-radius:9px;padding:10px;background:#11141a;color:#fff;border:1px solid #ffffff28}
         button{border:0;border-radius:9px;padding:0 18px;background:#2563eb;color:#fff;font-weight:600}button:disabled{opacity:.45}
+        .attach-btn{background:transparent !important;border:1px solid #ffffff28 !important;font-size:16px;padding:0 12px !important;cursor:pointer;border-radius:9px;display:flex;align-items:center;justify-content:center}
+        .attach-btn:hover{background:#ffffff12 !important}
+        .attachment-preview-bar{display:none;flex-wrap:wrap;gap:8px;padding:8px 12px;background:#161b22;border-top:1px solid #ffffff18}
+        .attachment-chip{display:inline-flex;align-items:center;gap:6px;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:4px 8px;font-size:12px;color:#c9d1d9}
+        .attachment-chip.uploading{opacity:.65;font-style:italic}
+        .attachment-chip.error{border-color:#ef4444;color:#fca5a5}
+        .remove-att{cursor:pointer;color:#8b949e;font-weight:bold;margin-left:4px;padding:0 2px}
+        .remove-att:hover{color:#f85149}
+        .drop-active{border-color:#3b82f6 !important;background:#1e3a8a22 !important}
+        .message-attachments{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px}
+        .message-attachment-card{display:flex;align-items:center;gap:6px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:4px 8px;font-size:11px}
         .permission{border-color:#f59e0b88}.permission-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
         .permission-actions button{min-height:34px;padding:6px 12px}.permission-actions .deny{background:#b91c1c}
         .permission-state{margin-top:7px;color:#aeb4bd}.permission-error{margin-top:7px;color:#fca5a5}
@@ -781,16 +801,104 @@
         @media(max-width:520px){.message{max-width:96%}.shell{border-radius:7px}.timeline{padding:8px}}
       </style>
       <div class="shell"><div class="status"><span class="dot"></span><span class="statusText">Connecting to live events…</span><span class="contextMeter"></span></div>
-      <div class="timeline"></div><form><textarea aria-label="Chat message" placeholder="Message this conversation"></textarea><button type="submit">Send</button></form></div>`;
+      <div class="timeline"></div><div class="attachment-preview-bar"></div><form><input type="file" id="mana-file-input" multiple style="display:none" /><button type="button" class="attach-btn" title="Attach file" aria-label="Attach file">📎</button><textarea aria-label="Chat message" placeholder="Message this conversation"></textarea><button type="submit">Send</button></form></div>`;
     const timeline = mount.querySelector(".timeline");
     const form = mount.querySelector("form");
     const input = mount.querySelector("textarea");
-    const submitButton = form.querySelector("button");
+    const submitButton = form.querySelector("button[type=submit]");
+    const attachBtn = form.querySelector(".attach-btn");
+    const fileInput = form.querySelector("#mana-file-input");
+    const attachmentBar = mount.querySelector(".attachment-preview-bar");
     const dot = mount.querySelector(".dot");
     const statusText = mount.querySelector(".statusText");
     const contextMeter = mount.querySelector(".contextMeter");
     const permissionBusy = new Set();
     const permissionErrors = new Map();
+    const pendingAttachments = [];
+
+    const renderPreviewBar = () => {
+      if (pendingAttachments.length === 0) {
+        attachmentBar.style.display = "none";
+        attachmentBar.replaceChildren();
+        return;
+      }
+      attachmentBar.style.display = "flex";
+      attachmentBar.replaceChildren();
+      pendingAttachments.forEach((att, index) => {
+        const chip = document.createElement("div");
+        chip.className = `attachment-chip ${att.uploading ? "uploading" : ""} ${att.error ? "error" : ""}`;
+        const name = text(att.filename || "file");
+        const size = att.size_bytes ? ` (${formatSize(att.size_bytes)})` : "";
+        chip.textContent = att.uploading ? `⏳ Uploading ${name}…` : att.error ? `⚠️ ${name}: ${att.error}` : `📎 ${name}${size}`;
+        if (!att.uploading) {
+          const remove = document.createElement("span");
+          remove.className = "remove-att";
+          remove.textContent = "✕";
+          remove.title = "Remove";
+          remove.addEventListener("click", () => {
+            pendingAttachments.splice(index, 1);
+            renderPreviewBar();
+          });
+          chip.appendChild(remove);
+        }
+        attachmentBar.appendChild(chip);
+      });
+    };
+
+    const uploadFile = async (file) => {
+      const pendingObj = { filename: file.name, size_bytes: file.size, uploading: true };
+      pendingAttachments.push(pendingObj);
+      renderPreviewBar();
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const resp = await fetch(
+          `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/attachments?root=${encodeURIComponent(config.root)}`,
+          {
+            method: "POST",
+            headers: config.token ? { Authorization: `Bearer ${config.token}` } : {},
+            body: formData,
+          }
+        );
+        const payload = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(payload.detail || payload.error || `HTTP ${resp.status}`);
+        Object.assign(pendingObj, payload.attachment, { uploading: false });
+      } catch (err) {
+        pendingObj.uploading = false;
+        pendingObj.error = err.message || "Failed to upload";
+      }
+      renderPreviewBar();
+    };
+
+    const handleFiles = (files) => {
+      for (const file of files) {
+        uploadFile(file);
+      }
+    };
+
+    attachBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files && fileInput.files.length > 0) {
+        handleFiles(fileInput.files);
+        fileInput.value = "";
+      }
+    });
+
+    form.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      form.classList.add("drop-active");
+    });
+    form.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      form.classList.remove("drop-active");
+    });
+    form.addEventListener("drop", (e) => {
+      e.preventDefault();
+      form.classList.remove("drop-active");
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleFiles(e.dataTransfer.files);
+      }
+    });
 
     const addText = (parent, tag, value, className) => {
       const node = document.createElement(tag);
@@ -813,6 +921,21 @@
           const node = document.createElement("div");
           node.className = `message ${item.role === "user" ? "user" : "assistant"} ${item.status === "failed" ? "failed" : ""} ${item.optimistic ? "sending" : ""}`;
           addText(node, "div", item.content || (item.status === "streaming" ? "…" : ""));
+          if (item.attachments && item.attachments.length > 0) {
+            const attContainer = document.createElement("div");
+            attContainer.className = "message-attachments";
+            for (const att of item.attachments) {
+              const chip = document.createElement("div");
+              chip.className = "message-attachment-card";
+              const fname = text(att.filename || "file");
+              const sz = formatSize(att.size_bytes || 0);
+              const cat = text(att.category || "");
+              chip.textContent = `📎 ${fname} (${cat ? `${cat}, ` : ""}${sz})`;
+              chip.title = `${fname} (${att.mime_type || ""})`;
+              attContainer.appendChild(chip);
+            }
+            node.appendChild(attContainer);
+          }
           const meta = item.error ? `${item.status} · ${item.error}` : item.optimistic ? "sending…" : item.status === "streaming" ? "streaming…" : "";
           if (meta) addText(node, "div", meta, `meta ${item.error ? "error" : ""}`);
           timeline.appendChild(node);
@@ -1100,16 +1223,29 @@
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const content = input.value.trim();
-      if (!content || state.submitting || !state.socketReady) return;
+      const validAttachments = pendingAttachments.filter((a) => !a.uploading && !a.error);
+      if ((!content && validAttachments.length === 0) || state.submitting || !state.socketReady) return;
+      if (pendingAttachments.some((a) => a.uploading)) return;
       const id = `client_${Date.now().toString(36)}_${crypto.randomUUID().replaceAll("-", "")}`;
-      reduce(state, { type: "optimistic", message: { message_id: id, content, created_at: new Date().toISOString() } });
+      const attsToSend = validAttachments.map((a) => ({ ...a }));
+      reduce(state, {
+        type: "optimistic",
+        message: {
+          message_id: id,
+          content,
+          attachments: attsToSend,
+          created_at: new Date().toISOString(),
+        }
+      });
       input.value = "";
+      pendingAttachments.length = 0;
+      renderPreviewBar();
       render();
       try {
         const response = await fetch(`${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}) },
-          body: JSON.stringify({ content, client_message_id: id, root: config.root }),
+          body: JSON.stringify({ content, attachments: attsToSend, client_message_id: id, root: config.root }),
         });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);

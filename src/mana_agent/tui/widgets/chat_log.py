@@ -255,7 +255,23 @@ class ChatLog(VerticalScroll):
         return panel
 
     def _add_user_message(self, event: UserMessageEvent) -> SelectableText:
-        widget = SelectableText(event.content, classes="user-message")
+        display_text = event.content or ""
+        if event.attachments:
+            from mana_agent.chat.attachments import format_size
+
+            att_lines = []
+            for att in event.attachments:
+                name = att.get("filename") if isinstance(att, dict) else getattr(att, "filename", "file")
+                size = att.get("size_bytes", 0) if isinstance(att, dict) else getattr(att, "size_bytes", 0)
+                mime = att.get("mime_type", "") if isinstance(att, dict) else getattr(att, "mime_type", "")
+                cat = att.get("category", "") if isinstance(att, dict) else getattr(att, "category", "")
+                att_lines.append(f"  📎 {name} ({cat}, {mime}, {format_size(size)})")
+            att_block = "\n".join(att_lines)
+            if display_text:
+                display_text = f"{display_text}\n\nAttachments:\n{att_block}"
+            else:
+                display_text = f"Attachments:\n{att_block}"
+        widget = SelectableText(display_text, classes="user-message")
         self.mount(widget)
         turn_id = event.turn_id or self._current_turn_id
         if turn_id:

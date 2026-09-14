@@ -307,7 +307,11 @@ Route semantics:
   its canonical command_name and structured string command_arguments; never execute it directly.
   Remote-worker lifecycle requests must select the `remote-worker` command with exactly
   `["register"|"start"|"stop", worker_id]`. This is a model decision, never keyword routing.
-- conversation: ordinary discussion that needs no tool, connector, repository, or coding action.
+- conversation: ordinary discussion, visual inspection, question answering, or interpretation of
+  attached images/media using the model's native multimodal capabilities, that needs no tool,
+  connector, repository, or coding action. User queries about attached images or files (such as
+  "what is this", "check this image", "describe this logo", "what does this picture show") select
+  conversation (or coding if the request asks to implement or edit repository code based on the image).
   Do not select conversation for repository planning, plan continuation, verification, or review
   of repository work—even when the user says not to edit yet.
 - coding: repository engineering workflows handled by the Codex coding path, including edits,
@@ -356,7 +360,14 @@ Route semantics:
   required_capability=filesystem.read, read_only=true, consequential=false, destructive=false,
   and arguments_json must be {"path":"/absolute/directory"}. Never use the inspect action or
   inspect capability for a directory-list tool.
-- artifact: creation, editing, conversion, inspection, or export of a user-provided document, spreadsheet, presentation, PDF, or image. A user artifact is not repository code, even when it has a filename. Use the supplied artifact_evidence, including provenance and repository membership. Only select coding when the resolved target is a repository member and the requested change is a repository edit. Return artifact_family for creation requests even when no existing filename or attachment supplies artifact evidence. Do not invent a filename.
+- artifact: creation, editing, conversion, inspection, or export of a user-provided document,
+  spreadsheet, presentation, or PDF using document tools. Do not select artifact for viewing,
+  inspecting, or chatting about attached images; multimodal image inspection uses conversation
+  (or coding for repository changes). A user artifact is not repository code, even when it has a
+  filename. Use the supplied artifact_evidence, including provenance and repository membership.
+  Only select coding when the resolved target is a repository member and the requested change is a
+  repository edit. Return artifact_family for creation requests even when no existing filename or
+  attachment supplies artifact evidence. Do not invent a filename.
 - media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
   one. Return a complete typed media_request. Never route media generation to artifact, coding, or
   conversation. The configured media provider/model is authoritative; never select a fallback.
@@ -469,6 +480,7 @@ Return JSON only:
 Examples:
 - “ping” -> conversation, ["none"].
 - “What can you do?” -> conversation, ["none"].
+- “check what is this?” (with attached image) -> conversation, ["none"] (visual question answering / inspection of an attached image using the model's native multimodal capabilities).
 - “Change this function and run its tests” -> coding, ["repository"] (one atomic workflow).
 - “Plan how to add a harmless CLI flag, but do not edit anything” -> coding, ["repository"]
   (repository planning / plan-only still uses the coding workflow; not conversation).

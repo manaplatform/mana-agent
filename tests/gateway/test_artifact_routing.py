@@ -53,3 +53,27 @@ def test_repository_source_is_not_a_user_artifact(tmp_path: Path) -> None:
 
     assert evidence["artifact_families"] == []
     assert evidence["has_user_artifact"] is False
+
+
+def test_image_attachment_is_multimodal_not_document_artifact(tmp_path: Path) -> None:
+    upload = tmp_path / "uploads" / "logo.png"
+    upload.parent.mkdir(parents=True, exist_ok=True)
+    upload.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    evidence = artifact_routing_evidence(
+        root=tmp_path,
+        user_prompt="check what is this?",
+        attachments=[{"path": str(upload), "mime_type": "image/png"}],
+    )
+
+    # Image attachments belong to multimodal conversation, not document tools
+    assert evidence["artifact_families"] == []
+    assert evidence["has_user_artifact"] is False
+    assert any(ref["filename"] == "logo.png" and ref["family"] is None for ref in evidence["references"])
+
+    # If an unconfigured family is directly evaluated, guidance points to conversation or media
+    available, reason = artifact_handler_availability({"artifact_families": ["image"]})
+    assert available is False
+    assert "No configured artifact handler can execute: image." in reason
+    assert "conversation" in reason
+

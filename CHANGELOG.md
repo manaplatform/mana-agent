@@ -4,6 +4,42 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-14
 
+- Fixed image attachment routing to use native multimodal conversation instead of unconfigured artifact handler:
+  - Removed image from `ARTIFACT_HANDLERS` in `src/mana_agent/gateway/artifact_routing.py` since document tools (`document_read`, `document_create`, etc.) only execute document files (PDF, DOCX, XLSX, CSV) and do not process raw images.
+  - Updated `artifact_routing_evidence()` in `artifact_routing.py` so attachments without document tool handlers (e.g. image attachments) do not set `has_user_artifact=True` or populate `artifact_families`.
+  - Updated `artifact_handler_availability()` in `artifact_routing.py` to provide clear guidance directing users to conversation for multimodal image inspection or media for generation.
+  - Updated `ENTRY_ROUTER_PROMPT` in `src/mana_agent/gateway/entry_routing.py` to clarify that questions, inspection, and discussion of attached images/media use `conversation` with native multimodal vision (or `coding` if modifying repository code), and added routing examples for image attachments.
+  - Added test cases in `tests/gateway/test_artifact_routing.py` and `tests/chat/test_attachments.py` verifying that image attachments in chat do not report document artifact families or trigger `No configured artifact handler can execute: image`.
+  - User verification required: `pytest tests/gateway/test_artifact_routing.py tests/chat/test_attachments.py -k "test_image_attachment" -v`.
+
+- Resolved active model name dynamically from user configuration and options instead of placeholder `default`:
+  - Fixed model resolution in `src/mana_agent/gateway/chat_gateway.py` `process_turn()`: resolves the active model from `options`, `self.config.model`, `self._stack.effective_model`, or user configuration (`OPENAI_CHAT_MODEL`, `MANA_PRIMARY_MODEL`, `LLM_MODEL`) using `split_qualified_model_id()` instead of falling back to `"default"`.
+  - Updated `validate_model_attachment_support()` in `src/mana_agent/chat/normalization.py` to resolve configured model name whenever `model` is `"default"`, `"openai/default"`, or empty.
+  - Updated `ManaChatApp` in `src/mana_agent/tui/app.py` to initialize `self.model` from user configuration and forward `model=self.model` to `gateway.process_turn()`.
+  - Added unit test `test_validate_model_attachment_support_resolves_default_from_config` in `tests/chat/test_attachments.py`.
+  - User verification required: `pytest tests/chat/test_attachments.py -k test_validate_model_attachment_support -v`.
+
+- Enhanced dynamic model capability extraction to eliminate hardcoded model capabilities and fetch from provider API/cards:
+  - Added support in `src/mana_agent/config/model_catalog.py` for dictionary modalities (`{"Text": "Input and output", "Image": "Input only", ...}`) and direction parsing (`input only`, `output only`, `input and output`, `supported`).
+  - Added `parse_model_metadata_text()` in `src/mana_agent/config/model_catalog.py` to parse text-formatted model documentation, model cards, and platform tables into structured metadata (modalities, features, tools, endpoints).
+  - Enhanced `extract_capabilities_from_record()` to extract capabilities from dictionary modalities, features, tools, endpoints, and raw text cards dynamically without hardcoding.
+  - Added `fetch_provider_model_detail()` in `src/mana_agent/tui/model_picker.py` to query live provider endpoints (`/models/{model_id}`) dynamically.
+  - Updated `ModelCatalogService.get_descriptor()` in `src/mana_agent/config/catalog_service.py` to query single model detail from the provider API when cached capabilities are missing or incomplete.
+  - Updated `configured_agent_models()` in `src/mana_agent/tui/model_management.py` to resolve capabilities via `catalog_service.get_descriptor()` and `normalize_capabilities()` rather than hardcoding `TEXT_GENERATION`.
+  - Updated `normalize_capabilities()` for OpenAI text families to include `IMAGE_INPUT` dynamically for vision-capable models (`4o`, `4.1`, `4.5`, `turbo`, `vision`, `5`, `6`, `o1`, `o3`, `o4`).
+  - Added tests in `tests/chat/test_attachments.py` verifying dictionary modalities, text model card parsing, and vision capability preservation for configured agent models.
+  - User verification required: `pytest tests/chat/test_attachments.py tests/test_single_provider_model_catalog.py tests/test_openrouter_provider.py -v`.
+
+- Implemented file & media input support for Mana-Agent chat across TUI and Dashboard:
+  - Created canonical attachment data model `ChatAttachment` and storage pipeline in `src/mana_agent/chat/attachments.py`, supporting images (PNG, JPEG, GIF, WEBP), documents (PDF, TXT, MD, CSV, JSON), code files, and audio/video media.
+  - Added magic-byte verification, tamper detection, filename sanitization, path traversal protection, and configurable file size/count validation.
+  - Implemented multimodal normalization and capability checks in `src/mana_agent/chat/normalization.py` for target provider/model with graceful error handling.
+  - Updated gateway, session history, and turn store (`chat_gateway.py`, `chat_turn_store.py`, `chat_session_history.py`, `envelope.py`) to safely persist and execute turns with attachments while fingerprinting `(text + attachments)` for turn deduplication without injecting raw base64 into history or routing envelopes.
+  - Updated TUI with compact `AttachmentChip` small boxes above the input box in `src/mana_agent/tui/widgets/attachment_bar.py`, `FileAttachmentModal`, `/attach <path>`, `/detach <# or name>`, `/clear-attachments`, `Ctrl+O` binding, and attachment rendering in `ChatLog`.
+  - Updated Dashboard with attachment upload/download API endpoints (`/api/v1/conversations/{id}/attachments`), paperclip attachment button, file picker, drag-and-drop, preview chips with remove actions, and timeline rendering in `live_chat.js` and `chat_timeline.py`.
+  - Added comprehensive test suites in `tests/chat/test_attachments.py`, `tests/chat/test_tui_attachments.py`, `tests/dashboard/test_attachments_api.py`, and `tests/dashboard/live_chat_reducer.test.mjs`.
+  - User verification required: `pytest tests/chat/test_attachments.py tests/chat/test_tui_attachments.py tests/dashboard/test_attachments_api.py tests/test_api_conversations.py && node --test tests/dashboard/live_chat_reducer.test.mjs`.
+
 - Fixed test failures in `tests/test_chat_planning_mode.py` and `tests/test_live_mode.py`:
   - Defined dedicated `logger = logging.getLogger(__name__)` in `src/mana_agent/commands/chat_cli.py` instead of inheriting `mana_agent.commands.cli_internal` logger from wildcard import.
   - Updated `_install_quiet_chat_console_logging()` in `cli_internal.py` to only filter exact `logging.StreamHandler` instances writing to `sys.stdout` or `sys.stderr`, preventing `_QuietChatConsoleFilter` from leaking onto test log capture handlers like `_pytest.logging.LogCaptureHandler`.

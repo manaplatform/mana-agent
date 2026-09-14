@@ -22,6 +22,8 @@ class ModelCapability(str, Enum):
     AUDIO_GENERATION = "audio_generation"
     VIDEO_GENERATION = "video_generation"
     REALTIME = "realtime"
+    AUDIO_INPUT = "audio_input"
+    VIDEO_INPUT = "video_input"
 
 
 class ModelPurpose(str, Enum):
@@ -34,6 +36,8 @@ class ModelPurpose(str, Enum):
     REALTIME = "realtime"
     TRANSCRIPTION = "transcription"
     MULTIMODAL_INPUT = "multimodal_input"
+    AUDIO_INPUT = "audio_input"
+    VIDEO_INPUT = "video_input"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +78,13 @@ class ModelDescriptor:
             return ModelCapability.SPEECH_TO_TEXT in self.capabilities
         if purpose is ModelPurpose.MULTIMODAL_INPUT:
             return ModelCapability.IMAGE_INPUT in self.capabilities
+        if purpose is ModelPurpose.AUDIO_INPUT:
+            return bool(
+                self.capabilities
+                & {ModelCapability.AUDIO_INPUT, ModelCapability.SPEECH_TO_TEXT}
+            )
+        if purpose is ModelPurpose.VIDEO_INPUT:
+            return ModelCapability.VIDEO_INPUT in self.capabilities
         if purpose is ModelPurpose.AGENT:
             return (
                 ModelCapability.TEXT_GENERATION in self.capabilities
@@ -180,6 +191,16 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "gpt-4.1-mini": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "gpt-4o": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.IMAGE_INPUT}),
     "gpt-4o-mini": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.IMAGE_INPUT}),
+    "chatgpt-4o-latest": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.IMAGE_INPUT}),
+    "gpt-4-turbo": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.IMAGE_INPUT}),
+    "gpt-4-vision-preview": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.IMAGE_INPUT}),
+    "gpt-4.5": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "gpt-4.5-preview": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "gpt-5": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "gpt-5-mini": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "o1": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "o1-preview": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "o3": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "gpt-6": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "gpt-6-astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
@@ -413,18 +434,37 @@ def normalize_capabilities(
                 }
             )
         if any(marker in lowered for marker in ("claude", "gpt-", "o1", "o3", "o4", "gemini", "deepseek", "qwen", "mistral", "llama")):
-            return frozenset(
-                {
-                    ModelCapability.TEXT_GENERATION,
-                    ModelCapability.CODE,
-                    ModelCapability.TOOL_CALLING,
-                }
-            )
+            caps_set = {
+                ModelCapability.TEXT_GENERATION,
+                ModelCapability.CODE,
+                ModelCapability.TOOL_CALLING,
+            }
+            if any(
+                m in lowered
+                for m in (
+                    "4o",
+                    "4.1",
+                    "4.5",
+                    "vision",
+                    "claude-3",
+                    "gemini-1.5",
+                    "gemini-2",
+                    "gpt-4-turbo",
+                    "gpt-5",
+                    "o1",
+                    "o3",
+                    "o4",
+                )
+            ):
+                caps_set.add(ModelCapability.IMAGE_INPUT)
+            return frozenset(caps_set)
     # Conservative name-based text detection only. Do not invent tool-calling
     # or reasoning capability solely because a model is an LLM; unknown models
     # remain unclassified and stay usable via Advanced/manual entry.
     text_family = (
-        provider_id == "openai" and lowered.startswith(("gpt-", "o1", "o3", "o4"))
+        provider_id == "openai" and lowered.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-"))
+    ) or (
+        provider_id == "groq" and ("llama" in lowered or "mixtral" in lowered or "gemma" in lowered)
     ) or (
         provider_id == "nvidia"
         and any(
@@ -447,7 +487,13 @@ def normalize_capabilities(
     )
     if text_family:
         if provider_id == "openai":
-            return frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING})
+            base = {ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING}
+            if any(
+                marker in lowered
+                for marker in ("4o", "4.1", "4.5", "turbo", "vision", "5", "6", "o1", "o3", "o4")
+            ):
+                base.add(ModelCapability.IMAGE_INPUT)
+            return frozenset(base)
         # NVIDIA DeepSeek V4 family is agent-capable with tools on NIM even when
         # the exact build suffix is not listed in _MAINTAINED.
         if provider_id == "nvidia" and "deepseek" in lowered:
@@ -463,6 +509,371 @@ def normalize_capabilities(
     return frozenset()
 
 
+def parse_model_metadata_text(text: str) -> dict[str, Any]:
+    """Parse text-formatted model documentation, model cards, or platform tables into structured metadata."""
+    if not text or not isinstance(text, str):
+        return {}
+
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return {}
+
+    result: dict[str, Any] = {
+        "modalities": {},
+        "endpoints": [],
+        "features": {},
+        "tools": {},
+    }
+
+    current_section: str | None = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        line_lower = line.lower().rstrip(":")
+
+        if line_lower == "modalities":
+            current_section = "modalities"
+            i += 1
+            continue
+        elif line_lower == "endpoints":
+            current_section = "endpoints"
+            i += 1
+            continue
+        elif line_lower == "features":
+            current_section = "features"
+            i += 1
+            continue
+        elif line_lower == "tools":
+            current_section = "tools"
+            i += 1
+            continue
+        elif current_section is None:
+            for section in ("modalities", "endpoints", "features", "tools"):
+                if line_lower.startswith(section):
+                    current_section = section
+                    break
+            i += 1
+            continue
+
+        if current_section == "modalities":
+            if line_lower in {"endpoints", "features", "tools"}:
+                current_section = line_lower
+                i += 1
+                continue
+            if ":" in line:
+                key, val = line.split(":", 1)
+                result["modalities"][key.strip()] = val.strip()
+                i += 1
+            elif i + 1 < len(lines) and lines[i + 1].lower() in {
+                "input and output",
+                "input only",
+                "output only",
+                "not supported",
+                "supported",
+                "input",
+                "output",
+                "none",
+            }:
+                result["modalities"][line] = lines[i + 1]
+                i += 2
+            else:
+                result["modalities"][line] = "supported"
+                i += 1
+
+        elif current_section == "endpoints":
+            if line_lower in {"features", "tools", "modalities"}:
+                current_section = line_lower
+                i += 1
+                continue
+            if line.startswith(("v1/", "/", "http://", "https://")):
+                result["endpoints"].append(line)
+                i += 1
+            elif i + 1 < len(lines) and lines[i + 1].startswith(("v1/", "/", "http://", "https://")):
+                result["endpoints"].append(lines[i + 1])
+                i += 2
+            else:
+                result["endpoints"].append(line)
+                i += 1
+
+        elif current_section == "features":
+            if line_lower in {"endpoints", "tools", "modalities"}:
+                current_section = line_lower
+                i += 1
+                continue
+            if ":" in line:
+                key, val = line.split(":", 1)
+                result["features"][key.strip()] = val.strip()
+                i += 1
+            elif i + 1 < len(lines) and lines[i + 1].lower() in {
+                "supported",
+                "not supported",
+                "yes",
+                "no",
+                "true",
+                "false",
+            }:
+                result["features"][line] = lines[i + 1]
+                i += 2
+            else:
+                result["features"][line] = "supported"
+                i += 1
+
+        elif current_section == "tools":
+            if line_lower in {"endpoints", "features", "modalities"}:
+                current_section = line_lower
+                i += 1
+                continue
+            if "supported by this model" in line_lower:
+                i += 1
+                continue
+            if ":" in line:
+                key, val = line.split(":", 1)
+                result["tools"][key.strip()] = val.strip()
+                i += 1
+            elif i + 1 < len(lines) and lines[i + 1].lower() in {
+                "supported",
+                "not supported",
+                "yes",
+                "no",
+                "true",
+                "false",
+            }:
+                result["tools"][line] = lines[i + 1]
+                i += 2
+            else:
+                result["tools"][line] = "supported"
+                i += 1
+        else:
+            i += 1
+
+    return result
+
+
+def extract_capabilities_from_record(item: dict[str, Any]) -> set[ModelCapability]:
+    """Extract standard ModelCapability values from any provider API model record."""
+    capabilities: set[ModelCapability] = set()
+
+    # Check for embedded raw text card or documentation
+    raw_doc = item.get("raw_metadata") or item.get("description") or item.get("model_card")
+    if isinstance(raw_doc, str) and any(
+        kw in raw_doc.lower() for kw in ("modalities", "endpoints", "features", "tools")
+    ):
+        parsed_doc = parse_model_metadata_text(raw_doc)
+        for section in ("modalities", "features", "tools"):
+            if parsed_doc.get(section) and not item.get(section):
+                item[section] = parsed_doc[section]
+        if parsed_doc.get("endpoints") and not item.get("endpoints"):
+            item["endpoints"] = parsed_doc["endpoints"]
+
+    # 1. Explicit capabilities supplied in record
+    supplied = item.get("capabilities")
+    if isinstance(supplied, (list, set, tuple)):
+        for value in supplied:
+            if isinstance(value, ModelCapability):
+                capabilities.add(value)
+                continue
+            text = str(value or "").strip().lower().replace("-", "_")
+            try:
+                capabilities.add(ModelCapability(text))
+            except ValueError:
+                if text in {"vision", "image"}:
+                    capabilities.add(ModelCapability.IMAGE_INPUT)
+                elif text in {"voice", "audio"}:
+                    capabilities.add(ModelCapability.AUDIO_INPUT)
+                    capabilities.add(ModelCapability.SPEECH_TO_TEXT)
+                elif text == "video":
+                    capabilities.add(ModelCapability.VIDEO_INPUT)
+    elif isinstance(supplied, dict):
+        for key, val in supplied.items():
+            if val:
+                text = str(key).strip().lower().replace("-", "_")
+                try:
+                    capabilities.add(ModelCapability(text))
+                except ValueError:
+                    if text in {"vision", "image"}:
+                        capabilities.add(ModelCapability.IMAGE_INPUT)
+
+    # 2. Supported parameters
+    supported = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), list) else []
+    supp_lower = {str(val).lower() for val in supported}
+    if any(p in supp_lower for p in ("tools", "tool_choice", "parallel_tool_calls")):
+        capabilities.add(ModelCapability.TOOL_CALLING)
+    if any("structured" in p or "response_format" in p for p in supp_lower):
+        capabilities.add(ModelCapability.STRUCTURED_OUTPUT)
+    if any("reasoning" in p or "thinking" in p for p in supp_lower):
+        capabilities.add(ModelCapability.REASONING)
+
+    # 3. Modalities (dict, list, or string)
+    raw_mods = item.get("modalities")
+    arch = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+    if not raw_mods and isinstance(arch, dict):
+        raw_mods = arch.get("modalities")
+
+    if isinstance(raw_mods, dict):
+        for mod_name, support_val in raw_mods.items():
+            m_name = str(mod_name).lower().strip()
+            s_val = str(support_val).lower().strip()
+            if s_val in {"not supported", "unsupported", "none", "false", "no", "0"}:
+                continue
+            if "image" in m_name or "vision" in m_name:
+                if "input" in s_val or s_val in {"supported", "yes", "true", "1"}:
+                    capabilities.add(ModelCapability.IMAGE_INPUT)
+            if "audio" in m_name or "voice" in m_name or "speech" in m_name:
+                if "input" in s_val or s_val in {"supported", "yes", "true", "1"}:
+                    capabilities.add(ModelCapability.AUDIO_INPUT)
+                    capabilities.add(ModelCapability.SPEECH_TO_TEXT)
+                if "output" in s_val:
+                    capabilities.add(ModelCapability.TEXT_TO_SPEECH)
+                    capabilities.add(ModelCapability.AUDIO_GENERATION)
+            if "video" in m_name:
+                if "input" in s_val or s_val in {"supported", "yes", "true", "1"}:
+                    capabilities.add(ModelCapability.VIDEO_INPUT)
+                if "output" in s_val:
+                    capabilities.add(ModelCapability.VIDEO_GENERATION)
+            if "text" in m_name:
+                capabilities.add(ModelCapability.TEXT_GENERATION)
+    elif isinstance(raw_mods, (list, tuple, set)):
+        for m in raw_mods:
+            m_l = str(m).lower().strip()
+            if m_l in {"image", "vision", "image_url"}:
+                capabilities.add(ModelCapability.IMAGE_INPUT)
+            if m_l in {"audio", "voice"}:
+                capabilities.add(ModelCapability.AUDIO_INPUT)
+                capabilities.add(ModelCapability.SPEECH_TO_TEXT)
+            if m_l in {"video"}:
+                capabilities.add(ModelCapability.VIDEO_INPUT)
+            if m_l in {"text"}:
+                capabilities.add(ModelCapability.TEXT_GENERATION)
+
+    # 4. Input modalities (architecture or top-level)
+    in_mods = arch.get("input_modalities") if isinstance(arch, dict) else None
+    if not in_mods:
+        in_mods = item.get("input_modalities")
+
+    if isinstance(in_mods, dict):
+        for mod_name, support_val in in_mods.items():
+            m_name = str(mod_name).lower().strip()
+            s_val = str(support_val).lower().strip()
+            if s_val in {"not supported", "unsupported", "none", "false", "no", "0"}:
+                continue
+            if "image" in m_name or "vision" in m_name:
+                capabilities.add(ModelCapability.IMAGE_INPUT)
+            if "audio" in m_name or "voice" in m_name:
+                capabilities.add(ModelCapability.AUDIO_INPUT)
+                capabilities.add(ModelCapability.SPEECH_TO_TEXT)
+            if "video" in m_name:
+                capabilities.add(ModelCapability.VIDEO_INPUT)
+            if "text" in m_name:
+                capabilities.add(ModelCapability.TEXT_GENERATION)
+    elif isinstance(in_mods, (list, tuple, set)):
+        mods_lower = {str(m).lower() for m in in_mods}
+        if mods_lower & {"image", "image_url", "vision"}:
+            capabilities.add(ModelCapability.IMAGE_INPUT)
+        if mods_lower & {"audio", "voice"}:
+            capabilities.add(ModelCapability.AUDIO_INPUT)
+            capabilities.add(ModelCapability.SPEECH_TO_TEXT)
+        if mods_lower & {"video"}:
+            capabilities.add(ModelCapability.VIDEO_INPUT)
+        if mods_lower & {"text"}:
+            capabilities.add(ModelCapability.TEXT_GENERATION)
+
+    # 5. Output modalities (architecture or top-level)
+    out_mods = arch.get("output_modalities") if isinstance(arch, dict) else None
+    if not out_mods:
+        out_mods = item.get("output_modalities")
+    if isinstance(out_mods, (list, tuple, set)):
+        out_lower = {str(m).lower() for m in out_mods}
+        if out_lower & {"text"}:
+            capabilities.add(ModelCapability.TEXT_GENERATION)
+        if out_lower & {"image"}:
+            capabilities.add(ModelCapability.IMAGE_GENERATION)
+        if out_lower & {"audio", "voice", "speech"}:
+            capabilities.add(ModelCapability.TEXT_TO_SPEECH)
+            capabilities.add(ModelCapability.AUDIO_GENERATION)
+        if out_lower & {"video"}:
+            capabilities.add(ModelCapability.VIDEO_GENERATION)
+
+    # 6. Features (dict or list)
+    feats = item.get("features")
+    if isinstance(feats, dict):
+        for feat_name, support_val in feats.items():
+            f_l = str(feat_name).lower().strip()
+            s_l = str(support_val).lower().strip()
+            if s_l in {"not supported", "unsupported", "false", "no", "0"}:
+                continue
+            if "function" in f_l or "tool" in f_l:
+                capabilities.add(ModelCapability.TOOL_CALLING)
+            if "structured" in f_l or "response_format" in f_l:
+                capabilities.add(ModelCapability.STRUCTURED_OUTPUT)
+            if "reasoning" in f_l or "thinking" in f_l:
+                capabilities.add(ModelCapability.REASONING)
+            if "streaming" in f_l:
+                capabilities.add(ModelCapability.TEXT_GENERATION)
+    elif isinstance(feats, (list, tuple, set)):
+        for f in feats:
+            f_l = str(f).lower().strip()
+            if "function" in f_l or "tool" in f_l:
+                capabilities.add(ModelCapability.TOOL_CALLING)
+            if "structured" in f_l or "response_format" in f_l:
+                capabilities.add(ModelCapability.STRUCTURED_OUTPUT)
+            if "reasoning" in f_l or "thinking" in f_l:
+                capabilities.add(ModelCapability.REASONING)
+
+    # 7. Tools (dict or list)
+    tools = item.get("tools")
+    if isinstance(tools, dict):
+        for tool_name, support_val in tools.items():
+            t_l = str(tool_name).lower().strip()
+            s_l = str(support_val).lower().strip()
+            if s_l in {"not supported", "unsupported", "false", "no", "0"}:
+                continue
+            capabilities.add(ModelCapability.TOOL_CALLING)
+            if "code" in t_l or "interpreter" in t_l or "patch" in t_l:
+                capabilities.add(ModelCapability.CODE)
+            if "image generation" in t_l:
+                capabilities.add(ModelCapability.IMAGE_GENERATION)
+    elif isinstance(tools, (list, tuple, set)) and len(tools) > 0:
+        capabilities.add(ModelCapability.TOOL_CALLING)
+
+    # 8. Endpoints (list or dict)
+    endpoints = item.get("endpoints")
+    ep_paths: list[str] = []
+    if isinstance(endpoints, dict):
+        ep_paths = [str(v) for v in endpoints.values()] + [str(k) for k in endpoints.keys()]
+    elif isinstance(endpoints, (list, tuple, set)):
+        ep_paths = [str(e) for e in endpoints]
+    for ep in ep_paths:
+        ep_l = ep.lower().strip()
+        if "chat/completions" in ep_l or "responses" in ep_l or "chat" in ep_l:
+            capabilities.add(ModelCapability.TEXT_GENERATION)
+        if "realtime" in ep_l or "live" in ep_l:
+            capabilities.add(ModelCapability.REALTIME)
+        if "images/generations" in ep_l:
+            capabilities.add(ModelCapability.IMAGE_GENERATION)
+        if "images/edits" in ep_l:
+            capabilities.add(ModelCapability.IMAGE_EDITING)
+        if "audio/speech" in ep_l:
+            capabilities.add(ModelCapability.TEXT_TO_SPEECH)
+        if "audio/transcriptions" in ep_l:
+            capabilities.add(ModelCapability.SPEECH_TO_TEXT)
+        if "embeddings" in ep_l:
+            capabilities.add(ModelCapability.EMBEDDING)
+        if "videos" in ep_l:
+            capabilities.add(ModelCapability.VIDEO_GENERATION)
+
+    # 9. Modality string (e.g. "text+image->text", "text+audio->text")
+    modality_str = str(arch.get("modality") or item.get("modality") or "").lower()
+    if "image" in modality_str:
+        capabilities.add(ModelCapability.IMAGE_INPUT)
+    if "audio" in modality_str:
+        capabilities.add(ModelCapability.AUDIO_INPUT)
+        capabilities.add(ModelCapability.SPEECH_TO_TEXT)
+    if "video" in modality_str:
+        capabilities.add(ModelCapability.VIDEO_INPUT)
+
+    return capabilities
+
+
 def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, Any]], *, source: str = "discovered") -> list[ModelDescriptor]:
     result: list[ModelDescriptor] = []
     for record in records:
@@ -474,7 +885,10 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
             metadata = dict(record)
         if not model_id:
             continue
-        capabilities = normalize_capabilities(provider, model_id, metadata.get("capabilities"))
+        extracted_caps = extract_capabilities_from_record(metadata)
+        capabilities = normalize_capabilities(
+            provider, model_id, extracted_caps or metadata.get("capabilities")
+        )
         context_window = metadata.get("context_length") or metadata.get("context_window")
         max_output_tokens = metadata.get("max_output_tokens") or metadata.get("max_completion_tokens")
         try:

@@ -46,6 +46,7 @@ class ConversationMessage:
     created_at: str = field(default_factory=_utc_now)
     execution_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    attachments: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -144,6 +145,7 @@ class ConversationService:
         return [ConversationMessage(
             message_id=row.message_id, role=row.role, content=row.content,
             created_at=row.created_at, execution_id=row.turn_id, metadata=row.metadata,
+            attachments=getattr(row, "attachments", ()),
         ) for row in self._sessions.history.list(conversation_id, limit=limit)]
 
     def append_message(
@@ -155,11 +157,13 @@ class ConversationService:
         execution_id: str = "",
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
+        attachments: list[Any] | tuple[Any, ...] | None = None,
     ) -> ConversationMessage:
         self.get_or_raise(conversation_id)
         row = self._sessions.history.append(
             conversation_id, role=role, content=content,
             turn_id=execution_id, metadata=metadata, message_id=message_id,
+            attachments=attachments,
         )
         if role == "user":
             self._sessions.maybe_title_from_message(conversation_id, content)
@@ -167,6 +171,7 @@ class ConversationService:
         return ConversationMessage(
             message_id=row.message_id, role=row.role, content=row.content,
             created_at=row.created_at, execution_id=row.turn_id, metadata=row.metadata,
+            attachments=getattr(row, "attachments", ()),
         )
 
     def list_events(
@@ -218,6 +223,7 @@ class ConversationService:
         chat_runner: Callable[..., dict[str, Any]] | None = None,
         emit_events: bool = True,
         client_message_id: str = "",
+        attachments: list[Any] | tuple[Any, ...] | None = None,
     ) -> dict[str, Any]:
         """Append a user message, run chat, append assistant reply, emit runtime events.
 
@@ -225,8 +231,12 @@ class ConversationService:
         ``(prompt, root=..., conversation_id=..., execution_id=..., event_sink=...)``.
         """
         prompt = str(content or "").strip()
-        if not prompt:
-            raise ValueError("message content is required")
+        normalized_attachments = [
+            att.to_dict() if hasattr(att, "to_dict") else dict(att)
+            for att in (attachments or ())
+        ]
+        if not prompt and not normalized_attachments:
+            raise ValueError("message content or attachment is required")
         self.get_or_raise(conversation_id)
         requested_message_id = str(client_message_id or "").strip()
         if requested_message_id and (
@@ -299,6 +309,7 @@ class ConversationService:
             execution_id=execution_id,
             message_id=requested_message_id or None,
             metadata={"client_message_id": requested_message_id} if requested_message_id else None,
+            attachments=normalized_attachments,
         )
 
         if emit_events:
@@ -308,13 +319,14 @@ class ConversationService:
                 conversation_id=conversation_id,
                 execution_id=execution_id,
                 repository_id=self.repository_id,
-                message=prompt[:240],
+                message=(prompt or (f"[{len(normalized_attachments)} attachment(s)]"))[:240],
                 status="running",
                 metadata={
                     "role": "user",
                     "message_id": user_message.message_id,
                     "client_message_id": requested_message_id,
                     "content": prompt,
+                    "attachments": normalized_attachments,
                 },
             )
             self._hub.emit(
@@ -323,13 +335,14 @@ class ConversationService:
                 conversation_id=conversation_id,
                 execution_id=execution_id,
                 repository_id=self.repository_id,
-                message=prompt[:240],
+                message=(prompt or (f"[{len(normalized_attachments)} attachment(s)]"))[:240],
                 status="running",
                 metadata={
                     "role": "user",
                     "message_id": user_message.message_id,
                     "client_message_id": requested_message_id,
                     "content": prompt,
+                    "attachments": normalized_attachments,
                 },
             )
             self._hub.emit(
@@ -412,6 +425,7 @@ class ConversationService:
                     conversation_id=conversation_id,
                     execution_id=execution_id,
                     event_sink=event_sink,
+                    **kwargs,
                 )
 
         try:
@@ -422,6 +436,7 @@ class ConversationService:
                 execution_id=execution_id,
                 user_message_id=user_message.message_id,
                 event_sink=event_sink,
+                attachments=normalized_attachments,
             )
         except Exception as exc:
             self.set_status(conversation_id, "failed", execution_id=execution_id)

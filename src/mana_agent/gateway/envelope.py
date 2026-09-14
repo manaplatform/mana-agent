@@ -162,6 +162,7 @@ class RoutingExecutionEnvelope:
     previous_turn_pointers: PreviousTurnPointers
     conversation_context_availability: ConversationContextAvailability
     memory_availability: MemoryAvailability
+    attachments: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,6 +184,7 @@ class RoutingExecutionEnvelope:
             "previous_turn_pointers": self.previous_turn_pointers.to_dict(),
             "conversation_context_availability": self.conversation_context_availability.to_dict(),
             "memory_availability": self.memory_availability.to_dict(),
+            "attachments": [dict(a) for a in self.attachments],
         }
 
 
@@ -200,6 +202,7 @@ def build_routing_execution_envelope(
     previous_turn_pointers: PreviousTurnPointers | None = None,
     conversation_context_availability: ConversationContextAvailability | None = None,
     memory_availability: MemoryAvailability | None = None,
+    attachments: tuple[dict[str, Any], ...] = (),
 ) -> RoutingExecutionEnvelope:
     """Factory helper to construct a valid RoutingExecutionEnvelope."""
     return RoutingExecutionEnvelope(
@@ -217,6 +220,7 @@ def build_routing_execution_envelope(
         or ConversationContextAvailability(has_history=False, available_turns=0),
         memory_availability=memory_availability
         or MemoryAvailability(memory_capsules_enabled=False),
+        attachments=tuple(attachments or ()),
     )
 
 

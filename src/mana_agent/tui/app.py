@@ -64,6 +64,7 @@ from mana_agent.chat.events import (
     UserMessageEvent,
 )
 from mana_agent.chat.history import ChatHistory, get_history
+from mana_agent.tui.widgets.attachment_bar import AttachmentBar
 from mana_agent.tui.widgets.chat_log import ChatLog
 from mana_agent.tui.widgets.message_input import MessageInput
 
@@ -78,6 +79,7 @@ class ManaChatApp(App):
         Binding("q", "quit", "Quit", show=False),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+r", "simulate_response", "Simulate Agent", show=True),
+        Binding("ctrl+o", "attach_file", "Attach File", show=True),
     ]
 
     # Reactive status for footer
@@ -118,12 +120,28 @@ class ManaChatApp(App):
         self.history = history if history is not None else get_history()
         self.chat_log: ChatLog | None = None
         self.input: MessageInput | None = None
+        self.attachment_bar: AttachmentBar | None = None
         self._turn_counter = 0
         self._tool_cid_map: dict[str, str] = {}  # key -> call_id for reliable start/end pairing in bridge
 
         # Configuration for real agent behavior
         self.repo_root: Path = Path(repo_root).resolve() if repo_root else Path.cwd().resolve()
         self.model: str | None = model
+        if not self.model or self.model == "default":
+            try:
+                from mana_agent.config.user_config import load_effective_settings
+
+                eff = load_effective_settings()
+                cfg_model = str(
+                    eff.get("OPENAI_CHAT_MODEL")
+                    or eff.get("MANA_PRIMARY_MODEL")
+                    or eff.get("LLM_MODEL")
+                    or ""
+                ).strip()
+                if cfg_model and cfg_model != "default":
+                    self.model = cfg_model
+            except Exception:
+                pass
         self.initial_prompt: str | None = initial_prompt
         self.api_key: str | None = api_key
         self.base_url: str | None = base_url
@@ -183,13 +201,15 @@ class ManaChatApp(App):
 
             # Bottom input bar (message box)
             with Vertical(id="input-bar"):
+                self.attachment_bar = AttachmentBar(id="attachment-bar")
+                yield self.attachment_bar
                 self.input = MessageInput(
                     id="chat-input",
                 )
                 yield self.input
                 yield Static(
                     "Enter sends · Tab completes commands · Shift+Enter adds a line · "
-                    "Ctrl+J / Alt+Enter also add a line",
+                    "Ctrl+J / Alt+Enter also add a line · Ctrl+O attaches file",
                     id="input-help",
                 )
 
@@ -200,10 +220,9 @@ class ManaChatApp(App):
         """Focus input and show a welcome message. Seed initial prompt if provided by CLI."""
         if self.input:
             registry = getattr(self.gateway, "command_registry", None)
-            if registry is not None:
-                self.input.set_command_completions(
-                    [definition.canonical_name for definition in registry.definitions()]
-                )
+            cmd_names = [definition.canonical_name for definition in registry.definitions()] if registry is not None else []
+            cmd_names.extend(["attach", "detach", "clear-attachments"])
+            self.input.set_command_completions(cmd_names)
             self.input.focus()
         self._ui_thread_id = threading.get_ident()
         self._unsubscribe_computer_permissions = self.history.subscribe(
@@ -846,17 +865,102 @@ class ManaChatApp(App):
         if event.message_input is not self.input:
             return
         try:
-            self.query_one("#input-bar").styles.height = event.height + 2
+            extra = 1 if (self.attachment_bar and self.attachment_bar.styles.display != "none" and self.attachment_bar.count > 0) else 0
+            self.query_one("#input-bar").styles.height = event.height + 2 + extra
         except NoMatches:
             # A queued resize can arrive after a modal replaces the chat screen.
             return
+
+    def action_attach_file(self) -> None:
+        """Open the file attachment picker modal."""
+        from mana_agent.tui.attachment_picker import FileAttachmentModal
+
+        self.push_screen(FileAttachmentModal(self.repo_root), self._apply_file_attachment)
+
+    def _apply_file_attachment_path(self, target_path: Path | str) -> None:
+        p = Path(target_path).expanduser()
+        if not p.is_absolute():
+            p = (self.repo_root / p).resolve()
+        else:
+            p = p.resolve()
+        if not p.is_file():
+            self.notify(f"Attachment not found: {p}", severity="error")
+            return
+        self._apply_file_attachment(p)
+
+    def _apply_file_attachment(self, path: Path | None) -> None:
+        if path is None:
+            return
+        if not self._gateway_session_id and self.gateway is not None:
+            self._gateway_session_id = self.gateway.create_session(frontend="tui")
+        sid = self._gateway_session_id or "tui_session"
+        from mana_agent.chat.attachments import AttachmentStore, AttachmentValidator
+
+        validator = AttachmentValidator()
+        current = self.attachment_bar.attachments if self.attachment_bar else []
+        if len(current) >= validator.max_count:
+            self.notify(f"Cannot attach more than {validator.max_count} files.", severity="error")
+            return
+        try:
+            attachment = AttachmentStore.save_from_path(
+                session_id=sid,
+                source_path=path,
+                validator=validator,
+            )
+            if self.attachment_bar:
+                self.attachment_bar.add_attachment(attachment)
+            self.notify(f"Attached {attachment.filename} ({attachment.format_size()})", severity="information")
+        except Exception as exc:
+            self.notify(f"Failed to attach file: {exc}", severity="error")
 
     async def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
         """Handle user pressing Enter in the input box. Always uses the real turn handler."""
         # Preserve message whitespace and explicit line breaks. A final newline is
         # an editing artifact from the composer, not part of the submitted turn.
         text = event.value.rstrip("\r\n")
-        if not text.strip():
+
+        # Check attachment commands before regular turn execution
+        if text == "/attach" or text.startswith("/attach "):
+            parts = text.split(" ", 1)
+            if len(parts) > 1 and parts[1].strip():
+                self._apply_file_attachment_path(parts[1].strip())
+            else:
+                self.action_attach_file()
+            if self.input:
+                self.input.reset()
+            return
+
+        if text == "/clear-attachments":
+            if self.attachment_bar:
+                removed = self.attachment_bar.clear_attachments()
+                self.notify(f"Removed {len(removed)} attachments.", severity="information")
+            if self.input:
+                self.input.reset()
+            return
+
+        if text == "/detach" or text.startswith("/detach "):
+            parts = text.split(" ", 1)
+            if self.attachment_bar:
+                if len(parts) > 1 and parts[1].strip():
+                    arg = parts[1].strip()
+                    if arg.isdigit():
+                        idx = int(arg) - 1
+                        removed = self.attachment_bar.remove_attachment(idx)
+                    else:
+                        removed = self.attachment_bar.remove_by_name(arg)
+                else:
+                    count = len(self.attachment_bar.attachments)
+                    removed = self.attachment_bar.remove_attachment(count - 1) if count > 0 else None
+                if removed:
+                    self.notify(f"Removed attachment: {removed.filename}", severity="information")
+                else:
+                    self.notify("No matching attachment to remove.", severity="warning")
+            if self.input:
+                self.input.reset()
+            return
+
+        pending_atts = self.attachment_bar.attachments if self.attachment_bar else []
+        if not text.strip() and not pending_atts:
             return
 
         if self._turn_in_progress:
@@ -929,8 +1033,12 @@ class ManaChatApp(App):
         self.update_status("Thinking...")
         self.token_count += len(text.split())
 
+        att_dicts = tuple(a.to_dict() for a in pending_atts)
+        if self.attachment_bar:
+            self.attachment_bar.clear_attachments()
+
         # Record user message first so ChatLog can paint the bubble immediately
-        user_event = UserMessageEvent(content=text)
+        user_event = UserMessageEvent(content=text, attachments=att_dicts)
         self.history.add(user_event)
 
         # Yield so the Textual message pump can mount/paint the user bubble
@@ -960,7 +1068,8 @@ class ManaChatApp(App):
             content = str(message.get("content") or "")
             turn_id = str(message.get("turn_id") or "")
             if role == "user":
-                self.history.add(UserMessageEvent(content=content, turn_id=turn_id))
+                attachments = tuple(message.get("attachments") or ())
+                self.history.add(UserMessageEvent(content=content, turn_id=turn_id, attachments=attachments))
             elif role == "assistant":
                 self.history.add(AssistantMessageEvent(content=content, turn_id=turn_id))
 
@@ -1354,12 +1463,14 @@ class ManaChatApp(App):
                         return self.gateway.process_turn(
                             sid,
                             question,
+                            model=self.model,
                             index_dir=self.index_dir,
                             index_dirs=self.index_dirs,
                             callbacks=ask_callbacks or None,
                             turn_id=turn_id,
                             user_message_id=user_event.event_id,
                             event_sink=_on_gateway_sink_event,
+                            attachments=list(getattr(user_event, "attachments", ()) or []),
                         )
 
                     tools_before = self._count_tool_events_for_turn(turn_id)

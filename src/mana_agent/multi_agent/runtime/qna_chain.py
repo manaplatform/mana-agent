@@ -116,6 +116,7 @@ class QnAChain:
         runtime_self: Any | None = None,
         context_tools: Sequence[Any] | None = None,
         recent_history: Sequence[Any] | None = None,
+        multimodal_content: Any | None = None,
     ) -> str:
         """Answer from the session transcript after the routed Self is bound, executing bounded retrieval if needed."""
         current = runtime_self or compose_runtime_self(
@@ -154,7 +155,8 @@ class QnAChain:
                         messages.append(HumanMessage(content=content_str))
                     elif role == "assistant":
                         messages.append(AIMessage(content=content_str))
-        messages.append(HumanMessage(content=question))
+        user_content = multimodal_content if multimodal_content is not None else question
+        messages.append(HumanMessage(content=user_content))
 
         max_retrieval_rounds = 2
         for _ in range(max_retrieval_rounds + 1):
