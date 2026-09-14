@@ -37,15 +37,19 @@ class ChatSessionMessage:
 class ChatSessionHistory:
     """Append-only session message log with backward-compatible reads."""
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str | None = None) -> None:
+        self.session_id = str(session_id).strip() if session_id else None
         self._lock = threading.RLock()
 
-    def path(self, session_id: str) -> Path:
-        return session_dir(session_id) / "messages.jsonl"
+    def path(self, session_id: str | None = None) -> Path:
+        sid = str(session_id or self.session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        return session_dir(sid) / "messages.jsonl"
 
     def append(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         role: str,
         content: str,
@@ -56,7 +60,7 @@ class ChatSessionHistory:
         created_at: str | None = None,
         attachments: list[Any] | tuple[Any, ...] | None = None,
     ) -> ChatSessionMessage:
-        sid = str(session_id or "").strip()
+        sid = str(session_id or self.session_id or "").strip()
         if not sid:
             raise ValueError("session_id is required")
 
@@ -87,8 +91,11 @@ class ChatSessionHistory:
             handle.write(json.dumps(message.to_dict(), ensure_ascii=False, default=str) + "\n")
         return message
 
-    def list(self, session_id: str, *, limit: int = 500) -> list[ChatSessionMessage]:
-        path = self.path(session_id)
+    def list(self, session_id: str | None = None, *, limit: int = 500) -> list[ChatSessionMessage]:
+        sid = str(session_id or self.session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        path = self.path(sid)
         if not path.exists():
             return []
         rows: list[ChatSessionMessage] = []

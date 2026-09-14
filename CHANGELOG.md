@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-09-14
 
+- Fixed unit test failures across chat attachment detection, validation, normalization, routing, and TUI widgets:
+  - Classified `.json` files under `_CODE_EXTENSIONS` in `src/mana_agent/chat/attachments.py`.
+  - Added `validate_collection()` method to `AttachmentValidator` and adjusted size limit exception message to include `exceeds maximum allowed`.
+  - Updated `sanitize_filename()` and `AttachmentStore.get_path()` in `src/mana_agent/chat/attachments.py` to handle traversal sequences and validate raw paths.
+  - Corrected OpenAI model capability markers in `src/mana_agent/config/model_catalog.py` (`gpt-4-turbo`, `gpt-5`, `gpt-6` instead of `turbo`, `5`, `6`) ensuring `gpt-3.5-turbo` is recognized as text-only.
+  - Capitalized attachment categories in `normalize_multimodal_content()` in `src/mana_agent/chat/normalization.py`.
+  - Added optional bound `session_id` parameter to `ChatSessionHistory.__init__()` and methods in `src/mana_agent/services/chat_session_history.py`.
+  - Added `mana_agent.gateway.routing_decision` module and updated `build_routing_execution_envelope()` in `src/mana_agent/gateway/envelope.py` to support `turn_id`, `session_id`, `user_text`, and `decision`.
+  - Updated `configured_agent_models()` in `src/mana_agent/tui/model_management.py` to accept an optional `settings` dictionary.
+  - Guarded DOM operations and application references in `AttachmentBar` (`src/mana_agent/tui/widgets/attachment_bar.py`) with `is_mounted` checks and added `on_mount()`.
+  - User verification required: `pytest tests/chat/test_attachments.py tests/chat/test_tui_attachments.py`.
+
 - Fixed image attachment routing to use native multimodal conversation instead of unconfigured artifact handler:
   - Removed image from `ARTIFACT_HANDLERS` in `src/mana_agent/gateway/artifact_routing.py` since document tools (`document_read`, `document_create`, etc.) only execute document files (PDF, DOCX, XLSX, CSV) and do not process raw images.
   - Updated `artifact_routing_evidence()` in `artifact_routing.py` so attachments without document tool handlers (e.g. image attachments) do not set `has_user_artifact=True` or populate `artifact_families`.

@@ -62,6 +62,9 @@ class AttachmentBar(Horizontal):
         super().__init__(**kwargs)
         self._attachments: list[ChatAttachment] = []
 
+    def on_mount(self) -> None:
+        self._refresh_view()
+
     @property
     def attachments(self) -> list[ChatAttachment]:
         return list(self._attachments)
@@ -74,9 +77,10 @@ class AttachmentBar(Horizontal):
         if 0 <= index < len(self._attachments):
             removed = self._attachments.pop(index)
             self._refresh_view()
-            if self.app and hasattr(self.app, "notify"):
+            if self.is_mounted:
                 try:
-                    self.app.notify(f"Removed attachment: {removed.filename}", severity="information")
+                    if self.app and hasattr(self.app, "notify"):
+                        self.app.notify(f"Removed attachment: {removed.filename}", severity="information")
                 except Exception:
                     pass
             return removed
@@ -97,14 +101,17 @@ class AttachmentBar(Horizontal):
 
     def _refresh_view(self) -> None:
         self.count = len(self._attachments)
+        if not self.is_mounted:
+            return
+
         if not self._attachments:
             self.styles.display = "none"
             self.remove_children()
-            if self.app and getattr(self.app, "input", None):
-                try:
+            try:
+                if self.app and getattr(self.app, "input", None):
                     self.app.input._report_height(force=True)
-                except Exception:
-                    pass
+            except Exception:
+                pass
             return
 
         self.styles.display = "block"
@@ -113,8 +120,8 @@ class AttachmentBar(Horizontal):
         for idx, att in enumerate(self._attachments):
             self.mount(AttachmentChip(att, idx))
 
-        if self.app and getattr(self.app, "input", None):
-            try:
+        try:
+            if self.app and getattr(self.app, "input", None):
                 self.app.input._report_height(force=True)
-            except Exception:
-                pass
+        except Exception:
+            pass

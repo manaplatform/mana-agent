@@ -25,8 +25,12 @@ class ModelSelection:
         return qualify_model_id(self.provider, self.model_id)
 
 
-def configured_agent_models(*, service: ModelCatalogService | None = None) -> list[ModelDescriptor]:
-    values = load_effective_settings(include_env=False)
+def configured_agent_models(
+    settings: dict[str, Any] | None = None,
+    *,
+    service: ModelCatalogService | None = None,
+) -> list[ModelDescriptor]:
+    values = dict(settings) if settings is not None else load_effective_settings(include_env=False)
     provider = str(values.get("MANA_AI_PROVIDER") or "openai")
     configured = set(values.get("MANA_CONFIGURED_PROVIDERS") or [provider])
     if provider not in configured:

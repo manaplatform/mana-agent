@@ -490,7 +490,7 @@ def normalize_capabilities(
             base = {ModelCapability.TEXT_GENERATION, ModelCapability.TOOL_CALLING}
             if any(
                 marker in lowered
-                for marker in ("4o", "4.1", "4.5", "turbo", "vision", "5", "6", "o1", "o3", "o4")
+                for marker in ("4o", "4.1", "4.5", "gpt-4-turbo", "vision", "gpt-5", "gpt-6", "o1", "o3", "o4")
             ):
                 base.add(ModelCapability.IMAGE_INPUT)
             return frozenset(base)

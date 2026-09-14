@@ -245,7 +245,7 @@ def normalize_multimodal_content(
             file_text = _extract_attachment_text(storage_path, att)
             blocks.append({
                 "type": "text",
-                "text": f"\n\n[Attached {att.category.upper()}: {att.filename}]\n```\n{file_text}\n```\n",
+                "text": f"\n\n[Attached {att.category.capitalize()}: {att.filename}]\n```\n{file_text}\n```\n",
             })
         else:
             blocks.append({

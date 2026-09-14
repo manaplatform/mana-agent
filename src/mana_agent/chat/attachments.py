@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from mana_agent.config.user_config import get_setting
 from mana_agent.workspaces.paths import session_dir
@@ -67,10 +67,11 @@ _CODE_EXTENSIONS = frozenset({
     ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".java", ".kt",
     ".rb", ".php", ".sh", ".bash", ".zsh", ".sql", ".yaml", ".yml",
     ".toml", ".ini", ".xml", ".dockerfile", ".r", ".swift", ".scala",
+    ".json",
 })
 
 _DOCUMENT_EXTENSIONS = frozenset({
-    ".pdf", ".txt", ".md", ".json", ".csv", ".tsv", ".rst", ".log",
+    ".pdf", ".txt", ".md", ".csv", ".tsv", ".rst", ".log",
     ".docx", ".xlsx", ".pptx",
 })
 
@@ -154,7 +155,13 @@ def format_size(size_bytes: int) -> str:
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal and shell injection."""
-    basename = Path(filename).name
+    if ".." in filename:
+        cleaned = re.sub(r"^(\.\.[/\\])+", "", filename)
+        cleaned = re.sub(r"\.\.", "", cleaned)
+        cleaned = re.sub(r"[/\\]+", "_", cleaned)
+        basename = cleaned
+    else:
+        basename = Path(filename).name
     # Strip dangerous characters, keep alphanumerics, dots, hyphens, underscores
     sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", basename)
     # Remove leading dots to avoid hidden files or directory traversals
@@ -279,7 +286,7 @@ class AttachmentValidator:
         if size > self.max_file_size_bytes:
             max_mb = self.max_file_size_bytes / (1024 * 1024)
             raise ValueError(
-                f"File '{filename}' ({size / (1024 * 1024):.1f} MB) exceeds limit of {max_mb:.1f} MB"
+                f"File '{filename}' ({size / (1024 * 1024):.1f} MB) exceeds maximum allowed size of {max_mb:.1f} MB"
             )
 
         if current_total_size + size > self.max_total_size_bytes:
@@ -291,6 +298,22 @@ class AttachmentValidator:
         sanitized = sanitize_filename(filename)
         mime, category = detect_mime_and_category(sanitized, content)
         return sanitized, mime, category
+
+    def validate_collection(self, attachments: Sequence[Any]) -> None:
+        """Validate an attachment collection against count and total size limits."""
+        if len(attachments) > self.max_count:
+            raise ValueError(
+                f"Too many attachments ({len(attachments)}), maximum allowed is {self.max_count}"
+            )
+        total_size = sum(
+            att.size_bytes if hasattr(att, "size_bytes") else int(att.get("size_bytes", 0))
+            for att in attachments
+        )
+        if total_size > self.max_total_size_bytes:
+            max_mb = self.max_total_size_bytes / (1024 * 1024)
+            raise ValueError(
+                f"Total attachment size exceeds maximum allowed of {max_mb:.1f} MB"
+            )
 
 
 class AttachmentStore:
@@ -375,11 +398,13 @@ class AttachmentStore:
     @classmethod
     def get_path(cls, session_id: str, attachment_id: str, filename: str) -> Path:
         """Resolve attachment path ensuring path traversal protection."""
+        if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+            raise ValueError("Path traversal detected")
         sanitized_filename = sanitize_filename(filename)
         safe_att_id = re.sub(r"[^a-zA-Z0-9_-]", "", attachment_id)
-        base = cls.get_session_attachments_dir(session_id) / safe_att_id
+        base = (cls.get_session_attachments_dir(session_id) / safe_att_id).resolve()
         path = (base / sanitized_filename).resolve()
-        if not str(path).startswith(str(base.resolve())):
+        if not str(path).startswith(str(base)):
             raise ValueError("Path traversal detected")
         return path
 
