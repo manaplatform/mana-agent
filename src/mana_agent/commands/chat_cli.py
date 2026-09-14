@@ -8,6 +8,9 @@ import uuid
 
 from .cli_internal import *
 from .cli_internal import _build_project_llm_analyzer
+import logging
+
+logger = logging.getLogger(__name__)
 from .ui_helpers import log_worker_event
 from .chat_analyze_command import (
     analyze_command_args,

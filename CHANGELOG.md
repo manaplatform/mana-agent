@@ -2,6 +2,14 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-14
+
+- Fixed test failures in `tests/test_chat_planning_mode.py` and `tests/test_live_mode.py`:
+  - Defined dedicated `logger = logging.getLogger(__name__)` in `src/mana_agent/commands/chat_cli.py` instead of inheriting `mana_agent.commands.cli_internal` logger from wildcard import.
+  - Updated `_install_quiet_chat_console_logging()` in `cli_internal.py` to only filter exact `logging.StreamHandler` instances writing to `sys.stdout` or `sys.stderr`, preventing `_QuietChatConsoleFilter` from leaking onto test log capture handlers like `_pytest.logging.LogCaptureHandler`.
+  - Updated `setup_logging` in `cli_internal.py` to selectively remove existing `FileHandler` and console `StreamHandler` instances rather than indiscriminately clearing all handlers on `root_logger`, preserving pytest's `caplog` handler.
+  - User verification required: `pytest tests/test_chat_planning_mode.py tests/test_live_mode.py tests/test_chat_console_logging.py`.
+
 ## 2026-09-13
 
 - Fixed display stability and duplicate box rendering during `mana-agent live` initialization and shutdown:

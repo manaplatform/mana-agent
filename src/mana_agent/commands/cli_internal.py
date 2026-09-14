@@ -1605,7 +1605,9 @@ def _install_quiet_chat_console_logging() -> None:
     for handler in root.handlers:
         if isinstance(handler, logging.FileHandler):
             continue
-        if not isinstance(handler, logging.StreamHandler):
+        if type(handler) is not logging.StreamHandler:
+            continue
+        if getattr(handler, "stream", None) not in (sys.stdout, sys.stderr):
             continue
         if any(isinstance(f, _QuietChatConsoleFilter) for f in handler.filters):
             continue
@@ -1712,7 +1714,11 @@ def setup_logging(verbose: bool = False, log_dir: Path | str | None = None) -> P
     formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    root_logger.handlers.clear()
+    for handler in list(root_logger.handlers):
+        if isinstance(handler, logging.FileHandler) or (
+            type(handler) is logging.StreamHandler and getattr(handler, "stream", None) in (sys.stdout, sys.stderr)
+        ):
+            root_logger.removeHandler(handler)
 
     if log_file:
         try:
