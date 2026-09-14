@@ -247,7 +247,7 @@ class LiveSession:
             self._connected = True
             self._reconnect_count = 0
 
-            logger.info(
+            logger.debug(
                 (
                     "Connected to OpenAI GPT-Live API "
                     "(model=%s, session_id=%s)"
@@ -333,7 +333,7 @@ class LiveSession:
             self._ws = None
             self._closing = False
 
-            logger.info(
+            logger.debug(
                 "Disconnected from OpenAI GPT-Live API"
             )
 
@@ -1012,7 +1012,7 @@ class LiveSession:
                 * (2 ** (attempt - 1))
             )
 
-            logger.info(
+            logger.debug(
                 (
                     "GPT-Live reconnect attempt "
                     "%d/%d in %.1fs"

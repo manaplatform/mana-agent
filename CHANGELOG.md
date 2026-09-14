@@ -2,7 +2,27 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-14
+
+- Fixed test failures in `tests/test_chat_planning_mode.py` and `tests/test_live_mode.py`:
+  - Defined dedicated `logger = logging.getLogger(__name__)` in `src/mana_agent/commands/chat_cli.py` instead of inheriting `mana_agent.commands.cli_internal` logger from wildcard import.
+  - Updated `_install_quiet_chat_console_logging()` in `cli_internal.py` to only filter exact `logging.StreamHandler` instances writing to `sys.stdout` or `sys.stderr`, preventing `_QuietChatConsoleFilter` from leaking onto test log capture handlers like `_pytest.logging.LogCaptureHandler`.
+  - Updated `setup_logging` in `cli_internal.py` to selectively remove existing `FileHandler` and console `StreamHandler` instances rather than indiscriminately clearing all handlers on `root_logger`, preserving pytest's `caplog` handler.
+  - User verification required: `pytest tests/test_chat_planning_mode.py tests/test_live_mode.py tests/test_chat_console_logging.py`.
+
 ## 2026-09-13
+
+- Fixed display stability and duplicate box rendering during `mana-agent live` initialization and shutdown:
+  - Fixed shutdown duplication when `Ctrl+C` is pressed: added `_FixedLive` in `tui.py` to preserve `vertical_overflow='crop'` during `stop()`, preventing Rich from forcing `vertical_overflow='visible'` which un-cropped and scrolled the terminal into a duplicate panel.
+  - Cancelled active running task in `LiveRunner._signal_handler` so `SIGINT` immediately terminates `adapter.run()` without hanging or requiring repeated `Ctrl+C`.
+  - Removed extraneous `console.print` inside `live_command`'s `KeyboardInterrupt` handler in `cli_internal.py`.
+  - Removed redundant `render_mode_header` call from `live_command` in `cli_internal.py` which printed an unnecessary mode header box before starting `LiveRunner`.
+  - Updated `setup_logging` in `cli_internal.py` to only attach a `StreamHandler` to `sys.stderr` when `verbose=True`, preventing default INFO logs from printing to the console and breaking TUI cursor tracking.
+  - Demoted internal Live connection and session lifecycle logs in `session.py`, `adapter.py`, and `runner.py` from `INFO` to `DEBUG`.
+  - Isolated console `StreamHandler`s during `LiveRunner.start()` / `stop()`, preventing background logging from bleeding into the active terminal TUI.
+  - Configured `LivePulseDisplay` in `tui.py` with `redirect_stdout=True` and `redirect_stderr=True` so any unexpected stdout/stderr emission is safely managed by Rich without corrupting terminal line coordinates.
+  - Added unit tests in `TestLiveDisplayStability` in `tests/test_live_mode.py`.
+  - User verification required: `pytest tests/test_live_mode.py tests/test_logging_setup.py -v`.
 
 - Fixed test failures in `tests/test_live_mode.py`:
   - Updated `LiveAdapter._delegate_to_gateway()` to accept optional `delegation_id` keyword argument, defaulting to `request.correlation_id`, and emitted `DELEGATION_STARTED` and `DELEGATION_COMPLETED` / `DELEGATION_ERROR` events.

@@ -104,6 +104,28 @@ class _DisplayState:
     usage_output: int = 0
 
 
+class _FixedLive(Live):
+    """Rich Live subclass that preserves vertical_overflow='crop' during shutdown.
+
+    Rich's default Live.stop() overrides vertical_overflow to 'visible' and
+    performs an un-cropped final refresh, which causes terminal scrolling and
+    duplicate panels whenever the rendered panel height exceeds visible terminal rows.
+    """
+
+    def stop(self) -> None:
+        with self._lock:
+            self._force_crop = True
+            try:
+                super().stop()
+            finally:
+                self._force_crop = False
+
+    def refresh(self) -> None:
+        if getattr(self, "_force_crop", False):
+            self.vertical_overflow = "crop"
+        super().refresh()
+
+
 class LivePulseDisplay:
     """Own one stable ``rich.Live`` region for Mana-Agent Live mode.
 
@@ -169,14 +191,14 @@ class LivePulseDisplay:
 
         # auto_refresh=False is deliberate. The asyncio tick task below is the
         # only place that refreshes the terminal.
-        self._live = Live(
+        self._live = _FixedLive(
             self._render(),
             console=self._console,
             auto_refresh=False,
             screen=False,
             transient=False,
-            redirect_stdout=False,
-            redirect_stderr=False,
+            redirect_stdout=True,
+            redirect_stderr=True,
             vertical_overflow="crop",
         )
 
@@ -207,7 +229,7 @@ class LivePulseDisplay:
         if self._live is not None:
             self._live.update(
                 self._render(),
-                refresh=True,
+                refresh=False,
             )
             self._live.stop()
             self._live = None

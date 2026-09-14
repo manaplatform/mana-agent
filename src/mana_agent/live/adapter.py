@@ -266,7 +266,7 @@ class LiveAdapter:
             data={"session_id": session_id},
         )
 
-        logger.info(
+        logger.debug(
             "GPT-Live session started: %s",
             session_id or "<unknown>",
         )
@@ -311,7 +311,7 @@ class LiveAdapter:
             },
         )
 
-        logger.info(
+        logger.debug(
             "GPT-Live session closed: reason=%s audio_seconds=%.3f",
             reason or "<unknown>",
             seconds,
