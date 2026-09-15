@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, File, Header, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from mana_agent.api.exceptions import ManaApiError
@@ -101,7 +101,8 @@ class ConversationListQuery(BaseModel):
 
 
 class MessageCreateRequest(BaseModel):
-    content: str = Field(min_length=1)
+    content: str = Field(default="")
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
     client_message_id: str = Field(default="", max_length=128)
     root: str | None = None
     repository_id: str | None = None
@@ -262,12 +263,15 @@ def send_message(
     authorization: str | None = Header(None),
 ) -> dict[str, Any]:
     _require_mutation_token(authorization)
+    if not payload.content.strip() and not payload.attachments:
+        raise ManaApiError(422, "Either message content or attachments must be provided.")
     service = _service(root=payload.root, repository_id=payload.repository_id)
     try:
         result = service.send_message(
             conversation_id,
             payload.content,
             client_message_id=payload.client_message_id,
+            attachments=payload.attachments,
         )
     except FileNotFoundError as exc:
         raise ManaApiError(404, "Conversation not found.") from exc
@@ -277,6 +281,86 @@ def send_message(
     except Exception as exc:  # noqa: BLE001
         raise ManaApiError(500, "Chat execution failed.", error="execution_failed") from exc
     return {"ok": True, **result}
+
+
+@router.post("/conversations/{conversation_id}/attachments", status_code=201)
+async def upload_conversation_attachment(
+    conversation_id: str,
+    file: UploadFile = File(...),
+    root: str | None = None,
+    repository_id: str | None = None,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    _require_mutation_token(authorization)
+    service = _service(root=root, repository_id=repository_id)
+    try:
+        service.get_or_raise(conversation_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Conversation not found.") from exc
+
+    if not file.filename:
+        raise ManaApiError(400, "Filename is required.")
+
+    content = await file.read()
+    from mana_agent.chat.attachments import AttachmentStore, AttachmentValidator
+
+    validator = AttachmentValidator()
+    try:
+        attachment = AttachmentStore.save(
+            session_id=conversation_id,
+            filename=file.filename,
+            content=content,
+            validator=validator,
+        )
+    except ValueError as exc:
+        raise ManaApiError(422, str(exc)) from exc
+    except Exception as exc:
+        raise ManaApiError(500, f"Failed to save attachment: {exc}") from exc
+
+    return {"ok": True, "attachment": attachment.to_dict()}
+
+
+@router.get("/conversations/{conversation_id}/attachments/{attachment_id}")
+def get_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    filename: str | None = None,
+    root: str | None = None,
+    repository_id: str | None = None,
+) -> FileResponse:
+    service = _service(root=root, repository_id=repository_id)
+    try:
+        service.get_or_raise(conversation_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Conversation not found.") from exc
+
+    from mana_agent.chat.attachments import AttachmentStore
+    import mimetypes
+
+    target_dir = AttachmentStore.get_session_attachments_dir(conversation_id) / attachment_id
+    if not target_dir.is_dir():
+        raise ManaApiError(404, "Attachment not found.")
+
+    if filename:
+        try:
+            file_path = AttachmentStore.get_path(conversation_id, attachment_id, filename)
+        except ValueError as exc:
+            raise ManaApiError(400, "Invalid attachment filename.") from exc
+    else:
+        files = [p for p in target_dir.iterdir() if p.is_file()]
+        if not files:
+            raise ManaApiError(404, "Attachment file not found.")
+        file_path = files[0]
+
+    if not file_path.is_file():
+        raise ManaApiError(404, "Attachment file not found.")
+
+    media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        str(file_path),
+        media_type=media_type,
+        filename=file_path.name,
+    )
 
 
 @router.post(

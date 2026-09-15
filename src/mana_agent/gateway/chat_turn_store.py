@@ -185,8 +185,16 @@ class ChatTurnStore:
         user_message_id: str,
         turn_id: str,
         text: str,
+        attachments: list[Any] | tuple[Any, ...] | None = None,
     ) -> tuple[ChatTurnRecord, bool]:
-        fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        payload_bytes = text.encode("utf-8")
+        if attachments:
+            att_ids = sorted(
+                str(getattr(a, "attachment_id", None) or (a.get("attachment_id") if isinstance(a, dict) else ""))
+                for a in attachments
+            )
+            payload_bytes += b"::" + ":".join(att_ids).encode("utf-8")
+        fingerprint = hashlib.sha256(payload_bytes).hexdigest()
         now_str = _now()
 
         with self._thread_lock, self._connect() as conn:

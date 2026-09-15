@@ -30,7 +30,6 @@ ARTIFACT_HANDLERS: tuple[ArtifactHandler, ...] = (
     ArtifactHandler("document", (".doc", ".docx", ".odt", ".rtf", ".txt"), ("application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml", "application/vnd.oasis.opendocument.text", "application/rtf", "text/plain"), "document", ("document_detect", "document_read", "document_create", "document_update")),
     ArtifactHandler("presentation", (".ppt", ".pptx", ".odp"), ("application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml", "application/vnd.oasis.opendocument.presentation"), "presentation", ()),
     ArtifactHandler("pdf", (".pdf",), ("application/pdf",), "pdf", ("document_detect", "document_read", "document_create", "document_update")),
-    ArtifactHandler("image", (".png", ".jpg", ".jpeg", ".webp", ".gif"), ("image/",), "image", ()),
 )
 
 _FILENAME = re.compile(r"(?<![\w.-])([\w][\w .-]{0,180}\.[A-Za-z0-9]{1,8})(?![\w.-])")
@@ -69,7 +68,7 @@ def artifact_routing_evidence(
         "references": [item.to_dict() for item in references],
         "artifact_families": families,
         "detected_extensions": sorted({item.extension for item in references if item.extension}),
-        "has_user_artifact": any(item.provenance == "attachment" and not item.repository_member for item in references),
+        "has_user_artifact": any(item.provenance == "attachment" and not item.repository_member and item.family is not None for item in references),
         "available_handlers": [
             {"family": handler.family, "handler": handler.handler, "tools": list(handler.tools)}
             for handler in ARTIFACT_HANDLERS
@@ -83,9 +82,12 @@ def artifact_handler_availability(evidence: dict[str, Any]) -> tuple[bool, str]:
     if not families:
         return False, "No supported artifact family was resolved from the request."
     handlers = {handler.family: handler for handler in ARTIFACT_HANDLERS}
-    unavailable = sorted(family for family in families if not handlers[family].tools)
+    unavailable = sorted(family for family in families if family not in handlers or not handlers[family].tools)
     if unavailable:
-        return False, f"No configured artifact handler can execute: {', '.join(unavailable)}."
+        detail = ""
+        if "image" in unavailable:
+            detail = " Use conversation for multimodal image inspection or media for image generation."
+        return False, f"No configured artifact handler can execute: {', '.join(unavailable)}.{detail}"
     return True, ""
 
 

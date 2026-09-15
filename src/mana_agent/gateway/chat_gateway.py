@@ -4164,6 +4164,7 @@ class AgentChatGateway:
         turn_id: str,
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
+        attachments: list[Any] | tuple[Any, ...] | None = None,
     ) -> Any:
         if session_id in self._fenced_sessions:
             logger.debug("Suppressing message append for fenced session %s", session_id)
@@ -4175,6 +4176,7 @@ class AgentChatGateway:
             turn_id=turn_id,
             metadata=metadata,
             message_id=message_id,
+            attachments=attachments,
         )
         if role == "user":
             try:
@@ -5387,7 +5389,87 @@ class AgentChatGateway:
 
         turn_id = str(options.pop("turn_id", "") or f"turn_{uuid.uuid4().hex[:20]}")
         user_message_id = str(options.pop("user_message_id", "") or f"msg_{uuid.uuid4().hex[:20]}")
+        attachments = list(options.pop("attachments", None) or [])
+        from mana_agent.chat.attachments import ChatAttachment
+        normalized_attachments = [
+            ChatAttachment.from_dict(att) if isinstance(att, dict) else att
+            for att in attachments
+        ]
+        if normalized_attachments:
+            from mana_agent.chat.normalization import (
+                UnsupportedAttachmentError,
+                validate_model_attachment_support,
+            )
+
+            from mana_agent.config.user_config import load_effective_settings
+            from mana_agent.config.provider_registry import split_qualified_model_id
+
+            effective_cfg = load_effective_settings(include_env=True)
+
+            model_from_stack = None
+            if hasattr(self, "_stack") and self._stack:
+                model_from_stack = getattr(self._stack, "effective_model", None)
+
+            raw_model = str(
+                options.get("model")
+                or options.get("_selected_model")
+                or getattr(self, "model", None)
+                or getattr(getattr(self, "config", None), "model", None)
+                or model_from_stack
+                or effective_cfg.get("OPENAI_CHAT_MODEL")
+                or effective_cfg.get("MANA_PRIMARY_MODEL")
+                or effective_cfg.get("LLM_MODEL")
+                or getattr(self.settings, "openai_chat_model", "")
+                or getattr(self.settings, "llm_model", "")
+                or "gpt-4.1-mini"
+            ).strip()
+
+            if raw_model.lower() == "default":
+                raw_model = str(
+                    model_from_stack
+                    or effective_cfg.get("OPENAI_CHAT_MODEL")
+                    or effective_cfg.get("MANA_PRIMARY_MODEL")
+                    or effective_cfg.get("LLM_MODEL")
+                    or getattr(self.settings, "openai_chat_model", "")
+                    or getattr(self.settings, "llm_model", "")
+                    or "gpt-4.1-mini"
+                ).strip()
+                if raw_model.lower() == "default":
+                    raw_model = "gpt-4.1-mini"
+
+            default_prov = str(
+                options.get("provider")
+                or options.get("_selected_provider")
+                or getattr(self, "provider", None)
+                or effective_cfg.get("MANA_AI_PROVIDER")
+                or getattr(self.settings, "mana_ai_provider", "")
+                or "openai"
+            ).strip().lower() or "openai"
+
+            current_provider, current_model = split_qualified_model_id(
+                raw_model, default_provider=default_prov
+            )
+            if not current_model or current_model.lower() == "default":
+                current_model = str(
+                    effective_cfg.get("OPENAI_CHAT_MODEL")
+                    or getattr(self.settings, "openai_chat_model", "gpt-4.1-mini")
+                )
+
+            try:
+                validate_model_attachment_support(
+                    current_provider, current_model, normalized_attachments
+                )
+            except UnsupportedAttachmentError as exc:
+                return ChatTurnResult(
+                    answer=str(exc),
+                    error="unsupported_attachment",
+                    mode="error",
+                    payload={"error_detail": str(exc), "turn_id": turn_id},
+                )
+
         state = self._session(session_id)
+        state["attachments"] = [a.to_dict() for a in normalized_attachments]
+        options["attachments"] = [a.to_dict() for a in normalized_attachments]
         conversation_id = str(state.get("conversation_id") or session_id)
         turn_store = ChatTurnStore(session_id)
         turn_record, duplicate_turn = turn_store.create_or_get(
@@ -5395,6 +5477,7 @@ class AgentChatGateway:
             user_message_id=user_message_id,
             turn_id=turn_id,
             text=text,
+            attachments=normalized_attachments,
         )
         if duplicate_turn:
             if turn_record.response:
@@ -5413,11 +5496,21 @@ class AgentChatGateway:
         turn_id = turn_record.turn_id
         record_current(
             "gateway.turn.started",
-            {"session_id": session_id, "turn_id": turn_id, "original_task": text},
+            {
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "original_task": text,
+                "attachments": [a.to_dict() for a in normalized_attachments],
+            },
         )
         self._append_session_message(
-            session_id, role="user", content=text, turn_id=turn_id, message_id=user_message_id,
+            session_id,
+            role="user",
+            content=text,
+            turn_id=turn_id,
+            message_id=user_message_id,
             metadata={"user_message_id": user_message_id, "turn_state": "received"},
+            attachments=normalized_attachments,
         )
         try:
             # Each user message (including follow-ups and extends) needs a fresh
@@ -5591,6 +5684,7 @@ class AgentChatGateway:
                 previous_turn_pointers=turn_pointers,
                 conversation_context_availability=conv_avail,
                 memory_availability=mem_avail,
+                attachments=tuple(a.to_dict() for a in normalized_attachments),
             )
             record_current(
                 "gateway.envelope.created",
@@ -8802,6 +8896,20 @@ class AgentChatGateway:
                 and str(m.get("content") or "").strip()
             ]
             kwargs["recent_history"] = recent_history[-6:]
+        attachments_data = options.get("attachments") or state.get("attachments") or []
+        if attachments_data and (
+            "multimodal_content" in parameters or any(
+                item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+            )
+        ):
+            from mana_agent.chat.attachments import ChatAttachment
+            from mana_agent.chat.normalization import normalize_multimodal_content
+
+            att_objs = [
+                ChatAttachment.from_dict(att) if isinstance(att, dict) else att
+                for att in attachments_data
+            ]
+            kwargs["multimodal_content"] = normalize_multimodal_content(execution_text, att_objs)
         return ask_conversation(execution_text, **kwargs)
 
     def _conversation_runtime_self(

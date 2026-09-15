@@ -55,10 +55,13 @@ class UserMessageEvent:
     timestamp: str = field(default_factory=_utc_now)
     event_id: str = field(default_factory=lambda: _new_id("user"))
     turn_id: str = ""
+    attachments: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.turn_id:
             self.turn_id = _new_id("turn")
+        if not isinstance(self.attachments, tuple):
+            self.attachments = tuple(self.attachments or ())
 
 
 @dataclass(slots=True)

@@ -539,12 +539,13 @@ def run_dashboard_chat(
     execution_id: str = "",
     user_message_id: str = "",
     event_sink: Any | None = None,
+    attachments: list[dict[str, Any]] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     """Run one model-routed gateway turn with the shared live event sink."""
     root = find_mana_root(root)
     prompt = (prompt or "").strip()
-    if not prompt:
+    if not prompt and not attachments:
         return {"answer": "", "mode": "empty"}
 
     def _emit(event_type: str, title: str, **kwargs: Any) -> None:
@@ -590,6 +591,7 @@ def run_dashboard_chat(
         event_sink=_emit,
         turn_id=execution_id,
         user_message_id=user_message_id,
+        attachments=attachments,
     )
     answer = str(getattr(turn, "answer", "") or "").strip()
     if getattr(turn, "error", None):

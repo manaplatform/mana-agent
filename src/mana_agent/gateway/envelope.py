@@ -162,6 +162,7 @@ class RoutingExecutionEnvelope:
     previous_turn_pointers: PreviousTurnPointers
     conversation_context_availability: ConversationContextAvailability
     memory_availability: MemoryAvailability
+    attachments: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,15 +184,21 @@ class RoutingExecutionEnvelope:
             "previous_turn_pointers": self.previous_turn_pointers.to_dict(),
             "conversation_context_availability": self.conversation_context_availability.to_dict(),
             "memory_availability": self.memory_availability.to_dict(),
+            "attachments": tuple(dict(a) for a in self.attachments),
         }
 
 
 def build_routing_execution_envelope(
     *,
-    user_request: str,
-    identity: IdentitySessionRelationship,
-    execution_state: ExecutionRecoveryState,
-    accounting_snapshot: AccountingSnapshot,
+    user_request: str = "",
+    user_text: str = "",
+    identity: IdentitySessionRelationship | None = None,
+    execution_state: ExecutionRecoveryState | None = None,
+    accounting_snapshot: AccountingSnapshot | None = None,
+    turn_id: str = "",
+    session_id: str = "",
+    conversation_id: str = "",
+    decision: Any = None,
     model_candidates: tuple[ModelCandidateCapacity, ...] = (),
     route_availability: tuple[dict[str, Any], ...] = (),
     capabilities_and_tools: tuple[dict[str, Any], ...] = (),
@@ -200,10 +207,33 @@ def build_routing_execution_envelope(
     previous_turn_pointers: PreviousTurnPointers | None = None,
     conversation_context_availability: ConversationContextAvailability | None = None,
     memory_availability: MemoryAvailability | None = None,
+    attachments: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
 ) -> RoutingExecutionEnvelope:
     """Factory helper to construct a valid RoutingExecutionEnvelope."""
+    effective_req = str(user_request or user_text or "").strip()
+    effective_tid = str(turn_id or (identity.turn_id if identity else "") or "turn_default")
+    effective_sid = str(session_id or (identity.session_id if identity else "") or "session_default")
+    effective_cid = str(conversation_id or (identity.conversation_id if identity else "") or effective_sid)
+
+    if identity is None:
+        identity = IdentitySessionRelationship(
+            authenticated_user_id="user_session",
+            session_id=effective_sid,
+            conversation_id=effective_cid,
+            turn_id=effective_tid,
+        )
+
+    if execution_state is None:
+        route = getattr(decision, "route", "") or ""
+        execution_state = ExecutionRecoveryState(active_route=str(route))
+
+    if accounting_snapshot is None:
+        from mana_agent.gateway.context_compactor import default_accounting_snapshot
+
+        accounting_snapshot = default_accounting_snapshot(effective_tid, effective_tid)
+
     return RoutingExecutionEnvelope(
-        user_request=str(user_request or "").strip(),
+        user_request=effective_req,
         identity=identity,
         execution_state=execution_state,
         accounting_snapshot=accounting_snapshot,
@@ -217,6 +247,7 @@ def build_routing_execution_envelope(
         or ConversationContextAvailability(has_history=False, available_turns=0),
         memory_availability=memory_availability
         or MemoryAvailability(memory_capsules_enabled=False),
+        attachments=tuple(attachments or ()),
     )
 
 

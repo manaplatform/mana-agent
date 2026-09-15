@@ -25,30 +25,40 @@ class ModelSelection:
         return qualify_model_id(self.provider, self.model_id)
 
 
-def configured_agent_models(*, service: ModelCatalogService | None = None) -> list[ModelDescriptor]:
-    values = load_effective_settings(include_env=False)
+def configured_agent_models(
+    settings: dict[str, Any] | None = None,
+    *,
+    service: ModelCatalogService | None = None,
+) -> list[ModelDescriptor]:
+    values = dict(settings) if settings is not None else load_effective_settings(include_env=False)
     provider = str(values.get("MANA_AI_PROVIDER") or "openai")
     configured = set(values.get("MANA_CONFIGURED_PROVIDERS") or [provider])
     if provider not in configured:
         return []
     _api_key, base_url = credentials_from_mapping(values, provider=provider)
-    catalog = (service or ModelCatalogService()).cached(
+    catalog_svc = service or ModelCatalogService()
+    catalog = catalog_svc.cached(
         provider=provider,
         base_url=base_url or PROVIDERS.get(provider).default_base_url,
     )
     models = filter_models(catalog, ModelPurpose.AGENT)
     current = str(values.get("OPENAI_CHAT_MODEL") or "").strip()
     if current and current not in {model.id for model in models}:
-        from mana_agent.config.model_catalog import ModelCapability
+        from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
 
-        models.append(
-            ModelDescriptor(
-                provider=provider,
-                id=current,
-                capabilities=frozenset({ModelCapability.TEXT_GENERATION}),
-                source="manual",
+        desc = catalog_svc.get_descriptor(provider, current, base_url=base_url, api_key=_api_key)
+        if desc:
+            models.append(desc)
+        else:
+            caps = normalize_capabilities(provider, current)
+            models.append(
+                ModelDescriptor(
+                    provider=provider,
+                    id=current,
+                    capabilities=caps if caps else frozenset({ModelCapability.TEXT_GENERATION}),
+                    source="manual",
+                )
             )
-        )
     return sorted(models, key=lambda item: item.qualified_id)
 
 

@@ -438,3 +438,42 @@ test("execution trace recognizes searching phase correctly for search tools and 
   assert.equal(trace.steps[1].title, "Searching");
 });
 
+test("optimistic and hydrated messages preserve attachments", () => {
+  const state = createState("session-attachments");
+  const attachment = {
+    attachment_id: "att-1",
+    filename: "spec.pdf",
+    mime_type: "application/pdf",
+    size_bytes: 1024,
+    category: "document",
+  };
+  reduce(state, {
+    type: "optimistic",
+    message: {
+      message_id: "client-att",
+      content: "review this spec",
+      attachments: [attachment],
+      created_at: "2026-07-23T00:00:00Z",
+    },
+  });
+  const optMsg = snapshot(state).messages[0];
+  assert.equal(optMsg.message_id, "client-att");
+  assert.deepEqual(optMsg.attachments, [attachment]);
+
+  reduce(state, {
+    type: "hydrate",
+    messages: [
+      {
+        message_id: "client-att",
+        role: "user",
+        content: "review this spec",
+        attachments: [attachment],
+      },
+    ],
+  });
+  const hydMsg = snapshot(state).messages[0];
+  assert.equal(hydMsg.message_id, "client-att");
+  assert.deepEqual(hydMsg.attachments, [attachment]);
+});
+
+

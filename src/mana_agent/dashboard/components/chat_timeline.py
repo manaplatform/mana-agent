@@ -55,9 +55,22 @@ def render_message(message: dict[str, Any]) -> None:
         content = str(message.get("content") or "")
         if role in {"tool", "agent", "system"}:
             st.caption(f"{role} · {message.get('created_at', '')}")
-            st.markdown(content)
+            if content:
+                st.markdown(content)
         else:
-            st.markdown(content)
+            if content:
+                st.markdown(content)
+        attachments = message.get("attachments") or []
+        if attachments:
+            from mana_agent.chat.attachments import format_size
+
+            st.markdown("📎 **Attachments**")
+            for att in attachments:
+                fname = att.get("filename") or "file"
+                sz = format_size(att.get("size_bytes", 0))
+                mime = att.get("mime_type", "")
+                cat = att.get("category", "")
+                st.caption(f"• **{fname}** ({cat}, {mime}, {sz})")
         meta = message.get("metadata") or {}
         sources = meta.get("sources") or []
         if sources:

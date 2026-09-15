@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -14,7 +15,13 @@ from mana_agent.config.catalog_service import (
     ProviderConnectionFailedError,
     ProviderValidationError,
 )
-from mana_agent.config.model_catalog import ModelCapability, ModelPurpose, descriptors_from_catalog, filter_models
+from mana_agent.config.model_catalog import (
+    ModelCapability,
+    ModelPurpose,
+    descriptors_from_catalog,
+    extract_capabilities_from_record,
+    filter_models,
+)
 from mana_agent.config.provider_registry import PROVIDERS
 from mana_agent.tui.forms import text_input
 from mana_agent.tui.menu import MenuOption, select_option
@@ -43,6 +50,13 @@ def parse_openai_model_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
             item = dict(raw)
             model_id = str(item["id"]).strip()
             item["id"] = model_id
+            architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+            modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else item.get("input_modalities")
+            if modalities and not item.get("input_modalities"):
+                item["input_modalities"] = modalities
+            caps = extract_capabilities_from_record(item)
+            if caps:
+                item["capabilities"] = sorted(str(c.value) for c in caps)
             records[model_id] = item
     return [records[key] for key in sorted(records)]
 
@@ -64,37 +78,12 @@ def parse_openai_compatible_model_records(payload: dict[str, Any]) -> list[dict[
             continue
         item = dict(raw)
         model_id = str(item["id"]).strip()
-        # Preserve only capability hints the catalog actually supplies.
-        capabilities: set[str] = set()
-        supplied = item.get("capabilities")
-        if isinstance(supplied, list):
-            for value in supplied:
-                text = str(value or "").strip().lower().replace("-", "_")
-                if text:
-                    capabilities.add(text)
-        supported = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), list) else []
-        if any(str(value).lower() in {"tools", "tool_choice", "parallel_tool_calls"} for value in supported):
-            capabilities.add(ModelCapability.TOOL_CALLING.value)
-        if any(
-            "structured" in str(value).lower() or "response_format" in str(value).lower()
-            for value in supported
-        ):
-            capabilities.add(ModelCapability.STRUCTURED_OUTPUT.value)
-        if any("reasoning" in str(value).lower() for value in supported):
-            capabilities.add(ModelCapability.REASONING.value)
-        architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
-        modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else []
-        if any(str(value).lower() in {"image", "image_url"} for value in modalities or []):
-            capabilities.add(ModelCapability.IMAGE_INPUT.value)
+        caps = extract_capabilities_from_record(item)
         lowered = model_id.lower()
         if any(marker in lowered for marker in ("embed", "embedding")):
-            capabilities.add(ModelCapability.EMBEDDING.value)
-        elif capabilities or item.get("object") == "model":
-            # Basic OpenAI-style model entries with no capability metadata remain
-            # capability-empty so Advanced/manual selection can still use them.
-            pass
-        if capabilities:
-            item["capabilities"] = sorted(capabilities)
+            caps.add(ModelCapability.EMBEDDING)
+        if caps:
+            item["capabilities"] = sorted(str(c.value) for c in caps)
         item["id"] = model_id
         records[model_id] = item
     return [records[key] for key in sorted(records)]
@@ -114,6 +103,8 @@ def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
         architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
         supported = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), list) else []
         modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else []
+        if not isinstance(modalities, list):
+            modalities = item.get("input_modalities") if isinstance(item.get("input_modalities"), list) else []
         capabilities: set[str] = set()
         lowered_id = model_id.lower()
         endpoint = item.get("_mana_endpoint", "")
@@ -137,8 +128,22 @@ def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
             capabilities.add(ModelCapability.TOOL_CALLING.value)
         if any("structured" in str(value).lower() or "response_format" in str(value).lower() for value in supported):
             capabilities.add(ModelCapability.STRUCTURED_OUTPUT.value)
-        if any(str(value).lower() in {"image", "image_url"} for value in modalities or []):
+        mods_lower = [str(value).lower() for value in modalities or []]
+        if any(value in {"image", "image_url", "vision"} for value in mods_lower):
             capabilities.add(ModelCapability.IMAGE_INPUT.value)
+        if any(value in {"audio", "voice"} for value in mods_lower):
+            capabilities.add(ModelCapability.AUDIO_INPUT.value)
+            capabilities.add(ModelCapability.SPEECH_TO_TEXT.value)
+        if any(value in {"video"} for value in mods_lower):
+            capabilities.add(ModelCapability.VIDEO_INPUT.value)
+        modality_str = str(architecture.get("modality") or "").lower()
+        if "image" in modality_str:
+            capabilities.add(ModelCapability.IMAGE_INPUT.value)
+        if "audio" in modality_str:
+            capabilities.add(ModelCapability.AUDIO_INPUT.value)
+            capabilities.add(ModelCapability.SPEECH_TO_TEXT.value)
+        if "video" in modality_str:
+            capabilities.add(ModelCapability.VIDEO_INPUT.value)
         if any("reasoning" in str(value).lower() for value in supported):
             capabilities.add(ModelCapability.REASONING.value)
         item["capabilities"] = sorted(capabilities)
@@ -299,6 +304,38 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
             f"{definition.display_name} model-list fetch failed: no model IDs were returned."
         )
     return models
+
+
+def fetch_provider_model_detail(
+    *,
+    provider: str,
+    base_url: str,
+    api_key: str,
+    model_id: str,
+    timeout_seconds: int = 10,
+) -> dict[str, Any] | None:
+    """Fetch metadata for a single model from the provider's /models/{model_id} endpoint."""
+    if not api_key.strip() or not model_id.strip():
+        return None
+    try:
+        definition = PROVIDERS.get(provider)
+    except KeyError:
+        return None
+
+    headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
+    base = (base_url or definition.default_base_url).rstrip("/")
+    endpoint = f"/models/{urllib.parse.quote(model_id, safe='')}"
+    request = urllib.request.Request(base + endpoint, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            if isinstance(payload, dict):
+                if isinstance(payload.get("data"), dict):
+                    return payload["data"]
+                return payload
+    except Exception:
+        pass
+    return None
 
 
 def load_or_fetch_models(
