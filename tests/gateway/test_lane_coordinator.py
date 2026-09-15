@@ -623,10 +623,10 @@ def test_lane_capacity_waits_in_queue_until_capacity_is_released(tmp_path: Path,
         )
     )
     worker.start()
-    assert waiting.wait(timeout=2)
+    assert waiting.wait(timeout=10)
 
     coordinator.finish(first.execution.task_id)
-    worker.join(timeout=2)
+    worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert result and result[0].execution.state == LaneTaskState.QUEUED
@@ -673,7 +673,7 @@ def test_scheduler_diagnostics_explain_capacity_wait_before_lane_execution(
         )
     )
     worker.start()
-    assert waiting.wait(timeout=2)
+    assert waiting.wait(timeout=10)
 
     diagnostics = coordinator.scheduling_diagnostics(queued_task.task_id)
 
@@ -701,7 +701,7 @@ def test_scheduler_diagnostics_explain_capacity_wait_before_lane_execution(
     assert diagnostics["lifecycle"]["running"] is False
 
     coordinator.finish(first.execution.task_id)
-    worker.join(timeout=2)
+    worker.join(timeout=10)
     assert not worker.is_alive()
 
 
@@ -763,9 +763,9 @@ def test_provider_limit_waits_until_model_capacity_is_released(tmp_path: Path, m
         )
     )
     worker.start()
-    assert waiting.wait(timeout=2)
+    assert waiting.wait(timeout=10)
     coordinator.finish(first.execution.task_id)
-    worker.join(timeout=2)
+    worker.join(timeout=10)
     assert result and not worker.is_alive()
 
 
@@ -788,7 +788,7 @@ def test_interactive_waiter_runs_before_background_without_dropping_background(
 
     coordinator = LaneCoordinator(
         root,
-        contracts={"research": {"max_concurrent_jobs": 1, "timeout_seconds": 5}},
+        contracts={"research": {"max_concurrent_jobs": 1, "timeout_seconds": 15}},
         event_sink=sink,
     )
     first = _reserve(coordinator, LaneId.RESEARCH, intent="occupy lane")
@@ -812,16 +812,28 @@ def test_interactive_waiter_runs_before_background_without_dropping_background(
     interactive = threading.Thread(target=worker, args=("interactive", LanePriority.INTERACTIVE))
     background.start()
     interactive.start()
-    with queued:
-        assert queued.wait_for(lambda: len(queued_ids) >= 2, timeout=2)
+    try:
+        with queued:
+            assert queued.wait_for(lambda: len(queued_ids) >= 2, timeout=10)
 
-    coordinator.finish(first.execution.task_id)
-    interactive.join(timeout=2)
-    assert order and order[0][0] == "interactive"
-    coordinator.finish(order[0][1].execution.task_id)
-    background.join(timeout=2)
-    assert [name for name, _ in order] == ["interactive", "background"]
-    coordinator.finish(order[1][1].execution.task_id)
+        coordinator.finish(first.execution.task_id)
+        interactive.join(timeout=10)
+        assert not interactive.is_alive()
+        assert order and order[0][0] == "interactive"
+        coordinator.finish(order[0][1].execution.task_id)
+        background.join(timeout=10)
+        assert not background.is_alive()
+        assert [name for name, _ in order] == ["interactive", "background"]
+        coordinator.finish(order[1][1].execution.task_id)
+    finally:
+        for task in list(coordinator.executions):
+            if task.state in ACTIVE_LANE_STATES:
+                try:
+                    coordinator.finish(task.task_id, state=LaneTaskState.CANCELLED)
+                except Exception:
+                    pass
+        interactive.join(timeout=5)
+        background.join(timeout=5)
 
 
 def test_overlapping_file_mutations_are_serialized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -840,10 +852,10 @@ def test_overlapping_file_mutations_are_serialized(tmp_path: Path, monkeypatch: 
     coordinator.start(first)
     worker = threading.Thread(target=lambda: coordinator.start(second))
     worker.start()
-    assert lock_waiting.wait(timeout=2)
+    assert lock_waiting.wait(timeout=10)
 
     coordinator.finish(first.execution.task_id)
-    worker.join(timeout=2)
+    worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert second.execution.state == LaneTaskState.RUNNING

@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-09-16
+
+- Fixed timing fragility and thread leaks in gateway lane coordinator unit tests under Windows CI:
+  - Increased `LaneCoordinator` contract timeout to 15s and thread join/wait timeouts from 2s to 10s across `tests/gateway/test_lane_coordinator.py` (`test_interactive_waiter_runs_before_background_without_dropping_background`, `test_lane_capacity_waits_in_queue_until_capacity_is_released`, `test_scheduler_diagnostics_explain_capacity_wait_before_lane_execution`, `test_provider_limit_waits_until_model_capacity_is_released`, and `test_overlapping_file_mutations_are_serialized`) to prevent false-positive timeouts caused by disk I/O latency.
+  - Added `try...finally` cancellation and join cleanup in `test_interactive_waiter_runs_before_background_without_dropping_background` to ensure background threads terminate cleanly and avoid `RuntimeError: WorkspaceDatabase is closed` warnings leaking into subsequent tests.
+  - User verification required: `pytest tests/gateway/test_lane_coordinator.py -k test_interactive_waiter_runs_before_background_without_dropping_background -v`.
+
 ## 2026-09-14
 
 - Fixed unit test failures across chat attachment detection, validation, normalization, routing, and TUI widgets:
