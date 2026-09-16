@@ -27,6 +27,7 @@ from mana_agent.gateway.lane_coordinator import (
 )
 from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.gateway.lanes import (
+    ACTIVE_LANE_STATES,
     LockMode,
     LaneId,
     LanePermissionError,
