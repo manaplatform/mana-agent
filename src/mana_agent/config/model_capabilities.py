@@ -1208,7 +1208,7 @@ class ModelCapabilityRegistry:
             if key in self._overrides:
                 return self._overrides[key]
 
-        # 2. Explicitly supplied catalog records take precedence
+        # 2. Explicitly supplied catalog records take precedence when they supply capability metadata
         if catalog_records is not None:
             for record in catalog_records:
                 rec_id = ""
@@ -1223,9 +1223,11 @@ class ModelCapabilityRegistry:
                     continue
                 normalized_rec_id = normalize_model_lookup_id(provider, rec_id)
                 if normalized_rec_id == model or rec_id == model:
-                    return self._descriptor_from_catalog_record(
+                    desc = self._descriptor_from_catalog_record(
                         provider, model, transport, rec_dict
                     )
+                    if desc.is_known:
+                        return desc
 
         # 3. Maintained entries (exact match or family prefix match)
         if key in _MAINTAINED_DESCRIPTORS:

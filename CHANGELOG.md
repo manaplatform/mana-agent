@@ -13,7 +13,10 @@ All notable repository changes should be recorded here.
   - Added execution supervisor hooks in `src/mana_agent/execution_supervisor/supervisor.py` and `infer_effect_scope` in `src/mana_agent/execution_supervisor/models.py`.
   - Added dedicated eval suite `evals/suites/shell-injection.yaml` and task in `evals/suites/routing-smoke.yaml` testing defense against adversarial prompt injections inside terminal output.
   - Added unit test suite in `tests/test_shell_executor.py` covering timeout, exit code preservation, truncation, cwd confinement, secrets redaction, denylist blocking, read-only vs mutating approval flows, contracts, catalog registration, router/manager integration, supervisor hooks, and prompt injection defense.
-  - User verification required: `pytest tests/test_shell_executor.py tests/test_ask_agent.py tests/test_coding_tool_system.py tests/test_auto_chat_tools_catalog.py -v`.
+  - Fixed model capability resolution when bare catalog records lack tool/parameter metadata:
+    - In `src/mana_agent/config/model_capabilities.py`, allowed maintained descriptors (and family prefix matches like `gpt-6.*`) to resolve when supplied catalog records lack explicit capability metadata, preventing false-positive `no_write_capable_model_available` errors for maintained models like `gpt-6.1-sol`.
+    - In `src/mana_agent/doctor/checks/secrets.py`, checked both uppercase and lowercase provider key names to correctly recognize configured secrets.
+  - User verification required: `pytest tests/test_model_capabilities.py tests/test_shell_executor.py tests/test_ask_agent.py tests/test_coding_tool_system.py tests/test_auto_chat_tools_catalog.py -v`.
 
 ## 2026-09-16
 
