@@ -128,6 +128,7 @@ class SandboxCapabilities(StrictModel):
     persistent_volumes: bool = False
     artifact_streaming: bool = False
     parallel_execution: bool = False
+    shell_execution: bool = False
 
 
 class SandboxSpec(StrictModel):

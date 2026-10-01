@@ -289,6 +289,14 @@ class _ReadFileInput(BaseModel):
 class _RunCommandInput(BaseModel):
     cmd: str = Field(description="Shell command to execute in project root")
 
+class _ShellInput(BaseModel):
+    action: dict[str, Any] | None = Field(default=None, description="Action object with commands, timeout_ms, max_output_length")
+    commands: list[str] | None = Field(default=None, description="Optional top-level shorthand list of commands")
+    timeout_ms: int = Field(default=60000, description="Execution timeout in milliseconds")
+    max_output_length: int = Field(default=4096, description="Maximum characters per stream")
+    environment: dict[str, str] | None = Field(default=None, description="Environment object specifying local mode")
+    action_approval_id: str = Field(default="", description="Optional human approval token")
+
 class _ChunkFileInput(BaseModel):
     path: str = Field(description="Absolute or project-relative file path")
 
@@ -1606,6 +1614,7 @@ class AskAgent:
                     parent_task_id=str(run_id or "ask-run-command"),
                     actor="model_tool",
                     originating_agent="ask_agent",
+                    policy_context={"tool": "run_command"},
                     idempotency_key=f"shell:{hashlib.sha256(json.dumps({'run_id': run_id, 'argv': shell_argv}, sort_keys=True).encode()).hexdigest()}",
                     timeout_seconds=timeout_seconds,
                     runner=transactional_runner,
@@ -1671,6 +1680,58 @@ class AskAgent:
                 traces.append(
                     ToolInvocationTrace(
                         tool_name="run_command",
+                        args_summary=args_summary,
+                        duration_ms=(perf_counter() - started) * 1000,
+                        status=status,
+                        output_preview=output_preview,
+                    )
+                )
+
+        def shell(
+            action: dict[str, Any] | None = None,
+            commands: list[str] | None = None,
+            timeout_ms: int = 60000,
+            max_output_length: int = 4096,
+            environment: dict[str, str] | None = None,
+            action_approval_id: str = "",
+        ) -> str:
+            started = perf_counter()
+            status = "ok"
+            output_preview = ""
+            resolved_action = dict(action or {})
+            if commands and "commands" not in resolved_action:
+                resolved_action["commands"] = list(commands)
+            if "timeout_ms" not in resolved_action:
+                resolved_action["timeout_ms"] = timeout_ms
+            if "max_output_length" not in resolved_action:
+                resolved_action["max_output_length"] = max_output_length
+            args_summary = f"commands={resolved_action.get('commands')!r}"
+            try:
+                from mana_agent.tools.shell_exec import ShellExecutor
+
+                executor = ShellExecutor(
+                    workspace_root=self.project_root,
+                    default_timeout_ms=resolved_action["timeout_ms"],
+                    default_max_output_length=resolved_action["max_output_length"],
+                )
+                res = executor.execute_action(
+                    resolved_action,
+                    action_approval_id=action_approval_id,
+                )
+                encoded = json.dumps(res)
+                output_preview = encoded[:400]
+                return encoded
+            except Exception as exc:
+                status = "error"
+                output_preview = str(exc)[:400]
+                return json.dumps({
+                    "type": "shell_call_output",
+                    "output": [{"stdout": "", "stderr": str(exc), "outcome": {"type": "exit", "exit_code": 1}}],
+                })
+            finally:
+                traces.append(
+                    ToolInvocationTrace(
+                        tool_name="shell",
                         args_summary=args_summary,
                         duration_ms=(perf_counter() - started) * 1000,
                         status=status,
@@ -1846,6 +1907,16 @@ class AskAgent:
                 name="run_command",
                 description="Run a non-destructive shell command in project root and return JSON stdout/stderr.",
                 args_schema=_RunCommandInput,
+            ),
+            StructuredTool.from_function(
+                func=shell,
+                name="shell",
+                description=(
+                    "Execute shell commands locally conforming to OpenAI Shell tool protocol. "
+                    "Accepts an action with commands list, timeout_ms, and max_output_length. "
+                    "Returns shell_call_output with items containing stdout, stderr, and outcome."
+                ),
+                args_schema=_ShellInput,
             ),
             StructuredTool.from_function(
                 func=chunk_file,

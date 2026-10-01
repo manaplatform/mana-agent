@@ -377,6 +377,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "write_file": frozenset({"repository_write"}), "create_file": frozenset({"repository_write"}),
     "delete_file": frozenset({"repository_write"}), "run_command": frozenset({"shell_write"}),
     "run_script_once": frozenset({"shell_write"}),
+    "shell": frozenset({"shell_write", "shell_read"}),
     "verify_project": frozenset({"test_execution"}), "run_tests": frozenset({"test_execution"}),
     "run_lint": frozenset({"test_execution"}), "web_search": frozenset({"web_search"}),
     "github_search": frozenset({"web_search"}), "git_status": frozenset({"git_read"}),

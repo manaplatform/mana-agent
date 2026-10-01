@@ -60,6 +60,7 @@ class LocalProcessProvider(ProviderBase):
             network_isolation=EnforcementStrength.NONE,
             secret_files=True, secret_environment_variables=True,
             persistent_volumes=True, artifact_streaming=True,
+            shell_execution=True,
         )
 
     async def provision(self, spec: SandboxSpec) -> SandboxHandle:

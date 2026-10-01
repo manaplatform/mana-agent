@@ -2592,6 +2592,53 @@ class ExecutionSupervisor:
         self._emit("action_updated", task, action_id=action_id, request_state=request_state.value)
         return action
 
+    def prepare_shell_action(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+        commands: list[str],
+        read_only: bool,
+        idempotency_key: str = "",
+    ) -> ActionRecord:
+        """Supervisory hook: prepare and register a shell tool execution."""
+        import json
+        fingerprint = hashlib.sha256(json.dumps(commands).encode()).hexdigest()
+        classification = (
+            SideEffectClassification.READ_ONLY
+            if read_only
+            else SideEffectClassification.NON_IDEMPOTENT
+        )
+        return self.prepare_action(
+            task_id,
+            attempt_id=attempt_id,
+            lease_token=lease_token,
+            tool_name="shell",
+            action_fingerprint=fingerprint,
+            classification=classification,
+            idempotency_key=idempotency_key or f"shell:{fingerprint[:16]}",
+        )
+
+    def complete_shell_action(
+        self,
+        action_id: str,
+        *,
+        results: list[dict[str, Any]],
+        success: bool,
+        verification_state: dict[str, Any] | None = None,
+    ) -> ActionRecord:
+        """Supervisory hook: complete and record shell tool execution outcome."""
+        import json
+        state = ActionRequestState.SUCCEEDED if success else ActionRequestState.FAILED
+        receipt = hashlib.sha256(json.dumps(results, sort_keys=True, default=str).encode()).hexdigest()
+        return self.update_action(
+            action_id,
+            request_state=state,
+            external_receipt=f"shell_receipt:{receipt[:16]}",
+            verification_state=verification_state or {"results_count": len(results), "success": success},
+        )
+
     def cancellation_requested(self, task_id: str) -> bool:
         return self.store.get_task(task_id).state in {ExecutionState.CANCELLING, ExecutionState.CANCELLED}
 

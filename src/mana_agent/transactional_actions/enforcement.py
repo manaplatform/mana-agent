@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 ROUTED_SIDE_EFFECT_TOOLS = frozenset({
-    "edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file",
+    "shell", "edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file",
     "create_file", "delete_file", "document_create", "document_update", "document_delete",
     "run_command", "run_script_once", "git_generic", "git_create_branch", "git_switch",
     "git_add", "git_commit", "git_push", "api_request_execute",

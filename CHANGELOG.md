@@ -2,6 +2,19 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-01
+
+- Added OpenAI-compatible Local Shell Tool (`shell`) across contracts, executor, router, supervisor, and approval policy:
+  - Added `shell` `ToolContract` in `src/mana_agent/tools/contracts.py` with strict input/output schemas conforming to OpenAI Shell tool protocol (`shell_call` action with `commands`, `timeout_ms`, `max_output_length`, and `shell_call_output` with `stdout`, `stderr`, and `outcome`).
+  - Implemented `ShellExecutor` in `src/mana_agent/tools/shell_exec.py` running in local mode only (`environment: {"type": "local"}`) using `subprocess.Popen` without `shell=True`, locked workspace cwd confinement, mandatory timeout with process kill and partial output preservation, non-zero exit preservation for model error recovery, stream truncation per `max_output_length`, environment sanitization with secret redaction via `execution/secrets.py`, command denylist protection, audit logging, and prompt-injection defense with untrusted terminal content notice.
+  - Registered `shell` in auto-chat catalog under `verify` category in `src/mana_agent/tools/catalog.py` and exposed in `AskAgent` `base_tools` in `src/mana_agent/multi_agent/runtime/ask_agent.py`.
+  - Added shell execution routing and lifecycle support in `src/mana_agent/execution/router.py`, `src/mana_agent/execution/manager.py`, and `src/mana_agent/execution/providers/local_process.py`.
+  - Configured transactional approval policy in `src/mana_agent/transactional_actions/policy.py` classifying read-only commands (`ls`, `git status`, `git diff`, `git log`, etc.) as free (`PolicyOutcome.ALLOW`) while requiring human approval for mutating commands (`touch`, `rm`, `git commit`, etc.), and denying dangerous patterns.
+  - Added execution supervisor hooks in `src/mana_agent/execution_supervisor/supervisor.py` and `infer_effect_scope` in `src/mana_agent/execution_supervisor/models.py`.
+  - Added dedicated eval suite `evals/suites/shell-injection.yaml` and task in `evals/suites/routing-smoke.yaml` testing defense against adversarial prompt injections inside terminal output.
+  - Added unit test suite in `tests/test_shell_executor.py` covering timeout, exit code preservation, truncation, cwd confinement, secrets redaction, denylist blocking, read-only vs mutating approval flows, contracts, catalog registration, router/manager integration, supervisor hooks, and prompt injection defense.
+  - User verification required: `pytest tests/test_shell_executor.py tests/test_ask_agent.py tests/test_coding_tool_system.py tests/test_auto_chat_tools_catalog.py -v`.
+
 ## 2026-09-16
 
 - Fixed timing fragility and thread leaks in gateway lane coordinator unit tests under Windows CI:

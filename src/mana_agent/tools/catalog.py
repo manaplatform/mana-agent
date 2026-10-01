@@ -253,6 +253,11 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("git_generic", "Run a model-selected Git argv list through the safe executor.", "git"),
     # Verification / shell
     (
+        "shell",
+        "Run non-interactive shell commands in local workspace per OpenAI Shell tool specification.",
+        "verify",
+    ),
+    (
         "run_command",
         "Run a non-destructive shell command in the project root.",
         "verify",
@@ -357,7 +362,7 @@ def _category_for_name(name: str) -> str:
         "delete_file",
     }:
         return "edit"
-    if n in {"run_command", "run_script_once", "verify_project"}:
+    if n in {"run_command", "run_script_once", "verify_project", "shell"}:
         return "verify"
     return "repository"
 

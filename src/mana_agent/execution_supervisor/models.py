@@ -70,6 +70,10 @@ class ActionEffectScope(str, Enum):
     EXTERNAL_CONSEQUENTIAL = "EXTERNAL_CONSEQUENTIAL"
 
 
+# Backwards-compatible alias
+EffectScope = ActionEffectScope
+
+
 class LostLeaseOutcome(str, Enum):
     SAFE_AUTOMATIC_RECOVERY = "SAFE_AUTOMATIC_RECOVERY"
     LOCAL_RECONCILIATION_REQUIRED = "LOCAL_RECONCILIATION_REQUIRED"
@@ -143,7 +147,15 @@ class ActionRecord(StrictModel):
         if "effect_scope" not in data or not data["effect_scope"]:
             tool = str(data.get("tool_name") or "")
             classification = data.get("classification")
-            if tool in LOCAL_REPOSITORY_TOOLS:
+            if tool == "shell":
+                if classification in {
+                    SideEffectClassification.READ_ONLY.value,
+                    SideEffectClassification.READ_ONLY,
+                }:
+                    data["effect_scope"] = ActionEffectScope.LOCAL_PROCESS.value
+                else:
+                    data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY.value
+            elif tool in LOCAL_REPOSITORY_TOOLS:
                 data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY.value
             elif tool in {
                 "read_file",
@@ -172,6 +184,30 @@ class ActionRecord(StrictModel):
             else:
                 data["effect_scope"] = ActionEffectScope.UNKNOWN.value
         return data
+
+
+def infer_effect_scope(
+    tool_name: str,
+    args: dict[str, Any] | None = None,
+    classification: SideEffectClassification | str | None = None,
+) -> ActionEffectScope:
+    """Infer the effect scope of an action given tool name, args, or classification."""
+    if classification is None:
+        from mana_agent.tools.shell_exec import is_read_only_command
+
+        commands = (args or {}).get("commands") or []
+        if tool_name == "shell" and commands and all(is_read_only_command(c) for c in commands):
+            classification = SideEffectClassification.READ_ONLY
+        elif tool_name in LOCAL_REPOSITORY_TOOLS:
+            classification = SideEffectClassification.NON_IDEMPOTENT
+        elif tool_name == "shell":
+            classification = SideEffectClassification.NON_IDEMPOTENT
+        else:
+            classification = SideEffectClassification.READ_ONLY
+
+    data: dict[str, Any] = {"tool_name": tool_name, "classification": classification}
+    ActionRecord.infer_effect_scope(data)
+    return ActionEffectScope(data["effect_scope"])
 
 
 class RetryCategory(str, Enum):
