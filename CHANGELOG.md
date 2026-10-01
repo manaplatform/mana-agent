@@ -4,6 +4,24 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-01
 
+- Fixed entry router recognizing local shell and terminal command execution requests:
+  - Updated `ENTRY_ROUTER_PROMPT` in `src/mana_agent/gateway/entry_routing.py` to explicitly describe `coding` as owning repository engineering workflows, verification, and local shell/terminal command execution (via `shell` or `run_command` tools), adding explicit routing examples so shell execution requests are not classified as `unsupported`.
+  - Registered available tools (`shell`, `run_command`, etc.) in `RouteRegistration("coding", ...)` and updated its description in `src/mana_agent/gateway/chat_gateway.py` `_build_entry_route_registry()`.
+  - Updated `mapped["coding"]` `AgentDecision` in `src/mana_agent/gateway/chat_gateway.py` to populate `selected_tools` with registered route tools.
+  - Added `"shell"` to `KNOWN_AGENT_TOOLS` in `src/mana_agent/multi_agent/routing/agent_decision.py`.
+  - Updated `coding_task` description in `src/mana_agent/multi_agent/runtime/entry_router.py`.
+  - Added unit test `test_entry_router_recognizes_shell_execution_requests_as_coding` in `tests/gateway/test_entry_routing.py` and populated registered tools for `coding` in test mock `_registry()`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -k test_entry_router_recognizes_shell_execution_requests_as_coding` and `python -m pytest tests/test_agent_decision_routing.py`.
+
+- Added ApprovalAgent and model-driven approval wait tools (`request_user_approval`, `wait_for_approval`):
+  - Implemented `request_user_approval` and `wait_for_approval` in `src/mana_agent/human_inbox/approval_tools.py` with typed verdicts (`approved`, `denied`, `expired`, `cancelled`, `still_pending`), timeout suspension hook, idempotency key derivation from `task_id` and `source_decision_id`, strict parameter validation stopping safely without fallback, and LangChain `StructuredTool` builder `build_approval_tools()`.
+  - Added `AgentRole.APPROVAL` in `src/mana_agent/multi_agent/core/types.py`, registered approval capabilities (`[transactional_actions, execution, human_inbox, approval_request, approval_wait]`) in `src/mana_agent/multi_agent/registry/capability_registry.py`, and added model level assignment (`MANA_MODEL_APPROVAL`, level 3), routing task (`approval`), and structured output requirement in `src/mana_agent/multi_agent/runtime/model_levels.py`.
+  - Created `ApprovalAgent` in `src/mana_agent/multi_agent/agents/approval_agent.py` with allowed tools `[request_user_approval, wait_for_approval, git_status, git_diff, run_command]`, `tools()` method, and `may_continue(result)` returning true strictly for verdict approved.
+  - Added approval tools to `READ_ONLY_MODEL_TOOLS` in `src/mana_agent/transactional_actions/enforcement.py` as inbox-only to ensure approval tools do not bypass `ActionGateway` policy.
+  - Registered approval tools in `src/mana_agent/tools/catalog.py` under the `inbox` category and wired into `AskAgent` tool loop in `src/mana_agent/multi_agent/runtime/ask_agent.py` and `src/mana_agent/gateway/chat_gateway.py`.
+  - Added test coverage in `tests/human_inbox/test_approval_tools.py` and `tests/multi_agent/test_approval_agent.py`.
+  - User verification required: `python -m pytest tests/human_inbox/test_approval_tools.py` and `python -m pytest tests/multi_agent`.
+
 - Added OpenAI-compatible Local Shell Tool (`shell`) across contracts, executor, router, supervisor, and approval policy:
   - Added `shell` `ToolContract` in `src/mana_agent/tools/contracts.py` with strict input/output schemas conforming to OpenAI Shell tool protocol (`shell_call` action with `commands`, `timeout_ms`, `max_output_length`, and `shell_call_output` with `stdout`, `stderr`, and `outcome`).
   - Implemented `ShellExecutor` in `src/mana_agent/tools/shell_exec.py` running in local mode only (`environment: {"type": "local"}`) using `subprocess.Popen` without `shell=True`, locked workspace cwd confinement, mandatory timeout with process kill and partial output preservation, non-zero exit preservation for model error recovery, stream truncation per `max_output_length`, environment sanitization with secret redaction via `execution/secrets.py`, command denylist protection, audit logging, and prompt-injection defense with untrusted terminal content notice.

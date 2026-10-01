@@ -22,6 +22,7 @@ class AgentRole(_ValueEnum):
     TOOL_WORKER = "tool_worker"
     RESEARCH = "research"
     SUMMARIZER = "summarizer"
+    APPROVAL = "approval"
 
 
 class AgentState(_ValueEnum):

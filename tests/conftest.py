@@ -28,6 +28,16 @@ if str(SRC_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(1 if sys.path and sys.path[0] == str(SRC_DIR) else 0, str(PROJECT_ROOT))
 
+# If any mana_agent module was imported before conftest.py from an installed wheel
+# or site-packages, purge it from sys.modules so all test imports load strictly from src/.
+for _mod_name in list(sys.modules):
+    if _mod_name == "mana_agent" or _mod_name.startswith("mana_agent."):
+        _mod = sys.modules.get(_mod_name)
+        _file = getattr(_mod, "__file__", "") or ""
+        if _file and not _file.startswith(str(SRC_DIR)):
+            sys.modules.pop(_mod_name, None)
+
+
 
 # Capture this before pytest changes HOME.  The value is deliberately never
 # removed or otherwise modified by this module.

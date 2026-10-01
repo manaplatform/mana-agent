@@ -314,10 +314,13 @@ Route semantics:
   conversation (or coding if the request asks to implement or edit repository code based on the image).
   Do not select conversation for repository planning, plan continuation, verification, or review
   of repository work—even when the user says not to edit yet.
-- coding: repository engineering workflows handled by the Codex coding path, including edits,
-  implementation, plan-only design for repository changes, continuing an active plan without
-  applying it, and verification/testing of the repository. Planning a CLI flag or similar
-  repository change is coding, not conversation.
+- coding: repository engineering workflows and command execution handled by the Codex coding and
+  verification path, including edits, implementation, plan-only design for repository changes,
+  continuing an active plan without applying it, verification/testing of the repository, and
+  local shell/terminal command execution (using the shell or run_command tool). All requests to run,
+  execute, or test commands in the local environment or terminal (such as shell commands, scripts,
+  diagnostics, CLI utilities, or process tools) must select coding; never route them to unsupported
+  or command. Planning a CLI flag or similar repository change is coding, not conversation.
 - mcp: execute a request through one configured Model Context Protocol provider. Return a complete
   mcp_request with one exact provider_id from the route availability details. MCP provider state and
   tool results are live external state, so requires_live_data must be true. The provider selection is
@@ -486,6 +489,9 @@ Examples:
   (repository planning / plan-only still uses the coding workflow; not conversation).
 - “Continue the active plan without applying it” -> coding, ["repository"] (plan continuation).
 - “Verify the repository tests without modifying files” -> coding, ["repository"].
+- “use shell run nmap to manadev.net on port 443” -> coding, ["repository"] (requests to run shell/terminal commands in the local workspace select coding; never route shell commands to unsupported).
+- “Run git reset --hard on this repository” -> coding, ["repository"] (command execution in the repository selects coding).
+- “Run a shell command to check network or system status” -> coding, ["repository"].
 - “Check open GitHub issues and update the README” -> multi_task, ["none"] (independent routes).
 - “Research the current API, then update the implementation from those findings” -> multi_task,
   ["none"] (the coding child depends on the research child).

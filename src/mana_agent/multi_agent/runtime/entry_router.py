@@ -100,7 +100,7 @@ Route kinds:
   amend, push, pull, fetch, branch, switch, checkout, merge, rebase, reset, revert,
   or tag through Git-capable tools. Choose this before repo_search for Git requests;
   branch names and words like commit/push are not repository search queries.
-- coding_task: user wants repository files changed.
+- coding_task: user wants repository files changed, verification, or local shell command execution.
 - analysis_task: user wants repository analysis.
 - conversation: answer ordinary chat, conversational recall, or a follow-up from
   the active session history without repository search, external search, or tools.

@@ -13,4 +13,11 @@ DEFAULT_CAPABILITIES: dict[AgentRole, list[str]] = {
     AgentRole.VERIFIER: ["verification"],
     AgentRole.REVIEWER: ["review", "risk_analysis"],
     AgentRole.SUMMARIZER: ["summarization"],
+    AgentRole.APPROVAL: [
+        "transactional_actions",
+        "execution",
+        "human_inbox",
+        "approval_request",
+        "approval_wait",
+    ],
 }

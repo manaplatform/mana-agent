@@ -1353,6 +1353,9 @@ class AgentChatGateway:
             self._dispatch_resumed_transactional_action
         )
         self._recover_queued_transactional_action_dispatches()
+        if hasattr(self._stack, "ask_service") and hasattr(self._stack.ask_service, "ask_agent"):
+            if self._stack.ask_service.ask_agent is not None:
+                self._stack.ask_service.ask_agent.human_inbox_service = self.human_inbox_service
         from mana_agent.connectors.browser.session import default_browser_manager
         from mana_agent.sessions.service import SessionService
 
@@ -3508,9 +3511,22 @@ class AgentChatGateway:
             ),
             RouteRegistration(
                 "coding",
-                "Codex coding workflow for repository file changes.",
+                "Codex coding workflow for repository file changes, verification, testing, and local shell/terminal command execution.",
                 lambda: self._available(
                     self._coding_agent is not None, "Coding agent is not configured."
+                ),
+                (
+                    "shell",
+                    "run_command",
+                    "run_script_once",
+                    "verify_project",
+                    "edit_file",
+                    "multi_edit_file",
+                    "write_file",
+                    "create_file",
+                    "delete_file",
+                    "apply_patch",
+                    "apply_patch_batch",
                 ),
             ),
             RouteRegistration(
@@ -10005,6 +10021,19 @@ class AgentChatGateway:
             "coding": AgentDecision(
                 intent="edit",
                 confidence=decision.confidence,
+                selected_tools=list(registration.tools or [
+                    "shell",
+                    "run_command",
+                    "run_script_once",
+                    "verify_project",
+                    "edit_file",
+                    "multi_edit_file",
+                    "write_file",
+                    "create_file",
+                    "delete_file",
+                    "apply_patch",
+                    "apply_patch_batch",
+                ]),
                 code_editing_needed=True,
                 flow_action="continue"
                 if decision.reuse_active_route and state.get("active_flow_id")

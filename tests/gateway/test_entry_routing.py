@@ -227,11 +227,29 @@ def _registry(
             if name == "mcp"
             else RouteAvailability(True)
         )
+        tools = (
+            (
+                "shell",
+                "run_command",
+                "run_script_once",
+                "verify_project",
+                "edit_file",
+                "multi_edit_file",
+                "write_file",
+                "create_file",
+                "delete_file",
+                "apply_patch",
+                "apply_patch_batch",
+            )
+            if name == "coding"
+            else ()
+        )
         registry.register(
             RouteRegistration(
                 name,  # type: ignore[arg-type]
                 description,
                 lambda value=availability: value,
+                tools=tools,
             )
         )
     return registry
@@ -2183,4 +2201,33 @@ def test_entry_route_context_to_dict_filters_memory_task_candidates_when_disable
         memory_task_candidates=({"task_id": "task-1"}, {"task_id": "task-2"}),
     )
     assert len(context_enabled.to_dict()["memory_task_candidates"]) == 2
+
+
+def test_entry_router_recognizes_shell_execution_requests_as_coding(tmp_path: Path) -> None:
+    assert "local shell/terminal command execution" in ENTRY_ROUTER_PROMPT
+    assert "use shell run nmap to manadev.net on port 443" in ENTRY_ROUTER_PROMPT
+
+    gateway, _chat, _ask = _gateway(tmp_path, _RouteModel("coding"))
+    built_reg = gateway._build_entry_route_registry().get("coding")
+    assert "shell" in built_reg.tools
+    assert "run_command" in built_reg.tools
+
+    registry = gateway._entry_route_registry
+    coding_reg = registry.get("coding")
+    assert "shell" in coding_reg.tools
+    assert "run_command" in coding_reg.tools
+
+    model = _RouteModel("coding")
+    router = EntryRouter(llm=model, registry=registry)
+    decision = router.route(
+        user_prompt="use shell run nmap to manadev.net on port 443",
+        context=EntryRouteContext(
+            session_id="s_shell",
+            conversation_id="s_shell",
+            turn_id="t_shell",
+        ),
+    )
+    assert decision.route == "coding"
+    assert decision.required_sources == ("repository",)
+
 

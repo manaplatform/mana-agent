@@ -63,6 +63,7 @@ KNOWN_AGENT_TOOLS = frozenset(
         "create_file",
         "delete_file",
         "run_command",
+        "shell",
         "verify_project",
         "git",
         "git_status",

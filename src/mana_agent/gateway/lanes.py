@@ -410,6 +410,9 @@ for _canvas_tool in (
 ):
     TOOL_CAPABILITIES[_canvas_tool] = frozenset({"canvas"})
 
+for _approval_tool in ("request_user_approval", "wait_for_approval"):
+    TOOL_CAPABILITIES[_approval_tool] = frozenset({"repository_read", "human_inbox"})
+
 for _git_read_tool in (
     "git_log", "git_show", "git_branch", "git_remote", "git_help", "git_config_get",
 ):

@@ -36,6 +36,7 @@ READ_ONLY_MODEL_TOOLS = frozenset({
     "canvas_get_surface", "canvas_list_surfaces", "canvas_wait_for_action",
     "api_workflow_decide", "api_docs_inspect", "api_integrations_list", "api_integration_get",
     "api_operations_search", "api_request_preview",
+    "request_user_approval", "wait_for_approval",
 })
 
 UNROUTED_SIDE_EFFECT_TOOLS = frozenset({

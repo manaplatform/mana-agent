@@ -280,6 +280,17 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("write_file", "Write full file content with overwrite guards.", "edit"),
     ("create_file", "Create a new file without overwriting an existing target.", "edit"),
     ("delete_file", "Delete one existing repository file.", "edit"),
+    # Human approval / inbox
+    (
+        "request_user_approval",
+        "Request human approval for a model-decided action through the durable inbox.",
+        "inbox",
+    ),
+    (
+        "wait_for_approval",
+        "Wait for a human approval decision on a pending inbox item.",
+        "inbox",
+    ),
 )
 
 # Preferred display order for categories in the TUI.
@@ -298,6 +309,7 @@ CATEGORY_ORDER: tuple[str, ...] = (
     "git",
     "verify",
     "edit",
+    "inbox",
     "other",
 )
 
@@ -315,6 +327,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "git": "Git",
     "verify": "Verify & shell",
     "edit": "Edit",
+    "inbox": "Human Inbox & Approvals",
     "other": "Other",
 }
 
@@ -348,6 +361,8 @@ def _category_for_name(name: str) -> str:
         return "canvas"
     if n.startswith("git_") or n.startswith("git."):
         return "git"
+    if n in {"request_user_approval", "wait_for_approval"}:
+        return "inbox"
     if n.startswith("mcp__") or n.startswith("mcp.") or n == "mcp":
         return "mcp"
     if n in {"web_search", "github_search", "semantic_search", "repo_search", "repo_batch_search"}:

@@ -39,7 +39,10 @@ def get_version() -> str:
     2. Installed distribution metadata for ``mana-agent``.
     3. ``\"dev\"`` when neither is available.
     """
-    from_pyproject = _read_pyproject_version(Path(__file__).resolve().parent)
+    from_pyproject = (
+        _read_pyproject_version(Path(__file__).resolve().parent)
+        or _read_pyproject_version(Path.cwd())
+    )
     if from_pyproject:
         return from_pyproject
     try:

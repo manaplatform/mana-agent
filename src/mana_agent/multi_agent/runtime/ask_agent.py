@@ -2208,6 +2208,11 @@ class AskAgent:
             except Exception:
                 context_tools = []
 
+        from mana_agent.human_inbox.approval_tools import build_approval_tools
+
+        inbox_service = getattr(self, "human_inbox_service", None)
+        approval_tools = build_approval_tools(inbox_service=inbox_service)
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
@@ -2222,6 +2227,7 @@ class AskAgent:
             *media_tools,
             *api_manager_tools,
             *mcp_tools,
+            *approval_tools,
             *list(getattr(self, "tools", []) or []),
         ]
         return all_tools, traces, sources, warnings
