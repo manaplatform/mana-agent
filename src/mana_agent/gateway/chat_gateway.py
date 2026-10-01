@@ -3510,14 +3510,18 @@ class AgentChatGateway:
                 lambda: self._available(),
             ),
             RouteRegistration(
+                "shell",
+                "Local shell and terminal command execution in the workspace environment.",
+                lambda: self._available(),
+                ("shell", "run_command"),
+            ),
+            RouteRegistration(
                 "coding",
-                "Codex coding workflow for repository file changes, verification, testing, and local shell/terminal command execution.",
+                "Codex coding workflow for repository file changes, verification, and implementation.",
                 lambda: self._available(
                     self._coding_agent is not None, "Coding agent is not configured."
                 ),
                 (
-                    "shell",
-                    "run_command",
                     "run_script_once",
                     "verify_project",
                     "edit_file",
@@ -6058,6 +6062,7 @@ class AgentChatGateway:
                     )
                 execution_role = {
                     "coding": "coding",
+                    "shell": "tool",
                     "mcp": "tool",
                     "search": "research",
                     "github": "research",
@@ -6220,6 +6225,10 @@ class AgentChatGateway:
                             "shell_write",
                             "git_read",
                             "test_execution",
+                        ),
+                        "shell": (
+                            "shell_read",
+                            "shell_write",
                         ),
                         "mcp": ("mcp",),
                         "repository": ("repository_read",),
@@ -7110,7 +7119,7 @@ class AgentChatGateway:
                                 result.payload["pending_required_work"] = False
                                 result.payload["resume_required"] = False
                         else:
-                            if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"} and not result.error:
+                            if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server", "shell"} and not result.error:
                                 actual_tools = [
                                     t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
                                 ]
@@ -8439,6 +8448,7 @@ class AgentChatGateway:
             availability = RouteAvailability(available, reason=reason)
         execution_role = {
             "coding": "coding",
+            "shell": "tool",
             "mcp": "tool",
             "search": "research",
             "github": "research",
@@ -8507,6 +8517,10 @@ class AgentChatGateway:
                 "shell_write",
                 "git_read",
                 "test_execution",
+            ),
+            "shell": (
+                "shell_read",
+                "shell_write",
             ),
             "repository": ("repository_read",),
             "mcp": ("mcp",),
@@ -8763,7 +8777,7 @@ class AgentChatGateway:
                 error="goal_not_satisfied: Execution did not satisfy required criteria",
             )
         else:
-            if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"}:
+            if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server", "shell"}:
                 actual_tools = [
                     t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
                 ]
@@ -9519,6 +9533,20 @@ class AgentChatGateway:
                 lane_task_id=lane_task_id,
             )
 
+        if decision.route == "shell":
+            if lane_task_id:
+                for tool_name in registration.tools:
+                    self._lane_coordinator.authorize_tool(lane_task_id, tool_name)
+            return self._execute_shell_route(
+                decision=decision,
+                context=context,
+                text=execution_text,
+                ask_service=ask_service,
+                callbacks=options.get("callbacks"),
+                event_sink=sink,
+                lane_task_id=lane_task_id,
+            )
+
         if decision.route == "artifact":
             return self._execute_artifact_route(
                 decision=decision,
@@ -10018,12 +10046,17 @@ class AgentChatGateway:
                 },
             )
         mapped = {
+            "shell": AgentDecision(
+                intent="tool",
+                confidence=decision.confidence,
+                selected_tools=list(registration.tools or ["shell", "run_command"]),
+                reasoning_summary=decision.reason,
+                verifier_passed=True,
+            ),
             "coding": AgentDecision(
                 intent="edit",
                 confidence=decision.confidence,
                 selected_tools=list(registration.tools or [
-                    "shell",
-                    "run_command",
                     "run_script_once",
                     "verify_project",
                     "edit_file",
@@ -12187,6 +12220,79 @@ class AgentChatGateway:
                 "route": "computer",
                 "permission_requests": transactional_approvals,
             },
+        )
+
+    def _execute_shell_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        text: str,
+        ask_service: Any,
+        callbacks: Any = None,
+        event_sink: Any = None,
+        lane_task_id: str = "",
+    ) -> ChatTurnResult:
+        """Execute local shell and terminal commands using AskAgent without Codex."""
+        ask_agent = getattr(ask_service, "ask_agent", None)
+        if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
+            return ChatTurnResult(
+                answer="Shell command execution requires the configured tool execution agent.",
+                error="shell_executor_unavailable",
+                mode="route-shell-error",
+                decision=decision,
+                payload={"route": "shell"},
+            )
+        if callable(event_sink):
+            event_sink(
+                "shell_execution_started",
+                "Shell execution",
+                metadata={
+                    "turn_id": context.turn_id,
+                    "session_id": context.session_id,
+                    "status": "running",
+                },
+            )
+        from mana_agent.config.settings import default_index_dir
+
+        system_prompt = (
+            "You are Mana-Agent's local shell and terminal command execution agent. "
+            "Use only the shell or run_command tools to execute terminal commands in the local workspace. "
+            "Execute the requested commands, inspect their stdout/stderr outputs, and present clear results. "
+            "Do not call Codex or attempt repository code-generation workflows."
+        )
+        try:
+            response = ask_agent.run(
+                question=text,
+                index_dir=self._index_dir or default_index_dir(self.root),
+                k=self._resolved_k,
+                max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                callbacks=callbacks,
+                system_prompt=system_prompt,
+                tool_policy={
+                    "allowed_tools": ["shell", "run_command"],
+                    "require_initial_tool_call": True,
+                },
+            )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
+        except Exception as exc:
+            return ChatTurnResult(
+                answer=str(exc),
+                error=f"Shell route execution failed: {exc}",
+                mode="route-shell-error",
+                decision=decision,
+                payload={"route": "shell"},
+            )
+        answer = str(getattr(response, "answer", response) or "").strip()
+        trace = _serialize_tool_traces(response)
+        return ChatTurnResult(
+            answer=answer,
+            mode="route-shell",
+            decision=decision,
+            trace=trace,
+            warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
+            payload={"route": "shell", "entry_route": "shell"},
         )
 
     async def process_turn_async(

@@ -2,6 +2,17 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-02
+
+- Separated local shell execution from Codex coding agent:
+  - Created a dedicated `shell` entry route distinct from `coding`, separating local shell/terminal command execution from Codex-driven code editing workflows.
+  - Added `"shell"` to `EntryRouteName` and `required_source_rules` in `src/mana_agent/gateway/entry_routing.py`, updating `ENTRY_ROUTER_PROMPT` to guide command execution to `shell` and repository edits to `coding`.
+  - Added `RouteRegistration("shell", ...)` with tools `("shell", "run_command")` in `src/mana_agent/gateway/chat_gateway.py` and removed shell tools from `RouteRegistration("coding", ...)`, preventing Codex preflight from blocking shell execution.
+  - Implemented `_execute_shell_route()` in `src/mana_agent/gateway/chat_gateway.py` executing shell commands directly through `AskAgent` without requiring Codex.
+  - Mapped `"shell"` in `ENTRY_ROUTE_LANES` (`src/mana_agent/gateway/lanes.py`) to `LaneId.OPERATIONS`.
+  - Added tests in `tests/gateway/test_entry_routing.py` verifying that shell requests route to `shell` with shell tools, coding does not have shell tools, and shell commands execute without Codex.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -k "test_entry_router_recognizes_shell_execution_requests_as_shell or test_shell_route_executes_without_codex"`.
+
 ## 2026-10-01
 
 - Fixed entry router recognizing local shell and terminal command execution requests:

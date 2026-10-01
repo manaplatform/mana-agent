@@ -327,6 +327,7 @@ ENTRY_ROUTE_LANES: dict[str, LaneId] = {
     "artifact": LaneId.ARTIFACT,
     "media": LaneId.MEDIA,
     "coding": LaneId.CODING,
+    "shell": LaneId.OPERATIONS,
     "mcp": LaneId.OPERATIONS,
     "browser": LaneId.RESEARCH,
     "search": LaneId.RESEARCH,

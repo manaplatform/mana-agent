@@ -95,6 +95,7 @@ class _RouteModel:
         route = self.routes.pop(0) if self.routes else "conversation"
         source_by_route = {
             "conversation": ["none"], "unsupported": ["none"], "coding": ["repository"],
+            "shell": ["repository"],
             "mcp": ["mcp"],
             "gmail": ["gmail"], "calendar": ["calendar"], "browser": ["browser"],
             "search": ["search"], "github": ["github"], "repository": ["repository"],
@@ -203,6 +204,7 @@ def _registry(
         ("multi_task", "compound task orchestration"),
         ("conversation", "ordinary conversation"),
         ("coding", "Codex coding"),
+        ("shell", "local shell and terminal command execution"),
         ("mcp", "MCP provider operations"),
         ("gmail", "Gmail inbox"),
         ("calendar", "calendar"),
@@ -228,9 +230,9 @@ def _registry(
             else RouteAvailability(True)
         )
         tools = (
-            (
-                "shell",
-                "run_command",
+            ("shell", "run_command")
+            if name == "shell"
+            else (
                 "run_script_once",
                 "verify_project",
                 "edit_file",
@@ -820,6 +822,7 @@ def test_gateway_route_registry_has_executors_for_every_available_route(
         "conversation": "_execute_entry_route",
         "multi_task": "process_turn",
         "coding": "_execute_entry_route",
+        "shell": "_execute_shell_route",
         "mcp": "_execute_mcp_route",
         "remote_execution": "_execute_entry_route",
         "server": "_execute_entry_route",
@@ -2203,21 +2206,29 @@ def test_entry_route_context_to_dict_filters_memory_task_candidates_when_disable
     assert len(context_enabled.to_dict()["memory_task_candidates"]) == 2
 
 
-def test_entry_router_recognizes_shell_execution_requests_as_coding(tmp_path: Path) -> None:
+def test_entry_router_recognizes_shell_execution_requests_as_shell(tmp_path: Path) -> None:
     assert "local shell/terminal command execution" in ENTRY_ROUTER_PROMPT
     assert "use shell run nmap to manadev.net on port 443" in ENTRY_ROUTER_PROMPT
 
-    gateway, _chat, _ask = _gateway(tmp_path, _RouteModel("coding"))
-    built_reg = gateway._build_entry_route_registry().get("coding")
+    gateway, _chat, _ask = _gateway(tmp_path, _RouteModel("shell"))
+    built_reg = gateway._build_entry_route_registry().get("shell")
     assert "shell" in built_reg.tools
     assert "run_command" in built_reg.tools
 
-    registry = gateway._entry_route_registry
-    coding_reg = registry.get("coding")
-    assert "shell" in coding_reg.tools
-    assert "run_command" in coding_reg.tools
+    coding_built = gateway._build_entry_route_registry().get("coding")
+    assert "shell" not in coding_built.tools
+    assert "run_command" not in coding_built.tools
 
-    model = _RouteModel("coding")
+    registry = gateway._entry_route_registry
+    shell_reg = registry.get("shell")
+    assert "shell" in shell_reg.tools
+    assert "run_command" in shell_reg.tools
+
+    coding_reg = registry.get("coding")
+    assert "shell" not in coding_reg.tools
+    assert "run_command" not in coding_reg.tools
+
+    model = _RouteModel("shell")
     router = EntryRouter(llm=model, registry=registry)
     decision = router.route(
         user_prompt="use shell run nmap to manadev.net on port 443",
@@ -2227,7 +2238,42 @@ def test_entry_router_recognizes_shell_execution_requests_as_coding(tmp_path: Pa
             turn_id="t_shell",
         ),
     )
-    assert decision.route == "coding"
+    assert decision.route == "shell"
     assert decision.required_sources == ("repository",)
+
+
+test_entry_router_recognizes_shell_execution_requests_as_coding = (
+    test_entry_router_recognizes_shell_execution_requests_as_shell
+)
+
+
+def test_shell_route_executes_without_codex(tmp_path: Path) -> None:
+    gateway, _chat, ask_agent = _gateway(tmp_path, _RouteModel("shell"), coding_agent=None)
+    decision = EntryRoutingDecision(
+        route="shell",
+        confidence=0.95,
+        reason="run local shell command",
+        required_sources=("repository",),
+    )
+    context = EntryRouteContext(
+        session_id="s_shell_exec",
+        conversation_id="c_shell_exec",
+        turn_id="t_shell_exec",
+    )
+    result = gateway._execute_entry_route(
+        decision=decision,
+        context=context,
+        text="use shell run nmap to manadev.net on port 443",
+        state={},
+        ask_service=_AskService(ask_agent),
+        sink=None,
+        options={},
+    )
+    assert result.mode == "route-shell"
+    assert result.error is None
+    assert len(ask_agent.calls) == 1
+    call = ask_agent.calls[0]
+    assert call["tool_policy"]["allowed_tools"] == ["shell", "run_command"]
+
 
 

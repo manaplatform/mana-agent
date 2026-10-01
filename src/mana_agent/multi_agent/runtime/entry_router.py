@@ -90,7 +90,7 @@ only. Never select web_search, github_search, or another provider as a substitut
 
 Route kinds:
 - command: run a known Mana-Agent command only when command_name is in available_commands.
-- tool_execution: execute a named tool/action from available_tools, such as command_inventory.
+- tool_execution: execute a named tool/action from available_tools, such as command_inventory or shell.
 - browser_task: run a multi-step interactive website session using only advertised browser_* tools.
 - semantic_qa: answer from the semantic index; requires_index must be true.
 - repo_search: search/read local repository files directly.
@@ -100,7 +100,7 @@ Route kinds:
   amend, push, pull, fetch, branch, switch, checkout, merge, rebase, reset, revert,
   or tag through Git-capable tools. Choose this before repo_search for Git requests;
   branch names and words like commit/push are not repository search queries.
-- coding_task: user wants repository files changed, verification, or local shell command execution.
+- coding_task: user wants repository files changed or verification.
 - analysis_task: user wants repository analysis.
 - conversation: answer ordinary chat, conversational recall, or a follow-up from
   the active session history without repository search, external search, or tools.
