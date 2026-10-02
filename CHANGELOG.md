@@ -4,6 +4,40 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-02
 
+- Integrated interactive approval modals and waiting flow across chat (TUI) and dashboard:
+  - Enabled automatic approval modal popup in TUI (`src/mana_agent/tui/app.py`) by subscribing to `action.approval.required` in `_handle_hub_session_event`, enqueuing approval modals for transactional actions, auto-dismissing on `action.approval.granted`/`denied`, and supporting lookup by `action_id` (`act_...`) in addition to `inbox_item_id`.
+  - Updated `src/mana_agent/transactional_actions/events.py` to populate `permission_request_id` with either `inbox_item_id` or `action_id`, and injected `conversation_id` into event payloads and metadata for reliable WebSocket dispatch to `/ws/conversations/{id}/events`.
+  - Updated `ShellExecutor._request_approval_and_wait` in `src/mana_agent/tools/shell_exec.py` to forward `conversation_id` to event emissions, publish `action.approval.required` to `ExecutionEventHub`, and post `CodingActivityEvent` to chat history.
+  - Updated `AskAgent.run_command` in `src/mana_agent/multi_agent/runtime/ask_agent.py` to handle `ApprovalRequired`, emit approval events, and wait for human response; on approval, executes the shell action through the gateway and returns the output to continue the agent turn seamlessly.
+  - Updated `AgentChatGateway` in `src/mana_agent/gateway/chat_gateway.py` to support `action_id` lookup in approval and denial commands (`transactional_action_approval_command`, `deny_transactional_action_command`).
+  - Updated `decide_transactional_action_in_chat` in `src/mana_agent/api/routes/conversations.py` to resolve items by `action_id` (`act_...`) via `find_for_action` and issue approval grants on approval.
+  - Added unit tests in `tests/gateway/test_transactional_approval.py` and `tests/test_api_conversations.py`.
+  - User verification required: `python -m pytest tests/gateway/test_transactional_approval.py tests/test_api_conversations.py tests/test_shell_executor.py`.
+
+- Fixed transactional action approval execution in AgentChatGateway:
+  - Fixed erroneous `Exact action approved, but this legacy MCP approval is not bound to a resumable durable task. No provider action was executed; submit a fresh model-selected MCP request.` message returned when approving shell or standalone MCP actions.
+  - In `src/mana_agent/gateway/chat_gateway.py`, updated `transactional_action_approval_command` to recognize shell actions (`action.tool_name == "shell"`), issuing the approval grant so waiting in-flight shell executions proceed cleanly.
+  - Bound and executed standalone MCP actions via `_rebind_approved_mcp_action` and `gateway.execute`, executing the provider action directly when not backed by a durable branch task.
+  - Updated `_rebind_approved_mcp_action` to resolve `provider_id`, `tool_name`, and `arguments` from `normalized_arguments` in `ActionIntent` and protected context.
+  - Added unit test coverage in `tests/gateway/test_transactional_approval.py`.
+  - User verification required: `python -m pytest tests/gateway/test_transactional_approval.py`.
+
+- Fixed Windows shell command line tokenization and quote stripping in ShellExecutor:
+  - Fixed Windows test failures on CI (`test_shell_executor_timeout_kills_process_and_returns_partial_output`, `test_shell_executor_preserves_non_zero_exit_code`, `test_shell_executor_truncation_per_max_output_length`, `test_shell_executor_sanitizes_environment_and_secrets`) caused by `shlex.split(..., posix=False)` retaining enclosing quotes on arguments.
+  - When `subprocess.Popen(argv)` runs on Windows, `list2cmdline` re-escaped tokens that retained quotes into `\"...\"`, turning Python `-c` commands into string statements that silently exited with code 0 instead of executing.
+  - Implemented `split_windows_command` and `split_shell_command` in `src/mana_agent/tools/shell_exec.py` properly stripping enclosing quotes while preserving Windows path backslashes and escaped quotes (`\"` -> `"`).
+  - Added unit test suite in `tests/test_shell_executor.py` verifying Windows command splitting, backslash path preservation, quote stripping, roundtrip fidelity with `subprocess.list2cmdline`, and platform dispatch.
+  - User verification required: `python -m pytest tests/test_shell_executor.py`.
+
+- Fixed shell execution to automatically send approval requests and wait when commands require human approval:
+  - Added `auto_request_approval` and `approval_wait_timeout_seconds` configuration to `ShellExecutor` in `src/mana_agent/tools/shell_exec.py`.
+  - Implemented `_request_approval_and_wait()` in `ShellExecutor` proposing a `ShellActionAdapter` through `ActionGateway` to create an authoritative durable human inbox request, emit `action.approval.required` activity events to notify connected TUIs and live dashboards, and wait for human decision.
+  - If approved, acquires the valid grant token and automatically executes the shell command; if denied or timed out, stops safely and returns the exact status without executing.
+  - Updated `AskAgent` `shell` and `run_command` tools in `src/mana_agent/multi_agent/runtime/ask_agent.py` to forward approval waiting parameters.
+  - Updated `ExecutionManager` `execute_shell_call` and `execute_shell_call_sync` in `src/mana_agent/execution/manager.py` to support `auto_request_approval`.
+  - Added unit test coverage in `tests/test_shell_executor.py` verifying automatic approval request creation, waiting, approval resumption, denial handling, and timeout behavior.
+  - User verification required: `python -m pytest tests/test_shell_executor.py -k "test_shell_executor_auto_request_approval"`.
+
 - Separated local shell execution from Codex coding agent:
   - Created a dedicated `shell` entry route distinct from `coding`, separating local shell/terminal command execution from Codex-driven code editing workflows.
   - Added `"shell"` to `EntryRouteName` and `required_source_rules` in `src/mana_agent/gateway/entry_routing.py`, updating `ENTRY_ROUTER_PROMPT` to guide command execution to `shell` and repository edits to `coding`.

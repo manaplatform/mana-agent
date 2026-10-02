@@ -379,3 +379,168 @@ def test_shell_executor_audit_log(tmp_path: Path) -> None:
     assert record["tool"] == "shell"
     assert record["command"] == "echo auditing_check"
     assert record["outcome"] == {"type": "exit", "exit_code": 0}
+
+
+def test_shell_executor_auto_request_approval_and_wait_approved(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    import threading
+    import time
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+
+    executor = ShellExecutor(
+        workspace_root=tmp_path,
+        needs_approval=True,
+        auto_request_approval=True,
+        approval_wait_timeout_seconds=5.0,
+    )
+
+    def approve_inbox() -> None:
+        inbox = default_human_inbox_service()
+        for _ in range(50):
+            time.sleep(0.05)
+            items = inbox.repository.list()
+            if items:
+                actor = items[0].assigned_reviewer_id or "local"
+                inbox.respond(ResponseSubmission(
+                    inbox_item_id=items[0].inbox_item_id,
+                    operation=ResponseOperation.APPROVE,
+                    actor_id=actor,
+                    channel="test",
+                    idempotency_key=f"approve_{items[0].inbox_item_id}",
+                    expected_version=items[0].version,
+                    current_action_digest=items[0].action_digest,
+                ))
+                break
+
+    thread = threading.Thread(target=approve_inbox, daemon=True)
+    thread.start()
+
+    res = executor.execute(commands=["python -c 'print(123)'"])
+    assert res["type"] == "shell_call_output"
+    assert len(res["output"]) == 1
+    assert "123" in res["output"][0]["stdout"]
+    assert res["output"][0]["outcome"]["exit_code"] == 0
+
+
+def test_shell_executor_auto_request_approval_and_wait_denied(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    import threading
+    import time
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+
+    executor = ShellExecutor(
+        workspace_root=tmp_path,
+        needs_approval=True,
+        auto_request_approval=True,
+        approval_wait_timeout_seconds=5.0,
+    )
+
+    def deny_inbox() -> None:
+        inbox = default_human_inbox_service()
+        for _ in range(50):
+            time.sleep(0.05)
+            items = inbox.repository.list()
+            if items:
+                actor = items[0].assigned_reviewer_id or "local"
+                inbox.respond(ResponseSubmission(
+                    inbox_item_id=items[0].inbox_item_id,
+                    operation=ResponseOperation.DENY,
+                    actor_id=actor,
+                    channel="test",
+                    idempotency_key=f"deny_{items[0].inbox_item_id}",
+                    expected_version=items[0].version,
+                    current_action_digest=items[0].action_digest,
+                ))
+                break
+
+    thread = threading.Thread(target=deny_inbox, daemon=True)
+    thread.start()
+
+    res = executor.execute(commands=["python -c 'print(123)'"])
+    assert res["output"][0]["outcome"]["exit_code"] == 1
+    assert "HumanApprovalRequired" in res["output"][0]["stderr"]
+    assert "denied" in res["output"][0]["stderr"].lower()
+
+
+def test_shell_executor_auto_request_approval_timeout(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    executor = ShellExecutor(
+        workspace_root=tmp_path,
+        needs_approval=True,
+        auto_request_approval=True,
+        approval_wait_timeout_seconds=0.1,
+    )
+    res = executor.execute(commands=["python -c 'print(123)'"])
+    assert res["output"][0]["outcome"]["exit_code"] == 1
+    assert "HumanApprovalRequired" in res["output"][0]["stderr"]
+    assert "timed out" in res["output"][0]["stderr"].lower()
+
+
+def test_shell_executor_auto_request_approval_disabled(tmp_path: Path) -> None:
+    executor = ShellExecutor(
+        workspace_root=tmp_path,
+        needs_approval=True,
+        auto_request_approval=False,
+    )
+    res = executor.execute(commands=["python -c 'print(123)'"])
+    assert res["output"][0]["outcome"]["exit_code"] == 1
+    assert "HumanApprovalRequired" in res["output"][0]["stderr"]
+    assert "requires explicit approval before execution" in res["output"][0]["stderr"]
+
+
+def test_split_windows_command_preserves_paths_and_unquotes_args() -> None:
+    from mana_agent.tools.shell_exec import split_windows_command
+
+    # Path with backslashes must retain backslashes, and quotes around -c argument must be stripped
+    cmd = (
+        r'C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe -c '
+        r'"import sys, time; sys.stdout.write(\'partial_before_timeout\n\'); sys.stdout.flush(); time.sleep(5)"'
+    )
+    tokens = split_windows_command(cmd)
+    assert len(tokens) == 3
+    assert tokens[0] == r"C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
+    assert tokens[1] == "-c"
+    assert tokens[2] == r"import sys, time; sys.stdout.write('partial_before_timeout\n'); sys.stdout.flush(); time.sleep(5)"
+
+
+def test_split_windows_command_roundtrip_with_list2cmdline() -> None:
+    import subprocess
+    from mana_agent.tools.shell_exec import split_windows_command
+
+    cmds = [
+        r'C:\Python312\python.exe -c "import sys; sys.exit(42)"',
+        r"""C:\Python312\python.exe -c "print('A' * 3000)""" + '"',
+        r"""C:\Python312\python.exe -c "import os; print('Token:' + os.environ.get('KEY', ''))""" + '"',
+        r'echo "hello \"world\""',
+        r'python.exe -c "print(1 + 2)" "" arg3',
+    ]
+    for original in cmds:
+        tokens = split_windows_command(original)
+        reconstructed = subprocess.list2cmdline(tokens)
+        assert reconstructed == original
+
+
+def test_split_windows_command_syntax_error_unclosed_quotes() -> None:
+    import pytest
+    from mana_agent.tools.shell_exec import split_windows_command
+
+    with pytest.raises(ValueError, match="No closing quotation"):
+        split_windows_command('python.exe -c "unclosed string')
+
+
+def test_split_shell_command_platform_dispatch(monkeypatch) -> None:
+    from mana_agent.tools.shell_exec import split_shell_command
+
+    # On POSIX: delegates to shlex.split with posix=True
+    monkeypatch.setattr("os.name", "posix")
+    posix_res = split_shell_command("echo 'hello world'")
+    assert posix_res == ["echo", "hello world"]
+
+    # On Windows NT: delegates to split_windows_command
+    monkeypatch.setattr("os.name", "nt")
+    win_cmd = r'C:\Python\python.exe -c "print(\'hello\')"'
+    win_res = split_shell_command(win_cmd)
+    assert win_res == [r"C:\Python\python.exe", "-c", "print('hello')"]
+

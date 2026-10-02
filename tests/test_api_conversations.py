@@ -313,3 +313,44 @@ def test_event_serialization_shape(client: TestClient, tmp_path: Path) -> None:
         assert key in event
     assert event["conversation_id"] == conversation_id
     assert event["execution_id"] == "exec_1"
+
+
+def test_dashboard_transactional_action_endpoint_by_action_id(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    root = str(tmp_path / "repo")
+    created = client.post(
+        "/api/v1/conversations",
+        json={"title": "Transactional action", "root": root},
+    ).json()
+    conversation_id = created["conversation"]["conversation_id"]
+
+    from mana_agent.transactional_actions.adapters import ShellActionAdapter
+    from mana_agent.transactional_actions.runtime import create_transactional_runtime
+
+    runtime = create_transactional_runtime(tmp_path / "repo")
+    adapter = ShellActionAdapter(
+        argv=["nmap", "-p", "443", "manadev.net"],
+        cwd=tmp_path / "repo",
+        environment={},
+        expected_outputs=[],
+        parent_task_id="shell_exec",
+        actor="user",
+        originating_agent="shell_executor",
+        idempotency_key="test_api_conv_action_1",
+        allow_command_result_verification=True,
+    )
+    action_intent = runtime.gateway.propose(adapter)
+    action_id = action_intent.action_id
+    assert action_id.startswith("act_")
+
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/transactional-actions/{action_id}",
+        json={"decision": "approve", "root": root},
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["decision"] == "approve"
+    assert response.json()["result"]["action_id"] == action_id
+

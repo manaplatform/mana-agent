@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import ast
 import re
+import time
 from time import perf_counter
 from typing import Any, Literal, Sequence
 from collections import defaultdict
@@ -1554,7 +1555,14 @@ class AskAgent:
                     )
                 )
 
-        def run_command(cmd: str, expected_outputs: list[str] | None = None, action_approval_id: str = "", cwd: str | None = None) -> str:
+        def run_command(
+            cmd: str,
+            expected_outputs: list[str] | None = None,
+            action_approval_id: str = "",
+            cwd: str | None = None,
+            wait_for_approval: bool = False,
+            approval_wait_timeout_seconds: float = 60.0,
+        ) -> str:
             started = perf_counter()
             status = "ok"
             output_preview = ""
@@ -1625,16 +1633,122 @@ class AskAgent:
                     )
                 except ApprovalRequired as exc:
                     action = exc.action
-                    return json.dumps({
-                        "ok": False,
-                        "error_code": "approval_required",
-                        "permission_required": True,
-                        "permission_request_id": action.action_id,
-                        "action_id": action.action_id,
-                        "preview": action.preview.redacted() if action.preview else {},
-                        "preview_digest": action.preview_digest,
-                        "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
-                    })
+                    inbox_item_id = exc.inbox_item_id or action.inbox_item_id
+                    if not inbox_item_id:
+                        inbox_service = default_action_gateway(self.project_root).inbox_service
+                        if inbox_service is not None:
+                            matches = inbox_service.repository.find_for_action(action.action_id)
+                            if matches:
+                                inbox_item_id = matches[0].inbox_item_id
+
+                    req_id = inbox_item_id or action.action_id
+                    conv_id = str(flow_id or getattr(self, "session_id", "") or "").strip()
+
+                    if wait_for_approval:
+                        from mana_agent.human_inbox import default_human_inbox_service
+                        from mana_agent.human_inbox.models import InboxStatus
+                        gateway = default_action_gateway(self.project_root)
+                        inbox_service = gateway.inbox_service or default_human_inbox_service()
+
+                        approval_metadata = {
+                            "permission_request_id": req_id,
+                            "inbox_item_id": req_id,
+                            "action_id": action.action_id,
+                            "permission_scope": "transactional_action.once",
+                            "preview": action.preview.redacted() if action.preview else {"command": cmd},
+                            "preview_digest": action.preview_digest,
+                            "transactional_action_approval": True,
+                            "conversation_id": conv_id,
+                        }
+                        try:
+                            from mana_agent.chat.history import get_history
+                            from mana_agent.chat.models import CodingActivityEvent
+
+                            get_history().add(
+                                CodingActivityEvent(
+                                    activity={
+                                        "event_type": "action.approval.required",
+                                        "title": f"Approval required for shell command: {cmd}",
+                                        "metadata": approval_metadata,
+                                    }
+                                )
+                            )
+                        except Exception as hist_err:
+                            logger.debug("Failed to record CodingActivityEvent for approval: %s", hist_err)
+
+                        try:
+                            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+                            get_execution_event_hub().publish(
+                                {
+                                    "type": "action.approval.required",
+                                    "event_type": "action.approval.required",
+                                    "kind": "transactional_action",
+                                    "title": f"Approval required for command: {cmd}",
+                                    "metadata": approval_metadata,
+                                },
+                                conversation_id=conv_id,
+                                execution_id=str(run_id or ""),
+                                persist=False,
+                            )
+                        except Exception as hub_err:
+                            logger.debug("Failed to publish approval event to hub: %s", hub_err)
+
+                        start_time = time.monotonic()
+                        poll_interval = 0.25
+                        approved = False
+                        grant_id = ""
+                        while time.monotonic() - start_time < approval_wait_timeout_seconds:
+                            grant = gateway.approvals.find_valid(action)
+                            if grant is not None:
+                                approved = True
+                                grant_id = grant.approval_id
+                                break
+                            if inbox_item_id:
+                                item = inbox_service.repository.get(inbox_item_id)
+                                if item is not None and item.status == InboxStatus.APPROVED:
+                                    grant = gateway.approvals.find_valid(action)
+                                    if grant is None:
+                                        grant = gateway.approvals.issue(
+                                            action,
+                                            approved_by=item.response_actor_id or "user",
+                                            ttl_seconds=300,
+                                        )
+                                    approved = True
+                                    grant_id = grant.approval_id
+                                    break
+                                elif item is not None and item.status in {
+                                    InboxStatus.DENIED,
+                                    InboxStatus.CANCELLED,
+                                    InboxStatus.SUPERSEDED,
+                                    InboxStatus.EXPIRED,
+                                }:
+                                    break
+                            time.sleep(poll_interval)
+                        if approved and grant_id:
+                            outcome = gateway.execute(shell_adapter, approval_id=grant_id)
+                        else:
+                            return json.dumps({
+                                "ok": False,
+                                "error_code": "approval_required",
+                                "permission_required": True,
+                                "permission_request_id": req_id,
+                                "action_id": action.action_id,
+                                "preview": action.preview.redacted() if action.preview else {},
+                                "preview_digest": action.preview_digest,
+                                "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+                            })
+                    else:
+                        return json.dumps({
+                            "ok": False,
+                            "error_code": "approval_required",
+                            "permission_required": True,
+                            "permission_request_id": req_id,
+                            "action_id": action.action_id,
+                            "preview": action.preview.redacted() if action.preview else {},
+                            "preview_digest": action.preview_digest,
+                            "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+                        })
                 executed = outcome.result
                 returncode = int(executed.get("returncode") or 0)
                 stdout = str(executed.get("stdout") or "")
@@ -1694,6 +1808,8 @@ class AskAgent:
             max_output_length: int = 4096,
             environment: dict[str, str] | None = None,
             action_approval_id: str = "",
+            wait_for_approval: bool = True,
+            approval_wait_timeout_seconds: float = 60.0,
         ) -> str:
             started = perf_counter()
             status = "ok"
@@ -1713,6 +1829,9 @@ class AskAgent:
                     workspace_root=self.project_root,
                     default_timeout_ms=resolved_action["timeout_ms"],
                     default_max_output_length=resolved_action["max_output_length"],
+                    auto_request_approval=wait_for_approval,
+                    approval_wait_timeout_seconds=approval_wait_timeout_seconds,
+                    conversation_id=str(flow_id or getattr(self, "session_id", "") or ""),
                 )
                 res = executor.execute_action(
                     resolved_action,

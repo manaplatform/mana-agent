@@ -19,7 +19,11 @@ def event_payload(event_type: str, action: ActionIntent, **details: Any) -> dict
         raise ValueError(f"unsupported transactional action event: {event_type}")
     preview = action.preview.redacted() if action.preview else None
     approval_event = event_type.startswith("action.approval.")
-    return {
+    inbox_id = action.inbox_item_id or str(details.get("inbox_item_id") or "")
+    req_id = inbox_id or action.action_id
+    conv_id = str(details.get("conversation_id") or "").strip()
+    exec_id = str(details.get("execution_id") or action.parent_task_id or "").strip()
+    payload = {
         "type": event_type,
         "event_type": event_type,
         "kind": "transactional_action",
@@ -28,8 +32,8 @@ def event_payload(event_type: str, action: ActionIntent, **details: Any) -> dict
         "message": action.policy_decision.explanation if action.policy_decision else event_type,
         "metadata": {
             "action_id": action.action_id,
-            "inbox_item_id": action.inbox_item_id,
-            "permission_request_id": action.inbox_item_id if approval_event else "",
+            "inbox_item_id": inbox_id,
+            "permission_request_id": req_id if approval_event else "",
             "permission_scope": (
                 (
                     "transactional_action.task"
@@ -72,6 +76,11 @@ def event_payload(event_type: str, action: ActionIntent, **details: Any) -> dict
             **details,
         },
     }
+    if conv_id:
+        payload["conversation_id"] = conv_id
+    if exec_id:
+        payload["execution_id"] = exec_id
+    return payload
 
 
 ActionEventSink = Callable[[dict[str, Any]], None]

@@ -701,7 +701,15 @@ def decide_transactional_action_in_chat(
             if gateway is not None and getattr(gateway, "root", None) == service.root
             else getattr(request.app.state, "human_inbox", None) or default_human_inbox_service()
         )
-        item = inbox.repository.get(inbox_item_id)
+        try:
+            item = inbox.repository.get(inbox_item_id)
+        except (KeyError, LookupError):
+            matches = inbox.repository.find_for_action(inbox_item_id)
+            if matches:
+                item = matches[0]
+                inbox_item_id = item.inbox_item_id
+            else:
+                raise
         response = inbox.respond(ResponseSubmission(
             inbox_item_id=inbox_item_id,
             operation=(ResponseOperation.APPROVE if payload.decision == "approve" else ResponseOperation.DENY),
@@ -711,6 +719,17 @@ def decide_transactional_action_in_chat(
             expected_version=item.version,
             current_action_digest=item.action_digest,
         ))
+        if payload.decision == "approve" and gateway is not None and hasattr(gateway, "_transactional_runtime"):
+            try:
+                action = gateway._transactional_runtime.store.get_action(item.action_intent_id)
+                if action is not None:
+                    gateway._transactional_runtime.gateway.approvals.issue(
+                        action,
+                        approved_by=getpass.getuser(),
+                        ttl_seconds=300,
+                    )
+            except Exception:
+                pass
         result = {
             "inbox_item_id": response.inbox_item_id,
             "action_id": response.action_intent_id,

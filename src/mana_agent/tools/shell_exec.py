@@ -13,6 +13,7 @@ Implements non-interactive local shell execution with:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -117,6 +118,108 @@ UNTRUSTED_CONTENT_NOTICE: str = (
 )
 
 
+def split_windows_command(cmd: str) -> list[str]:
+    """Split a Windows command line string into argv tokens.
+
+    Adheres to Windows command line semantics while preserving path backslashes:
+    - Whitespace outside quotes delimits arguments.
+    - Double quotes ("...") and single quotes ('...') group whitespace into a single argument.
+    - Outer enclosing quotes are stripped from the resulting argument tokens so that
+      subprocess.Popen does not escape them into literal quotes.
+    - Escaped quotes (\\\" or \\\') unescape to literal quotes.
+    - Path backslashes (e.g. C:\\hostedtoolcache\\...) are preserved as literal characters.
+    """
+    text = str(cmd or "").strip()
+    if not text:
+        return []
+
+    tokens: list[str] = []
+    current: list[str] = []
+    in_quote: str | None = None
+    token_started = False
+    i = 0
+    n = len(text)
+
+    while i < n:
+        c = text[i]
+        if in_quote is None:
+            if c in " \t\r\n":
+                if token_started:
+                    tokens.append("".join(current))
+                    current = []
+                    token_started = False
+                i += 1
+                continue
+
+            token_started = True
+            if c in ('"', "'"):
+                in_quote = c
+                i += 1
+                continue
+
+            if c == "\\":
+                if i + 1 < n and text[i + 1] in ('"', "'"):
+                    current.append(text[i + 1])
+                    i += 2
+                    continue
+                current.append("\\")
+                i += 1
+                continue
+
+            current.append(c)
+            i += 1
+        elif in_quote == '"':
+            if c == '"':
+                in_quote = None
+                i += 1
+                continue
+            if c == "\\":
+                if i + 1 < n and text[i + 1] in ('"', "'"):
+                    current.append(text[i + 1])
+                    i += 2
+                    continue
+                current.append("\\")
+                i += 1
+                continue
+            current.append(c)
+            i += 1
+        else:  # in_quote == "'"
+            if c == "'":
+                in_quote = None
+                i += 1
+                continue
+            if c == "\\":
+                if i + 1 < n and text[i + 1] in ('"', "'"):
+                    current.append(text[i + 1])
+                    i += 2
+                    continue
+                current.append("\\")
+                i += 1
+                continue
+            current.append(c)
+            i += 1
+
+    if in_quote is not None:
+        raise ValueError("No closing quotation")
+
+    if token_started:
+        tokens.append("".join(current))
+
+    return tokens
+
+
+def split_shell_command(cmd: str) -> list[str]:
+    """Tokenize a shell command string into an argv list respecting platform conventions.
+
+    On POSIX platforms (Linux/macOS), delegates to `shlex.split(cmd, posix=True)`.
+    On Windows (`os.name == 'nt'`), delegates to `split_windows_command(cmd)` to avoid
+    Windows-specific quote retention or backslash corruption.
+    """
+    if os.name == "nt":
+        return split_windows_command(cmd)
+    return shlex.split(cmd, posix=True)
+
+
 def is_read_only_command(cmd: str | Sequence[str]) -> bool:
     """Classify whether a command is strictly read-only or potentially mutating.
 
@@ -130,7 +233,7 @@ def is_read_only_command(cmd: str | Sequence[str]) -> bool:
         if re.search(r"(?:>|>>|\|\s*(?:tee|sed|awk|xargs\s+rm))", text):
             return False
         try:
-            tokens = shlex.split(text, posix=os.name != "nt")
+            tokens = split_shell_command(text)
         except ValueError:
             return False
     else:
@@ -245,8 +348,11 @@ class ShellExecutor:
         allowlist: Sequence[str] | None = None,
         denylist: Sequence[str] | None = None,
         needs_approval: bool = True,
+        auto_request_approval: bool = True,
+        approval_wait_timeout_seconds: float = 60.0,
         on_approval: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         audit_log_path: Path | str | None = None,
+        conversation_id: str = "",
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         if not self.workspace_root.is_dir():
@@ -259,7 +365,10 @@ class ShellExecutor:
         self.allowlist = tuple(allowlist) if allowlist is not None else None
         self.denylist = tuple(denylist) if denylist is not None else DANGEROUS_SHELL_PATTERNS
         self.needs_approval = needs_approval
+        self.auto_request_approval = auto_request_approval
+        self.approval_wait_timeout_seconds = max(0.01, float(approval_wait_timeout_seconds))
         self.on_approval = on_approval
+        self.conversation_id = str(conversation_id or "").strip()
 
     def _sanitize_env(self) -> tuple[dict[str, str], list[str]]:
         """Construct a sanitized process environment and gather secret values to redact."""
@@ -335,7 +444,7 @@ class ShellExecutor:
 
         # 2. Tokenize command into argv (WITHOUT shell=True)
         try:
-            argv = shlex.split(cmd, posix=os.name != "nt")
+            argv = split_shell_command(cmd)
         except ValueError as exc:
             duration_ms = (time.perf_counter() - start_time) * 1000.0
             self._audit("command_parse_error", cmd=cmd, error=str(exc), duration_ms=duration_ms)
@@ -457,6 +566,168 @@ class ShellExecutor:
 
         return result
 
+    def _request_approval_and_wait(
+        self,
+        cmd: str,
+        action: dict[str, Any] | ShellCallAction,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[bool, str]:
+        """Automatically create a durable approval request for a shell command and wait for human decision."""
+        try:
+            from mana_agent.chat.events import CodingActivityEvent
+            from mana_agent.chat.history import get_history
+            from mana_agent.human_inbox import default_human_inbox_service
+            from mana_agent.human_inbox.models import InboxStatus
+            from mana_agent.transactional_actions.adapters import ShellActionAdapter
+            from mana_agent.transactional_actions.models import PolicyOutcome
+            from mana_agent.transactional_actions.runtime import default_action_gateway
+        except ImportError as exc:
+            logger.warning("Approval subsystem imports unavailable: %s", exc)
+            return False, f"approval subsystem unavailable ({exc})"
+
+        try:
+            argv = split_shell_command(cmd)
+        except ValueError as exc:
+            return False, f"invalid command syntax ({exc})"
+
+        if not argv:
+            return False, "empty command cannot be approved"
+
+        timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else self.approval_wait_timeout_seconds
+        )
+
+        try:
+            gateway = default_action_gateway(self.workspace_root)
+            cmd_digest = hashlib.sha256(cmd.encode("utf-8")).hexdigest()
+            idempotency_key = f"shell_approval:{cmd_digest}:{time.time()}"
+            adapter = ShellActionAdapter(
+                argv=argv,
+                cwd=self.workspace_root,
+                environment={},
+                expected_outputs=[],
+                parent_task_id="shell_exec",
+                actor="user",
+                originating_agent="shell_executor",
+                idempotency_key=idempotency_key,
+                allow_command_result_verification=True,
+            )
+            action_intent = gateway.propose(adapter)
+            if (
+                action_intent.policy_decision
+                and action_intent.policy_decision.outcome is PolicyOutcome.DENY
+            ):
+                return False, f"denied by security policy ({action_intent.policy_decision.explanation})"
+
+            if (
+                action_intent.policy_decision
+                and action_intent.policy_decision.outcome is PolicyOutcome.ALLOW
+            ):
+                return True, ""
+
+            inbox_item_id = action_intent.inbox_item_id
+            if not inbox_item_id and gateway.inbox_service is not None:
+                matches = gateway.inbox_service.repository.find_for_action(action_intent.action_id)
+                if matches:
+                    inbox_item_id = matches[0].inbox_item_id
+
+            req_id = inbox_item_id or action_intent.action_id
+
+            # Post CodingActivityEvent to ChatHistory so connected TUI / Web interfaces display the approval modal
+            approval_metadata = {
+                "permission_request_id": req_id,
+                "inbox_item_id": req_id,
+                "action_id": action_intent.action_id,
+                "permission_scope": "transactional_action.once",
+                "preview": action_intent.preview.redacted() if action_intent.preview else {"command": cmd},
+                "preview_digest": action_intent.preview_digest,
+                "transactional_action_approval": True,
+                "conversation_id": self.conversation_id,
+            }
+            try:
+                get_history().add(
+                    CodingActivityEvent(
+                        activity={
+                            "event_type": "action.approval.required",
+                            "title": f"Approval required for shell command: {cmd}",
+                            "metadata": approval_metadata,
+                        }
+                    )
+                )
+            except Exception as exc:
+                logger.debug("Failed to record CodingActivityEvent for approval: %s", exc)
+
+            # Also publish to ExecutionEventHub so Dashboard and WebSocket subscribers receive the approval event
+            try:
+                from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+                get_execution_event_hub().publish(
+                    {
+                        "type": "action.approval.required",
+                        "event_type": "action.approval.required",
+                        "kind": "transactional_action",
+                        "title": f"Approval required for command: {cmd}",
+                        "metadata": approval_metadata,
+                    },
+                    conversation_id=self.conversation_id,
+                    persist=False,
+                )
+            except Exception as exc:
+                logger.debug("Failed to publish approval event to hub: %s", exc)
+
+            if self.audit_sink is not None:
+                try:
+                    self.audit_sink(
+                        "action.approval.required",
+                        {
+                            "title": f"Approval required for command: {cmd}",
+                            "metadata": approval_metadata,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            inbox_service = gateway.inbox_service or default_human_inbox_service()
+            start_time = time.monotonic()
+            poll_interval = 0.25
+
+            while True:
+                # Check if approval registry already has a valid grant
+                grant = gateway.approvals.find_valid(action_intent)
+                if grant is not None:
+                    return True, grant.approval_id
+
+                if inbox_item_id:
+                    item = inbox_service.repository.get(inbox_item_id)
+                    if item is not None:
+                        if item.status == InboxStatus.APPROVED:
+                            grant = gateway.approvals.find_valid(action_intent)
+                            if grant is None:
+                                grant = gateway.approvals.issue(
+                                    action_intent,
+                                    approved_by=item.response_actor_id or "user",
+                                    ttl_seconds=300,
+                                )
+                            return True, grant.approval_id
+                        if item.status in {
+                            InboxStatus.DENIED,
+                            InboxStatus.CANCELLED,
+                            InboxStatus.SUPERSEDED,
+                            InboxStatus.EXPIRED,
+                        }:
+                            return False, f"Approval {item.status.value}"
+
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout:
+                    return False, f"Approval request timed out after {int(timeout)}s"
+                time.sleep(min(poll_interval, max(0.01, timeout - elapsed)))
+        except Exception as exc:
+            logger.warning("Error during automatic approval wait: %s", exc)
+            return False, f"Approval error: {exc}"
+
     def execute_action(
         self,
         action: dict[str, Any] | ShellCallAction,
@@ -511,20 +782,35 @@ class ShellExecutor:
             read_only = is_read_only_command(cmd)
             if not read_only and self.needs_approval and not action_approval_id:
                 approved = False
+                grant_or_reason = ""
                 if self.on_approval is not None:
                     approval_res = self.on_approval({"command": cmd, "action": action})
                     approved = bool(approval_res.get("approve"))
+                    if approved and "approval_id" in approval_res:
+                        action_approval_id = str(approval_res["approval_id"])
+
+                if not approved and self.auto_request_approval:
+                    approved, grant_or_reason = self._request_approval_and_wait(
+                        cmd, action, timeout_seconds=self.approval_wait_timeout_seconds
+                    )
+                    if approved and grant_or_reason:
+                        action_approval_id = grant_or_reason
 
                 if not approved:
-                    self._audit("approval_required", cmd=cmd, read_only=False)
+                    self._audit("approval_required", cmd=cmd, read_only=False, reason=grant_or_reason)
+                    err_msg = (
+                        f"HumanApprovalRequired: Mutating shell command {cmd!r} was not approved: {grant_or_reason}."
+                        if grant_or_reason
+                        else (
+                            f"HumanApprovalRequired: Mutating shell command {cmd!r} "
+                            "requires explicit approval before execution."
+                        )
+                    )
                     results.append(
                         ShellCommandOutput(
                             command=cmd,
                             stdout="",
-                            stderr=(
-                                f"HumanApprovalRequired: Mutating shell command {cmd!r} "
-                                "requires explicit approval before execution."
-                            ),
+                            stderr=err_msg,
                             outcome=ShellOutcome(type="exit", exit_code=1),
                         )
                     )

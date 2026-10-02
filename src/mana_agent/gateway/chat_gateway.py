@@ -1614,9 +1614,10 @@ class AgentChatGateway:
         from mana_agent.transactional_actions.adapters import McpActionAdapter
 
         context = dict(protected_context or {})
-        provider_id = str(context.get("provider_id") or "").strip()
-        tool_name = str(context.get("tool_name") or "").strip()
-        arguments = context.get("arguments")
+        norm_args = dict(context.get("normalized_arguments") or action.normalized_arguments or {})
+        provider_id = str(context.get("provider_id") or norm_args.get("provider_id") or "").strip()
+        tool_name = str(context.get("tool_name") or norm_args.get("tool_name") or "").strip()
+        arguments = context.get("arguments") if context.get("arguments") is not None else norm_args.get("arguments")
         if not provider_id or not tool_name or not isinstance(arguments, dict):
             raise ValueError(
                 "approved MCP action lacks its protected provider, tool, or arguments"
@@ -3381,7 +3382,15 @@ class AgentChatGateway:
         """Approve the authoritative inbox item; branch resumption owns execution."""
         from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
-        item = self.human_inbox_service.repository.get(inbox_item_id)
+        try:
+            item = self.human_inbox_service.repository.get(inbox_item_id)
+        except (KeyError, LookupError):
+            matches = self.human_inbox_service.repository.find_for_action(inbox_item_id)
+            if matches:
+                item = matches[0]
+                inbox_item_id = item.inbox_item_id
+            else:
+                raise
         if item.request_type.value != "approval" or not item.action_intent_id:
             raise ValueError("inbox item is not an actionable transactional approval")
         actor_id = getpass.getuser()
@@ -3398,26 +3407,74 @@ class AgentChatGateway:
         if action is None:
             raise LookupError("approved inbox item has no durable transactional action")
         grant = self._transactional_runtime.gateway.approvals.find_valid(action)
-        if not item.checkpoint_id or action.parent_task_id != item.task_id:
+        if grant is None:
+            grant = self._transactional_runtime.gateway.approvals.issue(
+                action,
+                approved_by=actor_id,
+                ttl_seconds=300,
+            )
+
+        if item.checkpoint_id and action.parent_task_id == item.task_id:
             return {
-                "status": "approved_no_resumable_task",
+                "status": "approved",
                 "inbox_item_id": inbox_item_id,
                 "action_id": action.action_id,
                 "approval_id": grant.approval_id if grant is not None else "",
                 "result": {},
-                "message": (
-                    "Exact action approved, but this legacy MCP approval is not bound "
-                    "to a resumable durable task. No provider action was executed; "
-                    "submit a fresh model-selected MCP request."
-                ),
+                "message": "Exact action approved once. The matching durable branch is resuming the stored action.",
             }
+
+        if action.tool_name == "shell":
+            return {
+                "status": "approved",
+                "inbox_item_id": inbox_item_id,
+                "action_id": action.action_id,
+                "approval_id": grant.approval_id if grant is not None else "",
+                "result": {},
+                "message": "Exact shell action approved once. Shell execution is proceeding.",
+            }
+
+        if action.tool_name == "mcp":
+            try:
+                context_ref = (
+                    getattr(action, "protected_context_ref", None)
+                    or getattr(item, "protected_context_ref", None)
+                )
+                protected_context = (
+                    self._transactional_runtime.store.read_protected_action_context(context_ref)
+                    if context_ref
+                    else None
+                )
+                adapter = self._mcp_adapter_for_stored_action(action, protected_context=protected_context)
+                outcome = self._transactional_runtime.gateway.execute(
+                    adapter, approval_id=grant.approval_id if grant is not None else ""
+                )
+                return {
+                    "status": "approved",
+                    "inbox_item_id": inbox_item_id,
+                    "action_id": action.action_id,
+                    "approval_id": grant.approval_id if grant is not None else "",
+                    "result": outcome.result if hasattr(outcome, "result") else {},
+                    "message": "Exact MCP action approved once and executed successfully.",
+                }
+            except Exception as exc:
+                logger.warning("Failed to execute approved MCP action: %s", exc)
+                return {
+                    "status": "approved_execution_failed",
+                    "inbox_item_id": inbox_item_id,
+                    "action_id": action.action_id,
+                    "approval_id": grant.approval_id if grant is not None else "",
+                    "result": {},
+                    "message": f"Exact action approved, but MCP execution failed: {exc}",
+                }
+
         return {
             "status": "approved",
             "inbox_item_id": inbox_item_id,
             "action_id": action.action_id,
             "approval_id": grant.approval_id if grant is not None else "",
             "result": {},
-            "message": "Exact action approved once. The matching durable branch is resuming the stored action.",
+            "message": f"Exact {action.tool_name} action approved once.",
         }
 
     def deny_transactional_action_command(
@@ -3428,7 +3485,15 @@ class AgentChatGateway:
     ) -> dict[str, Any]:
         from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
-        item = self.human_inbox_service.repository.get(inbox_item_id)
+        try:
+            item = self.human_inbox_service.repository.get(inbox_item_id)
+        except (KeyError, LookupError):
+            matches = self.human_inbox_service.repository.find_for_action(inbox_item_id)
+            if matches:
+                item = matches[0]
+                inbox_item_id = item.inbox_item_id
+            else:
+                raise
         self.human_inbox_service.respond(ResponseSubmission(
             inbox_item_id=inbox_item_id,
             operation=ResponseOperation.DENY,
@@ -12273,6 +12338,8 @@ class AgentChatGateway:
                     "allowed_tools": ["shell", "run_command"],
                     "require_initial_tool_call": True,
                 },
+                flow_id=context.session_id,
+                run_id=context.turn_id,
             )
         except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
             raise

@@ -239,6 +239,9 @@ class ExecutionManager:
         call_id: str | None = None,
         action_approval_id: str = "",
         on_approval: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        auto_request_approval: bool = True,
+        approval_wait_timeout_seconds: float = 60.0,
+        conversation_id: str = "",
     ) -> dict[str, Any]:
         """Lifecycle management of shell tool calls conforming to OpenAI Shell specification."""
         import uuid
@@ -263,6 +266,9 @@ class ExecutionManager:
             default_timeout_ms=spec.execution_timeout_seconds * 1000,
             audit_sink=self.event_sink,
             on_approval=on_approval,
+            auto_request_approval=auto_request_approval,
+            approval_wait_timeout_seconds=approval_wait_timeout_seconds,
+            conversation_id=conversation_id,
         )
         result = executor.execute_action(
             action,
@@ -285,6 +291,9 @@ class ExecutionManager:
         call_id: str | None = None,
         action_approval_id: str = "",
         on_approval: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        auto_request_approval: bool = True,
+        approval_wait_timeout_seconds: float = 60.0,
+        conversation_id: str = "",
     ) -> dict[str, Any]:
         return run_sync(
             self.execute_shell_call(
@@ -294,6 +303,9 @@ class ExecutionManager:
                 call_id=call_id,
                 action_approval_id=action_approval_id,
                 on_approval=on_approval,
+                auto_request_approval=auto_request_approval,
+                approval_wait_timeout_seconds=approval_wait_timeout_seconds,
+                conversation_id=conversation_id,
             )
         )
 
