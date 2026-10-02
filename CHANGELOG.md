@@ -4,6 +4,17 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-02
 
+- Restored follow-up continuity and unified external memory integration across gateway and memory layers:
+  - Fixed early conversation return in `AgentChatGateway.process_turn` that caused follow-ups on completed tasks to bypass `FollowupClassifier`.
+  - Ensured completed tasks remain valid conversational parents for `followup_task`, `task_expansion`, `task_correction`, `clarification_answer`, and `status_request` without incorrectly retrying or resuming completed work.
+  - Populated `PreviousTurnPointers.previous_task_id` and `related_task_ids` from session candidate tasks and persisted `last_task_id` in turn state.
+  - Bound validated `related_task_id` selected by `FollowupClassifier` to `MemoryTaskBinding` after verifying presence in gateway-offered session task candidates; unoffered task IDs are strictly denied.
+  - Refactored `CapsuleService` and `MemoryService` into one canonical external memory architecture where external providers (Mem0, Supermemory) handle AI semantic memory add/search while local repository preserves authoritative security policies, task context, revisions, lineage, and audit evidence.
+  - Prevented silent fallback from external memory to internal AI memory on provider failure.
+  - Added diagnostic event emissions without logging secrets or memory content: `followup_relation_selected`, `memory_task_bound`, `provider_memory_write`, `provider_memory_read`, `empty_memory_result`, and `denied_memory_task_access`.
+  - Added end-to-end integration and regression tests in `tests/gateway/test_followup_and_memory_integration.py` covering all 12 follow-up continuity and memory scenarios.
+  - User verification required: `python -m pytest tests/gateway/test_followup_and_memory_integration.py tests/gateway/test_followup_classifier.py tests/gateway/test_context_retrieval_tools.py tests/test_memory_architecture.py`.
+
 - Fixed Windows file lock contention and PermissionError in LocalInboxRepository and storage locks:
   - Fixed Windows CI test failure in `test_shell_executor_auto_request_approval_and_wait_approved` where concurrent inbox threads raised `PermissionError: [Errno 13] Permission denied` when checking `if not handle.read(1):` on `.repository.lock`.
   - On Windows, byte-range locking via `msvcrt.locking` is mandatory; reading or writing a locked byte without holding the lock raises `PermissionError` (access denied).

@@ -61,6 +61,8 @@ class MemoryService:
             self.root,
             config=self.config.capsules,
             provider=self.config.provider,
+            backend=self.backend if self.config.mode == "external" else None,
+            memory_service=self,
         )
         self._coding: Any | None = None
         self._multi: Any | None = None
