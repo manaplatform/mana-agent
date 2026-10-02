@@ -61,6 +61,9 @@ class MemoryTaskBinding:
     def bind(self, task_id: str) -> None:
         self.selected_memory_task_id = str(task_id or "").strip()
 
+    def __str__(self) -> str:
+        return self.selected_memory_task_id
+
 
 class ConversationContextReadInput(BaseModel):
     """Input parameters for reading episodic conversation history."""
@@ -300,9 +303,12 @@ def execute_memory_read(
     retrieval_ledger: TurnRetrievalLedger | None = None,
     retrieval_budget: int = 4000,
 ) -> str:
-    """Read authorized durable memory capsules for authenticated principal and validated task."""
     effective_turn_id = current_turn_id or current_task_id
-    effective_selected_task = str(selected_memory_task_id or task_id or "").strip()
+    if hasattr(selected_memory_task_id, "selected_memory_task_id"):
+        raw_selected_task = selected_memory_task_id.selected_memory_task_id
+    else:
+        raw_selected_task = selected_memory_task_id
+    effective_selected_task = str(raw_selected_task or task_id or "").strip()
     bounded_max_capsules = max(1, min(int(max_capsules or 3), 10))
     remaining_allowance = (
         retrieval_ledger.retrieval_remaining_tokens

@@ -9,7 +9,10 @@ All notable repository changes should be recorded here.
   - Ensured completed tasks remain valid conversational parents for `followup_task`, `task_expansion`, `task_correction`, `clarification_answer`, and `status_request` without incorrectly retrying or resuming completed work.
   - Populated `PreviousTurnPointers.previous_task_id` and `related_task_ids` from session candidate tasks and persisted `last_task_id` in turn state.
   - Bound validated `related_task_id` selected by `FollowupClassifier` to `MemoryTaskBinding` after verifying presence in gateway-offered session task candidates; unoffered task IDs are strictly denied.
+  - Properly unwrapped `MemoryTaskBinding` instances in `execute_memory_read` and defined `__str__` on `MemoryTaskBinding`.
+  - Fixed parent budget expansion in `LaneCoordinator` and `chat_gateway`: treated `COMPLETED_PENDING_VERIFICATION` and `VERIFYING` states as terminal/non-expanding parent states, preventing invalid budget revision attempts on completed parent tasks during task expansion or correction follow-ups.
   - Refactored `CapsuleService` and `MemoryService` into one canonical external memory architecture where external providers (Mem0, Supermemory) handle AI semantic memory add/search while local repository preserves authoritative security policies, task context, revisions, lineage, and audit evidence.
+  - Updated `SupermemoryProvider` mapping in `search_result_to_record` to handle `content` and `text` attributes from provider responses and test doubles.
   - Prevented silent fallback from external memory to internal AI memory on provider failure.
   - Added diagnostic event emissions without logging secrets or memory content: `followup_relation_selected`, `memory_task_bound`, `provider_memory_write`, `provider_memory_read`, `empty_memory_result`, and `denied_memory_task_access`.
   - Added end-to-end integration and regression tests in `tests/gateway/test_followup_and_memory_integration.py` covering all 12 follow-up continuity and memory scenarios.

@@ -4346,7 +4346,10 @@ class AgentChatGateway:
             if not task_id or not user_id:
                 return "Capsule follow-up memory was not written because authenticated user and durable task identities were unavailable."
             if user_id and not getattr(self._stack.memory_service, "user_id", ""):
-                self._stack.memory_service.bind_scope(user_id=user_id)
+                if hasattr(self._stack.memory_service, "bind_scope"):
+                    self._stack.memory_service.bind_scope(user_id=user_id)
+                else:
+                    setattr(self._stack.memory_service, "user_id", user_id)
             agent_id = "gateway:chat"
             principal = MemoryPrincipal(
                 user_id=user_id,
@@ -5425,6 +5428,13 @@ class AgentChatGateway:
         not double-counted against the new requirement.
         """
         parent = self._lane_coordinator.inspect_task(parent_task_id)
+        if parent.state in {
+            LaneTaskState.COMPLETED,
+            LaneTaskState.VERIFYING,
+            LaneTaskState.FAILED,
+            LaneTaskState.CANCELLED,
+        }:
+            return
         sibling_reserved = sum(
             execution.budget.reserved_tokens
             for execution in self._lane_coordinator.executions
@@ -5708,7 +5718,10 @@ class AgentChatGateway:
                 or ""
             ).strip()
             if authenticated_user_id and not getattr(self._stack.memory_service, "user_id", ""):
-                self._stack.memory_service.bind_scope(user_id=authenticated_user_id)
+                if hasattr(self._stack.memory_service, "bind_scope"):
+                    self._stack.memory_service.bind_scope(user_id=authenticated_user_id)
+                else:
+                    setattr(self._stack.memory_service, "user_id", authenticated_user_id)
             capsules_enabled = bool(
                 getattr(
                     getattr(self._stack.memory_service.config, "capsules", None),
@@ -9280,6 +9293,7 @@ class AgentChatGateway:
             ExecutionState.BUDGET_EXHAUSTED,
             ExecutionState.RECOVERY_REVIEW_REQUIRED,
             ExecutionState.COMPLETED,
+            ExecutionState.COMPLETED_PENDING_VERIFICATION,
             ExecutionState.WAITING,
             ExecutionState.PENDING_BUDGET_DECISION,
         }
@@ -9293,6 +9307,7 @@ class AgentChatGateway:
             LaneTaskState.PAUSED,
             LaneTaskState.WAITING,
             LaneTaskState.COMPLETED,
+            LaneTaskState.VERIFYING,
         }
         executions = {item.task_id: item for item in self._lane_coordinator.executions}
         durable_tasks = sorted(

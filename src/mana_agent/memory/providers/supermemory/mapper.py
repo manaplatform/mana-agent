@@ -24,6 +24,8 @@ def search_result_to_record(result: Any, scope: MemoryScope) -> MemoryRecord:
     result_metadata = flat_scalar_metadata(getattr(result, "metadata", None))
     content = (
         getattr(result, "memory", None)
+        or getattr(result, "content", None)
+        or getattr(result, "text", None)
         or getattr(result, "chunk", None)
         or " ".join(chunk.content for chunk in (getattr(result, "chunks", None) or []) if getattr(chunk, "content", None))
     )

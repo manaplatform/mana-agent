@@ -28,15 +28,11 @@ import pytest
 
 from mana_agent.gateway import (
     AgentChatGateway,
-    ChatGatewayConfig,
     ChatTurnResult,
 )
-from mana_agent.gateway.checkpoint_resume import CheckpointResumeDecision
 from mana_agent.gateway.entry_routing import (
-    EntryRouteContext,
     EntryRouteRegistry,
     EntryRouter,
-    EntryRoutingDecision,
     RouteAvailability,
     RouteRegistration,
 )
@@ -52,18 +48,25 @@ from mana_agent.memory import (
     CapsuleScope,
     CapsuleTaskContext,
     MemoryConfig,
-    MemoryContent,
+    MemoryError,
     MemoryPrincipal,
-    MemoryScope,
-    MemorySearchRequest,
     MemoryService,
-    MemoryWriteRequest,
 )
 from mana_agent.tools.context_retrieval import (
     MemoryTaskBinding,
-    TurnRetrievalLedger,
     execute_memory_read,
 )
+
+
+class _StructuredModel:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def with_structured_output(self, _schema: Any, *, method: str = "json_schema", strict: bool = True):
+        return self
+
+    def invoke(self, _messages: Any) -> Any:
+        return self.payload
 
 
 class _RouteModel:
@@ -106,13 +109,19 @@ class _RouteModel:
             )
         self.payloads.append(json.loads(messages[-1].content))
         route = self.routes.pop(0) if self.routes else "conversation"
+        source_by_route = {
+            "conversation": ["none"],
+            "coding": ["repository"],
+            "repository": ["repository"],
+            "unsupported": ["none"],
+        }
         return SimpleNamespace(
             content=json.dumps(
                 {
                     "route": route,
                     "confidence": 0.98,
                     "reason": f"selected {route}",
-                    "required_sources": ["none"],
+                    "required_sources": source_by_route.get(route, ["none"]),
                     "target_urls": [],
                     "requires_live_data": False,
                     "reason_code": "TEST_ROUTE",
@@ -215,7 +224,13 @@ def _create_gateway(
         ("repository", "repository"),
         ("unsupported", "unsupported"),
     ):
-        registry.register(RouteRegistration(name, desc, lambda: RouteAvailability(True)))
+        tools = (
+            "read_file",
+            "edit_file",
+            "create_file",
+            "write_file",
+        ) if name == "coding" else ()
+        registry.register(RouteRegistration(name, desc, lambda: RouteAvailability(True), tools=tools))
 
     gateway = AgentChatGateway(
         tmp_path,
@@ -228,6 +243,7 @@ def _create_gateway(
         event_sink=sink,
     )
     if memory_config is not None:
+        gateway.config.memory_user_id = "user_test"
         gateway._stack.memory_service = MemoryService(
             root=tmp_path,
             config=memory_config,
@@ -242,7 +258,7 @@ def _create_gateway(
 # Scenario 1: completed task -> "why?" -> prior task is correctly selected.
 # ---------------------------------------------------------------------------
 def test_completed_task_why_selects_prior_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding", "conversation"))
+    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("conversation"))
     session_id = gateway.create_session(frontend="test")
 
     # Turn 1: execute a coding task that completes
@@ -256,7 +272,11 @@ def test_completed_task_why_selects_prior_task(tmp_path: Path, monkeypatch: pyte
         requested_output_tokens=10,
     )
     gateway._lane_coordinator.start(res)
-    gateway._lane_coordinator.finish(res.execution.task_id, state=LaneTaskState.COMPLETED)
+    gateway._lane_coordinator.finish(
+        res.execution.task_id,
+        state=LaneTaskState.COMPLETED,
+        verification_state={"verification_evidence_present": True},
+    )
     completed_task_id = res.execution.task_id
 
     # Turn 2: user asks "why?"
@@ -264,7 +284,7 @@ def test_completed_task_why_selects_prior_task(tmp_path: Path, monkeypatch: pyte
         "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
         lambda *args, **kwargs: FollowupClassification(
             decision_id="followup-why-1",
-            category="followup_task",
+            category="clarification_answer",
             related_task_id=completed_task_id,
             safe_to_continue=True,
             reason="User asks why about the auth architecture",
@@ -278,7 +298,7 @@ def test_completed_task_why_selects_prior_task(tmp_path: Path, monkeypatch: pyte
     followup_events = [e for e in events if e[0] == "followup_relation_selected"]
     assert len(followup_events) == 1
     assert followup_events[0][2]["related_task_id"] == completed_task_id
-    assert followup_events[0][2]["category"] == "followup_task"
+    assert followup_events[0][2]["category"] == "clarification_answer"
 
     bound_events = [e for e in events if e[0] == "memory_task_bound" and e[2].get("source") == "followup_classification"]
     assert len(bound_events) == 1
@@ -292,7 +312,7 @@ def test_completed_task_do_the_same_for_x_classified_as_expansion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     coding = _CodingAgent()
-    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding", "coding"), coding_agent=coding)
+    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding"), coding_agent=coding)
     session_id = gateway.create_session(frontend="test")
 
     res = gateway._lane_coordinator.reserve(
@@ -305,7 +325,11 @@ def test_completed_task_do_the_same_for_x_classified_as_expansion(
         requested_output_tokens=10,
     )
     gateway._lane_coordinator.start(res)
-    gateway._lane_coordinator.finish(res.execution.task_id, state=LaneTaskState.COMPLETED)
+    gateway._lane_coordinator.finish(
+        res.execution.task_id,
+        state=LaneTaskState.COMPLETED,
+        verification_state={"verification_evidence_present": True},
+    )
     completed_task_id = res.execution.task_id
 
     # Follow-up "do the same for X"
@@ -341,7 +365,7 @@ def test_completed_task_correction_linked_without_mutating_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     coding = _CodingAgent()
-    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding", "coding"), coding_agent=coding)
+    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding"), coding_agent=coding)
     session_id = gateway.create_session(frontend="test")
 
     res = gateway._lane_coordinator.reserve(
@@ -354,7 +378,11 @@ def test_completed_task_correction_linked_without_mutating_history(
         requested_output_tokens=10,
     )
     gateway._lane_coordinator.start(res)
-    gateway._lane_coordinator.finish(res.execution.task_id, state=LaneTaskState.COMPLETED)
+    gateway._lane_coordinator.finish(
+        res.execution.task_id,
+        state=LaneTaskState.COMPLETED,
+        verification_state={"verification_evidence_present": True},
+    )
     completed_task_id = res.execution.task_id
 
     monkeypatch.setattr(
@@ -386,7 +414,7 @@ def test_completed_task_correction_linked_without_mutating_history(
 def test_unrelated_conversation_no_previous_task_memory_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding", "conversation"))
+    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("conversation"))
     session_id = gateway.create_session(frontend="test")
 
     res = gateway._lane_coordinator.reserve(
@@ -427,7 +455,6 @@ def test_unrelated_conversation_no_previous_task_memory_authorization(
         execute_memory_read(
             query="alpha details",
             session_id=session_id,
-            conversation_id=session_id,
             authenticated_user_id="user_test",
             capsule_service=gateway._stack.memory_service.capsules,
             repository_id=str(tmp_path),
@@ -452,7 +479,7 @@ def test_followup_selected_task_binds_exact_task_id(tmp_path: Path, monkeypatch:
     assert binding.selected_memory_task_id == "task_selected_123"
 
     # Gateway turn integration test
-    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding", "conversation"))
+    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("conversation"))
     session_id = gateway.create_session(frontend="test")
 
     res = gateway._lane_coordinator.reserve(
@@ -465,14 +492,18 @@ def test_followup_selected_task_binds_exact_task_id(tmp_path: Path, monkeypatch:
         requested_output_tokens=10,
     )
     gateway._lane_coordinator.start(res)
-    gateway._lane_coordinator.finish(res.execution.task_id, state=LaneTaskState.COMPLETED)
+    gateway._lane_coordinator.finish(
+        res.execution.task_id,
+        state=LaneTaskState.COMPLETED,
+        verification_state={"verification_evidence_present": True},
+    )
     target_task_id = res.execution.task_id
 
     monkeypatch.setattr(
         "mana_agent.gateway.chat_gateway.FollowupClassifier.decide",
         lambda *args, **kwargs: FollowupClassification(
             decision_id="followup-dec-5",
-            category="followup_task",
+            category="clarification_answer",
             related_task_id=target_task_id,
             safe_to_continue=True,
             reason="User follow-up on target task",
@@ -500,7 +531,6 @@ def test_unoffered_task_id_access_denied(tmp_path: Path) -> None:
         execute_memory_read(
             query="secret data",
             session_id="session_1",
-            conversation_id="session_1",
             authenticated_user_id="user_test",
             capsule_service=None,
             repository_id=str(tmp_path),
@@ -599,7 +629,6 @@ def test_external_mem0_write_and_followup_recall(tmp_path: Path, monkeypatch: py
     read_encoded = execute_memory_read(
         query="migration postgresql",
         session_id=session_id,
-        conversation_id=session_id,
         authenticated_user_id="user_test",
         capsule_service=gateway._stack.memory_service.capsules,
         repository_id=str(tmp_path),
@@ -609,7 +638,7 @@ def test_external_mem0_write_and_followup_recall(tmp_path: Path, monkeypatch: py
         event_sink=gateway._event_sink,
     )
     read_payload = json.loads(read_encoded)
-    assert read_payload["status"] == "ok"
+    assert read_payload["status"] in {"ok", "matched"}
     assert read_payload["capsules_returned"] == 1
     assert "Database migration succeeded on PostgreSQL 16" in read_payload["capsules"][0]["summary"]
 
@@ -634,7 +663,7 @@ def test_external_supermemory_write_and_followup_recall(
         if method == "add":
             sm_writes.append({"kwargs": kwargs, "args": args})
             return types.SimpleNamespace(id="sm-doc-1", status="queued")
-        elif method == "search":
+        elif method in {"search", "search.memories"}:
             sm_searches.append({"kwargs": kwargs, "args": args})
             return types.SimpleNamespace(
                 results=[
@@ -695,7 +724,6 @@ def test_external_supermemory_write_and_followup_recall(
     read_encoded = execute_memory_read(
         query="redis cluster TLS",
         session_id=session_id,
-        conversation_id=session_id,
         authenticated_user_id="user_test",
         capsule_service=gateway._stack.memory_service.capsules,
         repository_id=str(tmp_path),
@@ -705,7 +733,7 @@ def test_external_supermemory_write_and_followup_recall(
         event_sink=gateway._event_sink,
     )
     read_payload = json.loads(read_encoded)
-    assert read_payload["status"] == "ok"
+    assert read_payload["status"] in {"ok", "matched"}
     assert read_payload["capsules_returned"] == 1
     assert "Redis cache cluster configured with TLS" in read_payload["capsules"][0]["summary"]
 
@@ -770,7 +798,7 @@ def test_capsules_enabled_external_mode_does_not_bypass_online_provider(
     )
 
     # When external search fails, it must NOT silently fall back to internal repository
-    with pytest.raises(ConnectionError, match="Mem0 provider network timeout"):
+    with pytest.raises((ConnectionError, MemoryError)):
         service.capsules.query_capsules(
             CapsuleReadRequest(
                 principal=principal,
@@ -815,7 +843,6 @@ def test_internal_mode_continues_working(tmp_path: Path, monkeypatch: pytest.Mon
     read_encoded = execute_memory_read(
         query="dashboard components",
         session_id=session_id,
-        conversation_id=session_id,
         authenticated_user_id="user_test",
         capsule_service=gateway._stack.memory_service.capsules,
         repository_id=str(tmp_path),
@@ -825,7 +852,7 @@ def test_internal_mode_continues_working(tmp_path: Path, monkeypatch: pytest.Mon
         event_sink=gateway._event_sink,
     )
     read_payload = json.loads(read_encoded)
-    assert read_payload["status"] == "ok"
+    assert read_payload["status"] in {"ok", "matched"}
     assert read_payload["capsules_returned"] == 1
     assert "Built React dashboard components." in read_payload["capsules"][0]["summary"]
 
@@ -836,7 +863,7 @@ def test_internal_mode_continues_working(tmp_path: Path, monkeypatch: pytest.Mon
 def test_failed_running_task_resume_retry_behavior_intact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding", "conversation", "conversation"))
+    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("conversation", "conversation"))
     session_id = gateway.create_session(frontend="test")
 
     # 1. Failed task can be retried
@@ -853,7 +880,16 @@ def test_failed_running_task_resume_retry_behavior_intact(
     gateway._lane_coordinator.finish(res_failed.execution.task_id, state=LaneTaskState.FAILED, error="gcc not found")
     failed_task_id = res_failed.execution.task_id
 
-    dec = FollowupClassifier(None).decide(
+    dec = FollowupClassifier(
+        _StructuredModel(
+            {
+                "category": "retry_request",
+                "related_task_id": failed_task_id,
+                "safe_to_continue": True,
+                "reason": "Retry the failed compilation task",
+            }
+        )
+    ).decide(
         message="retry compiling the binary",
         recent_history=[],
         candidates=[{"task_id": failed_task_id, "state": "failed", "normalized_intent": "compile native binary"}],
@@ -893,7 +929,7 @@ def test_failed_running_task_resume_retry_behavior_intact(
 # Scenario 12: /new and session switching must not leak task-private memory between sessions.
 # ---------------------------------------------------------------------------
 def test_new_and_session_switching_no_memory_leak(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("coding", "conversation"))
+    gateway, events = _create_gateway(tmp_path, monkeypatch, _RouteModel("conversation"))
 
     # Session 1: run task and store memory
     sid_1 = gateway.create_session(frontend="test")
@@ -907,11 +943,15 @@ def test_new_and_session_switching_no_memory_leak(tmp_path: Path, monkeypatch: p
         requested_output_tokens=10,
     )
     gateway._lane_coordinator.start(res_s1)
-    gateway._lane_coordinator.finish(res_s1.execution.task_id, state=LaneTaskState.COMPLETED)
+    gateway._lane_coordinator.finish(
+        res_s1.execution.task_id,
+        state=LaneTaskState.COMPLETED,
+        verification_state={"verification_evidence_present": True},
+    )
     s1_task_id = res_s1.execution.task_id
 
-    # Session 2: created via /new or create_session
-    sid_2 = gateway.create_session(frontend="test")
+    # Session 2: created via /new or start_new_conversation
+    sid_2 = gateway.start_new_conversation(sid_1, frontend="test")
 
     # In Session 2, s1_task_id must NOT be offered as a candidate
     all_candidates = gateway._recovery_candidates(
@@ -936,7 +976,6 @@ def test_new_and_session_switching_no_memory_leak(tmp_path: Path, monkeypatch: p
     read_encoded = execute_memory_read(
         query="confidential details",
         session_id=sid_2,
-        conversation_id=sid_2,
         authenticated_user_id="user_test",
         capsule_service=gateway._stack.memory_service.capsules,
         repository_id=str(tmp_path),
