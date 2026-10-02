@@ -111,9 +111,10 @@ task_expansion, not a resume, retry, duplicate, or status request. Do not use ke
 offered task is unambiguously applicable, select new_task or conversation_only. Return strict JSON
 matching the schema and select only an offered task ID.
 
-Set related_task_id only for followup_task, task_expansion, task_correction, retry_request,
-resume_request, status_request, or duplicate_message. For new_task, clarification_answer, and
-conversation_only, related_task_id must be the empty string.
+Set related_task_id for followup_task, task_expansion, task_correction, retry_request,
+resume_request, status_request, or duplicate_message, and optionally for clarification_answer when
+answering a question about an offered task. For new_task and conversation_only, related_task_id must
+be the empty string.
 
 If prior conversation context is required to safely classify this turn (for example, if the input is a terse
 follow-up such as "why?", "continue", "do that", "what did you mean?", or "and memory?" and pointers indicate
@@ -284,7 +285,17 @@ class FollowupClassifier:
             "status_request",
             "duplicate_message",
         }
+        can_have_task = needs_task or output.category == "clarification_answer"
         if needs_task and output.related_task_id not in offered:
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was executed. "
+                "Reason: selected task was not offered."
+            )
+        if (
+            output.category == "clarification_answer"
+            and output.related_task_id
+            and output.related_task_id not in offered
+        ):
             raise FollowupClassificationError(
                 "Model decision failed: followup_classification. No fallback action was executed. "
                 "Reason: selected task was not offered."
@@ -306,7 +317,7 @@ class FollowupClassifier:
                 "executed. Reason: a completed task cannot be resumed or retried; select "
                 "task_expansion for a downstream action."
             )
-        if not needs_task and output.related_task_id:
+        if not can_have_task and output.related_task_id:
             raise FollowupClassificationError(
                 "Model decision failed: followup_classification. No fallback action was executed. "
                 "Reason: non-task category selected a task."

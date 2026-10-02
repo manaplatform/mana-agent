@@ -4294,12 +4294,15 @@ class AgentChatGateway:
         session_id: str,
         conversation_id: str,
         query: str,
+        task_id: str = "",
     ) -> tuple[str, str]:
         if self._stack.memory_service.config.capsules.enabled:
             # A related durable task must be selected by the model before any
             # private capsule can be queried. Pre-routing conversation-wide
-            # recall would bypass task boundaries, so it fails closed here.
-            return "", ""
+            # recall would bypass task boundaries, so it delegates to task capsules.
+            if not task_id:
+                return "", ""
+            return self._recall_task_capsules(task_id=task_id, session_id=session_id, query=query), ""
         try:
             records = self._stack.memory_service.search_blocking(
                 MemorySearchRequest(
@@ -4328,15 +4331,25 @@ class AgentChatGateway:
         turn_id: str,
         user_text: str,
         result: ChatTurnResult,
+        sink: Any | None = None,
     ) -> str:
         if not result.answer:
             return ""
         capsule_config = self._stack.memory_service.config.capsules
         if capsule_config.enabled:
             task_id = str((result.payload or {}).get("execution_id") or "").strip()
-            user_id = str(self._stack.memory_service.user_id or "").strip()
+            user_id = str(
+                self.config.memory_user_id
+                or getattr(self._stack.memory_service, "user_id", "")
+                or ""
+            ).strip()
             if not task_id or not user_id:
                 return "Capsule follow-up memory was not written because authenticated user and durable task identities were unavailable."
+            if user_id and not getattr(self._stack.memory_service, "user_id", ""):
+                if hasattr(self._stack.memory_service, "bind_scope"):
+                    self._stack.memory_service.bind_scope(user_id=user_id)
+                else:
+                    setattr(self._stack.memory_service, "user_id", user_id)
             agent_id = "gateway:chat"
             principal = MemoryPrincipal(
                 user_id=user_id,
@@ -4376,6 +4389,18 @@ class AgentChatGateway:
             except (MemoryError, PermissionError, ValueError) as exc:
                 logger.warning("Chat capsule memory write failed closed: %s", exc)
                 return f"Chat capsule memory write unavailable: {exc}"
+            provider = getattr(self._stack.memory_service.capsules, "provider", "mana") or "mana"
+            if callable(sink):
+                sink(
+                    "provider_memory_write",
+                    f"Provider memory write: {provider}",
+                    metadata={
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "task_id": task_id,
+                        "provider": provider,
+                    },
+                )
             return ""
         content = f"User: {user_text}\nAssistant: {result.answer}"
         try:
@@ -4404,6 +4429,18 @@ class AgentChatGateway:
         except MemoryError as exc:
             logger.warning("Chat follow-up memory write degraded: %s", exc)
             return f"Chat follow-up memory write unavailable: {exc}"
+        provider = getattr(self._stack.memory_service.config, "provider", "mana") or "mana"
+        if callable(sink):
+            sink(
+                "provider_memory_write",
+                f"Provider memory write: {provider}",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "task_id": str((result.payload or {}).get("execution_id") or ""),
+                    "provider": provider,
+                },
+            )
         return ""
 
     def _recall_task_capsules(self, *, task_id: str, session_id: str, query: str) -> str:
@@ -5391,6 +5428,13 @@ class AgentChatGateway:
         not double-counted against the new requirement.
         """
         parent = self._lane_coordinator.inspect_task(parent_task_id)
+        if parent.state in {
+            LaneTaskState.COMPLETED,
+            LaneTaskState.VERIFYING,
+            LaneTaskState.FAILED,
+            LaneTaskState.CANCELLED,
+        }:
+            return
         sibling_reserved = sum(
             execution.budget.reserved_tokens
             for execution in self._lane_coordinator.executions
@@ -5649,9 +5693,15 @@ class AgentChatGateway:
                 workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                 repository_id=self._lane_coordinator.taskboard.store.repository_id,
             )
-            rec_task_candidates = [
+            session_rec_candidates = [
                 item
                 for item in all_rec_candidates
+                if not str(item.get("session_id") or "")
+                or str(item.get("session_id") or "") == session_id
+            ]
+            rec_task_candidates = [
+                item
+                for item in session_rec_candidates
                 if str(item.get("state") or "") != LaneTaskState.COMPLETED.value
             ]
             memory_task_candidates = tuple(
@@ -5660,13 +5710,18 @@ class AgentChatGateway:
                     "normalized_intent": str(item.get("normalized_intent") or ""),
                     "state": str(item.get("state") or ""),
                 }
-                for item in all_rec_candidates
+                for item in session_rec_candidates
             )
             authenticated_user_id = str(
                 self.config.memory_user_id
                 or getattr(self._stack.memory_service, "user_id", "")
                 or ""
             ).strip()
+            if authenticated_user_id and not getattr(self._stack.memory_service, "user_id", ""):
+                if hasattr(self._stack.memory_service, "bind_scope"):
+                    self._stack.memory_service.bind_scope(user_id=authenticated_user_id)
+                else:
+                    setattr(self._stack.memory_service, "user_id", authenticated_user_id)
             capsules_enabled = bool(
                 getattr(
                     getattr(self._stack.memory_service.config, "capsules", None),
@@ -5711,12 +5766,22 @@ class AgentChatGateway:
                 pending_action_approvals=(),
                 pending_user_approvals=(),
             )
+            prev_task_id = str(
+                state.get("last_task_id")
+                or (session_rec_candidates[0].get("task_id") if session_rec_candidates else "")
+                or ""
+            )
+            rel_task_ids = tuple(
+                str(item.get("task_id") or "")
+                for item in session_rec_candidates
+                if str(item.get("task_id") or "")
+            )
             turn_pointers = PreviousTurnPointers(
                 previous_turn_id=last_turn_id,
                 previous_route=str(state.get("active_route") or ""),
-                previous_task_id="",
-                related_task_ids=(),
-                retrieval_hints=(),
+                previous_task_id=prev_task_id,
+                related_task_ids=rel_task_ids,
+                retrieval_hints=tuple(["conversation_context_read"] if prior_messages else []),
             )
             conv_budget = int(getattr(self.settings, "mana_context_retrieval_max_tokens", 12000))
             mem_budget = int(getattr(self.settings, "mana_memory_capsules_default_max_tokens", 4000))
@@ -5927,6 +5992,28 @@ class AgentChatGateway:
                     }
                     if entry_decision.memory_task_id in offered_task_ids:
                         memory_task_binding.bind(entry_decision.memory_task_id)
+                        if callable(sink):
+                            sink(
+                                "memory_task_bound",
+                                f"Memory task bound: {entry_decision.memory_task_id}",
+                                metadata={
+                                    "turn_id": turn_id,
+                                    "task_id": entry_decision.memory_task_id,
+                                    "source": "entry_routing",
+                                },
+                            )
+                    else:
+                        if callable(sink):
+                            sink(
+                                "denied_memory_task_access",
+                                f"Denied memory task access: {entry_decision.memory_task_id} not offered",
+                                metadata={
+                                    "session_id": session_id,
+                                    "turn_id": turn_id,
+                                    "task_id": entry_decision.memory_task_id,
+                                    "error": "task_not_offered",
+                                },
+                            )
                 if entry_decision.route == "command":
                     import shlex
 
@@ -6053,17 +6140,14 @@ class AgentChatGateway:
                         state=state,
                         memory_warning=memory_warning,
                     )
-                # Conversation ordinarily remains a turn-level response. A stopped
-                # task is the exception: its follow-up classification must be
-                # validated before the gateway can decide whether to recover it or
-                # safely answer as an unrelated conversation.
-                has_stopped_task_candidate = any(
-                    candidate["state"] != LaneTaskState.COMPLETED.value
-                    for candidate in route_context.memory_task_candidates
-                )
+                # Conversation ordinarily remains a turn-level response when there
+                # are no prior tasks. If task candidates exist (completed, stopped, or
+                # running), follow-up classification must run to preserve task lineage,
+                # downstream actions, and memory task authorization.
+                has_task_candidate = bool(route_context.memory_task_candidates)
                 if (
                     entry_decision.route == "conversation"
-                    and not has_stopped_task_candidate
+                    and not has_task_candidate
                 ):
                     conversation_lane = self._lane_coordinator.select_lane(
                         entry_route=entry_decision.route,
@@ -6385,6 +6469,46 @@ class AgentChatGateway:
                                     "decision_id": followup.decision_id,
                                 },
                             )
+                        offered_followup_ids = {
+                            str(item.get("task_id") or "").strip()
+                            for item in followup_candidates
+                            if str(item.get("task_id") or "").strip()
+                        }
+                        if followup.related_task_id:
+                            if followup.related_task_id in offered_followup_ids:
+                                memory_task_binding.bind(followup.related_task_id)
+                                if callable(sink):
+                                    sink(
+                                        "followup_relation_selected",
+                                        f"Follow-up relation selected: {followup.category} -> {followup.related_task_id}",
+                                        metadata={
+                                            "turn_id": turn_id,
+                                            "category": followup.category,
+                                            "related_task_id": followup.related_task_id,
+                                            "decision_id": followup.decision_id,
+                                        },
+                                    )
+                                    sink(
+                                        "memory_task_bound",
+                                        f"Memory task bound: {followup.related_task_id}",
+                                        metadata={
+                                            "turn_id": turn_id,
+                                            "task_id": followup.related_task_id,
+                                            "source": "followup_classification",
+                                        },
+                                    )
+                            else:
+                                if callable(sink):
+                                    sink(
+                                        "denied_memory_task_access",
+                                        f"Denied memory task access: {followup.related_task_id} not offered",
+                                        metadata={
+                                            "session_id": session_id,
+                                            "turn_id": turn_id,
+                                            "task_id": followup.related_task_id,
+                                            "error": "task_not_offered",
+                                        },
+                                    )
                         if followup.category == "status_request":
                             lookup = self._lane_coordinator.get_verified_execution_result(
                                 followup.related_task_id
@@ -6969,6 +7093,7 @@ class AgentChatGateway:
                         turn_record.created_task_ids = [reservation.execution.task_id]
                         turn_record.status = "routed"
                         turn_store.update(turn_record)
+                        state["last_task_id"] = reservation.execution.task_id
                         if callable(sink):
                             sink(
                                 "task_linked" if parent_task_id else "task_created",
@@ -7476,6 +7601,7 @@ class AgentChatGateway:
         )
         execution_id = str(result.payload.get("execution_id") or "")
         if execution_id:
+            state["last_task_id"] = execution_id
             supervisor = self._lane_coordinator.execution_supervisor
             supervised = supervisor.store.get_task_or_none(execution_id)
             if supervised is not None:
@@ -7603,6 +7729,7 @@ class AgentChatGateway:
                 turn_id=turn_id,
                 user_text=text,
                 result=result,
+                sink=sink,
             )
         if write_warning:
             result.warnings.append(write_warning)
@@ -9166,6 +9293,7 @@ class AgentChatGateway:
             ExecutionState.BUDGET_EXHAUSTED,
             ExecutionState.RECOVERY_REVIEW_REQUIRED,
             ExecutionState.COMPLETED,
+            ExecutionState.COMPLETED_PENDING_VERIFICATION,
             ExecutionState.WAITING,
             ExecutionState.PENDING_BUDGET_DECISION,
         }
@@ -9179,6 +9307,7 @@ class AgentChatGateway:
             LaneTaskState.PAUSED,
             LaneTaskState.WAITING,
             LaneTaskState.COMPLETED,
+            LaneTaskState.VERIFYING,
         }
         executions = {item.task_id: item for item in self._lane_coordinator.executions}
         durable_tasks = sorted(

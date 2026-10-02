@@ -76,10 +76,14 @@ class CapsuleService:
         repository: CapsuleRepository | None = None,
         audit: CapsuleAuditLogger | None = None,
         retention_hook: Any | None = None,
+        backend: Any | None = None,
+        memory_service: Any | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.config = (config or CapsuleConfig()).validate()
         self.provider = provider
+        self.backend = backend
+        self.memory_service = memory_service
         storage_dir = repository_dir(repository_id_for_path(self.root))
         self.repository = repository or CapsuleRepository(storage_dir / "memory_capsules.json")
         self.audit = audit or CapsuleAuditLogger()
@@ -200,6 +204,39 @@ class CapsuleService:
             risk_flags=risk_flags,
         )
         self.repository.put(capsule)
+        if self.backend is not None:
+            from mana_agent.memory.compatibility import run_sync
+            from mana_agent.memory.models import MemoryContent, MemoryScope, MemoryWriteRequest
+
+            searchable_text = f"{capsule.title}: {capsule.summary}" if capsule.title else capsule.summary
+            if not searchable_text:
+                searchable_text = json.dumps(capsule.content, ensure_ascii=False)
+            write_req = MemoryWriteRequest(
+                content=MemoryContent(searchable_text),
+                scope=MemoryScope(
+                    user_id=capsule.owner_user_id or context.user_id,
+                    session_id=context.session_id or capsule.session_id or "",
+                    repository_id=context.project_id or capsule.project_id or "",
+                    task_id=context.task_id or capsule.task_id or "",
+                    agent_id=context.agent_id or capsule.agent_id or "",
+                ),
+                metadata={
+                    "capsule_id": capsule.capsule_id,
+                    "task_id": context.task_id or capsule.task_id or "",
+                    "scope": capsule.scope.value,
+                    "origin_type": capsule.origin_type,
+                    "origin_id": capsule.origin_id,
+                    "tags": list(capsule.tags),
+                    "mana_kind": "task_result",
+                },
+            )
+            run_sync(self.backend.add(write_req))
+            self.audit.emit(
+                "provider.memory_write",
+                principal=principal,
+                capsule=capsule,
+                correlation_id=correlation_id,
+            )
         event = "capsule.quarantined" if trust_state is TrustState.QUARANTINED else "capsule.created"
         self.audit.emit(event, principal=principal, capsule=capsule, correlation_id=correlation_id)
         return capsule
@@ -213,48 +250,149 @@ class CapsuleService:
         scopes = request.allowed_scopes
         namespaces = request.namespaces
         terms = set(request.query.lower().split())
-        candidates: list[tuple[float, MemoryCapsule]] = []
+        candidates: list[tuple[float, Any]] = []
         self.audit.emit("capsule.read_requested", principal=request.principal, correlation_id=correlation_id)
-        for capsule in self.repository.list():
-            if capsule.scope not in scopes or (namespaces and capsule.namespace not in namespaces):
-                continue
-            if not request.include_staged and capsule.merge_state is MergeState.STAGED:
-                continue
-            decision = self.policy.authorize_read(request.principal, capsule, request.task_context)
-            self._record_decision(request.principal, capsule, decision, correlation_id=correlation_id)
-            if not decision.allowed:
-                if decision.reason_code in {
-                    "user_mismatch",
-                    "private_owner_mismatch",
-                    "task_relationship_mismatch",
-                    "team_mismatch",
-                    "project_mismatch",
-                    "organisation_mismatch",
-                    "namespace_mismatch",
-                }:
-                    self.audit.emit(
-                        "capsule.access_anomaly",
-                        principal=request.principal,
-                        capsule=capsule,
-                        decision_code=decision.reason_code,
-                        correlation_id=correlation_id,
+        if self.backend is not None:
+            from mana_agent.memory.compatibility import run_sync
+            from mana_agent.memory.models import MemoryScope, MemorySearchRequest
+
+            provider_scope = MemoryScope(
+                user_id=request.principal.user_id or (getattr(request.task_context, "user_id", "") or ""),
+                session_id=request.task_context.session_id or "",
+                repository_id=request.task_context.project_id or "",
+                task_id=request.principal.task_id or (getattr(request.task_context, "task_id", "") or ""),
+                agent_id=request.principal.agent_id or "",
+            )
+            search_req = MemorySearchRequest(
+                query=request.query,
+                scope=provider_scope,
+                limit=max_capsules * 3,
+                metadata={"task_id": provider_scope.task_id} if provider_scope.task_id else {},
+            )
+            search_records = run_sync(self.backend.search(search_req))
+            self.audit.emit(
+                "provider.memory_read",
+                principal=request.principal,
+                correlation_id=correlation_id,
+            )
+            for record in search_records:
+                capsule_id = str(record.metadata.get("capsule_id") or record.id or "")
+                local_capsule = self.repository.get(capsule_id) if capsule_id else None
+                if local_capsule is not None:
+                    decision = self.policy.authorize_read(request.principal, local_capsule, request.task_context)
+                    self._record_decision(request.principal, local_capsule, decision, correlation_id=correlation_id)
+                    if not decision.allowed:
+                        self.audit.emit(
+                            "capsule.access_anomaly",
+                            principal=request.principal,
+                            capsule=local_capsule,
+                            decision_code=decision.reason_code,
+                            correlation_id=correlation_id,
+                        )
+                        continue
+                    rechecked = self.policy.authorize_read(request.principal, local_capsule, request.task_context)
+                    if not rechecked.allowed:
+                        self.audit.emit(
+                            "capsule.access_anomaly",
+                            principal=request.principal,
+                            capsule=local_capsule,
+                            decision_code=rechecked.reason_code,
+                            correlation_id=correlation_id,
+                        )
+                        continue
+                    score = float(record.score if record.score is not None else 1.0)
+                    candidates.append((score, local_capsule))
+                else:
+                    rec_task_id = str(record.metadata.get("task_id") or record.scope.task_id or "")
+                    rec_user_id = str(record.metadata.get("user_id") or record.scope.user_id or "")
+                    if rec_user_id and rec_user_id != request.principal.user_id:
+                        self.audit.emit(
+                            "capsule.access_anomaly",
+                            principal=request.principal,
+                            decision_code="user_mismatch",
+                            correlation_id=correlation_id,
+                        )
+                        continue
+                    if rec_task_id and request.principal.task_id and rec_task_id != request.principal.task_id:
+                        self.audit.emit(
+                            "capsule.access_anomaly",
+                            principal=request.principal,
+                            decision_code="task_relationship_mismatch",
+                            correlation_id=correlation_id,
+                        )
+                        continue
+                    text = record.content.text
+                    proj = CapsuleProjection(
+                        capsule_id=record.id,
+                        scope=CapsuleScope.PRIVATE,
+                        namespace=f"private:{request.principal.user_id}",
+                        title=str(record.metadata.get("title") or f"Task result {rec_task_id or record.id}"),
+                        summary=text,
+                        content={"text": text, **record.metadata},
+                        tags=tuple(record.metadata.get("tags") or ()),
+                        trust_state=TrustState.AGENT_GENERATED,
+                        origin_type="external_record",
+                        origin_id=record.id,
+                        source_capsule_ids=(),
+                        revision=1,
+                        content_hash="",
+                        provider=self.provider,
+                        created_at=record.created_at or utc_now(),
+                        expires_at=None,
                     )
-                continue
-            # Reauthorization happens after the repository result has been materialized.
-            rechecked = self.policy.authorize_read(request.principal, capsule, request.task_context)
-            if not rechecked.allowed:
-                self.audit.emit("capsule.access_anomaly", principal=request.principal, capsule=capsule, decision_code=rechecked.reason_code)
-                continue
-            words = set(_content_text(capsule).split())
-            relevance = len(terms & words) / max(1, len(terms)) if terms else 1.0
-            if terms and relevance == 0:
-                continue
-            candidates.append((relevance, capsule))
-        candidates.sort(key=lambda item: (-item[0], -item[1].updated_at.timestamp(), item[1].capsule_id))
+                    score = float(record.score if record.score is not None else 1.0)
+                    candidates.append((score, proj))
+        else:
+            for capsule in self.repository.list():
+                if capsule.scope not in scopes or (namespaces and capsule.namespace not in namespaces):
+                    continue
+                if not request.include_staged and capsule.merge_state is MergeState.STAGED:
+                    continue
+                decision = self.policy.authorize_read(request.principal, capsule, request.task_context)
+                self._record_decision(request.principal, capsule, decision, correlation_id=correlation_id)
+                if not decision.allowed:
+                    if decision.reason_code in {
+                        "user_mismatch",
+                        "private_owner_mismatch",
+                        "task_relationship_mismatch",
+                        "team_mismatch",
+                        "project_mismatch",
+                        "organisation_mismatch",
+                        "namespace_mismatch",
+                    }:
+                        self.audit.emit(
+                            "capsule.access_anomaly",
+                            principal=request.principal,
+                            capsule=capsule,
+                            decision_code=decision.reason_code,
+                            correlation_id=correlation_id,
+                        )
+                    continue
+                # Reauthorization happens after the repository result has been materialized.
+                rechecked = self.policy.authorize_read(request.principal, capsule, request.task_context)
+                if not rechecked.allowed:
+                    self.audit.emit("capsule.access_anomaly", principal=request.principal, capsule=capsule, decision_code=rechecked.reason_code)
+                    continue
+                words = set(_content_text(capsule).split())
+                relevance = len(terms & words) / max(1, len(terms)) if terms else 1.0
+                if terms and relevance == 0:
+                    continue
+                candidates.append((relevance, capsule))
+        candidates.sort(
+            key=lambda item: (
+                -item[0],
+                -(
+                    item[1].updated_at.timestamp()
+                    if hasattr(item[1], "updated_at") and getattr(item[1], "updated_at", None)
+                    else 0
+                ),
+                getattr(item[1], "capsule_id", ""),
+            )
+        )
         result: list[CapsuleProjection] = []
         used_tokens = 0
-        for _, capsule in candidates:
-            projection = self._projection(capsule)
+        for _, item in candidates:
+            projection = item if isinstance(item, CapsuleProjection) else self._projection(item)
             from mana_agent.context_cost.estimator import estimate_value_tokens
 
             estimated = estimate_value_tokens({"content": projection.content, "summary": projection.summary})
@@ -263,8 +401,8 @@ class CapsuleService:
             result.append(projection)
             used_tokens += estimated
             self.repository.record_access({
-                "capsule_id": capsule.capsule_id,
-                "revision": capsule.revision,
+                "capsule_id": projection.capsule_id,
+                "revision": projection.revision,
                 "task_id": request.principal.task_id,
                 "agent_id": request.principal.agent_id,
                 "timestamp": utc_now().isoformat(),

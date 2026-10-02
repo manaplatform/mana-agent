@@ -712,6 +712,7 @@ class LaneCoordinator:
                 # real lane/session/global cap.
                 if parent.state not in {
                     LaneTaskState.COMPLETED,
+                    LaneTaskState.VERIFYING,
                     LaneTaskState.FAILED,
                     LaneTaskState.CANCELLED,
                 }:
@@ -1482,6 +1483,7 @@ class LaneCoordinator:
                 parent = self._executions[execution.parent_task_id]
                 if parent.state not in {
                     LaneTaskState.COMPLETED,
+                    LaneTaskState.VERIFYING,
                     LaneTaskState.FAILED,
                     LaneTaskState.CANCELLED,
                 }:
@@ -1560,6 +1562,7 @@ class LaneCoordinator:
             parent = self._executions[parent_id]
             if parent.state in {
                 LaneTaskState.COMPLETED,
+                LaneTaskState.VERIFYING,
                 LaneTaskState.FAILED,
                 LaneTaskState.CANCELLED,
             }:
@@ -1587,6 +1590,7 @@ class LaneCoordinator:
                 grandparent = self._executions[grandparent_id]
                 if grandparent.state not in {
                     LaneTaskState.COMPLETED,
+                    LaneTaskState.VERIFYING,
                     LaneTaskState.FAILED,
                     LaneTaskState.CANCELLED,
                 }:

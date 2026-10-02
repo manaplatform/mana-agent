@@ -61,6 +61,9 @@ class MemoryTaskBinding:
     def bind(self, task_id: str) -> None:
         self.selected_memory_task_id = str(task_id or "").strip()
 
+    def __str__(self) -> str:
+        return self.selected_memory_task_id
+
 
 class ConversationContextReadInput(BaseModel):
     """Input parameters for reading episodic conversation history."""
@@ -300,9 +303,12 @@ def execute_memory_read(
     retrieval_ledger: TurnRetrievalLedger | None = None,
     retrieval_budget: int = 4000,
 ) -> str:
-    """Read authorized durable memory capsules for authenticated principal and validated task."""
     effective_turn_id = current_turn_id or current_task_id
-    effective_selected_task = str(selected_memory_task_id or task_id or "").strip()
+    if hasattr(selected_memory_task_id, "selected_memory_task_id"):
+        raw_selected_task = selected_memory_task_id.selected_memory_task_id
+    else:
+        raw_selected_task = selected_memory_task_id
+    effective_selected_task = str(raw_selected_task or task_id or "").strip()
     bounded_max_capsules = max(1, min(int(max_capsules or 3), 10))
     remaining_allowance = (
         retrieval_ledger.retrieval_remaining_tokens
@@ -399,6 +405,26 @@ def execute_memory_read(
         }
         encoded = json.dumps(error_payload, ensure_ascii=False)
         if callable(event_sink):
+            event_sink(
+                "denied_memory_task_access",
+                "Denied memory task access",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": effective_turn_id,
+                    "task_id": effective_selected_task,
+                    "error": "task_not_offered" if effective_selected_task else "no_task_authorized",
+                },
+            )
+            event_sink(
+                "context.denied_memory_task_access",
+                "Denied memory task access",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": effective_turn_id,
+                    "task_id": effective_selected_task,
+                    "error": "task_not_offered" if effective_selected_task else "no_task_authorized",
+                },
+            )
             event_sink(
                 "context.memory_read",
                 "Memory retrieval rejected: task not offered",
@@ -553,6 +579,51 @@ def execute_memory_read(
                 "history_injected": False,
             },
         )
+        if not matched:
+            event_sink(
+                "empty_memory_result",
+                "Memory query returned empty result",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": effective_turn_id,
+                    "task_id": effective_selected_task,
+                    "empty_result": True,
+                },
+            )
+            event_sink(
+                "context.memory_no_match",
+                "Memory query returned no match",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": effective_turn_id,
+                    "task_id": effective_selected_task,
+                    "empty_result": True,
+                },
+            )
+        else:
+            provider = getattr(capsule_service, "provider", "mana") if capsule_service else "mana"
+            event_sink(
+                "provider_memory_read",
+                "Provider memory read",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": effective_turn_id,
+                    "task_id": effective_selected_task,
+                    "provider": provider,
+                    "records_returned": len(capsule_rows),
+                },
+            )
+            event_sink(
+                "context.provider_memory_read",
+                "Provider memory read",
+                metadata={
+                    "session_id": session_id,
+                    "turn_id": effective_turn_id,
+                    "task_id": effective_selected_task,
+                    "provider": provider,
+                    "records_returned": len(capsule_rows),
+                },
+            )
 
     return encoded
 
