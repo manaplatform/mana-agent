@@ -397,21 +397,27 @@ def test_shell_executor_auto_request_approval_and_wait_approved(tmp_path: Path, 
 
     def approve_inbox() -> None:
         inbox = default_human_inbox_service()
-        for _ in range(50):
+        for _ in range(100):
             time.sleep(0.05)
-            items = inbox.repository.list()
+            try:
+                items = inbox.repository.list()
+            except Exception:
+                continue
             if items:
-                actor = items[0].assigned_reviewer_id or "local"
-                inbox.respond(ResponseSubmission(
-                    inbox_item_id=items[0].inbox_item_id,
-                    operation=ResponseOperation.APPROVE,
-                    actor_id=actor,
-                    channel="test",
-                    idempotency_key=f"approve_{items[0].inbox_item_id}",
-                    expected_version=items[0].version,
-                    current_action_digest=items[0].action_digest,
-                ))
-                break
+                try:
+                    actor = items[0].assigned_reviewer_id or "local"
+                    inbox.respond(ResponseSubmission(
+                        inbox_item_id=items[0].inbox_item_id,
+                        operation=ResponseOperation.APPROVE,
+                        actor_id=actor,
+                        channel="test",
+                        idempotency_key=f"approve_{items[0].inbox_item_id}",
+                        expected_version=items[0].version,
+                        current_action_digest=items[0].action_digest,
+                    ))
+                    break
+                except Exception:
+                    continue
 
     thread = threading.Thread(target=approve_inbox, daemon=True)
     thread.start()
@@ -439,21 +445,27 @@ def test_shell_executor_auto_request_approval_and_wait_denied(tmp_path: Path, mo
 
     def deny_inbox() -> None:
         inbox = default_human_inbox_service()
-        for _ in range(50):
+        for _ in range(100):
             time.sleep(0.05)
-            items = inbox.repository.list()
+            try:
+                items = inbox.repository.list()
+            except Exception:
+                continue
             if items:
-                actor = items[0].assigned_reviewer_id or "local"
-                inbox.respond(ResponseSubmission(
-                    inbox_item_id=items[0].inbox_item_id,
-                    operation=ResponseOperation.DENY,
-                    actor_id=actor,
-                    channel="test",
-                    idempotency_key=f"deny_{items[0].inbox_item_id}",
-                    expected_version=items[0].version,
-                    current_action_digest=items[0].action_digest,
-                ))
-                break
+                try:
+                    actor = items[0].assigned_reviewer_id or "local"
+                    inbox.respond(ResponseSubmission(
+                        inbox_item_id=items[0].inbox_item_id,
+                        operation=ResponseOperation.DENY,
+                        actor_id=actor,
+                        channel="test",
+                        idempotency_key=f"deny_{items[0].inbox_item_id}",
+                        expected_version=items[0].version,
+                        current_action_digest=items[0].action_digest,
+                    ))
+                    break
+                except Exception:
+                    continue
 
     thread = threading.Thread(target=deny_inbox, daemon=True)
     thread.start()

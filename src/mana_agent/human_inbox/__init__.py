@@ -31,7 +31,9 @@ from .models import (
     RiskLevel,
 )
 from .approval_tools import (
+    ApprovalRequestInput,
     ApprovalWaitResult,
+    approval_request,
     build_approval_tools,
     request_user_approval,
     wait_for_approval,
@@ -180,6 +182,8 @@ __all__ = [
     "ReviewerType",
     "RiskLevel",
     "StaticIdentityDirectory",
+    "approval_request",
+    "ApprovalRequestInput",
     "build_approval_tools",
     "default_human_inbox_service",
     "request_user_approval",

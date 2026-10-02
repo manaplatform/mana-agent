@@ -289,6 +289,11 @@ class _ReadFileInput(BaseModel):
 
 class _RunCommandInput(BaseModel):
     cmd: str = Field(description="Shell command to execute in project root")
+    expected_outputs: list[str] | None = Field(default=None, description="Optional expected output strings")
+    action_approval_id: str = Field(default="", description="Optional human approval token")
+    cwd: str | None = Field(default=None, description="Optional working directory relative to project root")
+    wait_for_approval: bool = Field(default=True, description="Whether to await human approval if required by security policy")
+    approval_wait_timeout_seconds: float = Field(default=60.0, description="Seconds to await approval if required")
 
 class _ShellInput(BaseModel):
     action: dict[str, Any] | None = Field(default=None, description="Action object with commands, timeout_ms, max_output_length")
@@ -1560,7 +1565,7 @@ class AskAgent:
             expected_outputs: list[str] | None = None,
             action_approval_id: str = "",
             cwd: str | None = None,
-            wait_for_approval: bool = False,
+            wait_for_approval: bool = True,
             approval_wait_timeout_seconds: float = 60.0,
         ) -> str:
             started = perf_counter()
@@ -1620,7 +1625,7 @@ class AskAgent:
                     environment={},
                     expected_outputs=list(expected_outputs or []),
                     parent_task_id=str(run_id or "ask-run-command"),
-                    actor="model_tool",
+                    actor="user",
                     originating_agent="ask_agent",
                     policy_context={"tool": "run_command"},
                     idempotency_key=f"shell:{hashlib.sha256(json.dumps({'run_id': run_id, 'argv': shell_argv}, sort_keys=True).encode()).hexdigest()}",
@@ -1644,55 +1649,55 @@ class AskAgent:
                     req_id = inbox_item_id or action.action_id
                     conv_id = str(flow_id or getattr(self, "session_id", "") or "").strip()
 
+                    approval_metadata = {
+                        "permission_request_id": req_id,
+                        "inbox_item_id": req_id,
+                        "action_id": action.action_id,
+                        "permission_scope": "transactional_action.once",
+                        "preview": action.preview.redacted() if action.preview else {"command": cmd},
+                        "preview_digest": action.preview_digest,
+                        "transactional_action_approval": True,
+                        "conversation_id": conv_id,
+                    }
+                    try:
+                        from mana_agent.chat.history import get_history
+                        from mana_agent.chat.models import CodingActivityEvent
+
+                        get_history().add(
+                            CodingActivityEvent(
+                                activity={
+                                    "event_type": "action.approval.required",
+                                    "title": f"Approval required for shell command: {cmd}",
+                                    "metadata": approval_metadata,
+                                }
+                            )
+                        )
+                    except Exception as hist_err:
+                        logger.debug("Failed to record CodingActivityEvent for approval: %s", hist_err)
+
+                    try:
+                        from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+                        get_execution_event_hub().publish(
+                            {
+                                "type": "action.approval.required",
+                                "event_type": "action.approval.required",
+                                "kind": "transactional_action",
+                                "title": f"Approval required for command: {cmd}",
+                                "metadata": approval_metadata,
+                            },
+                            conversation_id=conv_id,
+                            execution_id=str(run_id or ""),
+                            persist=False,
+                        )
+                    except Exception as hub_err:
+                        logger.debug("Failed to publish approval event to hub: %s", hub_err)
+
                     if wait_for_approval:
                         from mana_agent.human_inbox import default_human_inbox_service
                         from mana_agent.human_inbox.models import InboxStatus
                         gateway = default_action_gateway(self.project_root)
                         inbox_service = gateway.inbox_service or default_human_inbox_service()
-
-                        approval_metadata = {
-                            "permission_request_id": req_id,
-                            "inbox_item_id": req_id,
-                            "action_id": action.action_id,
-                            "permission_scope": "transactional_action.once",
-                            "preview": action.preview.redacted() if action.preview else {"command": cmd},
-                            "preview_digest": action.preview_digest,
-                            "transactional_action_approval": True,
-                            "conversation_id": conv_id,
-                        }
-                        try:
-                            from mana_agent.chat.history import get_history
-                            from mana_agent.chat.models import CodingActivityEvent
-
-                            get_history().add(
-                                CodingActivityEvent(
-                                    activity={
-                                        "event_type": "action.approval.required",
-                                        "title": f"Approval required for shell command: {cmd}",
-                                        "metadata": approval_metadata,
-                                    }
-                                )
-                            )
-                        except Exception as hist_err:
-                            logger.debug("Failed to record CodingActivityEvent for approval: %s", hist_err)
-
-                        try:
-                            from mana_agent.services.execution_event_hub import get_execution_event_hub
-
-                            get_execution_event_hub().publish(
-                                {
-                                    "type": "action.approval.required",
-                                    "event_type": "action.approval.required",
-                                    "kind": "transactional_action",
-                                    "title": f"Approval required for command: {cmd}",
-                                    "metadata": approval_metadata,
-                                },
-                                conversation_id=conv_id,
-                                execution_id=str(run_id or ""),
-                                persist=False,
-                            )
-                        except Exception as hub_err:
-                            logger.debug("Failed to publish approval event to hub: %s", hub_err)
 
                         start_time = time.monotonic()
                         poll_interval = 0.25

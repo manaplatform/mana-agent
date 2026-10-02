@@ -282,6 +282,11 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("delete_file", "Delete one existing repository file.", "edit"),
     # Human approval / inbox
     (
+        "approval_request",
+        "Request human approval and wait for user decision when a command or transactional action requires approval to run.",
+        "inbox",
+    ),
+    (
         "request_user_approval",
         "Request human approval for a model-decided action through the durable inbox.",
         "inbox",
@@ -361,7 +366,7 @@ def _category_for_name(name: str) -> str:
         return "canvas"
     if n.startswith("git_") or n.startswith("git."):
         return "git"
-    if n in {"request_user_approval", "wait_for_approval"}:
+    if n in {"approval_request", "request_user_approval", "wait_for_approval"}:
         return "inbox"
     if n.startswith("mcp__") or n.startswith("mcp.") or n == "mcp":
         return "mcp"

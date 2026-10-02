@@ -10,6 +10,7 @@ import pytest
 
 from mana_agent.human_inbox.approval_tools import (
     ApprovalWaitResult,
+    approval_request,
     build_approval_tools,
     request_user_approval,
     wait_for_approval,
@@ -307,9 +308,94 @@ def test_build_approval_tools(tmp_path: Path) -> None:
     inbox = create_test_inbox_service(tmp_path, clock)
 
     tools = build_approval_tools(inbox_service=inbox)
-    assert len(tools) == 2
+    assert len(tools) == 3
     tool_names = {t.name for t in tools}
-    assert tool_names == {"request_user_approval", "wait_for_approval"}
+    assert tool_names == {"approval_request", "request_user_approval", "wait_for_approval"}
     for tool in tools:
         assert tool.metadata.get("read_only") is True
         assert tool.metadata.get("inbox_only") is True
+
+
+def test_approval_request_with_approved_item(tmp_path: Path) -> None:
+    clock = Clock()
+    inbox = create_test_inbox_service(tmp_path, clock)
+
+    item_id = request_user_approval(
+        source_decision_id="dec_req_001",
+        task_id="task_req_001",
+        agent_id="agent_req_001",
+        title="Execute system command",
+        summary="Command requires execution approval",
+        reviewer_id="reviewer-1",
+        inbox_service=inbox,
+    )
+
+    submit_decision(inbox, item_id, ResponseOperation.APPROVE)
+
+    result = approval_request(
+        inbox_item_id=item_id,
+        timeout_seconds=0.1,
+        inbox_service=inbox,
+    )
+
+    assert result["approved"] is True
+    assert result["status"] == "approved"
+    assert result["inbox_item_id"] == item_id
+
+
+def test_approval_request_with_denied_item(tmp_path: Path) -> None:
+    clock = Clock()
+    inbox = create_test_inbox_service(tmp_path, clock)
+
+    item_id = request_user_approval(
+        source_decision_id="dec_req_002",
+        task_id="task_req_002",
+        agent_id="agent_req_002",
+        title="Execute dangerous command",
+        summary="Command rejected by policy",
+        reviewer_id="reviewer-1",
+        inbox_service=inbox,
+    )
+
+    submit_decision(inbox, item_id, ResponseOperation.DENY)
+
+    result = approval_request(
+        inbox_item_id=item_id,
+        timeout_seconds=0.1,
+        inbox_service=inbox,
+    )
+
+    assert result["approved"] is False
+    assert result["status"] == "denied"
+    assert result["inbox_item_id"] == item_id
+    assert "denied" in result["message"]
+
+
+def test_approval_request_timeout(tmp_path: Path) -> None:
+    clock = Clock()
+    inbox = create_test_inbox_service(tmp_path, clock)
+
+    item_id = request_user_approval(
+        source_decision_id="dec_req_003",
+        task_id="task_req_003",
+        agent_id="agent_req_003",
+        title="Pending command",
+        reviewer_id="reviewer-1",
+        inbox_service=inbox,
+    )
+
+    result = approval_request(
+        inbox_item_id=item_id,
+        timeout_seconds=0.05,
+        inbox_service=inbox,
+    )
+
+    assert result["approved"] is False
+    assert result["status"] == "pending"
+    assert result["inbox_item_id"] == item_id
+    assert "Timed out" in result["message"]
+
+
+def test_approval_request_missing_inputs() -> None:
+    with pytest.raises(ValueError, match="Either 'command', 'inbox_item_id', or 'action_id' must be provided"):
+        approval_request()

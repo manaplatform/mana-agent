@@ -8,6 +8,7 @@ from mana_agent.multi_agent.agents.base_agent import BaseAgent
 from mana_agent.multi_agent.core.types import AgentRole
 
 APPROVAL_ALLOWED_TOOLS = [
+    "approval_request",
     "request_user_approval",
     "wait_for_approval",
     "git_status",

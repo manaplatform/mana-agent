@@ -39,6 +39,7 @@ def test_approval_agent_tools() -> None:
     assert agent.role == AgentRole.APPROVAL
     assert agent.tools() == APPROVAL_ALLOWED_TOOLS
     assert agent.tools() == [
+        "approval_request",
         "request_user_approval",
         "wait_for_approval",
         "git_status",

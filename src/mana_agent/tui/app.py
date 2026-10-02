@@ -574,11 +574,16 @@ class ManaChatApp(App):
             )
         except Exception:
             try:
-                matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
-                if matches:
-                    item = matches[0]
+                item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
             except Exception:
                 pass
+            if item is None:
+                try:
+                    matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
+                    if matches:
+                        item = matches[0]
+                except Exception:
+                    pass
         if item is None:
             return
         if item.request_type.value != "approval" or item.status.value not in {"pending", "delivered"}:
@@ -599,11 +604,16 @@ class ManaChatApp(App):
             item = self.gateway.human_inbox_service.get(inbox_item_id, actor_id=getpass.getuser())
         except Exception:
             try:
-                matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
-                if matches:
-                    item = matches[0]
+                item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
             except Exception:
                 pass
+            if item is None:
+                try:
+                    matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
+                    if matches:
+                        item = matches[0]
+                except Exception:
+                    pass
         if item is None:
             self._show_next_transactional_modal()
             return
@@ -1184,6 +1194,7 @@ class ManaChatApp(App):
         finally:
             self._current_frontend_turn_id = None
             self._turn_in_progress = False
+            self.call_after_refresh(self._queue_outstanding_transactional_approvals)
 
     def _apply_model_selection(self, selection: Any) -> None:
         if selection is None:

@@ -887,6 +887,50 @@ def coding_tool_contracts() -> list[ToolContract]:
                 }
             ],
         ),
+        ToolContract(
+            name="approval_request",
+            description=(
+                "Request human approval and wait for user verdict when a command or transactional action requires approval to run. "
+                "Displays the approval prompt in the user's interface in real time and returns the approved approval_id grant."
+            ),
+            input_schema=_schema(
+                {
+                    "command": {"type": "string"},
+                    "title": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "inbox_item_id": {"type": "string"},
+                    "action_id": {"type": "string"},
+                    "risk_level": {"type": "string"},
+                    "timeout_seconds": {"type": "number"},
+                },
+                [],
+            ),
+            output_schema=_schema(
+                {
+                    "approved": {"type": "boolean"},
+                    "approval_id": {"type": "string"},
+                    "inbox_item_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "command": {"type": "string"},
+                    "message": {"type": "string"},
+                },
+                ["approved", "status", "message"],
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Create or link a durable inbox approval request before consequential execution.",
+                "Wait for human decision without bypass; unapproved requests return approved=False.",
+                "The issued approval_id is strictly bound to the action preview and verified by ActionGateway.",
+            ],
+            examples=[
+                {
+                    "input": {
+                        "command": "python -m pytest tests/test_core.py",
+                        "reason": "Run test suite to verify code changes.",
+                    }
+                }
+            ],
+        ),
     ]
 
 

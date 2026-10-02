@@ -4,6 +4,24 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-02
 
+- Fixed Windows file lock contention and PermissionError in LocalInboxRepository and storage locks:
+  - Fixed Windows CI test failure in `test_shell_executor_auto_request_approval_and_wait_approved` where concurrent inbox threads raised `PermissionError: [Errno 13] Permission denied` when checking `if not handle.read(1):` on `.repository.lock`.
+  - On Windows, byte-range locking via `msvcrt.locking` is mandatory; reading or writing a locked byte without holding the lock raises `PermissionError` (access denied).
+  - Added a process-wide thread lock registry per canonical path (`_thread_lock_for_repository_path`) in `src/mana_agent/human_inbox/repository.py` and `src/mana_agent/execution_supervisor/store.py` so different repository instances within the same process synchronize properly on Python `RLock`.
+  - Pre-seeded lock files with `b"0"` on initialization so they are never 0 bytes, and wrapped `handle.read(1)` empty checks in `try ... except (OSError, PermissionError): pass` across `repository.py`, `tokens.py`, `store.py`, `lane_coordinator.py`, `evals/storage.py`, `context_cost/store.py`, `workspaces/preparation.py`, and `automations/service.py`.
+  - Improved polling thread resilience in `tests/test_shell_executor.py` (`approve_inbox` and `deny_inbox`).
+  - User verification required: `python -m pytest tests/test_shell_executor.py -k "test_shell_executor_auto_request_approval"`.
+
+- Implemented `approval_request` tool and fixed real-time TUI approval modal popup:
+  - Created universal `approval_request` tool in `src/mana_agent/human_inbox/approval_tools.py` with typed `ApprovalRequestInput` schema, allowing agents to request approval for commands or pending inbox/action IDs, broadcast real-time `action.approval.required` events, poll for verdicts, and return structured approval output with `approval_id`.
+  - Registered `approval_request` tool in `build_approval_tools()`, exported it in `human_inbox`, added it to `_BUILTIN_AUTO_CHAT_TOOLS` and `"inbox"` category in `src/mana_agent/tools/catalog.py`, defined `ToolContract` in `src/mana_agent/tools/contracts.py`, registered capabilities in `src/mana_agent/gateway/lanes.py`, and added it to `APPROVAL_ALLOWED_TOOLS` in `src/mana_agent/multi_agent/agents/approval_agent.py`.
+  - Updated `run_command` in `src/mana_agent/multi_agent/runtime/ask_agent.py` to accept `action_approval_id`, default `wait_for_approval=True`, and always dispatch `CodingActivityEvent` and `ExecutionEventHub` events when `ApprovalRequired` is encountered.
+  - Updated `ActionGateway.execute` in `src/mana_agent/transactional_actions/gateway.py` to persist the inbox link and emit `action.approval.required` when policy halts on pending grant.
+  - Updated transactional runtime event sink in `src/mana_agent/transactional_actions/runtime.py` to mirror `action.approval.required` events to `ChatHistory`.
+  - Fixed TUI modal display in `src/mana_agent/tui/app.py`: fallback to repository direct lookup when reviewer permission check fails on `service.get(inbox_item_id)`, and trigger `_queue_outstanding_transactional_approvals` in turn completion to prevent missed modals without requiring TUI restart.
+  - Added unit tests in `tests/human_inbox/test_approval_tools.py` and updated `tests/multi_agent/test_approval_agent.py`.
+  - User verification required: `python -m pytest tests/human_inbox/test_approval_tools.py tests/multi_agent/test_approval_agent.py`.
+
 - Integrated interactive approval modals and waiting flow across chat (TUI) and dashboard:
   - Enabled automatic approval modal popup in TUI (`src/mana_agent/tui/app.py`) by subscribing to `action.approval.required` in `_handle_hub_session_event`, enqueuing approval modals for transactional actions, auto-dismissing on `action.approval.granted`/`denied`, and supporting lookup by `action_id` (`act_...`) in addition to `inbox_item_id`.
   - Updated `src/mana_agent/transactional_actions/events.py` to populate `permission_request_id` with either `inbox_item_id` or `action_id`, and injected `conversation_id` into event payloads and metadata for reliable WebSocket dispatch to `/ws/conversations/{id}/events`.
