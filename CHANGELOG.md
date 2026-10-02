@@ -2,6 +2,103 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-02
+
+- Fixed Windows file lock contention and PermissionError in LocalInboxRepository and storage locks:
+  - Fixed Windows CI test failure in `test_shell_executor_auto_request_approval_and_wait_approved` where concurrent inbox threads raised `PermissionError: [Errno 13] Permission denied` when checking `if not handle.read(1):` on `.repository.lock`.
+  - On Windows, byte-range locking via `msvcrt.locking` is mandatory; reading or writing a locked byte without holding the lock raises `PermissionError` (access denied).
+  - Added a process-wide thread lock registry per canonical path (`_thread_lock_for_repository_path`) in `src/mana_agent/human_inbox/repository.py` and `src/mana_agent/execution_supervisor/store.py` so different repository instances within the same process synchronize properly on Python `RLock`.
+  - Pre-seeded lock files with `b"0"` on initialization so they are never 0 bytes, and wrapped `handle.read(1)` empty checks in `try ... except (OSError, PermissionError): pass` across `repository.py`, `tokens.py`, `store.py`, `lane_coordinator.py`, `evals/storage.py`, `context_cost/store.py`, `workspaces/preparation.py`, and `automations/service.py`.
+  - Improved polling thread resilience in `tests/test_shell_executor.py` (`approve_inbox` and `deny_inbox`).
+  - User verification required: `python -m pytest tests/test_shell_executor.py -k "test_shell_executor_auto_request_approval"`.
+
+- Implemented `approval_request` tool and fixed real-time TUI approval modal popup:
+  - Created universal `approval_request` tool in `src/mana_agent/human_inbox/approval_tools.py` with typed `ApprovalRequestInput` schema, allowing agents to request approval for commands or pending inbox/action IDs, broadcast real-time `action.approval.required` events, poll for verdicts, and return structured approval output with `approval_id`.
+  - Registered `approval_request` tool in `build_approval_tools()`, exported it in `human_inbox`, added it to `_BUILTIN_AUTO_CHAT_TOOLS` and `"inbox"` category in `src/mana_agent/tools/catalog.py`, defined `ToolContract` in `src/mana_agent/tools/contracts.py`, registered capabilities in `src/mana_agent/gateway/lanes.py`, and added it to `APPROVAL_ALLOWED_TOOLS` in `src/mana_agent/multi_agent/agents/approval_agent.py`.
+  - Updated `run_command` in `src/mana_agent/multi_agent/runtime/ask_agent.py` to accept `action_approval_id`, default `wait_for_approval=True`, and always dispatch `CodingActivityEvent` and `ExecutionEventHub` events when `ApprovalRequired` is encountered.
+  - Updated `ActionGateway.execute` in `src/mana_agent/transactional_actions/gateway.py` to persist the inbox link and emit `action.approval.required` when policy halts on pending grant.
+  - Updated transactional runtime event sink in `src/mana_agent/transactional_actions/runtime.py` to mirror `action.approval.required` events to `ChatHistory`.
+  - Fixed TUI modal display in `src/mana_agent/tui/app.py`: fallback to repository direct lookup when reviewer permission check fails on `service.get(inbox_item_id)`, and trigger `_queue_outstanding_transactional_approvals` in turn completion to prevent missed modals without requiring TUI restart.
+  - Added unit tests in `tests/human_inbox/test_approval_tools.py` and updated `tests/multi_agent/test_approval_agent.py`.
+  - User verification required: `python -m pytest tests/human_inbox/test_approval_tools.py tests/multi_agent/test_approval_agent.py`.
+
+- Integrated interactive approval modals and waiting flow across chat (TUI) and dashboard:
+  - Enabled automatic approval modal popup in TUI (`src/mana_agent/tui/app.py`) by subscribing to `action.approval.required` in `_handle_hub_session_event`, enqueuing approval modals for transactional actions, auto-dismissing on `action.approval.granted`/`denied`, and supporting lookup by `action_id` (`act_...`) in addition to `inbox_item_id`.
+  - Updated `src/mana_agent/transactional_actions/events.py` to populate `permission_request_id` with either `inbox_item_id` or `action_id`, and injected `conversation_id` into event payloads and metadata for reliable WebSocket dispatch to `/ws/conversations/{id}/events`.
+  - Updated `ShellExecutor._request_approval_and_wait` in `src/mana_agent/tools/shell_exec.py` to forward `conversation_id` to event emissions, publish `action.approval.required` to `ExecutionEventHub`, and post `CodingActivityEvent` to chat history.
+  - Updated `AskAgent.run_command` in `src/mana_agent/multi_agent/runtime/ask_agent.py` to handle `ApprovalRequired`, emit approval events, and wait for human response; on approval, executes the shell action through the gateway and returns the output to continue the agent turn seamlessly.
+  - Updated `AgentChatGateway` in `src/mana_agent/gateway/chat_gateway.py` to support `action_id` lookup in approval and denial commands (`transactional_action_approval_command`, `deny_transactional_action_command`).
+  - Updated `decide_transactional_action_in_chat` in `src/mana_agent/api/routes/conversations.py` to resolve items by `action_id` (`act_...`) via `find_for_action` and issue approval grants on approval.
+  - Added unit tests in `tests/gateway/test_transactional_approval.py` and `tests/test_api_conversations.py`.
+  - User verification required: `python -m pytest tests/gateway/test_transactional_approval.py tests/test_api_conversations.py tests/test_shell_executor.py`.
+
+- Fixed transactional action approval execution in AgentChatGateway:
+  - Fixed erroneous `Exact action approved, but this legacy MCP approval is not bound to a resumable durable task. No provider action was executed; submit a fresh model-selected MCP request.` message returned when approving shell or standalone MCP actions.
+  - In `src/mana_agent/gateway/chat_gateway.py`, updated `transactional_action_approval_command` to recognize shell actions (`action.tool_name == "shell"`), issuing the approval grant so waiting in-flight shell executions proceed cleanly.
+  - Bound and executed standalone MCP actions via `_rebind_approved_mcp_action` and `gateway.execute`, executing the provider action directly when not backed by a durable branch task.
+  - Updated `_rebind_approved_mcp_action` to resolve `provider_id`, `tool_name`, and `arguments` from `normalized_arguments` in `ActionIntent` and protected context.
+  - Added unit test coverage in `tests/gateway/test_transactional_approval.py`.
+  - User verification required: `python -m pytest tests/gateway/test_transactional_approval.py`.
+
+- Fixed Windows shell command line tokenization and quote stripping in ShellExecutor:
+  - Fixed Windows test failures on CI (`test_shell_executor_timeout_kills_process_and_returns_partial_output`, `test_shell_executor_preserves_non_zero_exit_code`, `test_shell_executor_truncation_per_max_output_length`, `test_shell_executor_sanitizes_environment_and_secrets`) caused by `shlex.split(..., posix=False)` retaining enclosing quotes on arguments.
+  - When `subprocess.Popen(argv)` runs on Windows, `list2cmdline` re-escaped tokens that retained quotes into `\"...\"`, turning Python `-c` commands into string statements that silently exited with code 0 instead of executing.
+  - Implemented `split_windows_command` and `split_shell_command` in `src/mana_agent/tools/shell_exec.py` properly stripping enclosing quotes while preserving Windows path backslashes and escaped quotes (`\"` -> `"`).
+  - Added unit test suite in `tests/test_shell_executor.py` verifying Windows command splitting, backslash path preservation, quote stripping, roundtrip fidelity with `subprocess.list2cmdline`, and platform dispatch.
+  - User verification required: `python -m pytest tests/test_shell_executor.py`.
+
+- Fixed shell execution to automatically send approval requests and wait when commands require human approval:
+  - Added `auto_request_approval` and `approval_wait_timeout_seconds` configuration to `ShellExecutor` in `src/mana_agent/tools/shell_exec.py`.
+  - Implemented `_request_approval_and_wait()` in `ShellExecutor` proposing a `ShellActionAdapter` through `ActionGateway` to create an authoritative durable human inbox request, emit `action.approval.required` activity events to notify connected TUIs and live dashboards, and wait for human decision.
+  - If approved, acquires the valid grant token and automatically executes the shell command; if denied or timed out, stops safely and returns the exact status without executing.
+  - Updated `AskAgent` `shell` and `run_command` tools in `src/mana_agent/multi_agent/runtime/ask_agent.py` to forward approval waiting parameters.
+  - Updated `ExecutionManager` `execute_shell_call` and `execute_shell_call_sync` in `src/mana_agent/execution/manager.py` to support `auto_request_approval`.
+  - Added unit test coverage in `tests/test_shell_executor.py` verifying automatic approval request creation, waiting, approval resumption, denial handling, and timeout behavior.
+  - User verification required: `python -m pytest tests/test_shell_executor.py -k "test_shell_executor_auto_request_approval"`.
+
+- Separated local shell execution from Codex coding agent:
+  - Created a dedicated `shell` entry route distinct from `coding`, separating local shell/terminal command execution from Codex-driven code editing workflows.
+  - Added `"shell"` to `EntryRouteName` and `required_source_rules` in `src/mana_agent/gateway/entry_routing.py`, updating `ENTRY_ROUTER_PROMPT` to guide command execution to `shell` and repository edits to `coding`.
+  - Added `RouteRegistration("shell", ...)` with tools `("shell", "run_command")` in `src/mana_agent/gateway/chat_gateway.py` and removed shell tools from `RouteRegistration("coding", ...)`, preventing Codex preflight from blocking shell execution.
+  - Implemented `_execute_shell_route()` in `src/mana_agent/gateway/chat_gateway.py` executing shell commands directly through `AskAgent` without requiring Codex.
+  - Mapped `"shell"` in `ENTRY_ROUTE_LANES` (`src/mana_agent/gateway/lanes.py`) to `LaneId.OPERATIONS`.
+  - Added tests in `tests/gateway/test_entry_routing.py` verifying that shell requests route to `shell` with shell tools, coding does not have shell tools, and shell commands execute without Codex.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -k "test_entry_router_recognizes_shell_execution_requests_as_shell or test_shell_route_executes_without_codex"`.
+
+## 2026-10-01
+
+- Fixed entry router recognizing local shell and terminal command execution requests:
+  - Updated `ENTRY_ROUTER_PROMPT` in `src/mana_agent/gateway/entry_routing.py` to explicitly describe `coding` as owning repository engineering workflows, verification, and local shell/terminal command execution (via `shell` or `run_command` tools), adding explicit routing examples so shell execution requests are not classified as `unsupported`.
+  - Registered available tools (`shell`, `run_command`, etc.) in `RouteRegistration("coding", ...)` and updated its description in `src/mana_agent/gateway/chat_gateway.py` `_build_entry_route_registry()`.
+  - Updated `mapped["coding"]` `AgentDecision` in `src/mana_agent/gateway/chat_gateway.py` to populate `selected_tools` with registered route tools.
+  - Added `"shell"` to `KNOWN_AGENT_TOOLS` in `src/mana_agent/multi_agent/routing/agent_decision.py`.
+  - Updated `coding_task` description in `src/mana_agent/multi_agent/runtime/entry_router.py`.
+  - Added unit test `test_entry_router_recognizes_shell_execution_requests_as_coding` in `tests/gateway/test_entry_routing.py` and populated registered tools for `coding` in test mock `_registry()`.
+  - User verification required: `python -m pytest tests/gateway/test_entry_routing.py -k test_entry_router_recognizes_shell_execution_requests_as_coding` and `python -m pytest tests/test_agent_decision_routing.py`.
+
+- Added ApprovalAgent and model-driven approval wait tools (`request_user_approval`, `wait_for_approval`):
+  - Implemented `request_user_approval` and `wait_for_approval` in `src/mana_agent/human_inbox/approval_tools.py` with typed verdicts (`approved`, `denied`, `expired`, `cancelled`, `still_pending`), timeout suspension hook, idempotency key derivation from `task_id` and `source_decision_id`, strict parameter validation stopping safely without fallback, and LangChain `StructuredTool` builder `build_approval_tools()`.
+  - Added `AgentRole.APPROVAL` in `src/mana_agent/multi_agent/core/types.py`, registered approval capabilities (`[transactional_actions, execution, human_inbox, approval_request, approval_wait]`) in `src/mana_agent/multi_agent/registry/capability_registry.py`, and added model level assignment (`MANA_MODEL_APPROVAL`, level 3), routing task (`approval`), and structured output requirement in `src/mana_agent/multi_agent/runtime/model_levels.py`.
+  - Created `ApprovalAgent` in `src/mana_agent/multi_agent/agents/approval_agent.py` with allowed tools `[request_user_approval, wait_for_approval, git_status, git_diff, run_command]`, `tools()` method, and `may_continue(result)` returning true strictly for verdict approved.
+  - Added approval tools to `READ_ONLY_MODEL_TOOLS` in `src/mana_agent/transactional_actions/enforcement.py` as inbox-only to ensure approval tools do not bypass `ActionGateway` policy.
+  - Registered approval tools in `src/mana_agent/tools/catalog.py` under the `inbox` category and wired into `AskAgent` tool loop in `src/mana_agent/multi_agent/runtime/ask_agent.py` and `src/mana_agent/gateway/chat_gateway.py`.
+  - Added test coverage in `tests/human_inbox/test_approval_tools.py` and `tests/multi_agent/test_approval_agent.py`.
+  - User verification required: `python -m pytest tests/human_inbox/test_approval_tools.py` and `python -m pytest tests/multi_agent`.
+
+- Added OpenAI-compatible Local Shell Tool (`shell`) across contracts, executor, router, supervisor, and approval policy:
+  - Added `shell` `ToolContract` in `src/mana_agent/tools/contracts.py` with strict input/output schemas conforming to OpenAI Shell tool protocol (`shell_call` action with `commands`, `timeout_ms`, `max_output_length`, and `shell_call_output` with `stdout`, `stderr`, and `outcome`).
+  - Implemented `ShellExecutor` in `src/mana_agent/tools/shell_exec.py` running in local mode only (`environment: {"type": "local"}`) using `subprocess.Popen` without `shell=True`, locked workspace cwd confinement, mandatory timeout with process kill and partial output preservation, non-zero exit preservation for model error recovery, stream truncation per `max_output_length`, environment sanitization with secret redaction via `execution/secrets.py`, command denylist protection, audit logging, and prompt-injection defense with untrusted terminal content notice.
+  - Registered `shell` in auto-chat catalog under `verify` category in `src/mana_agent/tools/catalog.py` and exposed in `AskAgent` `base_tools` in `src/mana_agent/multi_agent/runtime/ask_agent.py`.
+  - Added shell execution routing and lifecycle support in `src/mana_agent/execution/router.py`, `src/mana_agent/execution/manager.py`, and `src/mana_agent/execution/providers/local_process.py`.
+  - Configured transactional approval policy in `src/mana_agent/transactional_actions/policy.py` classifying read-only commands (`ls`, `git status`, `git diff`, `git log`, etc.) as free (`PolicyOutcome.ALLOW`) while requiring human approval for mutating commands (`touch`, `rm`, `git commit`, etc.), and denying dangerous patterns.
+  - Added execution supervisor hooks in `src/mana_agent/execution_supervisor/supervisor.py` and `infer_effect_scope` in `src/mana_agent/execution_supervisor/models.py`.
+  - Added dedicated eval suite `evals/suites/shell-injection.yaml` and task in `evals/suites/routing-smoke.yaml` testing defense against adversarial prompt injections inside terminal output.
+  - Added unit test suite in `tests/test_shell_executor.py` covering timeout, exit code preservation, truncation, cwd confinement, secrets redaction, denylist blocking, read-only vs mutating approval flows, contracts, catalog registration, router/manager integration, supervisor hooks, and prompt injection defense.
+  - Fixed model capability resolution when bare catalog records lack tool/parameter metadata:
+    - In `src/mana_agent/config/model_capabilities.py`, allowed maintained descriptors (and family prefix matches like `gpt-6.*`) to resolve when supplied catalog records lack explicit capability metadata, preventing false-positive `no_write_capable_model_available` errors for maintained models like `gpt-6.1-sol`.
+    - In `src/mana_agent/doctor/checks/secrets.py`, checked both uppercase and lowercase provider key names to correctly recognize configured secrets.
+  - User verification required: `pytest tests/test_model_capabilities.py tests/test_shell_executor.py tests/test_ask_agent.py tests/test_coding_tool_system.py tests/test_auto_chat_tools_catalog.py -v`.
+
 ## 2026-09-16
 
 - Fixed timing fragility and thread leaks in gateway lane coordinator unit tests under Windows CI:

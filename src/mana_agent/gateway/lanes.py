@@ -327,6 +327,7 @@ ENTRY_ROUTE_LANES: dict[str, LaneId] = {
     "artifact": LaneId.ARTIFACT,
     "media": LaneId.MEDIA,
     "coding": LaneId.CODING,
+    "shell": LaneId.OPERATIONS,
     "mcp": LaneId.OPERATIONS,
     "browser": LaneId.RESEARCH,
     "search": LaneId.RESEARCH,
@@ -377,6 +378,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "write_file": frozenset({"repository_write"}), "create_file": frozenset({"repository_write"}),
     "delete_file": frozenset({"repository_write"}), "run_command": frozenset({"shell_write"}),
     "run_script_once": frozenset({"shell_write"}),
+    "shell": frozenset({"shell_write", "shell_read"}),
     "verify_project": frozenset({"test_execution"}), "run_tests": frozenset({"test_execution"}),
     "run_lint": frozenset({"test_execution"}), "web_search": frozenset({"web_search"}),
     "github_search": frozenset({"web_search"}), "git_status": frozenset({"git_read"}),
@@ -408,6 +410,9 @@ for _canvas_tool in (
     "canvas_wait_for_action",
 ):
     TOOL_CAPABILITIES[_canvas_tool] = frozenset({"canvas"})
+
+for _approval_tool in ("approval_request", "request_user_approval", "wait_for_approval"):
+    TOOL_CAPABILITIES[_approval_tool] = frozenset({"repository_read", "human_inbox"})
 
 for _git_read_tool in (
     "git_log", "git_show", "git_branch", "git_remote", "git_help", "git_config_get",

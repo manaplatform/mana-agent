@@ -135,9 +135,12 @@ def _preparation_lock(path: Path) -> Iterator[None]:
         with _thread_lock(identity), lock_path.open("a+b") as handle:
             if os.name == "nt":  # pragma: no cover - exercised on Windows CI
                 handle.seek(0)
-                if handle.read(1) == b"":
-                    handle.write(b"0")
-                    handle.flush()
+                try:
+                    if handle.read(1) == b"":
+                        handle.write(b"0")
+                        handle.flush()
+                except (OSError, PermissionError):
+                    pass
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
             else:  # pragma: no cover - platform selection is deterministic

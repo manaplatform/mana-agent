@@ -26,7 +26,7 @@ def check_secrets(context: DoctorContext) -> list[DoctorFinding]:
         
     for p in providers:
         key = f"{p.upper()}_API_KEY"
-        if not config.get(key.lower()) and not os.environ.get(key):
+        if not config.get(key) and not config.get(key.lower()) and not os.environ.get(key):
             findings.append(DoctorFinding(f"secrets/{p}", Severity.ERROR, f"{p} API Key Missing", f"Provider {p} is enabled but {key} is missing.", f"Set {key}.", code="SECRET_MISSING"))
         else:
             findings.append(DoctorFinding(f"secrets/{p}", Severity.INFO, f"{p} API Key", "Reference exists.", code="SECRET_OK"))

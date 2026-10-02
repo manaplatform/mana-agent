@@ -131,9 +131,12 @@ class AccountingStore:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
             elif msvcrt is not None:
                 stream.seek(0)
-                if not stream.read(1):
-                    stream.write("\0")
-                    stream.flush()
+                try:
+                    if not stream.read(1):
+                        stream.write("\0")
+                        stream.flush()
+                except (OSError, PermissionError):
+                    pass
                 stream.seek(0)
                 msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
             try:

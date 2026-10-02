@@ -557,3 +557,23 @@ def test_openrouter_grok_and_glm_transport_bridge_switching(tmp_path: Path):
     )
     assert effective_openai == CodexTransport.DIRECT_RESPONSES
 
+
+def test_bare_catalog_record_falls_back_to_maintained_descriptor():
+    """Bare catalog record with no tool/parameter metadata must not shadow maintained descriptors."""
+    bare_record = {
+        "id": "gpt-6.1-sol",
+        "created": 1790552874,
+        "object": "model",
+        "owned_by": "system",
+    }
+    desc = resolve_model_capability(
+        "openai",
+        "gpt-6.1-sol",
+        "direct_responses",
+        catalog_records=[bare_record],
+    )
+    assert desc.is_known is True
+    assert desc.supports_tool_calls is True
+    assert desc.supports_repository_write is True
+    assert desc.capability_source == "maintained"
+

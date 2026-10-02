@@ -26,6 +26,7 @@ def _pyproject_version() -> str:
 
 
 def test_get_version_matches_pyproject() -> None:
+    get_version.cache_clear()
     expected = _pyproject_version()
     assert get_version() == expected
     assert __version__ == expected

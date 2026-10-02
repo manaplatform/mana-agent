@@ -69,9 +69,12 @@ else:  # pragma: no cover - platform branch
 def _lock_process_file(handle: Any) -> None:
     if os.name == "nt":  # pragma: no cover - exercised on Windows CI
         handle.seek(0)
-        if not handle.read(1):
-            handle.write(b"0")
-            handle.flush()
+        try:
+            if not handle.read(1):
+                handle.write(b"0")
+                handle.flush()
+        except (OSError, PermissionError):
+            pass
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
     else:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 ROUTED_SIDE_EFFECT_TOOLS = frozenset({
-    "edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file",
+    "shell", "edit_file", "multi_edit_file", "apply_patch", "apply_patch_batch", "write_file",
     "create_file", "delete_file", "document_create", "document_update", "document_delete",
     "run_command", "run_script_once", "git_generic", "git_create_branch", "git_switch",
     "git_add", "git_commit", "git_push", "api_request_execute",
@@ -36,6 +36,7 @@ READ_ONLY_MODEL_TOOLS = frozenset({
     "canvas_get_surface", "canvas_list_surfaces", "canvas_wait_for_action",
     "api_workflow_decide", "api_docs_inspect", "api_integrations_list", "api_integration_get",
     "api_operations_search", "api_request_preview",
+    "request_user_approval", "wait_for_approval",
 })
 
 UNROUTED_SIDE_EFFECT_TOOLS = frozenset({

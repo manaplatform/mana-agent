@@ -1353,6 +1353,9 @@ class AgentChatGateway:
             self._dispatch_resumed_transactional_action
         )
         self._recover_queued_transactional_action_dispatches()
+        if hasattr(self._stack, "ask_service") and hasattr(self._stack.ask_service, "ask_agent"):
+            if self._stack.ask_service.ask_agent is not None:
+                self._stack.ask_service.ask_agent.human_inbox_service = self.human_inbox_service
         from mana_agent.connectors.browser.session import default_browser_manager
         from mana_agent.sessions.service import SessionService
 
@@ -1611,9 +1614,10 @@ class AgentChatGateway:
         from mana_agent.transactional_actions.adapters import McpActionAdapter
 
         context = dict(protected_context or {})
-        provider_id = str(context.get("provider_id") or "").strip()
-        tool_name = str(context.get("tool_name") or "").strip()
-        arguments = context.get("arguments")
+        norm_args = dict(context.get("normalized_arguments") or action.normalized_arguments or {})
+        provider_id = str(context.get("provider_id") or norm_args.get("provider_id") or "").strip()
+        tool_name = str(context.get("tool_name") or norm_args.get("tool_name") or "").strip()
+        arguments = context.get("arguments") if context.get("arguments") is not None else norm_args.get("arguments")
         if not provider_id or not tool_name or not isinstance(arguments, dict):
             raise ValueError(
                 "approved MCP action lacks its protected provider, tool, or arguments"
@@ -3378,7 +3382,15 @@ class AgentChatGateway:
         """Approve the authoritative inbox item; branch resumption owns execution."""
         from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
-        item = self.human_inbox_service.repository.get(inbox_item_id)
+        try:
+            item = self.human_inbox_service.repository.get(inbox_item_id)
+        except (KeyError, LookupError):
+            matches = self.human_inbox_service.repository.find_for_action(inbox_item_id)
+            if matches:
+                item = matches[0]
+                inbox_item_id = item.inbox_item_id
+            else:
+                raise
         if item.request_type.value != "approval" or not item.action_intent_id:
             raise ValueError("inbox item is not an actionable transactional approval")
         actor_id = getpass.getuser()
@@ -3395,26 +3407,74 @@ class AgentChatGateway:
         if action is None:
             raise LookupError("approved inbox item has no durable transactional action")
         grant = self._transactional_runtime.gateway.approvals.find_valid(action)
-        if not item.checkpoint_id or action.parent_task_id != item.task_id:
+        if grant is None:
+            grant = self._transactional_runtime.gateway.approvals.issue(
+                action,
+                approved_by=actor_id,
+                ttl_seconds=300,
+            )
+
+        if item.checkpoint_id and action.parent_task_id == item.task_id:
             return {
-                "status": "approved_no_resumable_task",
+                "status": "approved",
                 "inbox_item_id": inbox_item_id,
                 "action_id": action.action_id,
                 "approval_id": grant.approval_id if grant is not None else "",
                 "result": {},
-                "message": (
-                    "Exact action approved, but this legacy MCP approval is not bound "
-                    "to a resumable durable task. No provider action was executed; "
-                    "submit a fresh model-selected MCP request."
-                ),
+                "message": "Exact action approved once. The matching durable branch is resuming the stored action.",
             }
+
+        if action.tool_name == "shell":
+            return {
+                "status": "approved",
+                "inbox_item_id": inbox_item_id,
+                "action_id": action.action_id,
+                "approval_id": grant.approval_id if grant is not None else "",
+                "result": {},
+                "message": "Exact shell action approved once. Shell execution is proceeding.",
+            }
+
+        if action.tool_name == "mcp":
+            try:
+                context_ref = (
+                    getattr(action, "protected_context_ref", None)
+                    or getattr(item, "protected_context_ref", None)
+                )
+                protected_context = (
+                    self._transactional_runtime.store.read_protected_action_context(context_ref)
+                    if context_ref
+                    else None
+                )
+                adapter = self._mcp_adapter_for_stored_action(action, protected_context=protected_context)
+                outcome = self._transactional_runtime.gateway.execute(
+                    adapter, approval_id=grant.approval_id if grant is not None else ""
+                )
+                return {
+                    "status": "approved",
+                    "inbox_item_id": inbox_item_id,
+                    "action_id": action.action_id,
+                    "approval_id": grant.approval_id if grant is not None else "",
+                    "result": outcome.result if hasattr(outcome, "result") else {},
+                    "message": "Exact MCP action approved once and executed successfully.",
+                }
+            except Exception as exc:
+                logger.warning("Failed to execute approved MCP action: %s", exc)
+                return {
+                    "status": "approved_execution_failed",
+                    "inbox_item_id": inbox_item_id,
+                    "action_id": action.action_id,
+                    "approval_id": grant.approval_id if grant is not None else "",
+                    "result": {},
+                    "message": f"Exact action approved, but MCP execution failed: {exc}",
+                }
+
         return {
             "status": "approved",
             "inbox_item_id": inbox_item_id,
             "action_id": action.action_id,
             "approval_id": grant.approval_id if grant is not None else "",
             "result": {},
-            "message": "Exact action approved once. The matching durable branch is resuming the stored action.",
+            "message": f"Exact {action.tool_name} action approved once.",
         }
 
     def deny_transactional_action_command(
@@ -3425,7 +3485,15 @@ class AgentChatGateway:
     ) -> dict[str, Any]:
         from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
-        item = self.human_inbox_service.repository.get(inbox_item_id)
+        try:
+            item = self.human_inbox_service.repository.get(inbox_item_id)
+        except (KeyError, LookupError):
+            matches = self.human_inbox_service.repository.find_for_action(inbox_item_id)
+            if matches:
+                item = matches[0]
+                inbox_item_id = item.inbox_item_id
+            else:
+                raise
         self.human_inbox_service.respond(ResponseSubmission(
             inbox_item_id=inbox_item_id,
             operation=ResponseOperation.DENY,
@@ -3507,10 +3575,27 @@ class AgentChatGateway:
                 lambda: self._available(),
             ),
             RouteRegistration(
+                "shell",
+                "Local shell and terminal command execution in the workspace environment.",
+                lambda: self._available(),
+                ("shell", "run_command"),
+            ),
+            RouteRegistration(
                 "coding",
-                "Codex coding workflow for repository file changes.",
+                "Codex coding workflow for repository file changes, verification, and implementation.",
                 lambda: self._available(
                     self._coding_agent is not None, "Coding agent is not configured."
+                ),
+                (
+                    "run_script_once",
+                    "verify_project",
+                    "edit_file",
+                    "multi_edit_file",
+                    "write_file",
+                    "create_file",
+                    "delete_file",
+                    "apply_patch",
+                    "apply_patch_batch",
                 ),
             ),
             RouteRegistration(
@@ -6042,6 +6127,7 @@ class AgentChatGateway:
                     )
                 execution_role = {
                     "coding": "coding",
+                    "shell": "tool",
                     "mcp": "tool",
                     "search": "research",
                     "github": "research",
@@ -6204,6 +6290,10 @@ class AgentChatGateway:
                             "shell_write",
                             "git_read",
                             "test_execution",
+                        ),
+                        "shell": (
+                            "shell_read",
+                            "shell_write",
                         ),
                         "mcp": ("mcp",),
                         "repository": ("repository_read",),
@@ -7094,7 +7184,7 @@ class AgentChatGateway:
                                 result.payload["pending_required_work"] = False
                                 result.payload["resume_required"] = False
                         else:
-                            if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"} and not result.error:
+                            if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server", "shell"} and not result.error:
                                 actual_tools = [
                                     t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
                                 ]
@@ -8423,6 +8513,7 @@ class AgentChatGateway:
             availability = RouteAvailability(available, reason=reason)
         execution_role = {
             "coding": "coding",
+            "shell": "tool",
             "mcp": "tool",
             "search": "research",
             "github": "research",
@@ -8491,6 +8582,10 @@ class AgentChatGateway:
                 "shell_write",
                 "git_read",
                 "test_execution",
+            ),
+            "shell": (
+                "shell_read",
+                "shell_write",
             ),
             "repository": ("repository_read",),
             "mcp": ("mcp",),
@@ -8747,7 +8842,7 @@ class AgentChatGateway:
                 error="goal_not_satisfied: Execution did not satisfy required criteria",
             )
         else:
-            if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server"}:
+            if decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server", "shell"}:
                 actual_tools = [
                     t.get("tool_name") for t in (result.trace or []) if isinstance(t, dict)
                 ]
@@ -9503,6 +9598,20 @@ class AgentChatGateway:
                 lane_task_id=lane_task_id,
             )
 
+        if decision.route == "shell":
+            if lane_task_id:
+                for tool_name in registration.tools:
+                    self._lane_coordinator.authorize_tool(lane_task_id, tool_name)
+            return self._execute_shell_route(
+                decision=decision,
+                context=context,
+                text=execution_text,
+                ask_service=ask_service,
+                callbacks=options.get("callbacks"),
+                event_sink=sink,
+                lane_task_id=lane_task_id,
+            )
+
         if decision.route == "artifact":
             return self._execute_artifact_route(
                 decision=decision,
@@ -10002,9 +10111,27 @@ class AgentChatGateway:
                 },
             )
         mapped = {
+            "shell": AgentDecision(
+                intent="tool",
+                confidence=decision.confidence,
+                selected_tools=list(registration.tools or ["shell", "run_command"]),
+                reasoning_summary=decision.reason,
+                verifier_passed=True,
+            ),
             "coding": AgentDecision(
                 intent="edit",
                 confidence=decision.confidence,
+                selected_tools=list(registration.tools or [
+                    "run_script_once",
+                    "verify_project",
+                    "edit_file",
+                    "multi_edit_file",
+                    "write_file",
+                    "create_file",
+                    "delete_file",
+                    "apply_patch",
+                    "apply_patch_batch",
+                ]),
                 code_editing_needed=True,
                 flow_action="continue"
                 if decision.reuse_active_route and state.get("active_flow_id")
@@ -12158,6 +12285,81 @@ class AgentChatGateway:
                 "route": "computer",
                 "permission_requests": transactional_approvals,
             },
+        )
+
+    def _execute_shell_route(
+        self,
+        *,
+        decision: EntryRoutingDecision,
+        context: EntryRouteContext,
+        text: str,
+        ask_service: Any,
+        callbacks: Any = None,
+        event_sink: Any = None,
+        lane_task_id: str = "",
+    ) -> ChatTurnResult:
+        """Execute local shell and terminal commands using AskAgent without Codex."""
+        ask_agent = getattr(ask_service, "ask_agent", None)
+        if ask_agent is None or not callable(getattr(ask_agent, "run", None)):
+            return ChatTurnResult(
+                answer="Shell command execution requires the configured tool execution agent.",
+                error="shell_executor_unavailable",
+                mode="route-shell-error",
+                decision=decision,
+                payload={"route": "shell"},
+            )
+        if callable(event_sink):
+            event_sink(
+                "shell_execution_started",
+                "Shell execution",
+                metadata={
+                    "turn_id": context.turn_id,
+                    "session_id": context.session_id,
+                    "status": "running",
+                },
+            )
+        from mana_agent.config.settings import default_index_dir
+
+        system_prompt = (
+            "You are Mana-Agent's local shell and terminal command execution agent. "
+            "Use only the shell or run_command tools to execute terminal commands in the local workspace. "
+            "Execute the requested commands, inspect their stdout/stderr outputs, and present clear results. "
+            "Do not call Codex or attempt repository code-generation workflows."
+        )
+        try:
+            response = ask_agent.run(
+                question=text,
+                index_dir=self._index_dir or default_index_dir(self.root),
+                k=self._resolved_k,
+                max_steps=max(6, int(self.config.agent_max_steps or 6)),
+                callbacks=callbacks,
+                system_prompt=system_prompt,
+                tool_policy={
+                    "allowed_tools": ["shell", "run_command"],
+                    "require_initial_tool_call": True,
+                },
+                flow_id=context.session_id,
+                run_id=context.turn_id,
+            )
+        except (ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError):
+            raise
+        except Exception as exc:
+            return ChatTurnResult(
+                answer=str(exc),
+                error=f"Shell route execution failed: {exc}",
+                mode="route-shell-error",
+                decision=decision,
+                payload={"route": "shell"},
+            )
+        answer = str(getattr(response, "answer", response) or "").strip()
+        trace = _serialize_tool_traces(response)
+        return ChatTurnResult(
+            answer=answer,
+            mode="route-shell",
+            decision=decision,
+            trace=trace,
+            warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
+            payload={"route": "shell", "entry_route": "shell"},
         )
 
     async def process_turn_async(

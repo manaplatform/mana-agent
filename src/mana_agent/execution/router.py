@@ -14,6 +14,7 @@ _CAPABILITY_FIELDS = {
     "secret_files": "secret_files", "secret_environment_variables": "secret_environment_variables",
     "persistent_volumes": "persistent_volumes", "artifact_streaming": "artifact_streaming",
     "parallel_execution": "parallel_execution",
+    "shell_execution": "shell_execution",
 }
 
 
@@ -100,3 +101,14 @@ class ExecutionRouter:
             )
         message = "; ".join(f"{name}: {reason}" for name, reason in rejected.items()) or "no providers configured"
         raise CapabilityMismatchError(f"no provider satisfies routing decision {request.decision_id}: {message}")
+
+    async def route_shell(self, request: RoutingRequest) -> RoutingDecision:
+        """Route a shell tool call, ensuring local-only environment enforcement."""
+        req = request.model_copy(
+            update={
+                "explicit_provider": "local-process",
+                "required_capabilities": set(request.required_capabilities) | {"shell_execution"},
+            }
+        )
+        return await self.route(req)
+

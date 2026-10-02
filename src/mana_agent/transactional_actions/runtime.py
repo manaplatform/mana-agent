@@ -220,16 +220,24 @@ def create_transactional_runtime(
     hub = get_execution_event_hub()
     store = ActionStore(root)
     inbox = inbox_service or default_human_inbox_service()
+    def _event_sink(event: dict[str, Any]) -> None:
+        if surface_approval_events or event.get("event_type") != "action.approval.required":
+            hub.publish(event, persist=False)
+            if event.get("event_type") == "action.approval.required":
+                try:
+                    from mana_agent.chat.history import get_history
+                    from mana_agent.chat.models import CodingActivityEvent
+
+                    get_history().add(CodingActivityEvent(activity=event))
+                except Exception:
+                    pass
+
     gateway = ActionGateway(
         store=store,
         policy=ActionPolicy(policy_config_for_workspace(workspace_root, allowed_http_hosts=allowed_http_hosts)),
         approvals=ApprovalRegistry(root / "approvals"),
         inbox_service=inbox,
-        event_sink=lambda event: (
-            hub.publish(event, persist=False)
-            if surface_approval_events or event.get("event_type") != "action.approval.required"
-            else None
-        ),
+        event_sink=_event_sink,
     )
     runtime = TransactionalActionRuntime(gateway=gateway, store=store, inbox_service=inbox)
     runtime.reconcile_requests()

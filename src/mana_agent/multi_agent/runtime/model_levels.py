@@ -27,6 +27,7 @@ _DEFAULT_MODEL_LEVELS = {
     AgentRole.TOOL_WORKER: ("MANA_MODEL_TOOL_WORKER", MODEL_LEVEL_1_FAST_TOOL),
     AgentRole.RESEARCH: ("MANA_MODEL_TOOL", MODEL_LEVEL_1_FAST_TOOL),
     AgentRole.SUMMARIZER: ("MANA_MODEL_SUMMARIZER", MODEL_LEVEL_1_FAST_TOOL),
+    AgentRole.APPROVAL: ("MANA_MODEL_APPROVAL", MODEL_LEVEL_3_HIGH_REASONING),
 }
 
 
@@ -69,6 +70,7 @@ _ROLE_TASK = {
     AgentRole.TOOL_WORKER: ("tool", Complexity.LOW, RiskLevel.LOW),
     AgentRole.RESEARCH: ("research", Complexity.MEDIUM, RiskLevel.LOW),
     AgentRole.SUMMARIZER: ("summarization", Complexity.LOW, RiskLevel.LOW),
+    AgentRole.APPROVAL: ("approval", Complexity.HIGH, RiskLevel.HIGH),
 }
 
 
@@ -196,6 +198,7 @@ def resolve_model_for_role(
                     AgentRole.PLANNER,
                     AgentRole.REVIEWER,
                     AgentRole.VERIFIER,
+                    AgentRole.APPROVAL,
                 }
                 else frozenset({"tool_calls"})
                 if role in {AgentRole.TOOL, AgentRole.TOOL_WORKER}

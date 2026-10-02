@@ -30,6 +30,14 @@ from .models import (
     ReviewerType,
     RiskLevel,
 )
+from .approval_tools import (
+    ApprovalRequestInput,
+    ApprovalWaitResult,
+    approval_request,
+    build_approval_tools,
+    request_user_approval,
+    wait_for_approval,
+)
 from .notifications import DashboardNotificationAdapter, NotificationAdapter
 from .repository import InboxConcurrentUpdateError, LocalInboxRepository
 from .service import HumanInboxService
@@ -145,6 +153,7 @@ def default_human_inbox_service(*, branch_controller: Any | None = None) -> Huma
 
 __all__ = [
     "AgentInboxObservation",
+    "ApprovalWaitResult",
     "ClarificationField",
     "ClarificationValidation",
     "DeliveryAttempt",
@@ -173,5 +182,10 @@ __all__ = [
     "ReviewerType",
     "RiskLevel",
     "StaticIdentityDirectory",
+    "approval_request",
+    "ApprovalRequestInput",
+    "build_approval_tools",
     "default_human_inbox_service",
+    "request_user_approval",
+    "wait_for_approval",
 ]

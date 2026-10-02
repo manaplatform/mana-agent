@@ -76,9 +76,12 @@ class EvalStorage:
         with self._thread_lock, self.lock_path.open("a+b") as guard:
             if os.name == "nt":  # pragma: no cover
                 guard.seek(0)
-                if not guard.read(1):
-                    guard.write(b"0")
-                    guard.flush()
+                try:
+                    if not guard.read(1):
+                        guard.write(b"0")
+                        guard.flush()
+                except (OSError, PermissionError):
+                    pass
                 guard.seek(0)
                 msvcrt.locking(guard.fileno(), msvcrt.LK_LOCK, 1)
             else:  # pragma: no cover

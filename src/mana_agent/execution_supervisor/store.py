@@ -121,12 +121,25 @@ class ExecutionStore(Protocol):
 
 
 
+_STORE_LOCKS_GUARD = threading.Lock()
+_STORE_PATH_LOCKS: dict[Path, threading.RLock] = {}
+
+
+def _thread_lock_for_store_path(path: Path) -> threading.RLock:
+    resolved = path.resolve()
+    with _STORE_LOCKS_GUARD:
+        return _STORE_PATH_LOCKS.setdefault(resolved, threading.RLock())
+
+
 def _acquire_file_lock(handle) -> None:
     if os.name == "nt":  # pragma: no cover - Windows CI
         handle.seek(0)
-        if not handle.read(1):
-            handle.write(b"0")
-            handle.flush()
+        try:
+            if not handle.read(1):
+                handle.write(b"0")
+                handle.flush()
+        except (OSError, PermissionError):
+            pass
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
     else:
@@ -163,9 +176,13 @@ class LocalExecutionStore:
         self.max_log_bytes = max(4096, int(max_log_bytes))
         for name in self._DIRECTORIES:
             (self.root / name).mkdir(parents=True, exist_ok=True)
-        self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".store.lock"
-        self._lock_path.touch(exist_ok=True)
+        try:
+            if not self._lock_path.exists() or self._lock_path.stat().st_size == 0:
+                self._lock_path.write_bytes(b"0")
+        except OSError:
+            pass
+        self._thread_lock = _thread_lock_for_store_path(self._lock_path)
         self._lock_depth = 0
         self._lock_handle = None
 

@@ -58,6 +58,16 @@ class InboxRepository(Protocol):
     def due_for_reminder(self, now: datetime) -> list[InboxItem]: ...
 
 
+_REPOSITORY_LOCKS_GUARD = threading.Lock()
+_REPOSITORY_PATH_LOCKS: dict[Path, threading.RLock] = {}
+
+
+def _thread_lock_for_repository_path(path: Path) -> threading.RLock:
+    resolved = path.resolve()
+    with _REPOSITORY_LOCKS_GUARD:
+        return _REPOSITORY_PATH_LOCKS.setdefault(resolved, threading.RLock())
+
+
 def _safe_name(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -88,9 +98,13 @@ class LocalInboxRepository:
                 path.chmod(0o700)
             except OSError:  # pragma: no cover - platform ACLs
                 pass
-        self._thread_lock = threading.RLock()
         self._lock_path = self.root / ".repository.lock"
-        self._lock_path.touch(exist_ok=True)
+        try:
+            if not self._lock_path.exists() or self._lock_path.stat().st_size == 0:
+                self._lock_path.write_bytes(b"0")
+        except OSError:
+            pass
+        self._thread_lock = _thread_lock_for_repository_path(self._lock_path)
         if first_initialization:
             layout_marker.touch(exist_ok=True)
             from mana_agent.utils.durable_diagnostics import append_diagnostic
@@ -105,9 +119,12 @@ class LocalInboxRepository:
         with self._thread_lock, self._lock_path.open("r+b") as handle:
             if os.name == "nt":  # pragma: no cover
                 handle.seek(0)
-                if not handle.read(1):
-                    handle.write(b"0")
-                    handle.flush()
+                try:
+                    if not handle.read(1):
+                        handle.write(b"0")
+                        handle.flush()
+                except (OSError, PermissionError):
+                    pass
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
             else:

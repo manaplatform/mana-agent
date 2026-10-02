@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import ast
 import re
+import time
 from time import perf_counter
 from typing import Any, Literal, Sequence
 from collections import defaultdict
@@ -288,6 +289,19 @@ class _ReadFileInput(BaseModel):
 
 class _RunCommandInput(BaseModel):
     cmd: str = Field(description="Shell command to execute in project root")
+    expected_outputs: list[str] | None = Field(default=None, description="Optional expected output strings")
+    action_approval_id: str = Field(default="", description="Optional human approval token")
+    cwd: str | None = Field(default=None, description="Optional working directory relative to project root")
+    wait_for_approval: bool = Field(default=True, description="Whether to await human approval if required by security policy")
+    approval_wait_timeout_seconds: float = Field(default=60.0, description="Seconds to await approval if required")
+
+class _ShellInput(BaseModel):
+    action: dict[str, Any] | None = Field(default=None, description="Action object with commands, timeout_ms, max_output_length")
+    commands: list[str] | None = Field(default=None, description="Optional top-level shorthand list of commands")
+    timeout_ms: int = Field(default=60000, description="Execution timeout in milliseconds")
+    max_output_length: int = Field(default=4096, description="Maximum characters per stream")
+    environment: dict[str, str] | None = Field(default=None, description="Environment object specifying local mode")
+    action_approval_id: str = Field(default="", description="Optional human approval token")
 
 class _ChunkFileInput(BaseModel):
     path: str = Field(description="Absolute or project-relative file path")
@@ -1546,7 +1560,14 @@ class AskAgent:
                     )
                 )
 
-        def run_command(cmd: str, expected_outputs: list[str] | None = None, action_approval_id: str = "", cwd: str | None = None) -> str:
+        def run_command(
+            cmd: str,
+            expected_outputs: list[str] | None = None,
+            action_approval_id: str = "",
+            cwd: str | None = None,
+            wait_for_approval: bool = True,
+            approval_wait_timeout_seconds: float = 60.0,
+        ) -> str:
             started = perf_counter()
             status = "ok"
             output_preview = ""
@@ -1604,8 +1625,9 @@ class AskAgent:
                     environment={},
                     expected_outputs=list(expected_outputs or []),
                     parent_task_id=str(run_id or "ask-run-command"),
-                    actor="model_tool",
+                    actor="user",
                     originating_agent="ask_agent",
+                    policy_context={"tool": "run_command"},
                     idempotency_key=f"shell:{hashlib.sha256(json.dumps({'run_id': run_id, 'argv': shell_argv}, sort_keys=True).encode()).hexdigest()}",
                     timeout_seconds=timeout_seconds,
                     runner=transactional_runner,
@@ -1616,16 +1638,122 @@ class AskAgent:
                     )
                 except ApprovalRequired as exc:
                     action = exc.action
-                    return json.dumps({
-                        "ok": False,
-                        "error_code": "approval_required",
-                        "permission_required": True,
-                        "permission_request_id": action.action_id,
+                    inbox_item_id = exc.inbox_item_id or action.inbox_item_id
+                    if not inbox_item_id:
+                        inbox_service = default_action_gateway(self.project_root).inbox_service
+                        if inbox_service is not None:
+                            matches = inbox_service.repository.find_for_action(action.action_id)
+                            if matches:
+                                inbox_item_id = matches[0].inbox_item_id
+
+                    req_id = inbox_item_id or action.action_id
+                    conv_id = str(flow_id or getattr(self, "session_id", "") or "").strip()
+
+                    approval_metadata = {
+                        "permission_request_id": req_id,
+                        "inbox_item_id": req_id,
                         "action_id": action.action_id,
-                        "preview": action.preview.redacted() if action.preview else {},
+                        "permission_scope": "transactional_action.once",
+                        "preview": action.preview.redacted() if action.preview else {"command": cmd},
                         "preview_digest": action.preview_digest,
-                        "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
-                    })
+                        "transactional_action_approval": True,
+                        "conversation_id": conv_id,
+                    }
+                    try:
+                        from mana_agent.chat.history import get_history
+                        from mana_agent.chat.models import CodingActivityEvent
+
+                        get_history().add(
+                            CodingActivityEvent(
+                                activity={
+                                    "event_type": "action.approval.required",
+                                    "title": f"Approval required for shell command: {cmd}",
+                                    "metadata": approval_metadata,
+                                }
+                            )
+                        )
+                    except Exception as hist_err:
+                        logger.debug("Failed to record CodingActivityEvent for approval: %s", hist_err)
+
+                    try:
+                        from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+                        get_execution_event_hub().publish(
+                            {
+                                "type": "action.approval.required",
+                                "event_type": "action.approval.required",
+                                "kind": "transactional_action",
+                                "title": f"Approval required for command: {cmd}",
+                                "metadata": approval_metadata,
+                            },
+                            conversation_id=conv_id,
+                            execution_id=str(run_id or ""),
+                            persist=False,
+                        )
+                    except Exception as hub_err:
+                        logger.debug("Failed to publish approval event to hub: %s", hub_err)
+
+                    if wait_for_approval:
+                        from mana_agent.human_inbox import default_human_inbox_service
+                        from mana_agent.human_inbox.models import InboxStatus
+                        gateway = default_action_gateway(self.project_root)
+                        inbox_service = gateway.inbox_service or default_human_inbox_service()
+
+                        start_time = time.monotonic()
+                        poll_interval = 0.25
+                        approved = False
+                        grant_id = ""
+                        while time.monotonic() - start_time < approval_wait_timeout_seconds:
+                            grant = gateway.approvals.find_valid(action)
+                            if grant is not None:
+                                approved = True
+                                grant_id = grant.approval_id
+                                break
+                            if inbox_item_id:
+                                item = inbox_service.repository.get(inbox_item_id)
+                                if item is not None and item.status == InboxStatus.APPROVED:
+                                    grant = gateway.approvals.find_valid(action)
+                                    if grant is None:
+                                        grant = gateway.approvals.issue(
+                                            action,
+                                            approved_by=item.response_actor_id or "user",
+                                            ttl_seconds=300,
+                                        )
+                                    approved = True
+                                    grant_id = grant.approval_id
+                                    break
+                                elif item is not None and item.status in {
+                                    InboxStatus.DENIED,
+                                    InboxStatus.CANCELLED,
+                                    InboxStatus.SUPERSEDED,
+                                    InboxStatus.EXPIRED,
+                                }:
+                                    break
+                            time.sleep(poll_interval)
+                        if approved and grant_id:
+                            outcome = gateway.execute(shell_adapter, approval_id=grant_id)
+                        else:
+                            return json.dumps({
+                                "ok": False,
+                                "error_code": "approval_required",
+                                "permission_required": True,
+                                "permission_request_id": req_id,
+                                "action_id": action.action_id,
+                                "preview": action.preview.redacted() if action.preview else {},
+                                "preview_digest": action.preview_digest,
+                                "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+                            })
+                    else:
+                        return json.dumps({
+                            "ok": False,
+                            "error_code": "approval_required",
+                            "permission_required": True,
+                            "permission_request_id": req_id,
+                            "action_id": action.action_id,
+                            "preview": action.preview.redacted() if action.preview else {},
+                            "preview_digest": action.preview_digest,
+                            "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
+                        })
                 executed = outcome.result
                 returncode = int(executed.get("returncode") or 0)
                 stdout = str(executed.get("stdout") or "")
@@ -1671,6 +1799,63 @@ class AskAgent:
                 traces.append(
                     ToolInvocationTrace(
                         tool_name="run_command",
+                        args_summary=args_summary,
+                        duration_ms=(perf_counter() - started) * 1000,
+                        status=status,
+                        output_preview=output_preview,
+                    )
+                )
+
+        def shell(
+            action: dict[str, Any] | None = None,
+            commands: list[str] | None = None,
+            timeout_ms: int = 60000,
+            max_output_length: int = 4096,
+            environment: dict[str, str] | None = None,
+            action_approval_id: str = "",
+            wait_for_approval: bool = True,
+            approval_wait_timeout_seconds: float = 60.0,
+        ) -> str:
+            started = perf_counter()
+            status = "ok"
+            output_preview = ""
+            resolved_action = dict(action or {})
+            if commands and "commands" not in resolved_action:
+                resolved_action["commands"] = list(commands)
+            if "timeout_ms" not in resolved_action:
+                resolved_action["timeout_ms"] = timeout_ms
+            if "max_output_length" not in resolved_action:
+                resolved_action["max_output_length"] = max_output_length
+            args_summary = f"commands={resolved_action.get('commands')!r}"
+            try:
+                from mana_agent.tools.shell_exec import ShellExecutor
+
+                executor = ShellExecutor(
+                    workspace_root=self.project_root,
+                    default_timeout_ms=resolved_action["timeout_ms"],
+                    default_max_output_length=resolved_action["max_output_length"],
+                    auto_request_approval=wait_for_approval,
+                    approval_wait_timeout_seconds=approval_wait_timeout_seconds,
+                    conversation_id=str(flow_id or getattr(self, "session_id", "") or ""),
+                )
+                res = executor.execute_action(
+                    resolved_action,
+                    action_approval_id=action_approval_id,
+                )
+                encoded = json.dumps(res)
+                output_preview = encoded[:400]
+                return encoded
+            except Exception as exc:
+                status = "error"
+                output_preview = str(exc)[:400]
+                return json.dumps({
+                    "type": "shell_call_output",
+                    "output": [{"stdout": "", "stderr": str(exc), "outcome": {"type": "exit", "exit_code": 1}}],
+                })
+            finally:
+                traces.append(
+                    ToolInvocationTrace(
+                        tool_name="shell",
                         args_summary=args_summary,
                         duration_ms=(perf_counter() - started) * 1000,
                         status=status,
@@ -1846,6 +2031,16 @@ class AskAgent:
                 name="run_command",
                 description="Run a non-destructive shell command in project root and return JSON stdout/stderr.",
                 args_schema=_RunCommandInput,
+            ),
+            StructuredTool.from_function(
+                func=shell,
+                name="shell",
+                description=(
+                    "Execute shell commands locally conforming to OpenAI Shell tool protocol. "
+                    "Accepts an action with commands list, timeout_ms, and max_output_length. "
+                    "Returns shell_call_output with items containing stdout, stderr, and outcome."
+                ),
+                args_schema=_ShellInput,
             ),
             StructuredTool.from_function(
                 func=chunk_file,
@@ -2137,6 +2332,11 @@ class AskAgent:
             except Exception:
                 context_tools = []
 
+        from mana_agent.human_inbox.approval_tools import build_approval_tools
+
+        inbox_service = getattr(self, "human_inbox_service", None)
+        approval_tools = build_approval_tools(inbox_service=inbox_service)
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
@@ -2151,6 +2351,7 @@ class AskAgent:
             *media_tools,
             *api_manager_tools,
             *mcp_tools,
+            *approval_tools,
             *list(getattr(self, "tools", []) or []),
         ]
         return all_tools, traces, sources, warnings

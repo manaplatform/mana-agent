@@ -414,9 +414,12 @@ def _acquire_windows_file_lock(handle: Any) -> None:
     import msvcrt
 
     handle.seek(0)
-    if handle.tell() == 0:
-        handle.write(b"0")
-        handle.flush()
+    try:
+        if not handle.read(1):
+            handle.write(b"0")
+            handle.flush()
+    except (OSError, PermissionError):
+        pass
     # ``msvcrt.locking`` locks from the current file position.
     # Keep both acquisition and release on the same first byte.
     handle.seek(0)

@@ -22,6 +22,7 @@ from .models import (
     utc_now,
 )
 from .task_scope import computer_task_wide_eligible
+from mana_agent.tools.shell_exec import is_read_only_command
 
 
 class PolicyScope(StrictModel):
@@ -283,6 +284,12 @@ class ActionPolicy:
         )
         if any(item in dangerous for item in inspected) or "sudo" in inspected or destructive_git or action.reversibility is Reversibility.IRREVERSIBLE:
             return PolicyOutcome.DENY, ["destructive_shell"], "The command is destructive or irreversible.", ["deny_destructive_shell"]
+        is_legacy_run_command = (
+            context.get("tool") == "run_command"
+            or "run-command" in action.parent_task_id
+        )
+        if not is_legacy_run_command and is_read_only_command(inspected):
+            return PolicyOutcome.ALLOW, ["read_only_shell"], "A safe read-only shell command is allowed without human approval.", ["allow_read_only_shell"]
         if (
             context.get("kind") == "validated_verification"
             and action.actor == "tool_worker"

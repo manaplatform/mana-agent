@@ -246,7 +246,12 @@ class ActionGateway:
                         self.store.release_idempotency(action)
                         raise PermissionError(action.error)
                 if pending_grant is None:
-                    raise ApprovalRequired(action, inbox_item_id=self._ensure_inbox(action))
+                    inbox_item_id = self._ensure_inbox(action)
+                    if inbox_item_id and action.inbox_item_id != inbox_item_id:
+                        action.inbox_item_id = inbox_item_id
+                        self.store.save_action(action)
+                    self._emit("action.approval.required", action, inbox_item_id=inbox_item_id)
+                    raise ApprovalRequired(action, inbox_item_id=inbox_item_id)
                 approval_id = pending_grant.approval_id
             self.approvals.consume(
                 approval_id,

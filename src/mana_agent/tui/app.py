@@ -357,8 +357,8 @@ class ManaChatApp(App):
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
         event_id = str(event.get("event_id") or event.get("id") or "").strip()
 
-        # Handle API and server approval modal trigger
-        if event_type in {"api.waiting_approval", "server.waiting_approval"}:
+        # Handle API, server, and transactional action approval modal trigger
+        if event_type in {"api.waiting_approval", "server.waiting_approval", "action.approval.required"}:
             if event_id:
                 if event_id in self._delivered_coding_event_ids:
                     return
@@ -377,7 +377,11 @@ class ManaChatApp(App):
                     or (
                         "Server action approval required"
                         if event_type == "server.waiting_approval"
-                        else "API request approval required"
+                        else (
+                            "Transactional action approval required"
+                            if event_type == "action.approval.required"
+                            else "API request approval required"
+                        )
                     )
                 ),
                 "status": str(event.get("status") or "running"),
@@ -386,26 +390,45 @@ class ManaChatApp(App):
             self._safe_post_activity(act, target_turn_id)
             return
 
-        if event_type in {"server.approval_decided", "api.approval_decided"}:
+        if event_type in {
+            "server.approval_decided",
+            "api.approval_decided",
+            "action.approval.granted",
+            "action.approval.denied",
+        }:
             metadata = dict(event.get("metadata") or {})
-            req_id = str(metadata.get("permission_request_id") or metadata.get("approval_request_id") or "")
+            req_id = str(
+                metadata.get("permission_request_id")
+                or metadata.get("approval_request_id")
+                or metadata.get("inbox_item_id")
+                or metadata.get("action_id")
+                or ""
+            )
             from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
             if (
                 req_id
                 and isinstance(getattr(self, "screen", None), ComputerPermissionScreen)
-                and getattr(self.screen, "request_id", None) == req_id
+                and (
+                    getattr(self.screen, "request_id", None) == req_id
+                    or getattr(self.screen, "request_id", None)
+                    in {metadata.get("inbox_item_id"), metadata.get("action_id")}
+                )
             ):
                 try:
                     self.screen.dismiss(None)
                 except Exception:
                     pass
             decision = str(metadata.get("decision") or "")
-            if decision == "deny":
+            if decision == "deny" or event_type == "action.approval.denied":
                 self.update_status(
                     "Server action denied"
                     if event_type == "server.approval_decided"
-                    else "API request denied"
+                    else (
+                        "Action denied"
+                        if event_type == "action.approval.denied"
+                        else "API request denied"
+                    )
                 )
             return
 
@@ -543,26 +566,55 @@ class ManaChatApp(App):
     def _enqueue_transactional_modal(self, inbox_item_id: str) -> None:
         if self.gateway is None or inbox_item_id in self._computer_permission_requests_shown:
             return
+        item = None
         try:
             item = self.gateway.human_inbox_service.get(
                 inbox_item_id,
                 actor_id=getpass.getuser(),
             )
         except Exception:
+            try:
+                item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
+            except Exception:
+                pass
+            if item is None:
+                try:
+                    matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
+                    if matches:
+                        item = matches[0]
+                except Exception:
+                    pass
+        if item is None:
             return
         if item.request_type.value != "approval" or item.status.value not in {"pending", "delivered"}:
             return
         self._computer_permission_requests_shown.add(inbox_item_id)
-        self._transactional_modal_queue.append(inbox_item_id)
+        self._computer_permission_requests_shown.add(item.inbox_item_id)
+        if item.action_intent_id:
+            self._computer_permission_requests_shown.add(item.action_intent_id)
+        self._transactional_modal_queue.append(item.inbox_item_id)
         self._show_next_transactional_modal()
 
     def _show_next_transactional_modal(self) -> None:
         if self._transactional_modal_active or not self._transactional_modal_queue or self.gateway is None:
             return
         inbox_item_id = self._transactional_modal_queue.pop(0)
+        item = None
         try:
             item = self.gateway.human_inbox_service.get(inbox_item_id, actor_id=getpass.getuser())
         except Exception:
+            try:
+                item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
+            except Exception:
+                pass
+            if item is None:
+                try:
+                    matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
+                    if matches:
+                        item = matches[0]
+                except Exception:
+                    pass
+        if item is None:
             self._show_next_transactional_modal()
             return
         self._transactional_modal_active = True
@@ -1142,6 +1194,7 @@ class ManaChatApp(App):
         finally:
             self._current_frontend_turn_id = None
             self._turn_in_progress = False
+            self.call_after_refresh(self._queue_outstanding_transactional_approvals)
 
     def _apply_model_selection(self, selection: Any) -> None:
         if selection is None:

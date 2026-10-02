@@ -229,3 +229,83 @@ class ExecutionManager:
 
     def execute_once_sync(self, spec: SandboxSpec, routing: RoutingRequest, request: ExecutionRequest) -> ExecutionResult:
         return run_sync(self.execute_once(spec, routing, request))
+
+    async def execute_shell_call(
+        self,
+        spec: SandboxSpec,
+        action: dict[str, Any],
+        routing_request: RoutingRequest | None = None,
+        *,
+        call_id: str | None = None,
+        action_approval_id: str = "",
+        on_approval: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        auto_request_approval: bool = True,
+        approval_wait_timeout_seconds: float = 60.0,
+        conversation_id: str = "",
+    ) -> dict[str, Any]:
+        """Lifecycle management of shell tool calls conforming to OpenAI Shell specification."""
+        import uuid
+        from mana_agent.tools.shell_exec import ShellExecutor
+
+        routing = routing_request or RoutingRequest(
+            decision_id=f"shell:{uuid.uuid4().hex}",
+            explicit_provider="local-process",
+            trust_level="trusted",
+            risk_level="low",
+            required_capabilities={"shell_execution"},
+        )
+        decision = await self.router.route_shell(routing)
+        self._emit(
+            "shell.call.started",
+            selected_provider=decision.selected_provider,
+            decision_id=decision.decision_id,
+            workspace=str(spec.repository_source),
+        )
+        executor = ShellExecutor(
+            workspace_root=spec.repository_source,
+            default_timeout_ms=spec.execution_timeout_seconds * 1000,
+            audit_sink=self.event_sink,
+            on_approval=on_approval,
+            auto_request_approval=auto_request_approval,
+            approval_wait_timeout_seconds=approval_wait_timeout_seconds,
+            conversation_id=conversation_id,
+        )
+        result = executor.execute_action(
+            action,
+            call_id=call_id,
+            action_approval_id=action_approval_id,
+        )
+        self._emit(
+            "shell.call.completed",
+            decision_id=decision.decision_id,
+            output_count=len(result.get("output", [])),
+        )
+        return result
+
+    def execute_shell_call_sync(
+        self,
+        spec: SandboxSpec,
+        action: dict[str, Any],
+        routing_request: RoutingRequest | None = None,
+        *,
+        call_id: str | None = None,
+        action_approval_id: str = "",
+        on_approval: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        auto_request_approval: bool = True,
+        approval_wait_timeout_seconds: float = 60.0,
+        conversation_id: str = "",
+    ) -> dict[str, Any]:
+        return run_sync(
+            self.execute_shell_call(
+                spec,
+                action,
+                routing_request,
+                call_id=call_id,
+                action_approval_id=action_approval_id,
+                on_approval=on_approval,
+                auto_request_approval=auto_request_approval,
+                approval_wait_timeout_seconds=approval_wait_timeout_seconds,
+                conversation_id=conversation_id,
+            )
+        )
+
