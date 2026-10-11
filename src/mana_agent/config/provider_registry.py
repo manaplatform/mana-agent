@@ -35,6 +35,7 @@ class ProviderDefinition:
     supports_model_refresh: bool = True
     supports_validation: bool = True
     supports_responses_api: bool = False
+    supports_decisions_api: bool = False
     codex_transport: CodexTransport = CodexTransport.UNSUPPORTED
     custom: bool = False
 
@@ -56,6 +57,7 @@ class ProviderRegistry:
                 default_base_url="https://api.openai.com/v1",
                 api_key_env="OPENAI_API_KEY",
                 supports_responses_api=True,
+                supports_decisions_api=True,
                 codex_transport=CodexTransport.DIRECT_RESPONSES,
             ),
             ProviderDefinition(

@@ -574,10 +574,12 @@ class EntryRouter:
         llm: Any,
         registry: EntryRouteRegistry,
         compactor: Any | None = None,
+        decisions_client: Any | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
         self.compactor = compactor
+        self.decisions_client = decisions_client
 
     def route(
         self,
@@ -686,6 +688,70 @@ class EntryRouter:
         }
         try:
             started = time.perf_counter()
+
+            # Automatic capability-aware engine selection (Decisions choice when natively supported)
+            from mana_agent.engine_selection import (
+                EngineSelector,
+                EngineType,
+                choice_op,
+                execute_auto,
+            )
+
+            route_names = [r["name"] for r in routes]
+            route_op = choice_op(
+                instructions=(
+                    "Select the single most appropriate entry route from the supported routes for this user request.\n"
+                    f"Supported routes: {', '.join(route_names)}"
+                ),
+                choices=route_names,
+                evidence={"user_prompt": user_prompt, "routes": route_names},
+                name="entry_route_choice",
+            )
+            selector = EngineSelector()
+            selection = selector.select_engine(route_op, context)
+
+            if selection.selected_engine == EngineType.DECISIONS_CHOICE:
+                try:
+                    decisions_exec = execute_auto(
+                        route_op,
+                        context,
+                        decisions_client=self.decisions_client,
+                        llm=None,
+                    )
+                    if decisions_exec.success and decisions_exec.engine_used == EngineType.DECISIONS_CHOICE:
+                        chosen_route = str(decisions_exec.result).strip()
+                        default_rules = payload.get("required_source_rules", {})
+                        candidate_sources = default_rules.get(chosen_route)
+                        chosen_sources = (
+                            candidate_sources[0]
+                            if isinstance(candidate_sources, list) and candidate_sources
+                            else ["none"]
+                        )
+                        decisions_payload = {
+                            "selected_route": chosen_route,
+                            "confidence": decisions_exec.confidence,
+                            "required_sources": chosen_sources,
+                            "reasoning": f"Automatic engine selection: Decisions choice natively classified '{chosen_route}'.",
+                        }
+                        try:
+                            validated_dec = self._validate(decisions_payload, context=context)
+                            record_current(
+                                "model.decision",
+                                {
+                                    "boundary": "entry_router",
+                                    "engine": "decisions_choice",
+                                    "prompt_template": "DECISIONS_CHOICE",
+                                    "request_hash": stable_hash(payload),
+                                    "response": validated_dec.to_dict(),
+                                    "latency_seconds": time.perf_counter() - started,
+                                },
+                            )
+                            return validated_dec
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
             messages = [
                 SystemMessage(content=ENTRY_ROUTER_PROMPT),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),

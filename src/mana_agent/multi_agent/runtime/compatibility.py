@@ -31,6 +31,7 @@ class ModelCapabilities:
     """Transport capabilities for an OpenAI-compatible provider/model pair."""
 
     supports_responses_api: bool
+    supports_decisions_api: bool = False
     supports_chat_completions: bool = True
     supports_tools: bool = True
     supports_reasoning: bool = True
@@ -74,12 +75,14 @@ def resolve_model_capabilities(*, base_url: str | None, provider: str | None = N
     # Completions unless the operator opts in via MANA_LLM_SUPPORTS_RESPONSES_API.
     defaults = ModelCapabilities(
         supports_responses_api=is_openai and provider_id != "nvidia",
+        supports_decisions_api=is_openai and provider_id != "nvidia",
         supports_tools=True,
         supports_reasoning=True,
         supports_tools_with_chat_reasoning=is_openai and provider_id != "nvidia",
     )
     overrides = {
         "supports_responses_api": _optional_bool("MANA_LLM_SUPPORTS_RESPONSES_API"),
+        "supports_decisions_api": _optional_bool("MANA_LLM_SUPPORTS_DECISIONS_API"),
         "supports_chat_completions": _optional_bool("MANA_LLM_SUPPORTS_CHAT_COMPLETIONS"),
         "supports_tools": _optional_bool("MANA_LLM_SUPPORTS_TOOLS"),
         "supports_reasoning": _optional_bool("MANA_LLM_SUPPORTS_REASONING"),

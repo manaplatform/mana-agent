@@ -2,6 +2,21 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-11
+
+- Implemented intelligent, automatic AI engine-selection layer throughout the Mana-Agent API:
+  - Created `src/mana_agent/engine_selection/` with `EngineSelector`, `SmartDispatcher`, and `DecisionsClient` supporting `/v1/decisions` (`gpt-6-luna`).
+  - Added deterministic capability detection mapping boolean evaluations to Decisions `predicate`, fixed option classifications to Decisions `choice`, ordered rubric scoring to Decisions `score`, and batched evaluations to batched Decisions.
+  - Ensured Decisions API is optional and automatically selected only when natively supported; unsupported operations proactively route to Responses API Structured Outputs, Function Calling, reasoning/coding engine, generation engine, or native application code without exploratory calls.
+  - Added direct deterministic execution bypassing AI for explicit commands, safety boundaries, and exact handlers.
+  - Implemented thread-safe decision caching in `SmartDispatcher` (`execute_auto` / `executeAuto`) to prevent redundant re-evaluations across downstream components.
+  - Added safe, bounded fallback handling for model refusals, timeouts, HTTP errors, and malformed responses.
+  - Enforced input format constraints (base64 data URIs for images; unsupported external URLs or file IDs proactively skip Decisions).
+  - Integrated automatic engine selection across gateway entry routing, memory relevance, task prioritization, and recovery classification while preserving full contract compatibility.
+  - Added settings `MANA_DECISIONS_ENABLED`, `MANA_DECISIONS_MODEL`, and `MANA_DECISIONS_BASE_URL` with provider registry flags.
+  - Added comprehensive test suite in `tests/test_engine_selection.py`.
+  - User verification: Run `python -m pytest tests/test_engine_selection.py tests/gateway/test_entry_routing.py tests/gateway/test_followup_classifier.py tests/test_agent_decision_routing.py`.
+
 ## 2026-10-02
 
 - Restored follow-up continuity and unified external memory integration across gateway and memory layers:
