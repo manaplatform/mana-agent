@@ -7,7 +7,7 @@ name = "mana-agent"
 version = "0.1.11"
 description = "LLM-powered static analysis and repository understanding tool"
 readme = "README.md"
-requires-python = ">=3.10,<=3.14.7"  # Support up to Python 3.14.7; some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
+requires-python = ">=3.10,<3.15"  # Support Python 3.10 through 3.14 (3.14.x); some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
 license = { text = "MIT" }
 
 dependencies = [

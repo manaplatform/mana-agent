@@ -15,7 +15,13 @@ All notable repository changes should be recorded here.
   - Integrated automatic engine selection across gateway entry routing, memory relevance, task prioritization, and recovery classification while preserving full contract compatibility.
   - Added settings `MANA_DECISIONS_ENABLED`, `MANA_DECISIONS_MODEL`, and `MANA_DECISIONS_BASE_URL` with provider registry flags.
   - Added comprehensive test suite in `tests/test_engine_selection.py`.
-  - User verification: Run `python -m pytest tests/test_engine_selection.py tests/gateway/test_entry_routing.py tests/gateway/test_followup_classifier.py tests/test_agent_decision_routing.py`.
+  - Updated `requires-python` in `pyproject.toml` from `<=3.14.7,>=3.10` to `>=3.10,<3.15` to support Python 3.14 patch releases (such as Python 3.14.8 on Ubuntu CI runners).
+  - User verification: Run `python -m pip install -e .` and `python -m pytest tests/test_doctor.py`.
+- Fixed duplicate keyword argument `'root'` in `ConversationService.send_message()`:
+  - Eliminated the redundant nested wrapper function in `ConversationService.send_message()` that passed `root=self.root` explicitly while unpacking keyword arguments that also contained `'root'`, which previously raised `TypeError: mana_agent.ui.streamlit_helpers.run_dashboard_chat() got multiple values for keyword argument 'root'` during dashboard/API chat execution.
+  - Resolved `runner` directly to `run_dashboard_chat` when no custom `chat_runner` is provided, and added signature inspection to filter arguments appropriately when invoking custom runners with restricted parameter lists.
+  - Added test coverage in `tests/test_conversation_service.py` verifying both default runner invocation and restricted custom runner signatures.
+  - User verification required: `python -m pytest tests/test_conversation_service.py`.
 
 ## 2026-10-02
 
