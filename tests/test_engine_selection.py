@@ -562,3 +562,55 @@ def test_execute_auto_and_executeAuto_parity() -> None:
     assert res2.result == "TEST_INPUT"
     assert res1.engine_used == EngineType.DETERMINISTIC
     assert res2.engine_used == EngineType.DETERMINISTIC
+
+
+def test_decisions_input_formatting_for_dict_and_multimodal() -> None:
+    """_format_input converts dicts to JSON strings and multimodal parts to message arrays."""
+    client = DecisionsClient(api_key="sk-test")
+
+    # 1. Plain string is preserved
+    assert client._format_input("hello world") == "hello world"
+
+    # 2. Structured dict is converted to JSON string (never bare dict)
+    structured_dict = {"user_prompt": "pip install watchdog", "routes": ["github", "repository"]}
+    formatted = client._format_input(structured_dict)
+    assert isinstance(formatted, str)
+    decoded = json.loads(formatted)
+    assert decoded["user_prompt"] == "pip install watchdog"
+    assert decoded["routes"] == ["github", "repository"]
+
+    # 3. Multimodal image dict is converted to message array of objects
+    image_dict = {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+    formatted_image = client._format_input(image_dict)
+    assert isinstance(formatted_image, list)
+    assert len(formatted_image) == 1
+    assert formatted_image[0]["role"] == "user"
+    assert formatted_image[0]["content"][0]["type"] == "input_image"
+    assert formatted_image[0]["content"][0]["image_url"] == "data:image/png;base64,abc"
+
+
+def test_decisions_choice_with_dict_evidence_sends_valid_json_string_input() -> None:
+    """When evidence is a dict, request payload sends 'input' as a string (not bare object)."""
+    selector = EngineSelector()
+    op = choice_op(
+        instructions="Select route",
+        choices=["github", "repository"],
+        evidence={"user_prompt": "pip install watchdog", "routes": ["github", "repository"]},
+        name="route_choice",
+    )
+
+    client, requests = _make_mock_client({
+        "answers": [{"type": "choice", "name": "route_choice", "choice": "repository", "confidence": 0.95}]
+    })
+    dispatcher = SmartDispatcher(selector=selector, decisions_client=client)
+    result = dispatcher.execute_auto(op)
+
+    assert result.success is True
+    assert result.result == "repository"
+    assert len(requests) == 1
+    req_body = json.loads(requests[0].content)
+    # Decisions API requires 'input' to be a string or array of objects, never a bare dict object
+    assert isinstance(req_body["input"], str)
+    decoded_input = json.loads(req_body["input"])
+    assert decoded_input["user_prompt"] == "pip install watchdog"
+

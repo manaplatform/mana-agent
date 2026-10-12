@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-12
+
+- Fixed HTTP 400 invalid type error for `input` in `DecisionsClient`:
+  - Updated `_format_input()` in `src/mana_agent/engine_selection/decisions_client.py` to normalize structured dictionary evidence into valid JSON strings and multimodal image parts into user message arrays, resolving `HTTP 400: Invalid type for 'input': expected one of a string or array of objects, but got an object instead`.
+  - Added unit tests in `tests/test_engine_selection.py` validating that dictionary evidence is properly serialized to JSON strings in request payloads and multimodal image parts are structured as message arrays.
+  - User verification required: `python -m pytest tests/test_engine_selection.py`.
+
 ## 2026-10-11
 
 - Implemented intelligent, automatic AI engine-selection layer throughout the Mana-Agent API:

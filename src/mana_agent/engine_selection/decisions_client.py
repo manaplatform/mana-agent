@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Mapping
@@ -275,10 +276,69 @@ class DecisionsClient:
         result = self.decide(input_data=input_data, questions=questions, **kwargs)
         return result.answers
 
-    def _format_input(self, input_data: Any) -> Any:
-        if isinstance(input_data, (str, list, dict)):
+    def _format_input(self, input_data: Any) -> str | list[dict[str, Any]]:
+        """Format input for the Decisions API.
+
+        The Decisions endpoint expects 'input' to be either a string or an array
+        of objects (messages with content parts). It does not accept bare JSON objects (dicts).
+        """
+        if isinstance(input_data, str):
             return input_data
-        return str(input_data or "")
+
+        if isinstance(input_data, dict):
+            # If the dict is already a message object with role and content:
+            if "role" in input_data and "content" in input_data:
+                return [input_data]
+
+            # If the dict is a single multimodal content part:
+            part_type = str(input_data.get("type") or "").strip().lower()
+            if part_type in {"input_image", "image", "input_text", "text"} or "image_url" in input_data:
+                normalized_part = dict(input_data)
+                if part_type == "image":
+                    normalized_part["type"] = "input_image"
+                elif part_type == "text":
+                    normalized_part["type"] = "input_text"
+                elif not part_type and "image_url" in normalized_part:
+                    normalized_part["type"] = "input_image"
+                return [{"role": "user", "content": [normalized_part]}]
+
+            # General structured dictionary (e.g. {"user_prompt": ..., "routes": ...}):
+            # Serialize to a JSON string so it is received as a valid string input.
+            try:
+                return json.dumps(input_data, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return str(input_data)
+
+        if isinstance(input_data, list):
+            if input_data and all(isinstance(item, dict) for item in input_data):
+                # If list of messages (any item has "role"):
+                if any("role" in item for item in input_data):
+                    return input_data
+                # If list of content parts:
+                if any("type" in item or "image_url" in item for item in input_data):
+                    normalized_parts: list[dict[str, Any]] = []
+                    for item in input_data:
+                        part = dict(item)
+                        pt = str(part.get("type") or "").strip().lower()
+                        if pt == "image":
+                            part["type"] = "input_image"
+                        elif pt == "text":
+                            part["type"] = "input_text"
+                        elif not pt and "image_url" in part:
+                            part["type"] = "input_image"
+                        normalized_parts.append(part)
+                    return [{"role": "user", "content": normalized_parts}]
+
+            # List of primitives or arbitrary objects:
+            try:
+                return json.dumps(input_data, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return str(input_data)
+
+        if input_data is None:
+            return ""
+
+        return str(input_data)
 
     def _parse_answers(self, data: dict[str, Any]) -> list[DecisionsAnswer]:
         raw_answers = data.get("answers")
