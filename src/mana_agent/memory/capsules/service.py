@@ -890,3 +890,20 @@ class CapsuleService:
     def _risk_flags(title: str, summary: str, content: dict[str, Any]) -> list[str]:
         text = " ".join((title, summary, json.dumps(content, sort_keys=True)))
         return [f"prompt_injection_pattern_{index}" for index, pattern in enumerate(_INJECTION_PATTERNS, 1) if pattern.search(text)]
+
+    def evaluate_memory_relevance(self, memory_text: str, task_context: str) -> float:
+        """Evaluate semantic relevance probability of a memory using automatic Decisions predicate selection."""
+        from mana_agent.engine_selection import execute_auto, predicate_op
+
+        op = predicate_op(
+            instructions="Is this memory record relevant to the current user goal or task context?",
+            evidence={"memory": memory_text, "task_context": task_context},
+            name="memory_relevance",
+        )
+        res = execute_auto(op)
+        if res.success:
+            prob = res.metadata.get("probability")
+            if prob is not None:
+                return float(prob)
+            return 1.0 if res.result else 0.0
+        return 0.5

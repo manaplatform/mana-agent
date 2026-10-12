@@ -110,6 +110,15 @@ class Settings(BaseSettings):
     mana_adaptive_routing_enabled: bool = Field(
         default=True, alias="MANA_ADAPTIVE_ROUTING_ENABLED"
     )
+    mana_decisions_enabled: bool = Field(
+        default=True, alias="MANA_DECISIONS_ENABLED"
+    )
+    mana_decisions_model: str = Field(
+        default="gpt-6-luna", alias="MANA_DECISIONS_MODEL"
+    )
+    mana_decisions_base_url: str | None = Field(
+        default=None, alias="MANA_DECISIONS_BASE_URL"
+    )
     mana_model_profiles: list[dict[str, Any]] | str = Field(
         default_factory=list, alias="MANA_MODEL_PROFILES"
     )

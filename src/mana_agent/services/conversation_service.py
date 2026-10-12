@@ -11,6 +11,7 @@ Each conversation keeps:
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import threading
@@ -228,7 +229,8 @@ class ConversationService:
         """Append a user message, run chat, append assistant reply, emit runtime events.
 
         ``chat_runner`` defaults to ``run_dashboard_chat``. When provided, it must accept
-        ``(prompt, root=..., conversation_id=..., execution_id=..., event_sink=...)``.
+        ``(prompt, root=..., conversation_id=..., execution_id=..., event_sink=...)`` and optional
+        keyword arguments (such as ``user_message_id`` and ``attachments``).
         """
         prompt = str(content or "").strip()
         normalized_attachments = [
@@ -418,25 +420,34 @@ class ConversationService:
         if runner is None:
             from mana_agent.ui.streamlit_helpers import run_dashboard_chat
 
-            def runner(prompt_text: str, **kwargs: Any) -> dict[str, Any]:  # type: ignore[misc]
-                return run_dashboard_chat(
-                    prompt_text,
-                    root=self.root,
-                    conversation_id=conversation_id,
-                    execution_id=execution_id,
-                    event_sink=event_sink,
-                    **kwargs,
+            runner = run_dashboard_chat
+
+        runner_kwargs: dict[str, Any] = {
+            "root": self.root,
+            "conversation_id": conversation_id,
+            "execution_id": execution_id,
+            "user_message_id": user_message.message_id,
+            "event_sink": event_sink,
+            "attachments": normalized_attachments,
+        }
+        if chat_runner is not None:
+            try:
+                sig_params = inspect.signature(chat_runner).parameters
+                has_var_kwargs = any(
+                    param.kind is inspect.Parameter.VAR_KEYWORD
+                    for param in sig_params.values()
                 )
+                if not has_var_kwargs:
+                    runner_kwargs = {
+                        k: v for k, v in runner_kwargs.items() if k in sig_params
+                    }
+            except (TypeError, ValueError):
+                pass
 
         try:
             result = runner(
                 prompt,
-                root=self.root,
-                conversation_id=conversation_id,
-                execution_id=execution_id,
-                user_message_id=user_message.message_id,
-                event_sink=event_sink,
-                attachments=normalized_attachments,
+                **runner_kwargs,
             )
         except Exception as exc:
             self.set_status(conversation_id, "failed", execution_id=execution_id)

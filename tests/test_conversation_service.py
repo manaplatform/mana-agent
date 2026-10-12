@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -131,3 +132,53 @@ def test_client_message_id_is_persisted_and_retry_is_idempotent(conv_root: Path)
     assert [row.message_id for row in service.list_messages(conversation.conversation_id)].count(
         "client_stable_1"
     ) == 1
+
+
+def test_send_message_default_runner_invoked_cleanly(
+    conv_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = ConversationService(root=conv_root)
+    conv = service.create(title="Default Runner Test")
+
+    captured: dict[str, Any] = {}
+
+    def fake_dashboard_chat(prompt: str, **kwargs: Any) -> dict[str, Any]:
+        captured["prompt"] = prompt
+        captured["kwargs"] = kwargs
+        return {"answer": f"echo:{prompt}", "mode": "preview", "sources": []}
+
+    monkeypatch.setattr(
+        "mana_agent.ui.streamlit_helpers.run_dashboard_chat", fake_dashboard_chat
+    )
+
+    result = service.send_message(conv.conversation_id, "hello default")
+    assert result["ok"] is True
+    assert result["assistant_message"]["content"] == "echo:hello default"
+    assert captured["prompt"] == "hello default"
+    assert captured["kwargs"]["root"] == conv_root
+    assert captured["kwargs"]["conversation_id"] == conv.conversation_id
+
+
+def test_send_message_custom_runner_with_minimal_signature(conv_root: Path) -> None:
+    service = ConversationService(root=conv_root)
+    conv = service.create(title="Custom Minimal Runner")
+
+    captured: dict[str, Any] = {}
+
+    def minimal_runner(
+        prompt: str, root: Path | None = None, conversation_id: str = ""
+    ) -> dict[str, Any]:
+        captured["prompt"] = prompt
+        captured["root"] = root
+        captured["conversation_id"] = conversation_id
+        return {"answer": f"minimal:{prompt}", "mode": "minimal", "sources": []}
+
+    result = service.send_message(
+        conv.conversation_id, "test minimal", chat_runner=minimal_runner
+    )
+    assert result["ok"] is True
+    assert result["assistant_message"]["content"] == "minimal:test minimal"
+    assert captured["prompt"] == "test minimal"
+    assert captured["root"] == conv_root
+    assert captured["conversation_id"] == conv.conversation_id
+

@@ -2,6 +2,27 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-11
+
+- Implemented intelligent, automatic AI engine-selection layer throughout the Mana-Agent API:
+  - Created `src/mana_agent/engine_selection/` with `EngineSelector`, `SmartDispatcher`, and `DecisionsClient` supporting `/v1/decisions` (`gpt-6-luna`).
+  - Added deterministic capability detection mapping boolean evaluations to Decisions `predicate`, fixed option classifications to Decisions `choice`, ordered rubric scoring to Decisions `score`, and batched evaluations to batched Decisions.
+  - Ensured Decisions API is optional and automatically selected only when natively supported; unsupported operations proactively route to Responses API Structured Outputs, Function Calling, reasoning/coding engine, generation engine, or native application code without exploratory calls.
+  - Added direct deterministic execution bypassing AI for explicit commands, safety boundaries, and exact handlers.
+  - Implemented thread-safe decision caching in `SmartDispatcher` (`execute_auto` / `executeAuto`) to prevent redundant re-evaluations across downstream components.
+  - Added safe, bounded fallback handling for model refusals, timeouts, HTTP errors, and malformed responses.
+  - Enforced input format constraints (base64 data URIs for images; unsupported external URLs or file IDs proactively skip Decisions).
+  - Integrated automatic engine selection across gateway entry routing, memory relevance, task prioritization, and recovery classification while preserving full contract compatibility.
+  - Added settings `MANA_DECISIONS_ENABLED`, `MANA_DECISIONS_MODEL`, and `MANA_DECISIONS_BASE_URL` with provider registry flags.
+  - Added comprehensive test suite in `tests/test_engine_selection.py`.
+  - Updated `requires-python` in `pyproject.toml` from `<=3.14.7,>=3.10` to `>=3.10,<3.15` to support Python 3.14 patch releases (such as Python 3.14.8 on Ubuntu CI runners).
+  - User verification: Run `python -m pip install -e .` and `python -m pytest tests/test_doctor.py`.
+- Fixed duplicate keyword argument `'root'` in `ConversationService.send_message()`:
+  - Eliminated the redundant nested wrapper function in `ConversationService.send_message()` that passed `root=self.root` explicitly while unpacking keyword arguments that also contained `'root'`, which previously raised `TypeError: mana_agent.ui.streamlit_helpers.run_dashboard_chat() got multiple values for keyword argument 'root'` during dashboard/API chat execution.
+  - Resolved `runner` directly to `run_dashboard_chat` when no custom `chat_runner` is provided, and added signature inspection to filter arguments appropriately when invoking custom runners with restricted parameter lists.
+  - Added test coverage in `tests/test_conversation_service.py` verifying both default runner invocation and restricted custom runner signatures.
+  - User verification required: `python -m pytest tests/test_conversation_service.py`.
+
 ## 2026-10-02
 
 - Restored follow-up continuity and unified external memory integration across gateway and memory layers:

@@ -27,6 +27,7 @@ class InferenceConnection:
     env_headers: dict[str, str]
     query_params: dict[str, str]
     supports_responses_api: bool
+    supports_decisions_api: bool
     codex_transport: CodexTransport
 
 
@@ -102,5 +103,6 @@ def resolve_inference_connection(
         env_headers=dict(definition.default_env_headers),
         query_params=dict(definition.default_query_params),
         supports_responses_api=definition.supports_responses_api,
+        supports_decisions_api=definition.supports_decisions_api,
         codex_transport=definition.codex_transport,
     )

@@ -2751,6 +2751,47 @@ class QueueManager:
         )
 
 
+def evaluate_task_priority(task_description: str, context: str = "") -> int:
+    """Evaluate task priority score using automatic Decisions score selection."""
+    from mana_agent.engine_selection import execute_auto, score_op
+
+    levels = [
+        {"label": "Low", "description": "Minor or cosmetic improvement", "value": 80},
+        {"label": "Medium", "description": "Standard work or normal enhancement", "value": 50},
+        {"label": "High", "description": "Critical fix or high-impact task", "value": 20},
+        {"label": "Urgent", "description": "Blocker or immediate fix required", "value": 5},
+    ]
+    op = score_op(
+        instructions="Score the urgency and execution priority of this task against the levels.",
+        levels=levels,
+        evidence={"task": task_description, "context": context},
+        name="task_priority",
+    )
+    res = execute_auto(op)
+    if res.success and res.result is not None:
+        try:
+            return int(float(res.result))
+        except (ValueError, TypeError):
+            pass
+    return 50
+
+
+def classify_recovery_action(error_code: str, attempts: list[Any], file_content: str = "") -> str:
+    """Classify error recovery strategy using automatic Decisions choice selection."""
+    from mana_agent.engine_selection import choice_op, execute_auto
+
+    op = choice_op(
+        instructions="Select the best recovery strategy for this patch failure.",
+        choices=["rebase", "reread", "abort"],
+        evidence={"error_code": error_code, "attempts": attempts, "has_content": bool(file_content)},
+        name="recovery_classification",
+    )
+    res = execute_auto(op)
+    if res.success and res.result:
+        return str(res.result)
+    return "abort"
+
+
 __all__ = [
     "AgentWorkQueue",
     "EventBus",
@@ -2764,5 +2805,7 @@ __all__ = [
     "WorkQueueRunner",
     "WorkResult",
     "WorkStatus",
+    "classify_recovery_action",
     "compute_fingerprint",
+    "evaluate_task_priority",
 ]
