@@ -1,7 +1,7 @@
-# Coding runtime: Codex
+# Coding runtime: Codex (External Mode)
 
-Mana-Agent enforces Codex as the single authoritative coding engine for all coding requests (`Coding → Codex`). Internal coding backends, shims, and fallback execution paths have been removed.
-Once the shared model route selects a Codex coding turn, one Codex turn owns repository inspection, coding
+Mana-Agent supports dual selectable coding engines: `external` (OpenAI Codex app-server, preserved as default) and `internal` (Mana-Agent native AI orchestration with OpenAI Programmatic Tool Calling).
+In External Mode, one Codex turn owns repository inspection, coding
 decisions, planning, edits, review, and proportional verification. Mana-Agent
 retains the outer chat route, worktree allocation, permissions, event streaming,
 result normalization, and explicit merge control.

@@ -354,7 +354,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
         "flow_cards": True,
         "experimental_sharing": False,
     },
-    # Authoritative coding runtime: Codex is the single execution route (Coding -> Codex).
+    # Authoritative coding runtime: 'external' (OpenAI Codex) or 'internal' (Mana-Agent Native / Programmatic Tool Calling).
     "MANA_CODING_BACKEND": "codex",
     "MANA_CODEX_ENABLED": True,
     "MANA_CODEX_MAX_WORKERS": 2,
@@ -364,6 +364,23 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_CODEX_ALLOW_NETWORK": False,
     "MANA_CODEX_MODEL": "",
     "MANA_CODEX_BIN": "codex",
+    "MANA_INTERNAL_CODING_ENABLED": True,
+    "MANA_INTERNAL_PROGRAMMATIC_TOOL_CALLING": True,
+    "MANA_INTERNAL_USE_REGISTERED_TOOLS": True,
+    "MANA_INTERNAL_MAX_TOOL_CALLS": 50,
+    "coding_engine": {
+        "mode": "external",
+        "internal": {
+            "enabled": True,
+            "programmatic_tool_calling": True,
+            "use_registered_tools": True,
+            "max_tool_calls": 50,
+        },
+        "external": {
+            "provider": "codex",
+            "enabled": True,
+        },
+    },
     "MANA_AUTO_CHAT_TOOL_SURFACE": "full",
     "MANA_LANE_CONTRACTS": {},
     "MANA_LANE_GLOBAL_WORKER_LIMIT": 8,
@@ -574,6 +591,11 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_CODEX_ALLOW_NETWORK": "mana_codex_allow_network",
     "MANA_CODEX_MODEL": "mana_codex_model",
     "MANA_CODEX_BIN": "mana_codex_bin",
+    "MANA_INTERNAL_CODING_ENABLED": "mana_internal_coding_enabled",
+    "MANA_INTERNAL_PROGRAMMATIC_TOOL_CALLING": "mana_internal_programmatic_tool_calling",
+    "MANA_INTERNAL_USE_REGISTERED_TOOLS": "mana_internal_use_registered_tools",
+    "MANA_INTERNAL_MAX_TOOL_CALLS": "mana_internal_max_tool_calls",
+    "coding_engine": "coding_engine",
     "MANA_AUTO_CHAT_TOOL_SURFACE": "mana_auto_chat_tool_surface",
     "MANA_LANE_CONTRACTS": "mana_lane_contracts",
     "MANA_LANE_GLOBAL_WORKER_LIMIT": "mana_lane_global_worker_limit",
@@ -753,6 +775,11 @@ CONFIG_WRITE_ORDER = [
     "MANA_CODEX_ALLOW_NETWORK",
     "MANA_CODEX_MODEL",
     "MANA_CODEX_BIN",
+    "MANA_INTERNAL_CODING_ENABLED",
+    "MANA_INTERNAL_PROGRAMMATIC_TOOL_CALLING",
+    "MANA_INTERNAL_USE_REGISTERED_TOOLS",
+    "MANA_INTERNAL_MAX_TOOL_CALLS",
+    "coding_engine",
     "MANA_AUTO_CHAT_TOOL_SURFACE",
     "MANA_LANE_CONTRACTS",
     "MANA_LANE_GLOBAL_WORKER_LIMIT",
@@ -1331,18 +1358,33 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
             ),
             timeout_seconds=float(cleaned.get("MANA_MEMORY_TIMEOUT_SECONDS") or 15),
         ).validate()
+    if "coding_engine" in cleaned:
+        raw_ce = cleaned["coding_engine"]
+        if not isinstance(raw_ce, dict):
+            raise UserConfigError("coding_engine must be a TOML table or dictionary.")
+        from mana_agent.coding.models import CodingEngineSettings
+        try:
+            ce_settings = CodingEngineSettings.model_validate(raw_ce)
+        except Exception as exc:
+            raise UserConfigError(f"Invalid coding_engine configuration: {exc}") from exc
+        cleaned["coding_engine"] = ce_settings.model_dump(mode="json")
+        mode = ce_settings.mode.lower()
+        if mode in {"internal", "external", "codex"}:
+            cleaned["MANA_CODING_BACKEND"] = mode
+        if ce_settings.internal:
+            cleaned["MANA_INTERNAL_CODING_ENABLED"] = ce_settings.internal.enabled
+            cleaned["MANA_INTERNAL_PROGRAMMATIC_TOOL_CALLING"] = ce_settings.internal.programmatic_tool_calling
+            cleaned["MANA_INTERNAL_USE_REGISTERED_TOOLS"] = ce_settings.internal.use_registered_tools
+            cleaned["MANA_INTERNAL_MAX_TOOL_CALLS"] = ce_settings.internal.max_tool_calls
+        if ce_settings.external:
+            cleaned["MANA_CODEX_ENABLED"] = ce_settings.external.enabled
     if "MANA_CODING_BACKEND" in cleaned:
         backend_val = str(cleaned.get("MANA_CODING_BACKEND") or "").strip().lower()
-        if backend_val == "internal":
+        if backend_val and backend_val not in {"codex", "external", "internal"}:
             raise UserConfigError(
-                "Internal coding engine has been removed. Codex is the single authoritative "
-                "coding engine. No internal coding engine can be selected or invoked."
+                f"MANA_CODING_BACKEND must be 'internal', 'external', or 'codex' (got '{backend_val}')."
             )
-        if backend_val and backend_val != "codex":
-            raise UserConfigError(
-                f"MANA_CODING_BACKEND must be 'codex' (got '{backend_val}')."
-            )
-        cleaned["MANA_CODING_BACKEND"] = "codex"
+        cleaned["MANA_CODING_BACKEND"] = backend_val or "codex"
     for name in (
         "MANA_MODEL_MAIN",
         "MANA_MODEL_HEAD_DECISION",

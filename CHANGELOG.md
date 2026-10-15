@@ -2,6 +2,29 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-15
+
+- Bumped the package and documented version to `v0.1.12`.
+- Added selectable Internal and External Coding Engine Modes and integrated OpenAI Programmatic Tool Calling:
+  - Introduced shared `CodingEngine` protocol and implemented `ExternalCodingEngine` (delegated to OpenAI Codex via `CodexProviderAdapter`) and `InternalCodingEngine` (native AI model orchestration).
+  - Added dedicated system instruction in `src/mana_agent/coding/prompts.py` (`INTERNAL_CODING_SYSTEM_INSTRUCTION`) establishing the autonomous software engineering agent mission, tool discovery, engineering lifecycle, and operational directives for the internal coding engine.
+  - Implemented the autonomous model tool-calling loop in `InternalCodingEngine` (`_run_model_tool_loop`), binding registered repository and development tools to the chat model so that the agent autonomously decides which tools to invoke based on task requirements.
+  - Enabled complete visibility for all tool calls in `ProgrammaticExecutionSession` and `ToolExecutionDispatcher` by emitting `emit_tool_event("start" / "end" / "error")`, publishing normalized `AgentEvent` objects (`tool.call.started`, `tool.call.completed`, `tool.call.failed`), and streaming them to CLI live activity, conversation transcripts, and event subscribers.
+  - Extended `ToolExecutionDispatcher` to handle `web_search`, `semantic_search`, and `git_log` alongside core file and shell operations.
+  - Integrated OpenAI Programmatic Tool Calling in `src/mana_agent/coding/programmatic.py`, configuring `{"type": "programmatic_tool_calling"}` and exposing registered development tools with `allowed_callers: ["direct", "programmatic"]` and strict JSON contracts from `mana_agent.tools.contracts`.
+  - Implemented the full client-side tool execution and Responses API continuation lifecycle for generated JavaScript programs running in OpenAI's isolated V8 sandbox, while supporting direct tool-calling fallback for unsupported models and providers.
+  - Added `UnifiedCodingAgentFacade` subclassing `CodexCodingAgentShim` to allow dynamic switching between internal and external engines while preserving 100% backward compatibility with all gateway, CLI, TUI, and test callers.
+  - Added `/engine` (and `/coding-engine`) interactive chat command to inspect and switch the active coding engine per session.
+  - Added first-class configuration support in `Settings` and `user_config.py` for structured `[coding_engine]` table (`mode = "internal" | "external"` with `[coding_engine.internal]` and `[coding_engine.external]`) and `MANA_CODING_BACKEND`, with Codex (`"external"`) preserved as the default.
+  - Streamlined Configuration TUI (`mana-agent --configure`) "Coding runtime" tab with a clean selector between `Codex (External)` and `Internal (Mana Native)`, and normalized loaded backend modes (`external`/`codex`) to prevent Textual `InvalidSelectValueError`.
+  - Clarified `duplicate_message` classification semantics in `src/mana_agent/gateway/followup_classifier.py` so that actionable requests and repeat instructions are categorized as `new_task`, `task_correction`, or `retry_request` rather than triggering duplicate escrow short-circuits.
+  - Fixed `InternalCodingEngine` import in `src/mana_agent/gateway/stack.py` resolving runtime `NameError` during chat stack initialization.
+  - Sanitized tool definition names in `_build_tool_definitions` and `build_programmatic_tool_definitions` to strictly conform to OpenAI's tool naming pattern `^[a-zA-Z0-9_-]+$`, converting dotted contract names (such as `git.status` and `git.diff`) to valid identifiers (`git_status`, `git_diff`), deduplicating schemas, and supporting both underscored and dotted dispatch in `ToolExecutionDispatcher`.
+  - Extended `ToolExecutionDispatcher` to execute `read_skill`, all Git tools via `git_tools.execute_tool`, and Document tools via `ToolManager`.
+  - Fixed `status_rows` initialization in `src/mana_agent/commands/chat_cli.py` and model log formatting in `src/mana_agent/gateway/stack.py`.
+  - Added automated test coverage in `tests/test_coding_engine_modes.py` verifying system instruction binding, autonomous tool execution, OpenAI tool naming compliance, and tool event streaming.
+  - User verification required: `python -m pytest tests/test_coding_engine_modes.py tests/test_programmatic_tool_calling.py tests/test_codex_integration.py tests/test_coding_runtime_selection_events.py tests/test_coding_tool_system.py -v`.
+
 ## 2026-10-12
 
 - Fixed HTTP 400 invalid type error for `input` in `DecisionsClient`:

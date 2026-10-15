@@ -113,7 +113,7 @@ class AgentEvent(BaseModel):
     event_type: str
     task_id: str
     parent_event_id: str | None = None
-    backend: Literal["codex"] = "codex"
+    backend: str = "codex"
     sequence: int = Field(default=0, ge=0)
     status: Literal["queued", "running", "success", "failed", "cancelled"] = "running"
     title: str = ""
@@ -240,21 +240,70 @@ class CodingBackendDecision(BaseModel):
     def _validate_selection(self) -> "CodingBackendDecision":
         if self.coding_required and not str(self.selected_backend or "").strip():
             raise ValueError("selected_backend is required for coding tasks")
-        if self.coding_required and self.selected_backend != "codex":
+        if self.coding_required and self.selected_backend not in {"codex", "external", "internal"}:
             raise ValueError(
                 f"Invalid backend '{self.selected_backend}'. "
-                "Codex is the single authoritative coding engine; no internal coding engine can be selected or invoked."
+                "Allowed backends: 'external', 'internal', 'codex'."
             )
         if not self.safe_to_continue and self.selected_backend:
             raise ValueError("an unsafe decision must not select a backend")
         return self
 
 
+CodingEngineMode = Literal["internal", "external"]
+
+
+class InternalCodingEngineConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    enabled: bool = True
+    programmatic_tool_calling: bool = True
+    use_registered_tools: bool = True
+    max_tool_calls_per_program: int = Field(default=50, ge=1, alias="max_tool_calls")
+    program_timeout_seconds: int = Field(default=300, ge=1)
+    max_parallel_tool_calls: int = Field(default=10, ge=1)
+
+    @property
+    def max_tool_calls(self) -> int:
+        return self.max_tool_calls_per_program
+
+
+class ExternalCodingEngineConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    provider: str = "codex"
+    enabled: bool = True
+
+
+class CodingEngineSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mode: CodingEngineMode = "external"
+    internal: InternalCodingEngineConfig = Field(default_factory=InternalCodingEngineConfig)
+    external: ExternalCodingEngineConfig = Field(default_factory=ExternalCodingEngineConfig)
+
+
+class CodingStatus(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    task_id: str
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    backend: str
+    duration_ms: int | None = None
+    changed_files: list[str] = Field(default_factory=list)
+    error: str = ""
+
+
 __all__ = [
     "AgentEvent",
     "CodingBackendDecision",
+    "CodingEngineMode",
+    "CodingEngineSettings",
+    "CodingStatus",
     "CodingTask",
     "CodingTaskResult",
+    "ExternalCodingEngineConfig",
+    "InternalCodingEngineConfig",
     "WorkspaceContext",
     "compute_duration_breakdown",
     "redact_event_value",

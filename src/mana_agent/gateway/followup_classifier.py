@@ -105,7 +105,10 @@ class FollowupClassification:
 _PROMPT = """Classify this newly received chat turn. A completed task does not complete its conversation.
 Use new_task for independent actionable work; use followup_task, task_expansion, or task_correction only
 when one offered task is the intended parent; use retry_request/resume_request only for the same offered
-unfinished task; use status_request or conversation_only when no execution should be created. A new
+unfinished task; use status_request or conversation_only when no execution should be created; use
+duplicate_message ONLY for accidental, identical client re-transmissions of the exact same message from
+the same turn. If the user is re-requesting an action, asking to make changes, or requesting work, use
+new_task, task_correction, or retry_request, NEVER duplicate_message. A new
 downstream action after a completed task, especially one that changes live external state, is a
 task_expansion, not a resume, retry, duplicate, or status request. Do not use keyword matching. If no
 offered task is unambiguously applicable, select new_task or conversation_only. Return strict JSON

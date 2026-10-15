@@ -397,6 +397,37 @@ def _agent_command(name: str):
     return handler
 
 
+def _engine(context: CommandContext, args: list[str]) -> CommandResult:
+    coding_agent = getattr(context.gateway, "_coding_agent", None) if context.gateway else None
+    if coding_agent is None or not hasattr(coding_agent, "active_engine_mode"):
+        return CommandResult(
+            status="error",
+            message="Coding engine is not available or does not support runtime mode selection.",
+        )
+    if not args or args[0].lower() in {"show", "status"}:
+        current = getattr(coding_agent, "active_engine_mode", "external")
+        desc = "Internal (Mana-Agent Native)" if current == "internal" else "External (Codex)"
+        return CommandResult(
+            status="success",
+            message=f"Current coding engine: {current} ({desc})",
+            data={"engine": current},
+        )
+    target = args[0].lower()
+    if target in {"internal", "external", "codex"}:
+        try:
+            coding_agent.set_engine_mode(target)
+            current = getattr(coding_agent, "active_engine_mode", target)
+            desc = "Internal (Mana-Agent Native)" if current == "internal" else "External (Codex)"
+            return CommandResult(
+                status="success",
+                message=f"Switched coding engine to {current} ({desc}).",
+                data={"engine": current},
+            )
+        except Exception as exc:
+            return CommandResult(status="error", message=str(exc))
+    raise ValueError("Usage: /engine [show|internal|external|codex]")
+
+
 def definitions() -> list[CommandDefinition]:
     rows = [
         CommandDefinition(canonical_name="new", description="Permanently replace the current chat.", required_capability="sessions", handler=_new),
@@ -406,6 +437,14 @@ def definitions() -> list[CommandDefinition]:
         CommandDefinition(canonical_name="disconnect", description="Remove connector configuration.", argument_schema="<name>", required_capability="connectors", confirmation_required=True, handler=lambda context, args: _connect(context, ["disconnect", *args])),
         CommandDefinition(canonical_name="status", description="Show the active chat status.", required_capability="gateway", handler=_status),
         CommandDefinition(canonical_name="cancel", description="Cancel the active agent turn.", required_capability="gateway", handler=_cancel),
+        CommandDefinition(
+            canonical_name="engine",
+            aliases=("coding-engine",),
+            description="Inspect or switch the active coding engine (internal or external).",
+            argument_schema="[show|internal|external|codex]",
+            required_capability="gateway",
+            handler=_engine,
+        ),
         CommandDefinition(
             canonical_name="automations",
             aliases=("automation",),

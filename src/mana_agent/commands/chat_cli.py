@@ -1208,7 +1208,9 @@ def chat(
         # Collect the per-session configuration so it renders as one tidy panel
         # instead of a scattered list of single-line prints.
         status_rows: list[tuple[str, str]] = []
-        status_rows.append(("coding agent", "Codex — owns coding plans, edits, and verification"))
+        engine_mode = getattr(coding_agent_instance, "active_engine_mode", "external") if coding_agent_instance else "external"
+        engine_label = "Internal — Mana-Agent Native" if engine_mode == "internal" else "External — Codex (owns plans, edits, verification)"
+        status_rows.append(("coding engine", engine_label))
         _ca_flow = flow_id or (coding_agent_instance.get_active_flow_id() if coding_agent_instance else None)
         if coding_memory:
             if _ca_flow:

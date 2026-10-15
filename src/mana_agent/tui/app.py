@@ -1638,7 +1638,9 @@ class ManaChatApp(App):
                 # EXACT CODING AGENT PATH (mirrors chat_cli.py ~3127-3330)
                 # Only entered for edit/plan intents (or when auto-execute forces it).
                 # ==========================================================
-                self.update_status("Running Codex coding turn (tools live in chat box)…")
+                active_mode = getattr(self.coding_agent, "active_engine_mode", "external")
+                engine_name = "Internal" if active_mode == "internal" else "Codex"
+                self.update_status(f"Running {engine_name} coding turn (tools live in chat box)…")
 
                 try:
                     from mana_agent.commands.ui_helpers import RichToolCallbackHandler

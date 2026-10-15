@@ -207,9 +207,56 @@ class ChatLog(VerticalScroll):
             focus_widget = self._add_coding_activity(event)
 
         self.message_count = len(self._history.get_events()) if self._history else self.message_count + 1
-        # Always pin the viewport to the newest content (user requirement).
-        if was_near_bottom:
+
+        is_tool_event = isinstance(event, (ToolCallEvent, ToolResultEvent, CodingActivityEvent))
+        # When new tools run, always pin directly to the last tools run
+        if is_tool_event:
+            self._pin_to_tool(focus_widget)
+        elif was_near_bottom:
             self._scroll_to_latest(focus_widget)
+
+    def _pin_to_tool(self, tool_widget: Static | SelectableText | ToolCard | ExecutionPanel | None = None) -> None:
+        """Pin chat history viewport directly to the last tool run."""
+        target = tool_widget or getattr(self, "_last_tool_widget", None)
+        if target is None:
+            if self._tool_cards:
+                target = list(self._tool_cards.values())[-1]
+            elif self.children:
+                target = list(self.children)[-1]
+        if target is None:
+            return
+
+        self._last_tool_widget = target
+        try:
+            target.anchor(animate=False)
+        except Exception:
+            pass
+        try:
+            target.scroll_visible(animate=False, force=True)
+        except Exception:
+            pass
+        try:
+            self.scroll_to_widget(target, animate=False, force=True)
+        except Exception:
+            pass
+        try:
+            self.scroll_end(animate=False, force=True)
+        except Exception:
+            pass
+
+        def _repin() -> None:
+            try:
+                if getattr(target, "is_mounted", False) or target in self.children:
+                    target.scroll_visible(animate=False, force=True)
+                    self.scroll_to_widget(target, animate=False, force=True)
+                self.scroll_end(animate=False, force=True)
+            except Exception:
+                pass
+
+        try:
+            self.call_after_refresh(_repin)
+        except Exception:
+            pass
 
     def _scroll_to_latest(self, focus_widget: Static | SelectableText | ToolCard | None = None) -> None:
         """Keep chat history pinned to the latest message / tool card.
@@ -226,6 +273,14 @@ class ChatLog(VerticalScroll):
             if target is not None:
                 try:
                     target.anchor(animate=False)
+                except Exception:
+                    pass
+                try:
+                    target.scroll_visible(animate=False, force=True)
+                except Exception:
+                    pass
+                try:
+                    self.scroll_to_widget(target, animate=False, force=True)
                 except Exception:
                     pass
             # force=True ignores overflow restrictions; animate=False for snappy live updates.
