@@ -272,16 +272,22 @@ class ManaConfigurationApp(App[bool]):
                 yield Select(self._media_model_options(transcription_media, "", purpose="transcription"), id="media-transcription-model", allow_blank=False)
             with TabPane("Coding runtime", id="coding-runtime"):
                 yield Label("Coding backend", classes="section-title")
+                ce_val = values.get("coding_engine")
+                mode_from_ce = ce_val.get("mode") if isinstance(ce_val, dict) else None
+                raw_mode = str(values.get("MANA_CODING_BACKEND") or mode_from_ce or "codex").strip().lower()
+                backend_val = "internal" if raw_mode == "internal" else "codex"
                 yield Select(
-                    [("Codex app-server", "codex")],
-                    value="codex",
+                    [
+                        ("Codex (External)", "codex"),
+                        ("Internal (Mana Native)", "internal"),
+                    ],
+                    value=backend_val,
                     id="coding-backend",
                     allow_blank=False,
                 )
-                yield Switch(value=bool(values.get("MANA_CODEX_ENABLED", True)), id="codex-enabled")
-                yield Label("Enable the Codex integration", classes="hint")
                 yield Static(
-                    "Codex is the single authoritative coding engine (Coding -> Codex). No internal coding engine can be selected or invoked.",
+                    "Select the active coding engine: Codex (External) or Internal (Mana-Agent Native with Programmatic Tool Calling).",
+                    id="coding-backend-hint",
                     classes="hint",
                 )
             with TabPane("Memory", id="memory"):
@@ -571,7 +577,8 @@ class ManaConfigurationApp(App[bool]):
                 "MANA_MEMORY_PROVIDER": "mana" if str(self.query_one("#memory-mode", Select).value) == "internal" else str(self.query_one("#memory-provider", Select).value),
                 "MANA_MEMORY_FALLBACK_TO_INTERNAL": False,
                 "MANA_CODING_BACKEND": str(self.query_one("#coding-backend", Select).value),
-                "MANA_CODEX_ENABLED": self.query_one("#codex-enabled", Switch).value,
+                "MANA_CODEX_ENABLED": True,
+                "MANA_INTERNAL_CODING_ENABLED": True,
                 "MEM0_ORG_ID": self.query_one("#mem0-org-id", Input).value.strip(),
                 "MEM0_PROJECT_ID": self.query_one("#mem0-project-id", Input).value.strip(),
                 "MEM0_BASE_URL": self.query_one("#mem0-base-url", Input).value.strip(),
@@ -612,6 +619,12 @@ class ManaConfigurationApp(App[bool]):
             ],
         })
         self.draft.values["computer_control"] = computer
+        coding_backend_val = str(self.query_one("#coding-backend", Select).value)
+        ce_mode = "internal" if coding_backend_val == "internal" else "external"
+        existing_ce = self.draft.values.get("coding_engine")
+        coding_engine = dict(existing_ce) if isinstance(existing_ce, dict) else {}
+        coding_engine["mode"] = ce_mode
+        self.draft.values["coding_engine"] = coding_engine
         existing_media = self.draft.values.get("media")
         media = dict(existing_media) if isinstance(existing_media, dict) else {}
         image_model = self.query_one("#media-image-model", Select).value
@@ -906,6 +919,7 @@ class ManaConfigurationApp(App[bool]):
             resolve_coding_backend(SimpleNamespace(
                 mana_coding_backend=self.draft.values.get("MANA_CODING_BACKEND"),
                 mana_codex_enabled=self.draft.values.get("MANA_CODEX_ENABLED"),
+                mana_internal_coding_enabled=self.draft.values.get("MANA_INTERNAL_CODING_ENABLED", True),
             ))
             self.draft.save()
         except Exception as exc:

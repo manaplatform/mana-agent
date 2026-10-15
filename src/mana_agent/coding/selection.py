@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Literal, NamedTuple
 
 
-CodingBackendName = Literal["codex"]
+CodingBackendName = Literal["codex", "external", "internal"]
 
 
 class CodingBackendConfigurationError(ValueError):
@@ -25,31 +25,37 @@ class CodingBackendSelection(NamedTuple):
 def resolve_coding_backend(settings: object) -> CodingBackendSelection:
     """Resolve and validate the configured backend without probing Codex.
 
-    Codex is the single authoritative coding engine: Coding -> Codex.
-    No internal coding engine can be selected or invoked.
+    Supports 'external' (delegated to Codex) and 'internal' (Mana-Agent native).
+    Defaults to 'external' for existing configurations.
     """
 
     configured = str(getattr(settings, "mana_coding_backend", "") or "").strip().lower()
     codex_enabled = bool(getattr(settings, "mana_codex_enabled", True))
+    internal_enabled = bool(getattr(settings, "mana_internal_coding_enabled", True))
 
     if configured == "internal":
-        raise CodingBackendConfigurationError(
-            "Internal coding engine has been removed. Codex is the single authoritative "
-            "coding engine. No internal coding engine can be selected or invoked."
+        if not internal_enabled:
+            raise CodingBackendConfigurationError(
+                "Internal coding engine is configured but MANA_INTERNAL_CODING_ENABLED is false."
+            )
+        return CodingBackendSelection("internal", codex_enabled, "explicit")
+
+    if configured in {"", "external", "codex"}:
+        if not codex_enabled:
+            raise CodingBackendConfigurationError(
+                "External coding engine (Codex) is selected but MANA_CODEX_ENABLED is false. "
+                "Enable Codex to execute external coding tasks or configure MANA_CODING_BACKEND='internal'."
+            )
+        resolved_backend: CodingBackendName = "external" if configured == "external" else "codex"
+        return CodingBackendSelection(
+            resolved_backend,
+            codex_enabled,
+            "explicit" if configured else "migration-default",
         )
 
-    if not codex_enabled:
-        raise CodingBackendConfigurationError(
-            "Codex is the single authoritative coding engine but MANA_CODEX_ENABLED is false. "
-            "Enable Codex to execute coding tasks."
-        )
-
-    if configured and configured != "codex":
-        raise CodingBackendConfigurationError(
-            f"MANA_CODING_BACKEND must be 'codex' (got '{configured}'). No coding backend was started."
-        )
-
-    return CodingBackendSelection("codex", codex_enabled, "explicit" if configured else "migration-default")
+    raise CodingBackendConfigurationError(
+        f"MANA_CODING_BACKEND must be 'internal', 'external', or 'codex' (got '{configured}'). No coding backend was started."
+    )
 
 
 __all__ = [

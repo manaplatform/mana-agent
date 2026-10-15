@@ -19,6 +19,8 @@ from mana_agent.commands.cli_internal import (
 from mana_agent.config.settings import Settings, default_logs_dir
 from mana_agent.config.inference_provider import resolve_inference_connection
 from mana_agent.gateway.config import ChatGatewayConfig
+from mana_agent.coding.facade import UnifiedCodingAgentFacade
+from mana_agent.coding.internal_engine import InternalCodingEngine
 from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.coding.selection import resolve_coding_backend
@@ -473,7 +475,9 @@ def build_chat_stack(
         coding_working_directory = (
             prepared_repository.working_directory if prepared_repository else root
         )
-        if coding_agent_cls is CodexCodingAgentShim:
+        if coding_agent_cls is CodexCodingAgentShim or (
+            isinstance(coding_agent_cls, type) and issubclass(coding_agent_cls, CodexCodingAgentShim)
+        ):
             codex_settings = CodexSettings.from_mana_settings(
                 settings,
                 provider=(
@@ -484,10 +488,20 @@ def build_chat_stack(
             ).model_copy(
                 update={"model": coding_model_assignment.resolved_model}
             )
-            coding_agent_instance = coding_agent_cls(
+            default_mode = "internal" if (coding_selection and coding_selection.backend == "internal") else "external"
+            facade_cls = UnifiedCodingAgentFacade if coding_agent_cls is CodexCodingAgentShim else coding_agent_cls
+            internal_engine = InternalCodingEngine(
+                model=coding_model_assignment.resolved_model,
+                provider=codex_settings.provider or "openai",
+                api_key=inference_connection.api_key,
+                base_url=effective_base_url,
+            )
+            coding_agent_instance = facade_cls(
                 repo_root=coding_repository_root,
                 working_directory=coding_working_directory,
+                default_mode=default_mode,
                 codex_settings=codex_settings,
+                internal_engine=internal_engine,
                 repository_id=repository_id,
                 session_id=session_id,
                 event_sink=cfg.event_sink,
@@ -554,7 +568,20 @@ def build_chat_stack(
         coding_memory_service = getattr(coding_agent_instance, "coding_memory_service", None)
         tool_worker_client = getattr(coding_agent_instance, "tool_worker_client", None)
 
-    if isinstance(coding_agent_instance, CodexCodingAgentShim):
+    if isinstance(coding_agent_instance, UnifiedCodingAgentFacade):
+        coding_backend = "codex" if coding_agent_instance.active_engine_mode == "external" else "internal"
+        coding_model = (
+            coding_model_assignment.resolved_model
+            or str(getattr(settings, "mana_codex_model", "") or "").strip()
+            or "router-managed"
+        )
+        routed_coding_model = (
+            coding_agent_instance.codex_settings.model
+            or coding_model_assignment.resolved_model
+            or "app-server-default"
+        )
+        planner_model = "internal-native" if coding_backend == "internal" else "codex-owned"
+    elif isinstance(coding_agent_instance, CodexCodingAgentShim):
         coding_backend = "codex"
         # Report the model Codex will actually use (resolved/routed), not a
         # stale MANA_CODEX_MODEL pin that may disagree with the active provider.

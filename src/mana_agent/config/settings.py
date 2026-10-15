@@ -551,26 +551,87 @@ class Settings(BaseSettings):
     mana_transactional_always_approve: bool = Field(
         default=False, alias="MANA_TRANSACTIONAL_ALWAYS_APPROVE"
     )
-    # Authoritative coding runtime: Codex is the single execution route (Coding -> Codex).
-    mana_coding_backend: str = Field(default="codex", alias="MANA_CODING_BACKEND")
-    mana_codex_enabled: bool = Field(default=True, alias="MANA_CODEX_ENABLED")
-    mana_codex_max_workers: int = Field(default=2, alias="MANA_CODEX_MAX_WORKERS")
+    # Authoritative coding runtime: Codex (external) or Mana-Agent native (internal).
+    mana_coding_backend: str = Field(
+        default="codex",
+        alias="MANA_CODING_BACKEND",
+        description="Authoritative coding runtime: 'external' (OpenAI Codex) or 'internal' (Mana-Agent native with Programmatic Tool Calling).",
+    )
+    mana_codex_enabled: bool = Field(
+        default=True,
+        alias="MANA_CODEX_ENABLED",
+        description="Enable OpenAI Codex external coding engine.",
+    )
+    mana_codex_max_workers: int = Field(
+        default=2,
+        alias="MANA_CODEX_MAX_WORKERS",
+        description="Maximum concurrent Codex worker tasks.",
+    )
     mana_codex_stream_events: bool = Field(
-        default=True, alias="MANA_CODEX_STREAM_EVENTS"
+        default=True,
+        alias="MANA_CODEX_STREAM_EVENTS",
+        description="Stream live Codex turn and tool execution events.",
     )
     mana_codex_worktree_isolation: bool = Field(
-        default=False, alias="MANA_CODEX_WORKTREE_ISOLATION"
+        default=False,
+        alias="MANA_CODEX_WORKTREE_ISOLATION",
+        description="Enforce isolated Git worktree for Codex file modifications.",
     )
     mana_codex_task_timeout_seconds: int = Field(
-        default=1800, alias="MANA_CODEX_TASK_TIMEOUT_SECONDS"
+        default=1800,
+        alias="MANA_CODEX_TASK_TIMEOUT_SECONDS",
+        description="Maximum task execution timeout for Codex turns in seconds.",
     )
     mana_codex_allow_network: bool = Field(
-        default=False, alias="MANA_CODEX_ALLOW_NETWORK"
+        default=False,
+        alias="MANA_CODEX_ALLOW_NETWORK",
+        description="Allow outbound network connectivity from the Codex sandbox.",
     )
-    mana_codex_model: str | None = Field(default=None, alias="MANA_CODEX_MODEL")
-    mana_codex_bin: str = Field(default="codex", alias="MANA_CODEX_BIN")
-    mana_codex_execution_mode: str = Field(default="api", alias="MANA_CODEX_EXECUTION_MODE")
-    mana_codex_credential_reference: str = Field(default="", alias="MANA_CODEX_CREDENTIAL_REFERENCE")
+    mana_codex_model: str | None = Field(
+        default=None,
+        alias="MANA_CODEX_MODEL",
+        description="Model override for Codex coding backend.",
+    )
+    mana_codex_bin: str = Field(
+        default="codex",
+        alias="MANA_CODEX_BIN",
+        description="Path or command for the Codex binary executable.",
+    )
+    mana_codex_execution_mode: str = Field(
+        default="api",
+        alias="MANA_CODEX_EXECUTION_MODE",
+        description="Execution mode for Codex ('api' or 'subscription').",
+    )
+    mana_codex_credential_reference: str = Field(
+        default="",
+        alias="MANA_CODEX_CREDENTIAL_REFERENCE",
+        description="Secret backend reference for Codex credential.",
+    )
+    mana_internal_coding_enabled: bool = Field(
+        default=True,
+        alias="MANA_INTERNAL_CODING_ENABLED",
+        description="Enable Mana-Agent native internal coding engine.",
+    )
+    mana_internal_programmatic_tool_calling: bool = Field(
+        default=True,
+        alias="MANA_INTERNAL_PROGRAMMATIC_TOOL_CALLING",
+        description="Enable OpenAI Programmatic Tool Calling (tools.* in hosted V8 sandbox) for internal coding engine.",
+    )
+    mana_internal_use_registered_tools: bool = Field(
+        default=True,
+        alias="MANA_INTERNAL_USE_REGISTERED_TOOLS",
+        description="Expose registered development tools (filesystem, git, shell, patch, MCP) to programmatic JavaScript execution.",
+    )
+    mana_internal_max_tool_calls: int = Field(
+        default=50,
+        alias="MANA_INTERNAL_MAX_TOOL_CALLS",
+        description="Maximum tool calls allowed per programmatic execution session.",
+    )
+    coding_engine: dict[str, Any] | None = Field(
+        default=None,
+        alias="CODING_ENGINE",
+        description="Structured coding engine configuration table (mode: 'internal' or 'external').",
+    )
     # full = all auto-chat tools; coding = repository/edit/verify/document/git only
     # (SWE-bench and other isolated coding runs).
     mana_auto_chat_tool_surface: str = Field(

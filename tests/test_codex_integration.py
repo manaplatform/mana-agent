@@ -173,12 +173,12 @@ def test_registry_does_not_fallback_when_selected_backend_is_missing() -> None:
         registry.resolve(decision)
 
 
-def test_registry_rejects_non_codex_registration() -> None:
+def test_registry_rejects_unsupported_backend_registration() -> None:
     class _OtherBackend:
-        name = "internal"
+        name = "unsupported_backend"
 
     registry = CodingBackendRegistry()
-    with pytest.raises(ValueError, match="Cannot register coding backend 'internal'"):
+    with pytest.raises(ValueError, match="Cannot register coding backend 'unsupported_backend'"):
         registry.register(_OtherBackend())
 
 
