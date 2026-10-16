@@ -83,6 +83,90 @@ SEARCH_TOOLS = {
     "document_query",
 }
 
+CODING_TOOLS: frozenset[str] = frozenset(
+    {
+        # File editing & mutations
+        "edit_file",
+        "multi_edit_file",
+        "apply_patch",
+        "apply_patch_batch",
+        "write_file",
+        "create_file",
+        "delete_file",
+        "patch",
+        # Repository code reading & AST
+        "read_file",
+        "repo_batch_read",
+        "list_files",
+        "ls",
+        "find_symbols",
+        "call_graph",
+        "chunk_file",
+        "list_tools",
+        "tool_contracts",
+        "read_skill",
+        # Git operations
+        "git",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_show",
+        "git_branch",
+        "git_switch",
+        "git_checkout",
+        "git_create_branch",
+        "git_add",
+        "git_restore",
+        "git_stash",
+        "git_commit",
+        "git_push",
+        "git_pull",
+        "git_fetch",
+        "git_remote",
+        "git_tag",
+        "git_merge",
+        "git_rebase",
+        "git_revert",
+        "git_reset",
+        "git_clean",
+        "git_config",
+        "git_generic",
+        "git_help",
+        # Shell / execution / verification
+        "shell",
+        "run_command",
+        "run_script_once",
+        "verify_project",
+        "exec_command",
+        "bash",
+        "terminal",
+        "local_shell",
+    }
+)
+
+
+def is_coding_tool(tool_name: str | None) -> bool:
+    """Return True if tool_name belongs to coding/repository/mutation/execution tools."""
+    name = str(tool_name or "").strip().lower()
+    if not name:
+        return False
+    # Search tools take precedence and are not coding tools
+    if "search" in name or name in SEARCH_TOOLS:
+        return False
+    # Explicit exclusions for connectors, workflows, and approvals
+    if name.startswith(("email_", "server_", "api_", "canvas_", "browser_", "media_", "generate_")):
+        return False
+    if name in {"approval_request", "request_user_approval", "wait_for_approval"}:
+        return False
+    if name in CODING_TOOLS:
+        return True
+    if name.startswith(("git.", "git_", "patch.", "patch_")):
+        return True
+    if name.startswith(("edit_", "write_")):
+        return True
+    return False
+
+
 
 def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = None) -> tuple[str, str]:
     """Map a runtime event type to (phase, title).
@@ -142,8 +226,9 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
         }
         or et.startswith(("command.", "patch.", "file."))
         or (
-            meta.get("backend") == "codex"
-            and not et.startswith(("turn.", "error", "routing", "tool", "search", "model"))
+            meta.get("backend") in {"codex", "internal", "coding"}
+            and not et.startswith(("turn.", "error", "routing", "search", "model"))
+            and (not et.startswith("tool") or is_coding_tool(tool_name))
         )
     ):
         backend = str(meta.get("backend") or "coding")

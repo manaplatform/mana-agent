@@ -505,6 +505,7 @@ class AskAgent:
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
         self.tools: list[BaseTool] = []
         self.mcp_server_overrides: list[str] = []
+        self.continuation_evaluator: Any | None = None
 
     def update_model(self, model_name: str) -> None:
         resolved = str(model_name or "").strip()
@@ -2833,6 +2834,33 @@ class AskAgent:
                             bound_revision = capability_registry.active.revision
                     messages.append(HumanMessage(content=api_state.build_continuation_instruction()))
                     continue
+
+                continuation_evaluator = policy.get("continuation_evaluator") or getattr(self, "continuation_evaluator", None)
+                if continuation_evaluator is not None and callable(getattr(continuation_evaluator, "evaluate", None)):
+                    try:
+                        from mana_agent.execution.continuation_decision import ContinuationAction
+                        eval_decision = continuation_evaluator.evaluate(
+                            task_id=str(run_id or flow_id or "task_ask"),
+                            user_goal=question,
+                            step_output={"content": self._extract_model_text(ai_msg.content)},
+                            completed_steps=[{"summary": self._extract_model_text(ai_msg.content)}],
+                            metrics={
+                                "step_idx": step_idx,
+                                "tool_calls_count": len(seen_tool_args),
+                                "traces_count": len(tool_traces),
+                            },
+                        )
+                        if eval_decision.action == ContinuationAction.CONTINUE:
+                            messages.append(HumanMessage(content=eval_decision.remaining_work or "Please continue executing the remaining required tasks."))
+                            continue
+                        elif eval_decision.action == ContinuationAction.WAIT_FOR_USER:
+                            final_answer = eval_decision.user_message or self._extract_model_text(ai_msg.content)
+                            break
+                        elif eval_decision.action == ContinuationAction.BLOCKED:
+                            final_answer = f"Task blocked: {eval_decision.reason}"
+                            break
+                    except Exception as eval_exc:
+                        logger.warning("Continuation evaluator error in ask_agent: %s", eval_exc)
 
                 final_answer = self._extract_model_text(ai_msg.content) or str(ai_msg.content)
                 break

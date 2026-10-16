@@ -197,6 +197,17 @@ class AgentOrchestrator:
         self.trace.append(decision.trace_row())
         return decision
 
+    def record_continuation_decision(self, decision: Any) -> dict[str, Any]:
+        row = {
+            "layer": "autonomous_continuation",
+            "decision": getattr(decision, "action", str(decision)),
+            "goal_satisfied": getattr(decision, "goal_satisfied", False),
+            "reason": getattr(decision, "reason", ""),
+            "evidence_summary": getattr(decision, "evidence_summary", ""),
+        }
+        self.trace.append(row)
+        return row
+
     def finalize_trace(self) -> None:
         self.trace.append(
             {

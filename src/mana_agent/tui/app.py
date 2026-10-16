@@ -1366,7 +1366,7 @@ class ManaChatApp(App):
                     row = None
             if not isinstance(row, dict):
                 continue
-            if row.get("backend") == "codex" and row.get("event_type"):
+            if row.get("backend") in {"codex", "internal"}:
                 # Already rendered live in the backend-neutral execution panel.
                 continue
             tname = str(row.get("tool_name") or row.get("tool") or "tool")
@@ -1894,7 +1894,7 @@ class ManaChatApp(App):
                     for row in (result.get("actions_taken") or []):
                         if not isinstance(row, dict):
                             continue
-                        if row.get("backend") in {"codex", "internal"} and row.get("event_type"):
+                        if row.get("backend") in {"codex", "internal"}:
                             continue
                         tname = str(row.get("tool_name") or row.get("tool") or row.get("name") or "tool")
                         args_val = row.get("args") or row.get("input") or row.get("tool_args") or {}

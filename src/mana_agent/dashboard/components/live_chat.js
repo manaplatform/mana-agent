@@ -26,22 +26,104 @@
     return `${(b / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const SEARCH_TOOLS = new Set([
+    "web_search",
+    "github_search",
+    "repo_search",
+    "code_search",
+    "find_by_name",
+    "grep_search",
+    "search_files",
+    "search",
+    "document_query",
+  ]);
+
+  const CODING_TOOLS = new Set([
+    "edit_file",
+    "multi_edit_file",
+    "apply_patch",
+    "apply_patch_batch",
+    "write_file",
+    "create_file",
+    "delete_file",
+    "patch",
+    "read_file",
+    "repo_batch_read",
+    "list_files",
+    "ls",
+    "find_symbols",
+    "call_graph",
+    "chunk_file",
+    "list_tools",
+    "tool_contracts",
+    "read_skill",
+    "git",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_branch",
+    "git_switch",
+    "git_checkout",
+    "git_create_branch",
+    "git_add",
+    "git_restore",
+    "git_stash",
+    "git_commit",
+    "git_push",
+    "git_pull",
+    "git_fetch",
+    "git_remote",
+    "git_tag",
+    "git_merge",
+    "git_rebase",
+    "git_revert",
+    "git_reset",
+    "git_clean",
+    "git_config",
+    "git_generic",
+    "git_help",
+    "shell",
+    "run_command",
+    "run_script_once",
+    "verify_project",
+    "exec_command",
+    "bash",
+    "terminal",
+    "local_shell",
+  ]);
+
+  function isCodingTool(toolName) {
+    const name = text(toolName || "").trim().toLowerCase();
+    if (!name) return false;
+    if (name.includes("search") || SEARCH_TOOLS.has(name)) return false;
+    if (
+      name.startsWith("email_") ||
+      name.startsWith("server_") ||
+      name.startsWith("api_") ||
+      name.startsWith("canvas_") ||
+      name.startsWith("browser_") ||
+      name.startsWith("media_") ||
+      name.startsWith("generate_")
+    ) {
+      return false;
+    }
+    if (name === "approval_request" || name === "request_user_approval" || name === "wait_for_approval") {
+      return false;
+    }
+    if (CODING_TOOLS.has(name)) return true;
+    if (name.startsWith("git.") || name.startsWith("git_") || name.startsWith("patch.") || name.startsWith("patch_")) {
+      return true;
+    }
+    if (name.startsWith("edit_") || name.startsWith("write_")) {
+      return true;
+    }
+    return false;
+  }
+
   function classifyRuntimePhase(eventType, metadata) {
     const et = text(eventType || "").trim().toLowerCase();
     const meta = metadata || {};
-
-    const SEARCH_TOOLS = new Set([
-      "web_search",
-      "github_search",
-      "repo_search",
-      "code_search",
-      "find_by_name",
-      "grep_search",
-      "search_files",
-      "search",
-      "document_query",
-    ]);
-
     const toolName = text(meta.tool_name || meta.name || "").trim();
 
     // Routing
@@ -102,11 +184,11 @@
       et.startsWith("command.") ||
       et.startsWith("patch.") ||
       et.startsWith("file.") ||
-      (meta.backend === "codex" &&
+      ((meta.backend === "codex" || meta.backend === "internal" || meta.backend === "coding") &&
         !et.startsWith("turn.") &&
-        !et.startsWith("tool.") &&
         !et.startsWith("search.") &&
-        !et.startsWith("routing."))
+        !et.startsWith("routing.") &&
+        (!et.startsWith("tool.") || isCodingTool(toolName)))
     ) {
       const backend = text(meta.backend || "coding");
       const title = backend === "codex" ? "Codex" : "Coding";
@@ -978,8 +1060,10 @@
                   for (const se of step.subEvents) {
                     const sum = eventSummary(se);
                     const seMeta = metaOf(se);
-                    const cmd = seMeta.command || seMeta.cmd || se.title || "";
+                    const cmd = seMeta.command || seMeta.cmd || "";
                     if (cmd && !subLogs.includes(`$ ${cmd}`)) subLogs.push(`$ ${cmd}`);
+                    const title = !cmd && se.title ? se.title : "";
+                    if (title && !subLogs.includes(title)) subLogs.push(title);
                     if (sum && !subLogs.includes(sum)) subLogs.push(sum);
                   }
                   if (subLogs.length > 0) addText(codingBox, "pre", subLogs.join("\n"));
@@ -1012,8 +1096,13 @@
           }
         } else if (row.kind === "tool") {
           const tool = row.value;
+          if (isCodingTool(tool.name)) {
+            // Coding tools are displayed exclusively in the Coding activity section,
+            // never as standalone cards mounted one by one in the chat timeline.
+            continue;
+          }
           const alreadyInTrace = [...state.executionTraces.values()].some((t) =>
-            t.steps.some((s) => (s.phase === "tool" || s.phase === "search") && (s.stepId.endsWith(`:${tool.id}`) || text(s.metadata.tool_call_id) === tool.id))
+            t.steps.some((s) => (s.phase === "coding" || s.phase === "tool" || s.phase === "search") && (s.stepId.endsWith(`:${tool.id}`) || text(s.metadata.tool_call_id) === tool.id))
           );
           if (alreadyInTrace) continue;
           const node = document.createElement("details");
@@ -1285,5 +1374,5 @@
     return { state, reduce, snapshot: () => snapshot(state), close: () => { closed = true; if (socket) socket.close(); clearInterval(elapsedTimer); } };
   }
 
-  return { createState, reduce, snapshot, init };
+  return { createState, reduce, snapshot, init, classifyRuntimePhase, isCodingTool };
 });

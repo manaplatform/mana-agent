@@ -264,3 +264,116 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
             assert result_body.has_class("tool-result-error")
 
     _run(run())
+
+
+def test_is_coding_tool_classification() -> None:
+    from mana_agent.chat.execution_trace import is_coding_tool
+
+    # Coding tools
+    assert is_coding_tool("edit_file") is True
+    assert is_coding_tool("multi_edit_file") is True
+    assert is_coding_tool("apply_patch") is True
+    assert is_coding_tool("apply_patch_batch") is True
+    assert is_coding_tool("write_file") is True
+    assert is_coding_tool("create_file") is True
+    assert is_coding_tool("delete_file") is True
+    assert is_coding_tool("read_file") is True
+    assert is_coding_tool("repo_batch_read") is True
+    assert is_coding_tool("shell") is True
+    assert is_coding_tool("run_command") is True
+    assert is_coding_tool("verify_project") is True
+    assert is_coding_tool("git") is True
+    assert is_coding_tool("git_status") is True
+    assert is_coding_tool("git.diff") is True
+    assert is_coding_tool("git_commit") is True
+
+    # Non-coding tools
+    assert is_coding_tool("web_search") is False
+    assert is_coding_tool("github_search") is False
+    assert is_coding_tool("repo_search") is False
+    assert is_coding_tool("email_read") is False
+    assert is_coding_tool("email_send") is False
+    assert is_coding_tool("generate_image") is False
+    assert is_coding_tool("api_request_execute") is False
+    assert is_coding_tool("approval_request") is False
+
+
+def test_coding_tools_only_show_in_execution_panel_and_do_not_mount_cards() -> None:
+    """Coding tools must appear only in the ExecutionPanel (activity code), never as ToolCards one-by-one."""
+    history = ChatHistory()
+    app = ManaChatApp(history=history)
+
+    async def run() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            history.add(UserMessageEvent(content="fix bugs in repo", turn_id="turn-code-1"))
+            await pilot.pause()
+
+            # Coding tool call: edit_file
+            history.add(
+                ToolCallEvent(
+                    tool_name="edit_file",
+                    args={"path": "main.py", "old": "x", "new": "y"},
+                    call_id="call-edit-1",
+                    summary="editing line 42 in main.py",
+                    turn_id="turn-code-1",
+                )
+            )
+            await pilot.pause()
+
+            # Coding tool result: edit_file
+            history.add(
+                ToolResultEvent(
+                    call_id="call-edit-1",
+                    tool_name="edit_file",
+                    success=True,
+                    result="replaced 1 occurrence",
+                    summary="edit_file ok",
+                    duration_ms=15,
+                    turn_id="turn-code-1",
+                )
+            )
+            await pilot.pause()
+
+            # Coding tool call & result: shell
+            history.add(
+                ToolCallEvent(
+                    tool_name="shell",
+                    args={"command": "pytest -q"},
+                    call_id="call-shell-1",
+                    summary="running pytest",
+                    turn_id="turn-code-1",
+                )
+            )
+            await pilot.pause()
+            history.add(
+                ToolResultEvent(
+                    call_id="call-shell-1",
+                    tool_name="shell",
+                    success=True,
+                    result="1 passed",
+                    summary="shell ok",
+                    duration_ms=450,
+                    turn_id="turn-code-1",
+                )
+            )
+            await pilot.pause()
+
+            # CRITICAL ASSERTIONS:
+            # 1. Zero ToolCards should be mounted for coding tools
+            assert len(app.query(ToolCard)) == 0, "Coding tools must NOT produce individual ToolCards one by one"
+
+            # 2. ExecutionPanel exists and title is 'coding activity'
+            panels = list(app.query(ExecutionPanel))
+            assert len(panels) == 1, "ExecutionPanel must be created for the turn"
+            panel = panels[0]
+            assert panel.details is not None
+            assert panel.details.title == "coding activity"
+
+            # 3. Both coding tool actions appear in the execution panel activity log
+            activity_text = panel.activity_log.text if panel.activity_log else ""
+            assert "Code: edit_file" in activity_text
+            assert "Code: shell" in activity_text
+            assert "editing line 42" in activity_text or "edit_file" in activity_text
+
+    _run(run())
+

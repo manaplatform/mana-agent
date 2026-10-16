@@ -2,6 +2,29 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-16
+
+- Bumped the package version to `0.2.0` and updated the README version badge.
+  - User verification required: `python .github/scripts/validate_release_version.py --tag v0.2.0`.
+- Implemented Universal Model-Directed Autonomous Execution across all Mana-Agent capabilities:
+  - Created `src/mana_agent/config/autonomous_config.py` with `AutonomousExecutionConfig` and `AutoRenewConfig`, standardizing on a single `model_directed` execution mode with configurable turn limits, tool call limits, and accounting-based auto-renewal.
+  - Added autonomous configuration fields to `Settings` in `src/mana_agent/config/settings.py` (`mana_autonomous_mode`, `mana_autonomous_max_model_turns`, `mana_autonomous_max_tool_calls`, `mana_autonomous_auto_renew_enabled`, etc.).
+  - Created `src/mana_agent/execution/continuation_decision.py` defining `ContinuationAction` (`CONTINUE`, `FINALIZE`, `REPLAN`, `WAIT_FOR_USER`, `BLOCKED`) and `ContinuationDecision` with strict Pydantic validation ensuring `FINALIZE` requires `goal_satisfied=True` and `safe_to_continue=True`.
+  - Created `src/mana_agent/execution/continuation_evaluator.py` implementing `ContinuationEvaluator` to evaluate task progress against user goals with model decisions, preventing missing tool calls or empty responses from prematurely concluding tasks.
+  - Created `src/mana_agent/execution/autonomous_controller.py` implementing `AutonomousExecutionController` with centralized execution metrics tracking, accounting-based resource auto-renewal, progress evidence fingerprinting with no-progress cycle detection, supervisor durable checkpoints, consequential approval gating, and independent completion verification.
+  - Enhanced `TaskRecord` in `src/mana_agent/execution_supervisor/models.py` with autonomous tracking fields (`autonomous_model_turns`, `autonomous_tool_calls`, `autonomous_renewals_count`, `autonomous_no_progress_cycles`, `autonomous_continuation_state`).
+  - Added `validate_autonomous_renewal()` to `ModelTokenAccountingService` in `src/mana_agent/context_cost/accounting.py` for validating budget extensions against account limits and past progress.
+  - Added continuation recording in `AgentOrchestrator` (`src/mana_agent/agent/orchestrator.py`).
+  - Integrated continuation evaluation in `AskAgent` (`src/mana_agent/multi_agent/runtime/ask_agent.py`) and `AgentChatGateway` (`src/mana_agent/gateway/chat_gateway.py`), and extended `TurnEngine` (`src/mana_agent/gateway/turn_engine.py`) to run task-level autonomous continuation above external engines (such as Codex) while preserving internal tool loops.
+- Streamlined coding tool display across TUI and Dashboard:
+  - Unified coding tool activity display so that coding tools (`edit_file`, `multi_edit_file`, `write_file`, `create_file`, `delete_file`, `apply_patch`, `read_file`, `repo_batch_read`, `list_files`, `shell`, `run_command`, `verify_project`, `git_*`, etc.) are rendered exclusively inside the activity code section (`ExecutionPanel` / "coding activity" in TUI; `codingBox` in Dashboard).
+  - Eliminated duplicate one-by-one `ToolCard` mounting in TUI `ChatLog` for coding tools while preserving standalone `ToolCard`s for non-coding integrations (e.g. `web_search`, `email_read`).
+  - Updated `src/mana_agent/tui/app.py` actions replay and trace serializing to prevent duplicate coding tool events.
+  - Updated `src/mana_agent/dashboard/components/live_chat.js` to skip mounting individual tool detail cards in the timeline for coding tools, keeping coding commands and actions grouped in the trace's coding activity view.
+  - Added regression test coverage in `tests/test_tui_tool_card_layout.py` (`test_coding_tools_only_show_in_execution_panel_and_do_not_mount_cards`, `test_is_coding_tool_classification`).
+  - User verification required: `python -m pytest tests/test_tui_tool_card_layout.py tests/test_execution_trace.py -v`.
+
+
 ## 2026-10-15
 
 - Bumped the package and documented version to `v0.1.12`.

@@ -784,6 +784,21 @@ class Settings(BaseSettings):
     mana_execution_supervisor_allow_unknown_retry: bool = Field(
         default=False, alias="MANA_EXECUTION_SUPERVISOR_ALLOW_UNKNOWN_RETRY"
     )
+    # Universal model-directed autonomous execution settings
+    mana_autonomous_mode: str = Field(default="model_directed", alias="MANA_AUTONOMOUS_MODE")
+    mana_autonomous_max_model_turns: int = Field(default=120, alias="MANA_AUTONOMOUS_MAX_MODEL_TURNS")
+    mana_autonomous_max_tool_calls: int = Field(default=200, alias="MANA_AUTONOMOUS_MAX_TOOL_CALLS")
+    mana_autonomous_require_verification: bool = Field(default=True, alias="MANA_AUTONOMOUS_REQUIRE_VERIFICATION")
+    mana_autonomous_auto_renew_enabled: bool = Field(default=True, alias="MANA_AUTONOMOUS_AUTO_RENEW_ENABLED")
+    mana_autonomous_renew_strategy: str = Field(default="accounting_based", alias="MANA_AUTONOMOUS_RENEW_STRATEGY")
+    mana_autonomous_renew_model_turns: int = Field(default=40, alias="MANA_AUTONOMOUS_RENEW_MODEL_TURNS")
+    mana_autonomous_renew_tool_calls: int = Field(default=60, alias="MANA_AUTONOMOUS_RENEW_TOOL_CALLS")
+    mana_autonomous_max_auto_renewals: int = Field(default=3, alias="MANA_AUTONOMOUS_MAX_AUTO_RENEWALS")
+    mana_autonomous_require_progress: bool = Field(default=True, alias="MANA_AUTONOMOUS_REQUIRE_PROGRESS")
+    mana_autonomous_respect_account_budget: bool = Field(default=True, alias="MANA_AUTONOMOUS_RESPECT_ACCOUNT_BUDGET")
+    mana_autonomous_require_approval_above_budget: bool = Field(default=True, alias="MANA_AUTONOMOUS_REQUIRE_APPROVAL_ABOVE_BUDGET")
+    mana_autonomous_stop_on_no_progress: bool = Field(default=True, alias="MANA_AUTONOMOUS_STOP_ON_NO_PROGRESS")
+    mana_autonomous_max_no_progress_cycles: int = Field(default=3, alias="MANA_AUTONOMOUS_MAX_NO_PROGRESS_CYCLES")
     # Distributed verification is opt-in and fail-closed when no compatible
     # authenticated worker satisfies the model-produced selection request.
     mana_fleet_enabled: bool = Field(default=False, alias="MANA_FLEET_ENABLED")

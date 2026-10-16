@@ -1353,9 +1353,26 @@ class AgentChatGateway:
             self._dispatch_resumed_transactional_action
         )
         self._recover_queued_transactional_action_dispatches()
+        from mana_agent.config.autonomous_config import AutonomousExecutionConfig
+        from mana_agent.execution.autonomous_controller import AutonomousExecutionController
+        from mana_agent.execution.continuation_evaluator import ContinuationEvaluator
+
+        autonomous_llm = route_llm or agent_decision_llm(self.get_ask_service())
+        self._continuation_evaluator = (
+            ContinuationEvaluator(autonomous_llm) if autonomous_llm else None
+        )
+        self._autonomous_controller = AutonomousExecutionController(
+            config=AutonomousExecutionConfig(),
+            supervisor=self._lane_coordinator.execution_supervisor,
+            accounting_service=getattr(self._stack.context_cost_governor, "accounting", None),
+            context_governor=self._stack.context_cost_governor,
+            compactor=getattr(self, "_context_compactor", None),
+            evaluator=self._continuation_evaluator,
+        )
         if hasattr(self._stack, "ask_service") and hasattr(self._stack.ask_service, "ask_agent"):
             if self._stack.ask_service.ask_agent is not None:
                 self._stack.ask_service.ask_agent.human_inbox_service = self.human_inbox_service
+                self._stack.ask_service.ask_agent.continuation_evaluator = self._continuation_evaluator
         from mana_agent.connectors.browser.session import default_browser_manager
         from mana_agent.sessions.service import SessionService
 
@@ -10361,6 +10378,8 @@ class AgentChatGateway:
             turn_id=context.turn_id,
             user_message_id=context.user_message_id,
             dispatch_source="entry_route",
+            autonomous_controller=getattr(self, "_autonomous_controller", None),
+            continuation_evaluator=getattr(self, "_continuation_evaluator", None),
         )
         wiring_child_task_id = FeatureIntegrationCoordinator.wiring_child_id(
             self._lane_coordinator.taskboard,
