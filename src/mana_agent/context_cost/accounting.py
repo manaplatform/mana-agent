@@ -507,6 +507,31 @@ class ModelTokenAccountingService:
         self._finalized[reservation.reservation_id] = cancelled
         return cancelled
 
+    def validate_autonomous_renewal(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        renew_turns: int,
+        renew_tool_calls: int,
+        token_estimate: int,
+        estimated_cost: Decimal | None = None,
+        task_budget_remaining: int | None = None,
+        session_budget_remaining: int | None = None,
+        respect_budget: bool = True,
+    ) -> tuple[bool, str]:
+        """Independently validate whether an autonomous execution renewal is authorized."""
+        if not respect_budget:
+            return True, "budget checks disabled"
+
+        if task_budget_remaining is not None and task_budget_remaining <= 0:
+            return False, "task token budget exhausted"
+
+        if session_budget_remaining is not None and session_budget_remaining <= 0:
+            return False, "session token budget exhausted"
+
+        return True, "renewal authorized by accounting policy"
+
     @staticmethod
     def calculate_cost(
         profile: ModelTokenProfile,

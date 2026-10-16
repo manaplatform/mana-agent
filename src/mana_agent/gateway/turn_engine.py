@@ -741,6 +741,8 @@ def process_chat_turn(
     turn_id: str = "",
     user_message_id: str = "",
     dispatch_source: str = "",
+    autonomous_controller: Any | None = None,
+    continuation_evaluator: Any | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1196,6 +1198,23 @@ def process_chat_turn(
             if isinstance(flow_from, str) and flow_from.strip():
                 active_flow_id = flow_from.strip()
                 session_state["active_flow_id"] = active_flow_id
+            if continuation_evaluator is not None and (terminal_reason == "pass_cap_reached" or run_status == "needs_resume"):
+                try:
+                    from mana_agent.execution.continuation_decision import ContinuationAction
+                    cont_decision = continuation_evaluator.evaluate(
+                        task_id=str(gateway_task_id or turn_id or "coding_turn"),
+                        user_goal=question,
+                        step_output=result,
+                        completed_steps=[{"summary": str(result.get("answer") or terminal_reason)}],
+                        metrics={"resume_cycles": resume_cycles},
+                    )
+                    if cont_decision.action == ContinuationAction.FINALIZE:
+                        break
+                    elif cont_decision.action in {ContinuationAction.WAIT_FOR_USER, ContinuationAction.BLOCKED}:
+                        break
+                except Exception as cont_exc:
+                    logger.warning("Continuation evaluator error in coding turn loop: %s", cont_exc)
+
             if terminal_reason != "pass_cap_reached" and run_status != "needs_resume":
                 break
             resume_cycles += 1

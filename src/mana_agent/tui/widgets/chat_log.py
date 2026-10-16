@@ -33,6 +33,7 @@ from mana_agent.chat.events import (
     ToolResultEvent,
     UserMessageEvent,
 )
+from mana_agent.chat.execution_trace import is_coding_tool
 from mana_agent.chat.history import ChatHistory
 from mana_agent.tui.widgets.tool_card import ToolCard
 from mana_agent.tui.widgets.execution_panel import ExecutionPanel
@@ -364,15 +365,30 @@ class ChatLog(VerticalScroll):
         self.mount(widget)
         return widget
 
-    def _add_tool_call(self, event: ToolCallEvent) -> ToolCard:
-        if event.turn_id:
-            panel = self._get_or_create_execution_panel(event.turn_id)
-            tool_name = str(event.tool_name or "").strip()
+    def _add_tool_call(self, event: ToolCallEvent) -> ToolCard | ExecutionPanel | None:
+        tool_name = str(event.tool_name or "").strip()
+        coding = is_coding_tool(tool_name)
+        turn_id = (
+            event.turn_id
+            or getattr(self._latest_user_widget, "_turn_id", "")
+            or getattr(self, "_current_turn_id", "")
+            or ("turn-coding" if coding else "")
+        )
+        panel = None
+        if turn_id:
+            panel = self._get_or_create_execution_panel(turn_id)
             is_search = "search" in tool_name.lower() or tool_name in {
                 "find_by_name", "grep_search", "document_query"
             }
-            evt_type = "search.started" if is_search else "tool.started"
-            evt_title = f"Searching ({tool_name})" if is_search else f"Tool: {tool_name}"
+            if coding:
+                evt_type = "coding.progress"
+                evt_title = f"Code: {tool_name}"
+            elif is_search:
+                evt_type = "search.started"
+                evt_title = f"Searching ({tool_name})"
+            else:
+                evt_type = "tool.started"
+                evt_title = f"Tool: {tool_name}"
             panel.update_event({
                 "event_type": evt_type,
                 "title": evt_title,
@@ -380,21 +396,43 @@ class ChatLog(VerticalScroll):
                 "tool_call_id": event.call_id,
                 "status": "running",
                 "detail": event.summary or "",
+                "backend": "coding" if coding else "",
+                "payload": {"args": event.args},
             })
+        if coding:
+            # Coding tools are displayed exclusively in the ExecutionPanel (activity code),
+            # never as separate individual cards mounted in the timeline one by one.
+            return panel
+
         card = ToolCard(event)
         self._tool_cards[event.call_id] = card
         self.mount(card)
         return card
 
-    def _add_tool_result(self, event: ToolResultEvent) -> Static | ToolCard:
-        if event.turn_id:
-            panel = self._get_or_create_execution_panel(event.turn_id)
-            tool_name = str(event.tool_name or "").strip()
+    def _add_tool_result(self, event: ToolResultEvent) -> Static | ToolCard | ExecutionPanel | None:
+        tool_name = str(event.tool_name or "").strip()
+        coding = is_coding_tool(tool_name)
+        turn_id = (
+            event.turn_id
+            or getattr(self._latest_user_widget, "_turn_id", "")
+            or getattr(self, "_current_turn_id", "")
+            or ("turn-coding" if coding else "")
+        )
+        panel = None
+        if turn_id:
+            panel = self._get_or_create_execution_panel(turn_id)
             is_search = "search" in tool_name.lower() or tool_name in {
                 "find_by_name", "grep_search", "document_query"
             }
-            evt_type = "search.finished" if is_search else "tool.finished"
-            evt_title = f"Searching ({tool_name})" if is_search else f"Tool: {tool_name}"
+            if coding:
+                evt_type = "coding.terminal" if event.success else "coding.progress"
+                evt_title = f"Code: {tool_name}"
+            elif is_search:
+                evt_type = "search.finished"
+                evt_title = f"Searching ({tool_name})"
+            else:
+                evt_type = "tool.finished"
+                evt_title = f"Tool: {tool_name}"
             panel.update_event({
                 "event_type": evt_type,
                 "title": evt_title,
@@ -403,7 +441,13 @@ class ChatLog(VerticalScroll):
                 "status": "success" if event.success else "failed",
                 "detail": event.summary or event.error or "",
                 "duration_ms": event.duration_ms,
+                "backend": "coding" if coding else "",
             })
+        if coding:
+            # Coding tools are displayed exclusively in the ExecutionPanel (activity code),
+            # never as separate individual cards mounted in the timeline one by one.
+            return panel
+
         card = self._tool_cards.get(event.call_id)
         if card is not None:
             card.set_result(event)

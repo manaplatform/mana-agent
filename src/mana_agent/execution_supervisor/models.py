@@ -661,6 +661,11 @@ class TaskRecord(StrictModel):
     human_resume_claim_ids: list[str] = Field(default_factory=list)
     human_wait_started_at: datetime | None = None
     recovery_intervention_id: str = ""
+    autonomous_model_turns: int = Field(default=0, ge=0)
+    autonomous_tool_calls: int = Field(default=0, ge=0)
+    autonomous_renewals_count: int = Field(default=0, ge=0)
+    autonomous_no_progress_cycles: int = Field(default=0, ge=0)
+    autonomous_continuation_state: str = ""
 
     def wall_clock_deadline_exceeded(self, now: datetime | None = None) -> bool:
         """Return True when the absolute wall-clock deadline has already elapsed.

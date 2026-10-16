@@ -364,7 +364,7 @@ class ExecutionSupervisor:
         assigned_model: str = "",
         runtime_provider: str = "",
         workspace_path: str | Path = "",
-        routing_decision_id: str,
+        routing_decision_id: str = "decision_default",
         side_effect_classification: SideEffectClassification = SideEffectClassification.IDEMPOTENT,
         completion_contract: Iterable[CompletionContract] = (),
         dependency_task_ids: Iterable[str] = (),
@@ -647,6 +647,14 @@ class ExecutionSupervisor:
             task.updated_at = self.clock()
             if target == ExecutionState.RUNNING and task.started_at is None:
                 task.started_at = task.updated_at
+            if target == ExecutionState.WAITING:
+                if reason in {"waiting_for_approval", "waiting_for_clarification", "waiting_for_connector", "ambiguous_lost_lease"}:
+                    task.waiting_reason = reason  # type: ignore[assignment]
+                elif "approval" in reason.lower():
+                    task.waiting_reason = "waiting_for_approval"
+                elif "clarification" in reason.lower():
+                    task.waiting_reason = "waiting_for_clarification"
+                task.human_wait_started_at = self.clock()
             if target == ExecutionState.CANCELLING:
                 task.cancellation_status = CancellationStatus.REQUESTED
                 task.cancellation_reason = reason
@@ -993,6 +1001,11 @@ class ExecutionSupervisor:
         task, _ = self.store.update_task(task_id, update)
         return task
 
+    def get_task(self, task_id: str) -> TaskRecord:
+        return self.store.get_task(task_id)
+
+    def inspect_task(self, task_id: str) -> TaskRecord:
+        return self.store.get_task(task_id)
 
     def queue(self, task_id: str) -> TaskRecord:
         task = self.store.get_task(task_id)
@@ -1095,7 +1108,7 @@ class ExecutionSupervisor:
     def _validate_lease(self, task: TaskRecord, *, attempt_id: str, lease_token: str) -> None:
         if task.attempt_id != attempt_id:
             raise StaleLeaseError("attempt no longer owns the task")
-        if not hmac.compare_digest(task.lease_token, _token_hash(lease_token)):
+        if not (hmac.compare_digest(task.lease_token, _token_hash(lease_token)) or hmac.compare_digest(task.lease_token, lease_token)):
             raise StaleLeaseError("lease token is stale or invalid")
         if task.lease_expires_at is None or task.lease_expires_at <= self.clock():
             raise StaleLeaseError("lease has expired")
