@@ -231,6 +231,9 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
                 )
             )
             await pilot.pause()
+            # Dynamic text load and container virtual_size recalculation is a
+            # multi-phase operation in Textual across different event loop runners (e.g. Windows Proactor).
+            await pilot.pause()
             result_body = card.query_one(".tool-result-body", SelectableText)
             assert "line 39: detailed live output" in _rendered_source(result_body)
             assert card.size.height >= expanded_height
@@ -258,6 +261,7 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
                     summary="failed",
                 )
             )
+            await pilot.pause()
             await pilot.pause()
             assert "RuntimeError: failed" in _rendered_source(result_body)
             assert card.has_class("tool-result-error") is False

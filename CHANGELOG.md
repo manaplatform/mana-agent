@@ -31,9 +31,12 @@ All notable repository changes should be recorded here.
   - Resolved concurrency race condition in `LaneCoordinator`:
     - Tracked in-flight claiming waiters in `_claiming_waiters` during capacity reservation handoff so that subsequent queued waiters cannot erroneously double-allocate the same slot before the first waiter starts.
     - Guaranteed deterministic priority scheduling between interactive and background waiters without dropping background waiters.
+  - Fixed TUI tool card layout measurement timing on multi-phase event loop runners (e.g. Windows Proactor):
+    - Triggered `ChatLog.refresh(layout=True)` when a tool result updates an activity card, guaranteeing that container virtual size recalculation is immediately scheduled.
+    - Updated `tests/test_tui_tool_card_layout.py` to allow multi-phase layout pause cycles for container virtual size remeasurement to settle across platforms.
   - User verification required:
     - Not run by the agent (per Rule 40).
-    - `python -m pytest tests/test_execution_trace.py tests/test_tui_tool_card_layout.py tests/gateway/test_lane_coordinator.py -k test_interactive_waiter_runs_before_background_without_dropping_background -v`
+    - `python -m pytest tests/test_execution_trace.py tests/test_tui_tool_card_layout.py tests/gateway/test_lane_coordinator.py -v`
     - `node --test tests/dashboard/live_chat_reducer.test.mjs`
 
 ## 2026-10-16

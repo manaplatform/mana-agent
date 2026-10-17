@@ -450,11 +450,13 @@ class ChatLog(VerticalScroll):
         if panel is not None:
             card = panel.main_box.add_tool_result(event)
             if card is not None:
+                self.refresh(layout=True)
                 return card
 
         card = self._tool_cards.get(event.call_id)
         if card is not None:
             card.set_result(event)
+            self.refresh(layout=True)
             return card
         return panel
 
