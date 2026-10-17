@@ -404,9 +404,9 @@ class ChatLog(VerticalScroll):
             # never as separate individual cards mounted in the timeline one by one.
             return panel
 
-        card = ToolCard(event)
+        # General agent activities route inside MainActivityBox within ExecutionPanel
+        card = panel.main_box.add_tool_call(event)
         self._tool_cards[event.call_id] = card
-        self.mount(card)
         return card
 
     def _add_tool_result(self, event: ToolResultEvent) -> Static | ToolCard | ExecutionPanel | None:
@@ -416,11 +416,10 @@ class ChatLog(VerticalScroll):
             event.turn_id
             or getattr(self._latest_user_widget, "_turn_id", "")
             or getattr(self, "_current_turn_id", "")
-            or ("turn-coding" if coding else "")
+            or ("turn-coding" if coding else "turn-main")
         )
-        panel = None
-        if turn_id:
-            panel = self._get_or_create_execution_panel(turn_id)
+        panel = self._get_or_create_execution_panel(turn_id) if turn_id else None
+        if panel is not None:
             is_search = "search" in tool_name.lower() or tool_name in {
                 "find_by_name", "grep_search", "document_query"
             }
@@ -448,17 +447,16 @@ class ChatLog(VerticalScroll):
             # never as separate individual cards mounted in the timeline one by one.
             return panel
 
+        if panel is not None:
+            card = panel.main_box.add_tool_result(event)
+            if card is not None:
+                return card
+
         card = self._tool_cards.get(event.call_id)
         if card is not None:
             card.set_result(event)
             return card
-        # Orphan result (shouldn't happen with proper pairing) — render anyway
-        fallback = Static(
-            f"[tool result for {event.tool_name}] {'ok' if event.success else 'error'}",
-            classes="system-note",
-        )
-        self.mount(fallback)
-        return fallback
+        return panel
 
     def _handle_stream_token(self, event: StreamTokenEvent) -> SelectableText | None:
         """Append token to the live assistant message widget if we can find it."""

@@ -2,6 +2,35 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-17
+
+- Bumped the package version to `0.2.1` and updated the README version badge.
+- Implemented Unified Real-Time Activity Visualization System across TUI, Web Dashboard, and Streamlit Timeline:
+  - Aggregated all general agent activities, reasoning progress summaries, tool calls, tool results, API requests, execution steps, retries, and errors into a persistent **MainActivityBox**.
+  - Aggregated all coding-related operations (file reads, edits, patches, terminal commands, test executions, builds, Git operations, and validation results across internal coding engine and external Codex) into a persistent **CodingActivityBox**.
+  - Eliminated per-tool-call cards from the chat timeline: standalone `ToolCard`s are never mounted to root chat timelines, preventing UI clutter and card flooding.
+  - Added collapsible/expandable box design with preserved toggle state across real-time re-renders.
+  - Added real-time status badges (`running`, `completed`, `failed`, `cancelled`) and elapsed/duration timers.
+  - Added consecutive operation grouping (`tool (xN)`) to cleanly summarize repeated actions without losing detail.
+  - Added bounded rendering virtualization for 100+ consecutive tool calls with on-demand history expansion.
+  - Added expandable inspection for tool arguments, stdout/stderr, diffs, patches, results, and errors.
+  - Added changed-files chip tracker and terminal command log under the Coding Activity Box.
+  - Preserved backward compatibility for `ExecutionPanel` properties (`details`, `activity_log`, `footer`, `events`, `trace`) and `ToolCard` layout.
+  - Enriched `src/mana_agent/chat/execution_trace.py` with `classify_activity_category`, `main_events`, `coding_events`, and `changed_files`.
+  - Created `src/mana_agent/tui/widgets/activity_boxes.py` implementing `MainActivityBox` and `CodingActivityBox` widgets for Textual.
+  - Updated `src/mana_agent/tui/widgets/execution_panel.py` to embed and coordinate both activity boxes.
+  - Updated `src/mana_agent/tui/widgets/chat_log.py` to route all tool calls and events directly to the appropriate activity box in `ExecutionPanel`.
+  - Updated `src/mana_agent/tui/app.tcss` with styles for `MainActivityBox` and `CodingActivityBox`.
+  - Updated `src/mana_agent/dashboard/components/live_chat.js` with `mainBox` and `codingBox` models, CSS styling, and updated `render()` method.
+  - Updated `src/mana_agent/dashboard/components/chat_timeline.py` with `render_activity_boxes` for Streamlit/static dashboard timeline rendering.
+  - Updated `src/mana_agent/services/execution_event_hub.py` to stamp normalized events with `category` (`"main"` or `"coding"`).
+  - Added unit tests in `tests/dashboard/live_chat_reducer.test.mjs` verifying activity box routing and 100+ event accumulation.
+  - Fixed `AttributeError: 'str' object has no attribute 'get'` when processing tool events where `args` is serialized as a JSON string by introducing `_safe_dict` helper across `execution_trace.py`, `activity_boxes.py`, and `chat_timeline.py`.
+  - User verification required:
+    - Not run by the agent (per Rule 40).
+    - `python -m pytest tests/test_execution_trace.py tests/test_tui_tool_card_layout.py tests/test_dashboard_live_chat.py -v`
+    - `node --test tests/dashboard/live_chat_reducer.test.mjs`
+
 ## 2026-10-16
 
 - Bumped the package version to `0.2.0` and updated the README version badge.

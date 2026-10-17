@@ -117,6 +117,31 @@ ToolCard .tool-call-header {
     padding: 0 1;
 }
 
+/* Persistent Activity Boxes */
+MainActivityBox {
+    margin: 0 1 1 1;
+    border: round #3b82f6 50%;
+    background: #111827;
+    height: auto;
+}
+
+MainActivityBox Collapsible {
+    background: #111827;
+    border: none;
+}
+
+CodingActivityBox {
+    margin: 0 1 1 1;
+    border: round #10b981 50%;
+    background: #0f172a;
+    height: auto;
+}
+
+CodingActivityBox Collapsible {
+    background: #0f172a;
+    border: none;
+}
+
 /* Scrollbar */
 VerticalScroll > Scrollbar {
     background: #1f2937;

@@ -4,9 +4,23 @@ Pure helpers (``merge_timeline``) import without Streamlit so core CI can test
 timeline ordering. Streamlit is imported lazily only inside render functions.
 """
 
-from __future__ import annotations
-
+import json
 from typing import Any
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        val_str = value.strip()
+        if (val_str.startswith("{") and val_str.endswith("}")) or (val_str.startswith("[") and val_str.endswith("]")):
+            try:
+                parsed = json.loads(val_str)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+    return {}
 
 
 _ROLE_AVATAR = {
@@ -204,18 +218,83 @@ def merge_timeline(
     return rows
 
 
+def render_activity_boxes(events: list[dict[str, Any]]) -> None:
+    """Render accumulated execution events into unified Main and Coding activity boxes."""
+    if not events:
+        return
+    st = _streamlit()
+    from mana_agent.chat.execution_trace import classify_activity_category
+
+    main_events: list[dict[str, Any]] = []
+    coding_events: list[dict[str, Any]] = []
+    for ev in events:
+        et = str(ev.get("type") or "")
+        if et in {"turn.started"}:
+            continue
+        meta = ev.get("metadata") or ev.get("details") or {}
+        tool_name = str(meta.get("tool_name") or meta.get("name") or ev.get("tool_name") or "")
+        category = ev.get("category") or classify_activity_category(et, tool_name=tool_name, metadata=meta)
+        if category == "coding":
+            coding_events.append(ev)
+        else:
+            main_events.append(ev)
+
+    if main_events:
+        with st.expander(f"⚡ Main Activity ({len(main_events)} operations)", expanded=False):
+            for ev in main_events:
+                render_event(ev, compact=True)
+
+    if coding_events:
+        changed_files: set[str] = set()
+        commands: list[str] = []
+        for ev in coding_events:
+            meta = dict(ev.get("metadata") or ev.get("details") or {})
+            payload_dict = _safe_dict(ev.get("payload"))
+            args_dict = _safe_dict(payload_dict.get("args")) or _safe_dict(meta.get("args"))
+            fpath = (
+                ev.get("path")
+                or meta.get("path")
+                or meta.get("file_path")
+                or payload_dict.get("path")
+                or args_dict.get("path")
+            )
+            if fpath:
+                changed_files.add(str(fpath))
+            cmd = (
+                ev.get("command")
+                or meta.get("command")
+                or meta.get("cmd")
+                or payload_dict.get("command")
+                or args_dict.get("command")
+            )
+            if cmd and str(cmd) not in commands:
+                commands.append(str(cmd))
+
+        with st.expander(f"💻 Coding Activity ({len(coding_events)} operations)", expanded=False):
+            if changed_files:
+                st.caption(f"Files: {', '.join(sorted(changed_files))}")
+            if commands:
+                st.code("\n".join(f"$ {c}" for c in commands), language="bash")
+            for ev in coding_events:
+                render_event(ev, compact=True)
+
+
 def render_timeline(messages: list[dict[str, Any]], events: list[dict[str, Any]]) -> None:
     st = _streamlit()
     timeline = merge_timeline(messages, events)
     if not timeline:
         st.info("No messages yet. Start a conversation.")
         return
+    pending_events: list[dict[str, Any]] = []
     for row in timeline:
         if row["kind"] == "message":
+            if pending_events:
+                render_activity_boxes(pending_events)
+                pending_events.clear()
             render_message(row["payload"])
         else:
-            # Skip noisy pure turn.started duplicates of the user message content.
-            event = row["payload"]
-            if str(event.get("type") or "") == "turn.started":
-                continue
-            render_event(event)
+            pending_events.append(row["payload"])
+    if pending_events:
+        render_activity_boxes(pending_events)
+        pending_events.clear()
+

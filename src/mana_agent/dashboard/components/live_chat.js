@@ -247,6 +247,30 @@
     return [phase, title];
   }
 
+  function isCodingEvent(type, toolName, meta) {
+    const et = text(type).toLowerCase();
+    const tn = text(toolName || (meta && (meta.tool_name || meta.name))).toLowerCase();
+    const backend = text(meta && meta.backend).toLowerCase();
+    if (backend === "codex" || backend === "internal" || backend === "coding") {
+      if (!et.startsWith("turn.") && !et.startsWith("routing.") && !et.startsWith("model.")) {
+        return true;
+      }
+    }
+    if (tn && isCodingTool(tn)) return true;
+    if (
+      et.startsWith("command.") ||
+      et.startsWith("patch.") ||
+      et.startsWith("file.") ||
+      et === "coding_started" ||
+      et === "coding.terminal" ||
+      et === "coding.progress" ||
+      et === "coding"
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   function createTrace(turnId) {
     return {
       turnId: text(turnId),
@@ -257,6 +281,26 @@
       isCompleted: false,
       isFailed: false,
       isCancelled: false,
+      mainBox: {
+        events: [],
+        eventIdSet: new Set(),
+        status: "running",
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        durationMs: null,
+      },
+      codingBox: {
+        events: [],
+        eventIdSet: new Set(),
+        changedFiles: new Set(),
+        commands: [],
+        backend: "",
+        model: "",
+        status: "running",
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        durationMs: null,
+      },
     };
   }
 
@@ -267,6 +311,18 @@
       isCompleted: trace.isCompleted,
       isFailed: trace.isFailed,
       isCancelled: trace.isCancelled,
+      mainBox: {
+        status: trace.mainBox ? trace.mainBox.status : "running",
+        events: trace.mainBox ? [...trace.mainBox.events] : [],
+      },
+      codingBox: {
+        status: trace.codingBox ? trace.codingBox.status : "running",
+        backend: trace.codingBox ? trace.codingBox.backend : "",
+        model: trace.codingBox ? trace.codingBox.model : "",
+        changedFiles: trace.codingBox ? [...trace.codingBox.changedFiles] : [],
+        commands: trace.codingBox ? [...trace.codingBox.commands] : [],
+        events: trace.codingBox ? [...trace.codingBox.events] : [],
+      },
       steps: trace.steps.map((step) => ({
         stepId: step.stepId,
         turnId: step.turnId,
@@ -406,6 +462,7 @@
       } else {
         existing.subEvents.push({ ...event });
       }
+      updateTraceActivityBoxes(trace, event, type, meta, rawStatus, isTerminalStep, stepTitle, detail, durationMs, eventId);
       return existing;
     }
 
@@ -444,7 +501,70 @@
 
     trace.steps.push(newStep);
     trace.stepById.set(stepId, newStep);
+    updateTraceActivityBoxes(trace, event, type, meta, rawStatus, isTerminalStep, stepTitle, detail, durationMs, eventId);
     return newStep;
+  }
+
+  function updateTraceActivityBoxes(trace, event, type, meta, rawStatus, isTerminalStep, stepTitle, detail, durationMs, eventId) {
+    if (!trace) return;
+    if (!trace.mainBox) trace.mainBox = { events: [], eventIdSet: new Set(), status: "running" };
+    if (!trace.codingBox) trace.codingBox = { events: [], eventIdSet: new Set(), changedFiles: new Set(), commands: [], backend: "", model: "", status: "running" };
+
+    const isCoding = isCodingEvent(type, (meta && (meta.tool_name || meta.name)) || (event && event.tool_name), meta);
+    const box = isCoding ? trace.codingBox : trace.mainBox;
+    const boxEventId = eventId || `${type}:${Date.now()}`;
+    const opStatus = isTerminalStep ? (rawStatus === "success" || rawStatus === "done" ? "completed" : rawStatus) : rawStatus;
+
+    if (!box.eventIdSet.has(boxEventId)) {
+      box.eventIdSet.add(boxEventId);
+      box.events.push({
+        id: boxEventId,
+        type,
+        title: stepTitle,
+        tool_name: text((meta && (meta.tool_name || meta.name)) || (event && event.tool_name) || stepTitle),
+        status: opStatus,
+        detail,
+        time: eventTime(event) || new Date().toISOString(),
+        durationMs,
+        metadata: meta,
+      });
+    } else {
+      for (const be of box.events) {
+        if (be.id === boxEventId) {
+          be.status = opStatus;
+          if (detail && !be.detail) be.detail = detail;
+          if (durationMs != null) be.durationMs = durationMs;
+          break;
+        }
+      }
+    }
+
+    if (isCoding) {
+      if (meta && meta.backend) trace.codingBox.backend = text(meta.backend);
+      if (meta && (meta.model || (event && event.model))) trace.codingBox.model = text(meta.model || event.model);
+      const filePath = text((event && event.path) || (meta && (meta.path || meta.filePath || (meta.args && meta.args.path) || (meta.arguments && meta.arguments.path))));
+      if (filePath) trace.codingBox.changedFiles.add(filePath);
+      if (meta && Array.isArray(meta.changed_files)) {
+        for (const cf of meta.changed_files) {
+          const cfs = text(cf);
+          if (cfs) trace.codingBox.changedFiles.add(cfs);
+        }
+      }
+      const cmd = text((meta && (meta.command || meta.cmd || (meta.args && meta.args.command))) || (event && event.command));
+      if (cmd && !trace.codingBox.commands.includes(cmd)) {
+        trace.codingBox.commands.push(cmd);
+      }
+    }
+    const hasRunning = box.events.some((e) => e.status === "running");
+    if (hasRunning) {
+      box.status = "running";
+    } else if (trace.isCancelled) {
+      box.status = "cancelled";
+    } else if (box.events.some((e) => e.status === "failed") || trace.isFailed) {
+      box.status = "failed";
+    } else if (isTerminalStep || box.events.length > 0) {
+      box.status = opStatus === "failed" ? "failed" : "completed";
+    }
   }
 
   function createState(sessionId) {
@@ -588,6 +708,26 @@
       last_sequence: eventSequence(event),
       details: { ...event, metadata: meta },
     });
+
+    const turnId = getTurnId(state, event);
+    let trace = resolveTrace(state, turnId);
+    if (!trace) {
+      trace = createTrace(turnId);
+      state.executionTraces.set(turnId, trace);
+    }
+    const isTerminal = terminal.has(resolvedStatus) || resolvedStatus === "success" || resolvedStatus === "failed";
+    updateTraceActivityBoxes(
+      trace,
+      event,
+      type || "tool",
+      meta,
+      resolvedStatus,
+      isTerminal,
+      text(meta.tool_name || event.tool_name || previous.name || event.title || "tool"),
+      summary || previous.result || previous.error,
+      event.duration_ms != null ? Number(event.duration_ms) : previous.duration_ms,
+      id
+    );
   }
 
   function applyAssistant(state, event) {
@@ -842,9 +982,24 @@
         .message{max-width:88%;padding:10px 12px;border-radius:12px;white-space:pre-wrap;overflow-wrap:anywhere}
         .user{align-self:flex-end;background:#2563eb}.assistant{align-self:flex-start;background:#272b33}
         .meta{font-size:11px;opacity:.72;margin-top:5px}.failed{border:1px solid #ef4444}.sending{opacity:.72}
-        .tool,.activity{background:#171a20;border:1px solid #ffffff1c;border-radius:9px;padding:8px 10px}
-        .running{border-color:#f59e0b88}.success{border-color:#22c55e66}.failed-card{border-color:#ef444488}
-        summary{cursor:pointer}.tool pre{white-space:pre-wrap;max-height:220px;overflow:auto;color:#cbd5e1}
+        .main-activity-box,.coding-activity-box{background:#151821;border:1px solid #ffffff1c;border-radius:8px;margin:6px 0;padding:8px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px}
+        .main-activity-box{border-left:3px solid #3b82f6}
+        .coding-activity-box{border-left:3px solid #10b981}
+        .main-activity-box>summary,.coding-activity-box>summary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:600;color:#e2e8f0;user-select:none}
+        .activity-box-title{font-size:13px;font-weight:600}
+        .activity-box-badge{background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;font-size:11px;color:#94a3b8}
+        .activity-stream{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto}
+        .activity-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px}
+        .activity-row:last-child{border-bottom:none}
+        .activity-row-title{font-weight:500;color:#93c5fd}
+        .activity-row-cmd{font-weight:600;color:#38bdf8}
+        .activity-row-summary{color:#cbd5e1;flex:1}
+        .activity-overflow-note{color:#94a3b8;font-style:italic;font-size:11px;padding:2px 0}
+        .changed-files-bar{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}
+        .changed-file-chip{background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);color:#6ee7b7;padding:2px 6px;border-radius:4px;font-size:11px}
+        .cmd-output,.error-log{width:100%;margin:4px 0 0 0;white-space:pre-wrap;max-height:120px;overflow:auto;font-size:11px;background:#0d1117;padding:6px;border-radius:4px}
+        .error-log{color:#fca5a5}
+        .cmd-output{color:#cbd5e1}
         form{display:flex;gap:8px;padding:10px;border-top:1px solid #ffffff18} textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;border-radius:9px;padding:10px;background:#11141a;color:#fff;border:1px solid #ffffff28}
         button{border:0;border-radius:9px;padding:0 18px;background:#2563eb;color:#fff;font-weight:600}button:disabled{opacity:.45}
         .attach-btn{background:transparent !important;border:1px solid #ffffff28 !important;font-size:16px;padding:0 12px !important;cursor:pointer;border-radius:9px;display:flex;align-items:center;justify-content:center}
@@ -989,14 +1144,304 @@
       parent.appendChild(node);
       return node;
     };
+    const activityBoxState = new Map();
+
+    const renderMainActivityBox = (trace) => {
+      if (!trace || !trace.mainBox || trace.mainBox.events.length === 0) return null;
+      const box = trace.mainBox;
+      const key = `${trace.turnId}:main`;
+      const node = document.createElement("details");
+      node.className = "main-activity-box";
+      const isRunning = box.status === "running" || (!trace.isCompleted && !trace.isFailed && !trace.isCancelled);
+      node.open = activityBoxState.has(key) ? activityBoxState.get(key) : isRunning;
+      node.addEventListener("toggle", () => {
+        activityBoxState.set(key, node.open);
+      });
+
+      const summary = document.createElement("summary");
+      const titleWrap = document.createElement("div");
+      titleWrap.className = "activity-box-title";
+      const icon = document.createElement("span");
+      icon.textContent = isRunning ? "⚡" : box.status === "failed" ? "⚠️" : "✓";
+      const titleText = document.createElement("span");
+      const count = box.events.length;
+      titleText.textContent = `Main Activity (${count} ${count === 1 ? "operation" : "operations"})`;
+      titleWrap.appendChild(icon);
+      titleWrap.appendChild(titleText);
+      summary.appendChild(titleWrap);
+
+      const statusBadge = document.createElement("span");
+      const st = box.status || (isRunning ? "running" : "completed");
+      statusBadge.className = `activity-box-badge ${st}`;
+      statusBadge.textContent = st;
+      summary.appendChild(statusBadge);
+      node.appendChild(summary);
+
+      const stream = document.createElement("div");
+      stream.className = "activity-stream";
+
+      const showAllKey = `${key}:show_all`;
+      const showAll = activityBoxState.get(showAllKey) === true;
+      const maxEvents = 100;
+      const allEvents = box.events;
+      const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(allEvents.length - maxEvents);
+
+      if (allEvents.length > maxEvents && !showAll) {
+        const expandBtn = document.createElement("button");
+        expandBtn.type = "button";
+        expandBtn.className = "activity-expand-history-btn";
+        expandBtn.style.cssText = "font-size:11px;color:#93c5fd;background:none;border:none;cursor:pointer;padding:4px;text-align:left;";
+        expandBtn.textContent = `▲ Show ${allEvents.length - maxEvents} earlier operations...`;
+        expandBtn.addEventListener("click", (e) => {
+          e.preventDefault();
+          activityBoxState.set(showAllKey, true);
+          render();
+        });
+        stream.appendChild(expandBtn);
+      }
+
+      // Group consecutive operations with the same title/tool_name and status
+      const groups = [];
+      for (const ev of eventsToRender) {
+        const lastGroup = groups[groups.length - 1];
+        const evTitle = ev.tool_name || ev.title || ev.type;
+        if (lastGroup && lastGroup.title === evTitle && lastGroup.status === ev.status) {
+          lastGroup.events.push(ev);
+        } else {
+          groups.push({ title: evTitle, status: ev.status, events: [ev] });
+        }
+      }
+
+      for (const grp of groups) {
+        const row = document.createElement("div");
+        row.className = "activity-event-row";
+
+        const header = document.createElement("div");
+        header.className = "activity-event-header";
+
+        const titleEl = document.createElement("div");
+        titleEl.className = "activity-event-title";
+        const statusIcon = grp.status === "running" ? "⏳" : grp.status === "completed" || grp.status === "success" ? "✓" : grp.status === "failed" ? "✗" : "•";
+        const iconSpan = document.createElement("span");
+        iconSpan.textContent = statusIcon;
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = grp.events.length > 1 ? `${grp.title} (x${grp.events.length})` : grp.title;
+        titleEl.appendChild(iconSpan);
+        titleEl.appendChild(nameSpan);
+        header.appendChild(titleEl);
+
+        const latestEv = grp.events[grp.events.length - 1];
+        if (latestEv.durationMs != null) {
+          const durSpan = document.createElement("span");
+          durSpan.className = "meta";
+          durSpan.style.fontSize = "11px";
+          durSpan.textContent = formatDuration(latestEv.durationMs);
+          header.appendChild(durSpan);
+        }
+        row.appendChild(header);
+
+        if (latestEv.detail) {
+          const detailDiv = document.createElement("div");
+          detailDiv.className = "meta";
+          detailDiv.style.color = "#94a3b8";
+          detailDiv.style.marginTop = "2px";
+          detailDiv.textContent = latestEv.detail;
+          row.appendChild(detailDiv);
+        }
+
+        const hasDetails = grp.events.some((e) => (e.metadata && (e.metadata.arguments || e.metadata.args || e.metadata.args_summary)) || (e.detail && e.detail.length > 80) || (e.metadata && e.metadata.error));
+        if (hasDetails) {
+          const det = document.createElement("details");
+          det.className = "activity-event-details";
+          addText(det, "summary", "Details");
+          for (const e of grp.events) {
+            const meta = e.metadata || {};
+            const args = meta.arguments || meta.args || meta.args_summary;
+            if (args) addText(det, "div", `Arguments: ${typeof args === "string" ? args : JSON.stringify(args)}`, "logs");
+            if (e.detail && e.detail.length > 80) addText(det, "div", `Output: ${e.detail}`, "logs");
+            if (meta.error) addText(det, "div", `Error: ${meta.error}`, "logs error");
+          }
+          row.appendChild(det);
+        }
+
+        stream.appendChild(row);
+      }
+      node.appendChild(stream);
+      return node;
+    };
+
+    const renderCodingActivityBox = (trace) => {
+      if (!trace || !trace.codingBox) return null;
+      const box = trace.codingBox;
+      const hasEvents = box.events.length > 0;
+      const hasCommands = box.commands.length > 0;
+      const hasFiles = box.changedFiles && box.changedFiles.size > 0;
+      if (!hasEvents && !hasCommands && !hasFiles) return null;
+
+      const key = `${trace.turnId}:coding`;
+      const node = document.createElement("details");
+      node.className = "coding-activity-box";
+      const isRunning = box.status === "running" || (!trace.isCompleted && !trace.isFailed && !trace.isCancelled);
+      node.open = activityBoxState.has(key) ? activityBoxState.get(key) : isRunning;
+      node.addEventListener("toggle", () => {
+        activityBoxState.set(key, node.open);
+      });
+
+      const summary = document.createElement("summary");
+      const titleWrap = document.createElement("div");
+      titleWrap.className = "activity-box-title";
+      const icon = document.createElement("span");
+      icon.textContent = "💻";
+      const titleText = document.createElement("span");
+      const backendLabel = box.backend ? ` · ${box.backend}` : "";
+      const modelLabel = box.model ? ` (${box.model})` : "";
+      const totalOps = Math.max(box.events.length, box.commands.length);
+      titleText.textContent = `Coding Activity${backendLabel}${modelLabel} (${totalOps} ${totalOps === 1 ? "operation" : "operations"})`;
+      titleWrap.appendChild(icon);
+      titleWrap.appendChild(titleText);
+      summary.appendChild(titleWrap);
+
+      const statusBadge = document.createElement("span");
+      const st = box.status || (isRunning ? "running" : "completed");
+      statusBadge.className = `activity-box-badge ${st}`;
+      statusBadge.textContent = st;
+      summary.appendChild(statusBadge);
+      node.appendChild(summary);
+
+      if (box.changedFiles && box.changedFiles.size > 0) {
+        const filesContainer = document.createElement("div");
+        filesContainer.className = "coding-files-chips";
+        for (const f of box.changedFiles) {
+          const chip = document.createElement("span");
+          chip.className = "coding-file-chip";
+          chip.textContent = `📄 ${f}`;
+          chip.title = f;
+          filesContainer.appendChild(chip);
+        }
+        node.appendChild(filesContainer);
+      }
+
+      if (box.events.length > 0) {
+        const stream = document.createElement("div");
+        stream.className = "activity-stream";
+
+        const showAllKey = `${key}:show_all`;
+        const showAll = activityBoxState.get(showAllKey) === true;
+        const maxEvents = 100;
+        const allEvents = box.events;
+        const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(allEvents.length - maxEvents);
+
+        if (allEvents.length > maxEvents && !showAll) {
+          const expandBtn = document.createElement("button");
+          expandBtn.type = "button";
+          expandBtn.className = "activity-expand-history-btn";
+          expandBtn.style.cssText = "font-size:11px;color:#93c5fd;background:none;border:none;cursor:pointer;padding:4px;text-align:left;";
+          expandBtn.textContent = `▲ Show ${allEvents.length - maxEvents} earlier operations...`;
+          expandBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            activityBoxState.set(showAllKey, true);
+            render();
+          });
+          stream.appendChild(expandBtn);
+        }
+
+        const groups = [];
+        for (const ev of eventsToRender) {
+          const lastGroup = groups[groups.length - 1];
+          const evTitle = ev.tool_name || ev.title || ev.type;
+          if (lastGroup && lastGroup.title === evTitle && lastGroup.status === ev.status) {
+            lastGroup.events.push(ev);
+          } else {
+            groups.push({ title: evTitle, status: ev.status, events: [ev] });
+          }
+        }
+
+        for (const grp of groups) {
+          const row = document.createElement("div");
+          row.className = "activity-event-row";
+
+          const header = document.createElement("div");
+          header.className = "activity-event-header";
+
+          const titleEl = document.createElement("div");
+          titleEl.className = "activity-event-title";
+          const statusIcon = grp.status === "running" ? "⏳" : grp.status === "completed" || grp.status === "success" ? "✓" : grp.status === "failed" ? "✗" : "•";
+          const iconSpan = document.createElement("span");
+          iconSpan.textContent = statusIcon;
+          const nameSpan = document.createElement("span");
+          nameSpan.textContent = grp.events.length > 1 ? `${grp.title} (x${grp.events.length})` : grp.title;
+          titleEl.appendChild(iconSpan);
+          titleEl.appendChild(nameSpan);
+          header.appendChild(titleEl);
+
+          const latestEv = grp.events[grp.events.length - 1];
+          if (latestEv.durationMs != null) {
+            const durSpan = document.createElement("span");
+            durSpan.className = "meta";
+            durSpan.style.fontSize = "11px";
+            durSpan.textContent = formatDuration(latestEv.durationMs);
+            header.appendChild(durSpan);
+          }
+          row.appendChild(header);
+
+          if (latestEv.detail) {
+            const detailDiv = document.createElement("div");
+            detailDiv.className = "meta";
+            detailDiv.style.color = "#94a3b8";
+            detailDiv.style.marginTop = "2px";
+            detailDiv.textContent = latestEv.detail;
+            row.appendChild(detailDiv);
+          }
+
+          const hasDetails = grp.events.some((e) => (e.metadata && (e.metadata.arguments || e.metadata.args || e.metadata.args_summary || e.metadata.diff || e.metadata.patch)) || (e.detail && e.detail.length > 80) || (e.metadata && e.metadata.error));
+          if (hasDetails) {
+            const det = document.createElement("details");
+            det.className = "activity-event-details";
+            addText(det, "summary", "Details");
+            for (const e of grp.events) {
+              const meta = e.metadata || {};
+              const args = meta.arguments || meta.args || meta.args_summary;
+              if (args) addText(det, "div", `Arguments: ${typeof args === "string" ? args : JSON.stringify(args)}`, "logs");
+              if (meta.diff || meta.patch) addText(det, "pre", meta.diff || meta.patch, "logs");
+              if (e.detail && e.detail.length > 80) addText(det, "div", `Output: ${e.detail}`, "logs");
+              if (meta.error) addText(det, "div", `Error: ${meta.error}`, "logs error");
+            }
+            row.appendChild(det);
+          }
+
+          stream.appendChild(row);
+        }
+        node.appendChild(stream);
+      }
+
+      if (box.commands && box.commands.length > 0) {
+        const pre = document.createElement("pre");
+        pre.className = "coding-logs-pre";
+        pre.textContent = box.commands.map((cmd) => `$ ${cmd}`).join("\n");
+        node.appendChild(pre);
+      }
+
+      return node;
+    };
+
     const render = () => {
       const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
       timeline.replaceChildren();
       const rows = [];
       for (const message of state.messages.values()) rows.push({ kind: "message", time: message.created_at || "", sequence: 0, value: message });
-      for (const tool of state.tools.values()) rows.push({ kind: "tool", time: tool.started_at || "", sequence: tool.first_sequence || 0, value: tool });
-      for (const activity of state.activities.values()) rows.push({ kind: "activity", time: eventTime(activity), sequence: activity.sequence || 0, value: activity });
+      for (const activity of state.activities.values()) {
+        const type = eventType(activity);
+        const metadata = metaOf(activity);
+        const permissionRequestId = text(metadata.permission_request_id);
+        if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
+          rows.push({ kind: "permission", time: eventTime(activity), sequence: activity.sequence || 0, value: activity });
+        } else if (type.startsWith("media_generation_") || type === "canvas.createSurface") {
+          rows.push({ kind: "activity", time: eventTime(activity), sequence: activity.sequence || 0, value: activity });
+        }
+      }
       rows.sort((a, b) => a.time.localeCompare(b.time) || a.sequence - b.sequence);
+
+      const renderedTraces = new Set();
       for (const row of rows) {
         if (row.kind === "message") {
           const item = row.value;
@@ -1024,212 +1469,137 @@
 
           if (item.role === "user") {
             const trace = resolveTrace(state, item.execution_id || item.message_id || item.id);
-            if (trace && trace.steps.length > 0) {
-              const traceNode = document.createElement("div");
-              traceNode.className = "execution-trace";
-              for (const step of trace.steps) {
-                const stepRow = document.createElement("div");
-                stepRow.className = `trace-step ${step.status}`;
-
-                const icon = step.status === "running" ? "◌" : step.status === "completed" ? "✓" : step.status === "failed" ? "✗" : "⊘";
-                addText(stepRow, "span", icon, "step-icon");
-                addText(stepRow, "span", step.title, "step-title");
-
-                if (step.status === "running") {
-                  const elapsed = step.startedAt ? ` · ${formatDuration(Math.max(0, Date.now() - Date.parse(step.startedAt)))}` : "";
-                  addText(stepRow, "span", `· running${elapsed}`, "step-meta");
-                } else if (step.status === "completed" && step.durationMs != null) {
-                  addText(stepRow, "span", `(${formatDuration(step.durationMs)})`, "step-meta");
-                } else if (step.status === "failed") {
-                  addText(stepRow, "span", "· failed", "step-meta");
-                } else if (step.status === "cancelled") {
-                  addText(stepRow, "span", "· cancelled", "step-meta");
-                }
-
-                if (step.phase === "coding" && step.subEvents.length > 0) {
-                  const codingBox = document.createElement("details");
-                  codingBox.className = "coding-box";
-                  if (step.status === "running") codingBox.open = true;
-                  const cmdCount = step.subEvents.filter((se) => {
-                    const st = eventType(se);
-                    return st.startsWith("command.") || st.startsWith("tool.") || st.includes("terminal");
-                  }).length;
-                  const summaryLabel = cmdCount > 0 ? `Coding activity (${cmdCount} commands)` : `Coding activity (${step.subEvents.length} actions)`;
-                  addText(codingBox, "summary", summaryLabel);
-                  const subLogs = [];
-                  for (const se of step.subEvents) {
-                    const sum = eventSummary(se);
-                    const seMeta = metaOf(se);
-                    const cmd = seMeta.command || seMeta.cmd || "";
-                    if (cmd && !subLogs.includes(`$ ${cmd}`)) subLogs.push(`$ ${cmd}`);
-                    const title = !cmd && se.title ? se.title : "";
-                    if (title && !subLogs.includes(title)) subLogs.push(title);
-                    if (sum && !subLogs.includes(sum)) subLogs.push(sum);
-                  }
-                  if (subLogs.length > 0) addText(codingBox, "pre", subLogs.join("\n"));
-                  stepRow.appendChild(codingBox);
-                } else if (step.phase === "tool" || step.phase === "search") {
-                  const toolCallId = text(step.metadata.tool_call_id || step.metadata.call_id || step.stepId.split(":tool:")[1] || step.stepId.split(":search:")[1]);
-                  const toolObj = state.tools.get(toolCallId);
-                  const args = toolObj ? toolObj.arguments : (step.metadata.arguments || step.metadata.args_summary);
-                  const logs = toolObj ? toolObj.logs : [];
-                  const result = toolObj ? toolObj.result : step.detail;
-                  if (args || logs.length > 0 || result) {
-                    const toolBox = document.createElement("details");
-                    toolBox.className = "step-details";
-                    addText(toolBox, "summary", "Details");
-                    if (args) addText(toolBox, "div", `Arguments: ${typeof args === "string" ? args : JSON.stringify(args)}`, "logs");
-                    if (logs.length > 0) addText(toolBox, "div", logs.join("\n"), "logs");
-                    if (result) addText(toolBox, "div", `Result: ${result}`, "logs");
-                    stepRow.appendChild(toolBox);
-                  }
-                }
-
-                if (step.status === "failed" && step.detail) {
-                  addText(stepRow, "div", step.detail, "step-error");
-                }
-
-                traceNode.appendChild(stepRow);
-              }
-              timeline.appendChild(traceNode);
+            if (trace) {
+              renderedTraces.add(trace);
+              const mb = renderMainActivityBox(trace);
+              if (mb) timeline.appendChild(mb);
+              const cb = renderCodingActivityBox(trace);
+              if (cb) timeline.appendChild(cb);
             }
           }
-        } else if (row.kind === "tool") {
-          const tool = row.value;
-          if (isCodingTool(tool.name)) {
-            // Coding tools are displayed exclusively in the Coding activity section,
-            // never as standalone cards mounted one by one in the chat timeline.
-            continue;
-          }
-          const alreadyInTrace = [...state.executionTraces.values()].some((t) =>
-            t.steps.some((s) => (s.phase === "coding" || s.phase === "tool" || s.phase === "search") && (s.stepId.endsWith(`:${tool.id}`) || text(s.metadata.tool_call_id) === tool.id))
-          );
-          if (alreadyInTrace) continue;
-          const node = document.createElement("details");
-          node.className = `tool ${tool.status === "running" ? "running" : tool.status === "success" ? "success" : "failed-card"}`;
-          const elapsed = tool.status === "running" && tool.started_at ? ` · ${Math.max(0, (Date.now() - Date.parse(tool.started_at)) / 1000).toFixed(1)}s` : tool.duration_ms != null ? ` · ${(tool.duration_ms / 1000).toFixed(2)}s` : "";
-          addText(node, "summary", `${tool.status === "running" ? "⏳" : tool.status === "success" ? "✅" : "❌"} ${tool.name} · ${tool.status}${elapsed}`);
-          if (tool.arguments) addText(node, "div", `Arguments: ${typeof tool.arguments === "string" ? tool.arguments : JSON.stringify(tool.arguments)}`, "logs");
-          if (tool.progress.length) addText(node, "div", tool.progress.join("\n"), "logs");
-          if (tool.logs.length) addText(node, "div", tool.logs.join("\n"), "logs");
-          if (tool.result) addText(node, "div", `Result: ${tool.result}`, "logs");
-          if (tool.error) addText(node, "div", `Error: ${tool.error}`, "logs error");
-          addText(node, "pre", JSON.stringify(tool.details || {}, null, 2));
-          timeline.appendChild(node);
-        } else {
+        } else if (row.kind === "permission") {
           const event = row.value;
           const node = document.createElement("div");
           const type = eventType(event);
           const metadata = metaOf(event);
           const permissionRequestId = text(metadata.permission_request_id);
           const inboxItemId = text(metadata.inbox_item_id);
-          if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
-            node.className = "activity permission";
-            const authorityId = type === "action.approval.required" && inboxItemId ? inboxItemId : permissionRequestId;
-            const request = state.permissionRequests.get(authorityId) || {};
-            const serverApproval = type === "server.waiting_approval" || request.kind === "server";
-            const apiApproval = type === "api.waiting_approval" || request.kind === "api";
-            const transactionalApproval = type === "action.approval.required" || request.kind === "transactional";
-            addText(node, "div", serverApproval ? "Server action approval required" : apiApproval ? "API request approval required" : transactionalApproval ? "Transactional action approval required" : "Computer permission required");
-            addText(node, "div", request.preview || metadata.preview || event.title, "logs");
-            addText(node, "div", `Scope: ${request.scope || metadata.permission_scope || ""}`, "meta");
-            if (request.status === "completed" || request.status === "approved" || request.status === "denied" || request.status === "decided") {
-              const badgeText = request.status === "completed"
-                ? "Completed · Resumed"
-                : request.status === "approved"
-                ? "Approved · Executed"
-                : `Decision: ${request.decision || request.status}`;
-              addText(node, "div", badgeText, "permission-state");
-              if (request.result) addText(node, "div", request.result, "logs");
-            } else if (request.status === "resuming" || permissionBusy.has(authorityId)) {
-              addText(node, "div", "Approving & Resuming...", "permission-state");
-            } else {
-              const actions = document.createElement("div");
-              actions.className = "permission-actions";
-              const choices = serverApproval || apiApproval || transactionalApproval
-                ? [["Deny", "deny", "deny"], ["Approve once", "approve", ""]]
-                : [
-                    ["Deny", "deny", "deny"],
-                    ["Allow once", "allow_once", ""],
-                    ["This session", "allow_session", ""],
-                    ["Always", "always", ""],
-                  ];
-              for (const [label, decision, className] of choices) {
-                const decisionButton = document.createElement("button");
-                decisionButton.type = "button";
-                decisionButton.textContent = label;
-                decisionButton.className = className;
-                decisionButton.disabled = permissionBusy.has(authorityId);
-                decisionButton.addEventListener("click", async () => {
-                  permissionBusy.add(authorityId);
-                  permissionErrors.delete(authorityId);
-                  render();
-                  try {
-                    const permissionPath = serverApproval ? "server-approvals" : apiApproval ? "api-approvals" : transactionalApproval ? "transactional-actions" : "computer-permissions";
-                    const requestTarget = transactionalApproval ? authorityId : permissionRequestId;
-                    const response = await fetch(
-                      `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/${permissionPath}/${encodeURIComponent(requestTarget)}`,
-                      {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json", ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}) },
-                        body: JSON.stringify({ decision, root: config.root }),
-                      },
-                    );
-                    const payload = await response.json();
-                    if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
-                    const resultMessage = text(payload.answer || (payload.result && (payload.result.answer || payload.result.message)));
-                    if (payload.assistant_message) applyMessage(state, payload.assistant_message);
-                    state.permissionRequests.set(authorityId, {
-                      ...request,
-                      requestId: authorityId,
-                      status: payload.status || (payload.approved ? "completed" : "denied"),
-                      decision,
-                      result: resultMessage,
-                    });
-                  } catch (error) {
-                    permissionErrors.set(authorityId, error.message || String(error));
-                  } finally {
-                    permissionBusy.delete(authorityId);
-                    render();
-                  }
-                });
-                actions.appendChild(decisionButton);
-              }
-              node.appendChild(actions);
-              if (permissionErrors.has(authorityId)) {
-                addText(node, "div", permissionErrors.get(authorityId), "permission-error");
-              }
-            }
+          node.className = "activity permission";
+          const authorityId = type === "action.approval.required" && inboxItemId ? inboxItemId : permissionRequestId;
+          const request = state.permissionRequests.get(authorityId) || {};
+          const serverApproval = type === "server.waiting_approval" || request.kind === "server";
+          const apiApproval = type === "api.waiting_approval" || request.kind === "api";
+          const transactionalApproval = type === "action.approval.required" || request.kind === "transactional";
+          addText(node, "div", serverApproval ? "Server action approval required" : apiApproval ? "API request approval required" : transactionalApproval ? "Transactional action approval required" : "Computer permission required");
+          addText(node, "div", request.preview || metadata.preview || event.title, "logs");
+          addText(node, "div", `Scope: ${request.scope || metadata.permission_scope || ""}`, "meta");
+          if (request.status === "completed" || request.status === "approved" || request.status === "denied" || request.status === "decided") {
+            const badgeText = request.status === "completed"
+              ? "Completed · Resumed"
+              : request.status === "approved"
+              ? "Approved · Executed"
+              : `Decision: ${request.decision || request.status}`;
+            addText(node, "div", badgeText, "permission-state");
+            if (request.result) addText(node, "div", request.result, "logs");
+          } else if (request.status === "resuming" || permissionBusy.has(authorityId)) {
+            addText(node, "div", "Approving & Resuming...", "permission-state");
           } else {
-            const inTrace = [...state.executionTraces.values()].some((t) =>
-              t.steps.some((s) => s.subEvents.some((se) => text(se.event_id || se.id) === text(event.event_id || event.id)))
-            );
-            if (inTrace) continue;
-            node.className = "activity";
-            addText(node, "div", `${event.title || type} · ${eventStatus(event)}`);
-            if (eventSummary(event)) addText(node, "div", eventSummary(event), "logs");
-            if (type.startsWith("media_generation_")) {
-              const mediaLabel = [
-                metadata.media_type,
-                metadata.provider && metadata.model ? `${metadata.provider}/${metadata.model}` : "",
-                metadata.progress != null ? `${Math.round(Number(metadata.progress) * 100)}%` : "",
-              ].filter(Boolean).join(" · ");
-              if (mediaLabel) addText(node, "div", mediaLabel, "meta");
-              if (metadata.artifact_id) addText(node, "div", `Artifact: ${metadata.artifact_id}`, "logs");
-              if (metadata.error) addText(node, "div", metadata.error, "permission-error");
+            const actions = document.createElement("div");
+            actions.className = "permission-actions";
+            const choices = serverApproval || apiApproval || transactionalApproval
+              ? [["Deny", "deny", "deny"], ["Approve once", "approve", ""]]
+              : [
+                  ["Deny", "deny", "deny"],
+                  ["Allow once", "allow_once", ""],
+                  ["This session", "allow_session", ""],
+                  ["Always", "always", ""],
+                ];
+            for (const [label, decision, className] of choices) {
+              const decisionButton = document.createElement("button");
+              decisionButton.type = "button";
+              decisionButton.textContent = label;
+              decisionButton.className = className;
+              decisionButton.disabled = permissionBusy.has(authorityId);
+              decisionButton.addEventListener("click", async () => {
+                permissionBusy.add(authorityId);
+                permissionErrors.delete(authorityId);
+                render();
+                try {
+                  const permissionPath = serverApproval ? "server-approvals" : apiApproval ? "api-approvals" : transactionalApproval ? "transactional-actions" : "computer-permissions";
+                  const requestTarget = transactionalApproval ? authorityId : permissionRequestId;
+                  const response = await fetch(
+                    `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/${permissionPath}/${encodeURIComponent(requestTarget)}`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json", ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}) },
+                      body: JSON.stringify({ decision, root: config.root }),
+                    },
+                  );
+                  const payload = await response.json();
+                  if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                  const resultMessage = text(payload.answer || (payload.result && (payload.result.answer || payload.result.message)));
+                  if (payload.assistant_message) applyMessage(state, payload.assistant_message);
+                  state.permissionRequests.set(authorityId, {
+                    ...request,
+                    requestId: authorityId,
+                    status: payload.status || (payload.approved ? "completed" : "denied"),
+                    decision,
+                    result: resultMessage,
+                  });
+                } catch (error) {
+                  permissionErrors.set(authorityId, error.message || String(error));
+                } finally {
+                  permissionBusy.delete(authorityId);
+                  render();
+                }
+              });
+              actions.appendChild(decisionButton);
             }
-            if (type === "canvas.createSurface") {
-              const link = document.createElement("a");
-              const canvas = metadata.canvas_event || {};
-              link.textContent = "Open Live Canvas";
-              link.href = `${config.apiBase}/api/v1/dashboard/live-canvas?conversation_id=${encodeURIComponent(config.sessionId)}&root=${encodeURIComponent(config.root)}&surface_id=${encodeURIComponent(canvas.surface_id || metadata.surface_id || "")}`;
-              link.target = "_blank";
-              link.rel = "noopener noreferrer";
-              link.style.color = "#93c5fd";
-              node.appendChild(link);
+            node.appendChild(actions);
+            if (permissionErrors.has(authorityId)) {
+              addText(node, "div", permissionErrors.get(authorityId), "permission-error");
             }
           }
           timeline.appendChild(node);
+        } else if (row.kind === "activity") {
+          const event = row.value;
+          const node = document.createElement("div");
+          const type = eventType(event);
+          const metadata = metaOf(event);
+          node.className = "activity";
+          addText(node, "div", `${event.title || type} · ${eventStatus(event)}`);
+          if (eventSummary(event)) addText(node, "div", eventSummary(event), "logs");
+          if (type.startsWith("media_generation_")) {
+            const mediaLabel = [
+              metadata.media_type,
+              metadata.provider && metadata.model ? `${metadata.provider}/${metadata.model}` : "",
+              metadata.progress != null ? `${Math.round(Number(metadata.progress) * 100)}%` : "",
+            ].filter(Boolean).join(" · ");
+            if (mediaLabel) addText(node, "div", mediaLabel, "meta");
+            if (metadata.artifact_id) addText(node, "div", `Artifact: ${metadata.artifact_id}`, "logs");
+            if (metadata.error) addText(node, "div", metadata.error, "permission-error");
+          }
+          if (type === "canvas.createSurface") {
+            const link = document.createElement("a");
+            const canvas = metadata.canvas_event || {};
+            link.textContent = "Open Live Canvas";
+            link.href = `${config.apiBase}/api/v1/dashboard/live-canvas?conversation_id=${encodeURIComponent(config.sessionId)}&root=${encodeURIComponent(config.root)}&surface_id=${encodeURIComponent(canvas.surface_id || metadata.surface_id || "")}`;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.style.color = "#93c5fd";
+            node.appendChild(link);
+          }
+          timeline.appendChild(node);
+        }
+      }
+
+      for (const trace of state.executionTraces.values()) {
+        if (!renderedTraces.has(trace)) {
+          renderedTraces.add(trace);
+          const mb = renderMainActivityBox(trace);
+          if (mb) timeline.appendChild(mb);
+          const cb = renderCodingActivityBox(trace);
+          if (cb) timeline.appendChild(cb);
         }
       }
       submitButton.disabled = !state.socketReady || state.submitting;

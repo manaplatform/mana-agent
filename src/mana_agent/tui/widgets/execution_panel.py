@@ -1,20 +1,23 @@
-"""Compact live coding execution panel shared by every coding backend."""
+"""Compact live execution coordinator panel hosting persistent activity boxes."""
 
 from __future__ import annotations
+
+from typing import Any
 
 from textual.containers import Vertical
 from textual.widgets import Collapsible, Static
 
-from mana_agent.chat.execution_trace import ExecutionTrace
+from mana_agent.chat.execution_trace import ExecutionTrace, classify_activity_category
+from mana_agent.tui.widgets.activity_boxes import CodingActivityBox, MainActivityBox
 from mana_agent.tui.widgets.selectable_text import SelectableText
 
 
 class ExecutionPanel(Vertical):
     DEFAULT_CSS = """
-    ExecutionPanel { height: auto; margin: 0 0 1 0; border: round $accent; padding: 0 1; }
-    .execution-header { text-style: bold; color: $accent; margin: 0 0 0 0; }
-    .execution-steps { height: auto; margin: 0 0 0 0; }
-    .execution-footer { color: $text-muted; margin-top: 0; }
+    ExecutionPanel { height: auto; margin: 0 0 1 0; padding: 0; }
+    .execution-header { text-style: bold; color: $accent; margin: 0 0 0 0; padding: 0 1; }
+    .execution-steps { height: auto; margin: 0 0 0 0; padding: 0 1; }
+    .execution-footer { color: $text-muted; margin-top: 0; padding: 0 1; }
     .execution-log { height: auto; max-height: 18; }
     """
 
@@ -25,33 +28,49 @@ class ExecutionPanel(Vertical):
         self.backend = ""
         self.model = ""
         self.phase = "queued"
-        self.events: list[dict] = []
+        self.events: list[dict[str, Any]] = []
         self._event_ids: set[str] = set()
+
+        # Two persistent activity boxes
+        self.main_box = MainActivityBox(turn_id=turn_id)
+        self.coding_box = CodingActivityBox(turn_id=turn_id)
+
+        # Header, steps and summary widgets for overall turn
         self.header = Static("◌ execution · queued", classes="execution-header")
         self.steps_view = Static("", classes="execution-steps")
-        self.activity_log = SelectableText("Waiting for backend…", classes="execution-log")
         self.footer = Static("0 events", classes="execution-footer")
-        self.details = Collapsible(title="activity", collapsed=False)
-        self.context_meter: dict = {}
+        self.context_meter: dict[str, Any] = {}
+
+        # Aliases for backward compatibility with existing tests
+        self.details = self.coding_box.details
+        self.activity_log = self.coding_box.activity_log
 
     def compose(self):
         yield self.header
         yield self.steps_view
-        with Collapsible(title="activity", collapsed=False) as details:
-            self.details = details
-            yield self.activity_log
+        yield self.main_box
+        yield self.coding_box
         yield self.footer
 
-    def update_trace_event(self, event: dict) -> None:
+    def update_trace_event(self, event: dict[str, Any]) -> None:
         self.update_event(event)
 
-    def update_event(self, event: dict) -> None:
+    def update_event(self, event: dict[str, Any]) -> None:
         event_dict = dict(event)
         event_id = str(event_dict.get("event_id") or event_dict.get("id") or "").strip()
         if event_id:
             if event_id in self._event_ids:
-                # Still pass to trace for idempotent updates/completion
+                # Still pass to trace and activity boxes for idempotent updates/completion
                 self.trace.apply_event(event_dict)
+                category = classify_activity_category(
+                    event_dict.get("event_type") or event_dict.get("type") or "",
+                    event_dict.get("tool_name"),
+                    event_dict.get("metadata") or event_dict.get("payload"),
+                )
+                if category == "coding":
+                    self.coding_box.update_event(event_dict)
+                else:
+                    self.main_box.update_event(event_dict)
                 self._render_state(event_dict)
                 return
             self._event_ids.add(event_id)
@@ -64,6 +83,18 @@ class ExecutionPanel(Vertical):
                 if str(e.get("event_id") or e.get("id") or "").strip()
             }
         self.trace.apply_event(event_dict)
+
+        # Route to appropriate activity box
+        category = classify_activity_category(
+            event_dict.get("event_type") or event_dict.get("type") or "",
+            event_dict.get("tool_name"),
+            event_dict.get("metadata") or event_dict.get("payload"),
+        )
+        if category == "coding":
+            self.coding_box.update_event(event_dict)
+        else:
+            self.main_box.update_event(event_dict)
+
         self._render_state(event_dict)
 
     def on_mount(self) -> None:
@@ -80,7 +111,6 @@ class ExecutionPanel(Vertical):
             duration_str = f" ({step.duration_ms}ms)" if step.duration_ms is not None and step.status != "running" else ""
             detail_str = f" — {step.detail}" if step.detail else ""
             if step.status == "running":
-                # Codex-like subtle / low-opacity visual treatment for running steps
                 lines.append(f"[dim]◌ {step.title.lower()} · running{detail_str}[/dim]")
             elif step.status in {"completed", "success"}:
                 lines.append(f"[bold $success]✓[/] {step.title.lower()}{detail_str}{duration_str}")
@@ -92,7 +122,7 @@ class ExecutionPanel(Vertical):
                 lines.append(f"● {step.title.lower()} · {step.status}{detail_str}")
         self.steps_view.update("\n".join(lines))
 
-    def _render_state(self, event: dict) -> None:
+    def _render_state(self, event: dict[str, Any]) -> None:
         backend_val = event.get("backend")
         if backend_val:
             self.backend = str(backend_val)
@@ -123,11 +153,11 @@ class ExecutionPanel(Vertical):
         self._render_steps()
 
         # Update details title: only call it "coding activity" if a coding step is present
-        has_coding = any(s.phase == "coding" for s in self.trace.steps)
+        has_coding = any(s.phase == "coding" for s in self.trace.steps) or len(self.coding_box.events) > 0
         if self.details:
             self.details.title = "coding activity" if has_coding else "activity"
 
-        # Activity log (for coding / command / progress items)
+        # Synchronize backward compatible activity log
         lines: list[str] = []
         for row in self.events[-14:]:
             row_status = str(row.get("status") or "running")
@@ -138,6 +168,7 @@ class ExecutionPanel(Vertical):
         if self.activity_log:
             self.activity_log.load_text("\n".join(lines))
 
+        # Overall footer statistics
         usage = event.get("token_usage") or {}
         tokens = usage.get("total_tokens") or usage.get("totalTokens")
         duration = event.get("duration_ms")
@@ -165,8 +196,19 @@ class ExecutionPanel(Vertical):
             stats.append(stat_str)
         if self.footer:
             self.footer.update(" · ".join(stats))
-        if self.details and event_type in {"turn.completed", "turn.finished", "turn.cancelled", "error", "coding.terminal"}:
-            self.details.collapsed = True
+
+        # Only display boxes when they have events
+        self.coding_box.display = len(self.coding_box.events) > 0
+        self.main_box.display = len(self.main_box.events) > 0
+
+        if event_type in {"turn.completed", "turn.finished", "turn.cancelled", "error", "coding.terminal"}:
+            if self.details:
+                self.details.collapsed = True
+            if self.coding_box.details:
+                self.coding_box.details.collapsed = True
+            if self.main_box.details:
+                self.main_box.details.collapsed = True
+
         self.refresh(layout=True)
 
 

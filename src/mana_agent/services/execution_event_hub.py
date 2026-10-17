@@ -91,6 +91,17 @@ def normalize_execution_event(
         "kind",
         meta.get("kind") or normalize_event_kind(str(payload.get("type") or "")),
     )
+    from mana_agent.chat.execution_trace import classify_activity_category
+
+    tool_name = str(meta.get("tool_name") or meta.get("name") or payload.get("tool_name") or "")
+    payload.setdefault(
+        "category",
+        classify_activity_category(
+            str(payload.get("type") or ""),
+            tool_name=tool_name,
+            metadata=meta,
+        ),
+    )
     structurally_redacted = redact_secrets(payload)
     return dict(
         json.loads(

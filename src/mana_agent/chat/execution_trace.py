@@ -8,6 +8,7 @@ with idempotent step updates and clean running-state transitions.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +17,21 @@ from typing import Any
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        val_str = value.strip()
+        if (val_str.startswith("{") and val_str.endswith("}")) or (val_str.startswith("[") and val_str.endswith("]")):
+            try:
+                parsed = json.loads(val_str)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+    return {}
 
 
 @dataclass
@@ -271,6 +287,38 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
     return phase, title
 
 
+def classify_activity_category(
+    event_type: str,
+    tool_name: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Classify an event into 'coding' or 'main' activity box category.
+
+    - 'coding': file mutations (edit, write, patch), repo reads, terminal commands,
+      test execution, git operations, and coding engine / Codex events.
+    - 'main': all general agent activities including non-coding tools (search,
+      email, api, mcp), reasoning summaries, delegation, retries, and errors.
+    """
+    meta = dict(metadata or {})
+    et = str(event_type or "").strip().lower()
+    tool = str(tool_name or meta.get("tool_name") or meta.get("name") or "").strip()
+    backend = str(meta.get("backend") or "").strip().lower()
+
+    if backend in {"codex", "internal", "coding"} and not et.startswith(("turn.", "routing", "model")):
+        return "coding"
+
+    if tool and is_coding_tool(tool):
+        return "coding"
+
+    if (
+        et.startswith(("command.", "patch.", "file."))
+        or et in {"coding_started", "coding.terminal", "coding.progress", "coding"}
+    ):
+        return "coding"
+
+    return "main"
+
+
 class ExecutionTrace:
     """Maintains the chronological execution steps for a single chat turn."""
 
@@ -284,6 +332,12 @@ class ExecutionTrace:
         self.is_failed: bool = False
         self.is_cancelled: bool = False
         self._seen_sub_event_ids: set[str] = set()
+        # Persistent activity box event streams
+        self.main_events: list[dict[str, Any]] = []
+        self.coding_events: list[dict[str, Any]] = []
+        self.changed_files: list[str] = []
+        self._seen_main_ids: set[str] = set()
+        self._seen_coding_ids: set[str] = set()
 
     @property
     def active_step(self) -> ExecutionStep | None:
@@ -307,6 +361,43 @@ class ExecutionTrace:
 
         phase, default_title = classify_runtime_phase(event_type, meta)
         step_title = title or default_title
+
+        # Track categorized events and changed files for persistent activity boxes
+        category = classify_activity_category(event_type, ev.get("tool_name") or meta.get("tool_name"), meta)
+        ev["category"] = category
+        if category == "coding":
+            if event_id and event_id not in self._seen_coding_ids:
+                self._seen_coding_ids.add(event_id)
+                self.coding_events.append(ev)
+            elif not event_id:
+                self.coding_events.append(ev)
+            # Track touched / changed files
+            payload_dict = _safe_dict(ev.get("payload"))
+            args_dict = _safe_dict(payload_dict.get("args")) or _safe_dict(meta.get("args"))
+            raw_path = (
+                ev.get("path")
+                or meta.get("path")
+                or meta.get("filePath")
+                or meta.get("file_path")
+                or payload_dict.get("path")
+                or payload_dict.get("filePath")
+                or payload_dict.get("file_path")
+                or args_dict.get("path")
+                or args_dict.get("filePath")
+                or args_dict.get("file_path")
+            )
+            if raw_path and str(raw_path).strip() and str(raw_path).strip() not in self.changed_files:
+                self.changed_files.append(str(raw_path).strip())
+            for cf in (ev.get("changed_files") or meta.get("changed_files") or []):
+                cf_s = str(cf).strip()
+                if cf_s and cf_s not in self.changed_files:
+                    self.changed_files.append(cf_s)
+        else:
+            if event_id and event_id not in self._seen_main_ids:
+                self._seen_main_ids.add(event_id)
+                self.main_events.append(ev)
+            elif not event_id:
+                self.main_events.append(ev)
 
         # Determine step ID
         if phase == "tool":
@@ -410,5 +501,6 @@ class ExecutionTrace:
 __all__ = [
     "ExecutionStep",
     "ExecutionTrace",
+    "classify_activity_category",
     "classify_runtime_phase",
 ]
