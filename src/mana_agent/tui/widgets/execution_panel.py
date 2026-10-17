@@ -17,6 +17,7 @@ class ExecutionPanel(Vertical):
     ExecutionPanel { height: auto; margin: 0 0 1 0; padding: 0; }
     .execution-header { text-style: bold; color: $accent; margin: 0 0 0 0; padding: 0 1; }
     .execution-steps { height: auto; margin: 0 0 0 0; padding: 0 1; }
+    .execution-summary { height: auto; margin: 0 0 1 0; padding: 0 1; color: $success; }
     .execution-footer { color: $text-muted; margin-top: 0; padding: 0 1; }
     .execution-log { height: auto; max-height: 18; }
     """
@@ -35,9 +36,10 @@ class ExecutionPanel(Vertical):
         self.main_box = MainActivityBox(turn_id=turn_id)
         self.coding_box = CodingActivityBox(turn_id=turn_id)
 
-        # Header, steps and summary widgets for overall turn
+        # Header, steps, summary and footer widgets for overall turn
         self.header = Static("◌ execution · queued", classes="execution-header")
         self.steps_view = Static("", classes="execution-steps")
+        self.summary_card = Static("", classes="execution-summary")
         self.footer = Static("0 events", classes="execution-footer")
         self.context_meter: dict[str, Any] = {}
 
@@ -50,6 +52,7 @@ class ExecutionPanel(Vertical):
         yield self.steps_view
         yield self.main_box
         yield self.coding_box
+        yield self.summary_card
         yield self.footer
 
     def update_trace_event(self, event: dict[str, Any]) -> None:
@@ -201,13 +204,33 @@ class ExecutionPanel(Vertical):
         self.coding_box.display = len(self.coding_box.events) > 0
         self.main_box.display = len(self.main_box.events) > 0
 
-        if event_type in {"turn.completed", "turn.finished", "turn.cancelled", "error", "coding.terminal"}:
+        is_terminal = event_type in {"turn.completed", "turn.finished", "turn.cancelled", "error", "coding.terminal"} or status in {"completed", "success"}
+        if is_terminal:
             if self.details:
                 self.details.collapsed = True
             if self.coding_box.details:
                 self.coding_box.details.collapsed = True
             if self.main_box.details:
                 self.main_box.details.collapsed = True
+
+            has_coding = len(self.coding_box.events) > 0 or len(self.coding_box.changed_files) > 0
+            if has_coding:
+                files_count = len(self.coding_box.changed_files)
+                files_text = f"{files_count} file{'s' if files_count != 1 else ''} modified" if files_count > 0 else "Code inspected"
+                ops_count = len(self.coding_box.events)
+                summary_lines = [f"✓ Coding complete · {files_text} ({ops_count} operations)"]
+                if self.coding_box.changed_files:
+                    cfs = self.coding_box.changed_files
+                    preview = ", ".join(cfs[:3]) + ("..." if len(cfs) > 3 else "")
+                    summary_lines.append(f"  Files: {preview}")
+                self.summary_card.update("\n".join(summary_lines))
+                self.summary_card.display = True
+            else:
+                self.summary_card.update("")
+                self.summary_card.display = False
+        else:
+            self.summary_card.update("")
+            self.summary_card.display = False
 
         self.refresh(layout=True)
 

@@ -377,3 +377,63 @@ def test_coding_tools_only_show_in_execution_panel_and_do_not_mount_cards() -> N
 
     _run(run())
 
+
+def test_coding_finish_renders_summary_card_and_response_card() -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history)
+
+    async def run() -> None:
+        async with app.run_test(size=(80, 30)) as pilot:
+            history.add(UserMessageEvent(content="fix the bug in src/main.py", turn_id="turn-finish-1"))
+            await pilot.pause()
+
+            history.add(
+                CodingActivityEvent(
+                    turn_id="turn-finish-1",
+                    activity={
+                        "event_id": "coding-step-1",
+                        "event_type": "coding.progress",
+                        "backend": "codex",
+                        "status": "success",
+                        "title": "edit_file",
+                        "path": "src/main.py",
+                    },
+                )
+            )
+            await pilot.pause()
+
+            # Finish coding
+            history.add(
+                CodingActivityEvent(
+                    turn_id="turn-finish-1",
+                    activity={
+                        "event_id": "coding-finish-1",
+                        "event_type": "turn.completed",
+                        "backend": "codex",
+                        "status": "success",
+                        "title": "Coding turn completed",
+                    },
+                )
+            )
+            # Assistant response card
+            history.add(
+                AssistantMessageEvent(
+                    content="Bug successfully fixed in `src/main.py`.",
+                    turn_id="turn-finish-1",
+                )
+            )
+            await pilot.pause()
+
+            panel = app.query_one(ExecutionPanel)
+            assert panel.summary_card is not None
+            assert panel.summary_card.display is True
+            summary_render = str(panel.summary_card.render())
+            assert "Coding complete" in summary_render
+            assert "src/main.py" in summary_render
+
+            assistant_card = list(app.query(".assistant-message"))[-1]
+            assert assistant_card is not None
+            assert "Bug successfully fixed" in assistant_card.text
+
+    _run(run())
+

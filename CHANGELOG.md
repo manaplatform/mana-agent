@@ -25,10 +25,15 @@ All notable repository changes should be recorded here.
   - Updated `src/mana_agent/dashboard/components/chat_timeline.py` with `render_activity_boxes` for Streamlit/static dashboard timeline rendering.
   - Updated `src/mana_agent/services/execution_event_hub.py` to stamp normalized events with `category` (`"main"` or `"coding"`).
   - Added unit tests in `tests/dashboard/live_chat_reducer.test.mjs` verifying activity box routing and 100+ event accumulation.
-  - Fixed `AttributeError: 'str' object has no attribute 'get'` when processing tool events where `args` is serialized as a JSON string by introducing `_safe_dict` helper across `execution_trace.py`, `activity_boxes.py`, and `chat_timeline.py`.
+  - Added dedicated coding completion summary card and assistant response card in TUI and Dashboard:
+    - Displayed a clear coding completion summary card in `ExecutionPanel` and Web Dashboard (`live_chat.js` / `chat_timeline.py`) detailing files modified, operation count, and execution outcome when coding finishes.
+    - Preserved dedicated assistant response card mounting immediately following the execution panel on the chat timeline.
+  - Resolved concurrency race condition in `LaneCoordinator`:
+    - Tracked in-flight claiming waiters in `_claiming_waiters` during capacity reservation handoff so that subsequent queued waiters cannot erroneously double-allocate the same slot before the first waiter starts.
+    - Guaranteed deterministic priority scheduling between interactive and background waiters without dropping background waiters.
   - User verification required:
     - Not run by the agent (per Rule 40).
-    - `python -m pytest tests/test_execution_trace.py tests/test_tui_tool_card_layout.py tests/test_dashboard_live_chat.py -v`
+    - `python -m pytest tests/test_execution_trace.py tests/test_tui_tool_card_layout.py tests/gateway/test_lane_coordinator.py -k test_interactive_waiter_runs_before_background_without_dropping_background -v`
     - `node --test tests/dashboard/live_chat_reducer.test.mjs`
 
 ## 2026-10-16

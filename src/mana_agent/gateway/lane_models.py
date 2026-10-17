@@ -124,6 +124,7 @@ class LaneExecution:
     relation_type: str = "independent"
     previous_task_id: str = ""
     user_message_id: str = ""
+    waiter_id: str = ""
 
 
 @dataclass(slots=True)

@@ -1421,6 +1421,17 @@
         node.appendChild(pre);
       }
 
+      if (!isRunning && (hasEvents || hasFiles || hasCommands)) {
+        const summaryCard = document.createElement("div");
+        summaryCard.className = "coding-summary-card";
+        summaryCard.style.cssText = "margin-top:6px;padding:6px 10px;background:#0d1d2e;border-left:3px solid #22c55e;border-radius:4px;font-size:12px;color:#cbd5e1;";
+        const filesCount = box.changedFiles ? box.changedFiles.size : 0;
+        const opsCount = Math.max(box.events.length, box.commands.length);
+        const filesText = filesCount > 0 ? `${filesCount} ${filesCount === 1 ? "file" : "files"} changed` : "Code inspected";
+        summaryCard.textContent = `✓ Coding complete · ${filesText} (${opsCount} operations)`;
+        node.appendChild(summaryCard);
+      }
+
       return node;
     };
 

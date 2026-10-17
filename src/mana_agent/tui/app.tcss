@@ -81,6 +81,14 @@ Footer {
     color: #e2e8f0;
 }
 
+.execution-summary {
+    margin: 0 0 1 0;
+    padding: 1;
+    background: #111e2e;
+    border-left: thick #22c55e;
+    color: #e2e8f0;
+}
+
 /* Tool cards styling is also in the Python DEFAULT_CSS of ToolCard */
 ToolCard {
     margin: 0 2 1 2;

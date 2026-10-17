@@ -277,6 +277,9 @@ def render_activity_boxes(events: list[dict[str, Any]]) -> None:
                 st.code("\n".join(f"$ {c}" for c in commands), language="bash")
             for ev in coding_events:
                 render_event(ev, compact=True)
+            files_count = len(changed_files)
+            files_text = f"{files_count} file{'s' if files_count != 1 else ''} modified" if files_count > 0 else "Code inspected"
+            st.caption(f"✓ Coding complete · {files_text} ({len(coding_events)} operations)")
 
 
 def render_timeline(messages: list[dict[str, Any]], events: list[dict[str, Any]]) -> None:
