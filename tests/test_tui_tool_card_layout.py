@@ -212,10 +212,20 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
             await pilot.pause()
             card = app.query_one(ToolCard)
             collapsible = card.query_one(Collapsible)
+            # Allow initial layout pass to settle across platforms (e.g. Windows Proactor)
+            for _ in range(5):
+                if card.size.height > 0:
+                    break
+                await pilot.pause()
             collapsed_height = card.size.height
+            assert collapsed_height > 0
 
             collapsible.collapsed = False
             await pilot.pause()
+            for _ in range(5):
+                if card.size.height > collapsed_height:
+                    break
+                await pilot.pause()
             expanded_height = card.size.height
             assert expanded_height > collapsed_height
 
@@ -233,7 +243,11 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
             await pilot.pause()
             # Dynamic text load and container virtual_size recalculation is a
             # multi-phase operation in Textual across different event loop runners (e.g. Windows Proactor).
-            await pilot.pause()
+            for _ in range(5):
+                chat_log = app.query_one("#chat-log")
+                if card.size.height >= expanded_height and chat_log.virtual_size.height >= card.size.height:
+                    break
+                await pilot.pause()
             result_body = card.query_one(".tool-result-body", SelectableText)
             assert "line 39: detailed live output" in _rendered_source(result_body)
             assert card.size.height >= expanded_height
@@ -241,14 +255,27 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
 
             collapsible.collapsed = True
             await pilot.pause()
+            for _ in range(5):
+                if card.size.height == collapsed_height:
+                    break
+                await pilot.pause()
             assert card.size.height == collapsed_height
 
             collapsible.collapsed = False
             await pilot.pause()
+            for _ in range(5):
+                if card.size.height >= expanded_height:
+                    break
+                await pilot.pause()
             assert card.size.height >= expanded_height
 
             await pilot.resize_terminal(70, 24)
             await pilot.pause()
+            for _ in range(5):
+                chat_log = app.query_one("#chat-log")
+                if chat_log.virtual_size.height >= card.size.height:
+                    break
+                await pilot.pause()
             assert "line 39: detailed live output" in _rendered_source(result_body)
             assert app.query_one("#chat-log").virtual_size.height >= card.size.height
 

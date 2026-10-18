@@ -33,7 +33,7 @@ All notable repository changes should be recorded here.
     - Guaranteed deterministic priority scheduling between interactive and background waiters without dropping background waiters.
   - Fixed TUI tool card layout measurement timing on multi-phase event loop runners (e.g. Windows Proactor):
     - Triggered `ChatLog.refresh(layout=True)` when a tool result updates an activity card, guaranteeing that container virtual size recalculation is immediately scheduled.
-    - Updated `tests/test_tui_tool_card_layout.py` to allow multi-phase layout pause cycles for container virtual size remeasurement to settle across platforms.
+    - Updated `tests/test_tui_tool_card_layout.py` to allow multi-phase layout pause cycles for initial mounting, collapse/expand toggling, and container virtual size remeasurement to settle across platforms.
   - User verification required:
     - Not run by the agent (per Rule 40).
     - `python -m pytest tests/test_execution_trace.py tests/test_tui_tool_card_layout.py tests/gateway/test_lane_coordinator.py -v`
