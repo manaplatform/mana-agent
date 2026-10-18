@@ -30,9 +30,11 @@ from mana_agent.execution_supervisor.models import (
     utc_now,
 )
 from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+from mana_agent.multi_agent.core.types import TaskStatus
 
 if TYPE_CHECKING:
     from mana_agent.gateway.context_compactor import ContextCompactor
+    from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,10 @@ class AutonomousExecutionResult(StrictModel):
     def final_action(self) -> ContinuationAction | None:
         return self.decision.action if self.decision else None
 
+    @property
+    def final_response(self) -> str:
+        return self.answer
+
 
 def _compute_evidence_fingerprint(data: Any) -> str:
     """Compute a deterministic SHA-256 fingerprint of step evidence."""
@@ -130,6 +136,7 @@ class AutonomousExecutionController:
         *,
         config: AutonomousExecutionConfig | None = None,
         supervisor: ExecutionSupervisor,
+        taskboard: Any | None = None,
         accounting_service: ModelTokenAccountingService | None = None,
         context_governor: ContextCostGovernor | None = None,
         compactor: ContextCompactor | None = None,
@@ -138,6 +145,11 @@ class AutonomousExecutionController:
     ) -> None:
         self.config = config or AutonomousExecutionConfig()
         self.supervisor = supervisor
+        self.taskboard = taskboard
+        self.taskboard_operations = None
+        if taskboard is not None:
+            from mana_agent.multi_agent.taskboard.operations import TaskBoardOperationsHandler
+            self.taskboard_operations = TaskBoardOperationsHandler(taskboard)
         self.accounting_service = accounting_service
         self.context_governor = context_governor
         self.compactor = compactor
@@ -170,6 +182,7 @@ class AutonomousExecutionController:
         user_goal: str,
         step_runner: Callable[..., Any] | None = None,
         step_executor: Callable[..., Any] | None = None,
+        max_turns: int | None = None,
         context: dict[str, Any] | None = None,
         initial_metrics: TaskExecutionMetrics | None = None,
     ) -> AutonomousExecutionResult:
@@ -206,12 +219,32 @@ class AutonomousExecutionController:
 
         root_task_id = task.root_task_id or task_id
 
+        # Initialize or synchronize TaskBoard
+        if self.taskboard is not None:
+            try:
+                tb_task = self.taskboard.get_task(task_id)
+            except Exception:
+                tb_task = self.taskboard.create_task(
+                    title=user_goal[:80] or "Autonomous Task",
+                    user_request=user_goal,
+                    normalized_goal=user_goal,
+                )
+                if tb_task.task_id != task_id and task_id not in self.taskboard.tasks:
+                    self.taskboard.tasks[task_id] = tb_task
+                    tb_task.task_id = task_id
+                    tb_task.root_task_id = root_task_id
+                    self.taskboard.save()
+            tb_task.supervisor_execution_id = task_id
+            tb_task.supervisor_state = task.state.value
+            tb_task.supervisor_state_version = task.state_version
+            self.taskboard.save()
+
         metrics = initial_metrics or TaskExecutionMetrics(
             task_id=task_id,
             root_task_id=root_task_id,
         )
 
-        effective_max_turns = self.config.max_model_turns
+        effective_max_turns = max_turns if max_turns is not None else self.config.max_model_turns
         effective_max_tools = self.config.max_tool_calls
 
         step_index = 0
@@ -222,9 +255,23 @@ class AutonomousExecutionController:
         warnings: list[str] = []
 
         while True:
+            # 0. Provide live TaskBoard progress and operations in execution context
+            ctx.setdefault("evidence", [])
+            ctx.setdefault("touched_files", [])
+            ctx.setdefault("tool_events", [])
+            if self.taskboard is not None:
+                ctx["taskboard_progress"] = self.taskboard.get_progress(root_task_id=root_task_id)
+                ctx["taskboard"] = self.taskboard
+                ctx["taskboard_operations"] = self.taskboard_operations
+
             # 1. Hard Gate: Cancellation Check
             if self.supervisor.cancellation_requested(task_id):
                 self.supervisor.cancel(task_id, reason="user_cancelled")
+                if self.taskboard is not None:
+                    try:
+                        self.taskboard.mark_cancelled(task_id, reason="user_cancelled")
+                    except Exception:
+                        pass
                 return AutonomousExecutionResult(
                     task_id=task_id,
                     status="cancelled",
@@ -281,6 +328,26 @@ class AutonomousExecutionController:
 
             step_duration_ms = (time.perf_counter() - step_t0) * 1000.0
 
+            # Immediate cancellation check if cancelled during step execution
+            if self.supervisor.cancellation_requested(task_id):
+                self.supervisor.cancel(task_id, reason="user_cancelled")
+                if self.taskboard is not None:
+                    try:
+                        self.taskboard.mark_cancelled(task_id, reason="user_cancelled")
+                    except Exception:
+                        pass
+                return AutonomousExecutionResult(
+                    task_id=task_id,
+                    status="cancelled",
+                    goal_satisfied=False,
+                    answer="Task was cancelled by user or operator.",
+                    metrics=metrics,
+                    error="cancelled",
+                    trace=overall_trace,
+                    warnings=warnings,
+                    completed_steps=completed_steps,
+                )
+
             # 5. Extract Step Evidence & Update Central Metrics
             step_answer = str(step_result.get("answer") or step_result.get("output") or "").strip()
             if step_answer:
@@ -325,12 +392,29 @@ class AutonomousExecutionController:
                 evidence_fingerprint=evidence_fingerprint,
             )
 
+            # Synchronize TaskBoard with step results
+            if self.taskboard is not None:
+                try:
+                    if step_result.get("changed_files"):
+                        self.taskboard.add_files_touched(task_id, step_result.get("changed_files"))
+                    for tc in tool_calls:
+                        self.taskboard.record_tool_event(task_id, tc)
+                    if evidence_summary:
+                        self.taskboard.add_evidence(task_id, evidence_summary)
+                except Exception as tb_exc:
+                    logger.debug("TaskBoard update after step %d failed: %s", step_index, tb_exc)
+
             # 6. Check for Pending Human Approval Gate
             if step_result.get("is_approval_pending"):
                 current_task = self.supervisor.get_task(task_id)
                 if current_task.state == ExecutionState.RUNNING:
                     try:
                         self.supervisor.transition(task_id, ExecutionState.WAITING, reason="waiting_for_approval")
+                    except Exception:
+                        pass
+                if self.taskboard is not None:
+                    try:
+                        self.taskboard.update_status(task_id, TaskStatus.WAITING_FOR_TOOLS, reason="waiting_for_approval")
                     except Exception:
                         pass
                 return AutonomousExecutionResult(
@@ -364,6 +448,11 @@ class AutonomousExecutionController:
                 if current_task.state == ExecutionState.RUNNING:
                     try:
                         self.supervisor.transition(task_id, ExecutionState.FAILED, reason="no_progress_stopped")
+                    except Exception:
+                        pass
+                if self.taskboard is not None:
+                    try:
+                        self.taskboard.mark_blocked(task_id, reason=blocker_msg)
                     except Exception:
                         pass
                 return AutonomousExecutionResult(
@@ -497,22 +586,42 @@ class AutonomousExecutionController:
                     "Model decision failed: continuation_evaluator is required for autonomous execution."
                 )
 
-            decision = self.evaluator.evaluate(
-                task_id=task_id,
-                user_goal=user_goal,
-                step_output={
-                    "answer": step_answer,
-                    "tool_calls": tool_calls,
-                    "tool_results_count": len(tool_results),
-                    "changed_files": step_result.get("changed_files") or [],
-                    "error": step_result.get("error") or "",
-                },
-                completed_steps=completed_steps,
-                metrics=metrics.model_dump(mode="json"),
-                soft_limit_reached=(metrics.model_turns >= effective_max_turns),
-                consecutive_no_progress_cycles=metrics.consecutive_no_progress_cycles,
-                independent_verification_status=task.verification_status.value,
-            )
+            tb_progress = self.taskboard.get_progress(root_task_id=root_task_id) if self.taskboard is not None else None
+            try:
+                decision = self.evaluator.evaluate(
+                    task_id=task_id,
+                    user_goal=user_goal,
+                    step_output={
+                        "answer": step_answer,
+                        "tool_calls": tool_calls,
+                        "tool_results_count": len(tool_results),
+                        "changed_files": step_result.get("changed_files") or [],
+                        "error": step_result.get("error") or "",
+                    },
+                    completed_steps=completed_steps,
+                    metrics=metrics.model_dump(mode="json"),
+                    soft_limit_reached=(metrics.model_turns >= effective_max_turns),
+                    consecutive_no_progress_cycles=metrics.consecutive_no_progress_cycles,
+                    independent_verification_status=task.verification_status.value,
+                    taskboard_progress=tb_progress,
+                )
+            except TypeError:
+                decision = self.evaluator.evaluate(
+                    task_id=task_id,
+                    user_goal=user_goal,
+                    step_output={
+                        "answer": step_answer,
+                        "tool_calls": tool_calls,
+                        "tool_results_count": len(tool_results),
+                        "changed_files": step_result.get("changed_files") or [],
+                        "error": step_result.get("error") or "",
+                    },
+                    completed_steps=completed_steps,
+                    metrics=metrics.model_dump(mode="json"),
+                    soft_limit_reached=(metrics.model_turns >= effective_max_turns),
+                    consecutive_no_progress_cycles=metrics.consecutive_no_progress_cycles,
+                    independent_verification_status=task.verification_status.value,
+                )
 
             overall_trace.append(
                 {
@@ -564,6 +673,9 @@ class AutonomousExecutionController:
                         current_task = self.supervisor.get_task(task_id)
 
                 verification_passed = True
+                if step_result.get("verification_passed") is False or ctx.get("verification_passed") is False:
+                    verification_passed = False
+
                 if self.config.require_verification and current_task.completion_contract:
                     if current_task.state in {
                         ExecutionState.COMPLETED_PENDING_VERIFICATION,
@@ -575,10 +687,12 @@ class AutonomousExecutionController:
                         except Exception as verif_exc:
                             logger.warning("Completion verification error for task %s: %s", task_id, verif_exc)
 
-                    verification_passed = bool(
+                    contract_passed = bool(
                         current_task.state == ExecutionState.COMPLETED
                         or getattr(current_task.verification_status, "value", "") == "passed"
                     )
+                    if not contract_passed:
+                        verification_passed = False
                     metrics.verification_results.append(
                         {
                             "status": getattr(current_task.verification_status, "value", "unknown"),
@@ -589,6 +703,13 @@ class AutonomousExecutionController:
                 if not verification_passed:
                     # Cannot finalize when verification fails
                     logger.warning("Completion verification failed for task %s; rejecting FINALIZE", task_id)
+                    if self.taskboard is not None:
+                        try:
+                            for child in self.taskboard.list_tasks(root_task_id=root_task_id):
+                                if child.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.DONE} and not child.implementation_verified:
+                                    self.taskboard.reopen(child.task_id, reason="autonomous replanning after verification failure")
+                        except Exception:
+                            pass
                     decision = ContinuationDecision(
                         task_id=task_id,
                         action=ContinuationAction.REPLAN,
@@ -604,6 +725,15 @@ class AutonomousExecutionController:
                     if current_task.state == ExecutionState.COMPLETED_PENDING_VERIFICATION:
                         try:
                             self.supervisor.transition(task_id, ExecutionState.COMPLETED)
+                        except Exception:
+                            pass
+                    if self.taskboard is not None:
+                        try:
+                            self.taskboard.mark_completed(task_id, evidence=final_answer, cross_off=True)
+                            tb_task = self.taskboard.get_task(task_id)
+                            tb_task.verification_status = "passed"
+                            tb_task.implementation_verified = True
+                            self.taskboard.save()
                         except Exception:
                             pass
                     return AutonomousExecutionResult(
@@ -626,6 +756,11 @@ class AutonomousExecutionController:
                         self.supervisor.transition(task_id, ExecutionState.WAITING, reason="waiting_for_clarification")
                     except Exception:
                         pass
+                if self.taskboard is not None:
+                    try:
+                        self.taskboard.update_status(task_id, TaskStatus.WAITING_FOR_TOOLS, reason=decision.reason or "waiting_for_clarification")
+                    except Exception:
+                        pass
                 return AutonomousExecutionResult(
                     task_id=task_id,
                     status="waiting",
@@ -645,6 +780,11 @@ class AutonomousExecutionController:
                         self.supervisor.transition(task_id, ExecutionState.FAILED, reason=decision.reason)
                     except Exception:
                         pass
+                if self.taskboard is not None:
+                    try:
+                        self.taskboard.mark_blocked(task_id, reason=decision.reason)
+                    except Exception:
+                        pass
                 return AutonomousExecutionResult(
                     task_id=task_id,
                     status="blocked",
@@ -661,6 +801,8 @@ class AutonomousExecutionController:
             # For CONTINUE and REPLAN: proceed with next step
             ctx["continuation_remaining_work"] = decision.remaining_work
             ctx["continuation_decision"] = decision.model_dump(mode="json")
+            if self.taskboard is not None:
+                ctx["taskboard_progress"] = self.taskboard.get_progress(root_task_id=root_task_id)
             step_index += 1
 
     def _try_auto_renew(

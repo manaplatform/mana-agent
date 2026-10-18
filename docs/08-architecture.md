@@ -325,6 +325,51 @@ errors emit shared execution events without changing the original task status.
   flows using helper primitives (sections, badges, tables, details blocks, copy buttons).
   See: `src/mana_agent/renderers/html_report.py:1-613`.
 
+## Loop-Driven Architecture & TaskBoard State Authority
+
+Mana-Agent enforces a strict architectural triad where **Autonomous Loop decides and executes, TaskBoard records and exposes authoritative task state and progress, and Execution Supervisor enforces runtime lifecycle and safety**:
+
+```mermaid
+flowchart TD
+    User([User Request / Goal]) --> Loop["Autonomous Loop (Execution Brain)"]
+    Loop --> Evaluator["Continuation Evaluator (Model-Directed Decisions)"]
+    Loop <--> TB["TaskBoard (State & Progress Authority)"]
+    Loop <--> Sup["Execution Supervisor (Leases, Fences & Checkpoints)"]
+    Loop --> Steps["Tool Execution / Specialist Agents"]
+    Steps --> Evidence["Collect Evidence & Verify"]
+    Evidence --> TB
+    Evidence --> Loop
+    Evaluator -->|"CONTINUE / REPLAN"| Loop
+    Evaluator -->|"FINALIZE (Verified Goal)"| Verified([Verified Completion])
+```
+
+### Architectural Responsibilities
+
+1. **Autonomous Loop — Execution Brain (`AutonomousExecutionController`)**:
+   - Owns the execution cycle and selects the next action.
+   - Evaluates progress against the original user goal using model-directed decisions (`CONTINUE`, `REPLAN`, `FINALIZE`, `WAIT_FOR_USER`, `BLOCKED`).
+   - Reads TaskBoard state to understand completed and remaining work.
+   - Automatically continues pursuing the user's goal until verified completion or a legitimate stopping condition.
+   - Evaluates goal satisfaction independently of whether TaskBoard has pending items (does not stop prematurely just because items are crossed off).
+
+2. **TaskBoard — Task State and Progress Authority (`TaskBoard`)**:
+   - Acts as a supporting task-management workspace and the single source of truth for task progress, subtasks, dependencies, blockers, and verification records.
+   - Supports CRUD operations, crossing off, reopening, and live progress reporting.
+   - Never independently controls the execution loop, selects tools, or makes autonomous continuation decisions.
+
+3. **Execution Supervisor — Runtime Lifecycle & Safety Boundary (`ExecutionSupervisor`)**:
+   - Enforces runtime leases, attempts, heartbeat, fences, cancellation, checkpoints, and recovery.
+   - Synchronizes lifecycle events with TaskBoard without creating competing authoritative states.
+
+### Model-Directed TaskBoard Operations
+
+The model interacts with TaskBoard through registered tools (`taskboard_create_task`, `taskboard_update_task`, `taskboard_delete_task`, `taskboard_mark_completed`, `taskboard_verify_task`, `taskboard_reopen_task`, `taskboard_mark_blocked`, `taskboard_add_subtask`, `taskboard_get_progress`):
+- `taskboard_create_task`: Create tasks and subtasks dynamically.
+- `taskboard_mark_completed`: Mark task completed with execution summary.
+- `taskboard_verify_task`: Verify task with independent executed verification results.
+- `taskboard_reopen_task`: Reopen tasks when verification fails or replanning occurs.
+- **Verification Invariant**: A checked-off task is never equated with verified completion. Verification requires independent executed evidence.
+
 ## Data Flow (end-to-end)
 
 ### A. Analyze / describe / report artifacts

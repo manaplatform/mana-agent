@@ -581,5 +581,57 @@ test("main activity box scales cleanly for 100+ consecutive tool calls", () => {
   assert.equal(trace.mainBox.status, "completed");
 });
 
+test("activity boxes preserve open event stream and update to latest activity on new events", () => {
+  const state = createState("session-open-stream");
+  reduce(state, {
+    type: "optimistic",
+    message: { message_id: "turn-stream-1", content: "Do multiple things" },
+  });
+
+  // Event 1: tool 1 starts
+  reduce(state, {
+    type: "event",
+    event: event(1, "tool.started", {
+      event_id: "t1",
+      execution_id: "turn-stream-1",
+      metadata: { tool_name: "web_search", tool_call_id: "t1" },
+    }),
+  });
+  let trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.mainBox.status, "running");
+  assert.equal(trace.mainBox.events.length, 1);
+  assert.equal(trace.mainBox.events[0].tool_name, "web_search");
+
+  // Event 2: tool 1 completes
+  reduce(state, {
+    type: "event",
+    event: event(2, "tool.finished", {
+      event_id: "t1",
+      execution_id: "turn-stream-1",
+      status: "success",
+      metadata: { tool_name: "web_search", tool_call_id: "t1", result_summary: "found 3" },
+    }),
+  });
+  trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.mainBox.events[0].status, "completed");
+
+  // Event 3: tool 2 starts (new activity arrives)
+  reduce(state, {
+    type: "event",
+    event: event(3, "tool.started", {
+      event_id: "t2",
+      execution_id: "turn-stream-1",
+      metadata: { tool_name: "document_query", tool_call_id: "t2" },
+    }),
+  });
+  trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.mainBox.events.length, 2);
+  assert.equal(trace.mainBox.events[1].tool_name, "document_query");
+  assert.equal(trace.mainBox.events[1].status, "running");
+  // Latest activity is event 2
+  assert.equal(trace.mainBox.events[trace.mainBox.events.length - 1].tool_name, "document_query");
+});
+
+
 
 

@@ -237,6 +237,7 @@ class TaskBoardItem:
     child_task_ids: list[str] = field(default_factory=list)
     decomposition_id_map: dict[str, str] = field(default_factory=dict)
     aggregate_progress: str = ""
+    crossed_off: bool = False
     evidence: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
@@ -303,6 +304,10 @@ class TaskBoardItem:
     duration_breakdown: dict[str, int] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+
+    @property
+    def subtasks(self) -> list[str]:
+        return self.child_task_ids
 
 
 @dataclass

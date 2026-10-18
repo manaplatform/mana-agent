@@ -83,6 +83,11 @@ class MainActivityBox(Vertical):
         self.activity_log = SelectableText("Waiting for activity…", classes="main-activity-stream")
         self.cards_container = Vertical(classes="main-activity-cards")
         self.footer = Static("0 activities", classes="main-activity-summary")
+        self._user_collapsed: bool | None = None
+
+    def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
+        if event.collapsible == self.details:
+            self._user_collapsed = event.collapsible.collapsed
 
     def compose(self):
         yield self.header
@@ -227,8 +232,13 @@ class MainActivityBox(Vertical):
         self.activity_log.load_text("\n".join(lines))
         self.footer.update(f"{total_count} total operations")
 
-        if self._active_status in {"success", "completed"} and self.details:
-            self.details.collapsed = True
+        # Do not close if already open when new activity arrives.
+        # If open, advance to latest activity.
+        if self.details and not self.details.collapsed:
+            try:
+                self.activity_log.scroll_end(animate=False)
+            except Exception:
+                pass
         self.refresh(layout=True)
 
 
@@ -286,6 +296,11 @@ class CodingActivityBox(Vertical):
         self.details = Collapsible(title="coding activity", collapsed=False)
         self.activity_log = SelectableText("Waiting for coding engine…", classes="coding-activity-log")
         self.footer = Static("0 coding events", classes="coding-activity-footer")
+        self._user_collapsed: bool | None = None
+
+    def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
+        if event.collapsible == self.details:
+            self._user_collapsed = event.collapsible.collapsed
 
     def compose(self):
         yield self.header
@@ -399,8 +414,17 @@ class CodingActivityBox(Vertical):
         self.footer.update(" · ".join(stats))
 
         event_type = str(event.get("event_type") or event.get("type") or "")
-        if self.details and event_type in {"turn.completed", "turn.finished", "turn.cancelled", "error", "coding.terminal"}:
-            self.details.collapsed = True
+        # Do not close if already open when new activity arrives.
+        # Only turn completion collapses if not explicitly kept open by user.
+        if self.details:
+            if event_type in {"turn.completed", "turn.finished"} and self._user_collapsed is not False:
+                self.details.collapsed = True
+            elif not self.details.collapsed:
+                # Advance to latest activity
+                try:
+                    self.activity_log.scroll_end(animate=False)
+                except Exception:
+                    pass
 
         self.refresh(layout=True)
 

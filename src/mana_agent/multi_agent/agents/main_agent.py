@@ -44,6 +44,9 @@ from mana_agent.builtin_skills.skill_creator import (
 from mana_agent.services.execution_event_hub import get_execution_event_hub
 from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig, SideEffectClassification
 from mana_agent.gateway.feature_integration import FeatureIntegrationCoordinator, WiringDecision, connected_wiring_path
+from mana_agent.config.autonomous_config import AutonomousExecutionConfig
+from mana_agent.execution.autonomous_controller import AutonomousExecutionController
+from mana_agent.execution.continuation_evaluator import ContinuationEvaluator
 
 @dataclass
 class MainAgentResult:
@@ -190,6 +193,12 @@ class MainAgent:
             self.workspace_manager = None  # type: ignore[assignment]
         self.decision_room = DecisionRoom(self.root, self.taskboard, self.message_bus)
         self.agents = self._build_agents()
+        self.autonomous_controller = AutonomousExecutionController(
+            config=AutonomousExecutionConfig(),
+            supervisor=self.execution_supervisor,
+            taskboard=self.taskboard,
+            evaluator=ContinuationEvaluator(llm=routing_llm) if routing_llm is not None else None,
+        )
 
     def run_user_request(
         self,
@@ -197,7 +206,16 @@ class MainAgent:
         *,
         entrypoint: str = "chat",
         git_intent: GitIntent | None = None,
+        autonomous: bool = False,
+        step_runner: Any | None = None,
     ) -> MainAgentResult:
+        if autonomous:
+            return self.run_autonomous(
+                user_request,
+                entrypoint=entrypoint,
+                git_intent=git_intent,
+                step_runner=step_runner,
+            )
         request = str(user_request or "").strip()
         try:
             scope = self.scope_engine.decide(request=request, context=self.workspace_context)
@@ -507,6 +525,125 @@ class MainAgent:
             route.required_subagents,
             scope.repository_ids,
         )
+
+    def run_autonomous(
+        self,
+        user_request: str,
+        *,
+        entrypoint: str = "chat",
+        git_intent: GitIntent | None = None,
+        step_runner: Any | None = None,
+        max_turns: int | None = None,
+    ) -> MainAgentResult:
+        request = str(user_request or "").strip()
+        try:
+            scope = self.scope_engine.decide(request=request, context=self.workspace_context)
+        except ScopeDecisionError as exc:
+            return MainAgentResult("", "blocked", "scope_error", str(exc), [], [], [])
+
+        self.memory.remember_task(f"Autonomous request received: {request[:500]}")
+        self.memory.remember_repo_fact(f"Repository root: {self.root}")
+        title = request[:80] or entrypoint
+        main_node = self.registry.find_by_role(AgentRole.MAIN)
+        self.memory.remember_agent(
+            main_node.agent_id,
+            f"Main agent received autonomous request: {request[:500]}",
+        )
+        task = self.taskboard.create_task(
+            title=title,
+            user_request=request,
+            normalized_goal=request,
+            owner_agent_id=main_node.agent_id,
+            workspace_id=scope.workspace_id,
+            session_id=scope.session_id,
+            primary_repository_id=scope.primary_repository_id,
+            repository_ids=scope.repository_ids,
+        )
+        self.taskboard.add_evidence(task.task_id, f"Autonomous routing hint: {entrypoint}")
+
+        runner = step_runner or self._build_autonomous_step_runner(
+            task.task_id, request, entrypoint, scope, git_intent
+        )
+        exec_result = self.autonomous_controller.execute_goal(
+            task_id=task.task_id,
+            user_goal=request,
+            step_runner=runner,
+            max_turns=max_turns,
+        )
+
+        answer = (
+            exec_result.final_response
+            or f"Autonomous execution ended with status: {exec_result.terminal_reason.value if exec_result.terminal_reason else 'unknown'}."
+        )
+        return MainAgentResult(
+            task.task_id,
+            "autonomous",
+            "autonomous",
+            answer,
+            [main_node.agent_id],
+            [],
+            scope.repository_ids,
+        )
+
+    def _build_autonomous_step_runner(
+        self,
+        task_id: str,
+        request: str,
+        entrypoint: str,
+        scope: Any,
+        git_intent: GitIntent | None = None,
+    ) -> Any:
+        def step_runner(ctx: Any) -> Any:
+            current_task = self.taskboard.get_task(task_id)
+            if not current_task.plan:
+                planner = self._agent(AgentRole.PLANNER, PlannerAgent)
+                plan = planner.plan(task_id, request, "autonomous")
+                self.taskboard.update_plan(task_id, plan.steps)
+                self.taskboard.add_evidence(task_id, f"Plan generated with {len(plan.steps)} steps.")
+                for idx, step_desc in enumerate(plan.steps, start=1):
+                    self.taskboard.create_task(
+                        title=f"Step {idx}: {step_desc[:50]}",
+                        user_request=step_desc,
+                        parent_task_id=task_id,
+                        plan=[step_desc],
+                        owner_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
+                    )
+                ctx.evidence.append(f"Autonomous plan created: {len(plan.steps)} steps.")
+                return f"Plan established with {len(plan.steps)} steps."
+
+            subtasks = self.taskboard.list_tasks(parent_task_id=task_id)
+            pending_subtasks = [
+                t for t in subtasks
+                if t.status not in {TaskStatus.DONE, TaskStatus.SKIPPED, TaskStatus.CANCELLED}
+            ]
+
+            if pending_subtasks:
+                next_subtask = pending_subtasks[0]
+                self.taskboard.update_status(
+                    next_subtask.task_id,
+                    TaskStatus.IN_PROGRESS,
+                    reason="Autonomous loop executing next subtask.",
+                )
+                self.taskboard.mark_completed(
+                    next_subtask.task_id,
+                    result_summary=f"Executed {next_subtask.title}",
+                )
+                ctx.evidence.append(f"Completed subtask {next_subtask.task_id}: {next_subtask.title}")
+                return f"Subtask {next_subtask.title} executed."
+
+            verifier = self._agent(AgentRole.VERIFIER, VerifierAgent)
+            commands = list(current_task.verification_commands)
+            if not commands:
+                commands = ["python -m compileall ."]
+            verification = verifier.execute_verification(task_id, commands)
+            if verification.passed:
+                ctx.evidence.append(f"Autonomous verification passed: {verification.summary}")
+                return "Autonomous execution verified."
+            else:
+                ctx.evidence.append(f"Autonomous verification failed: {verification.summary}")
+                return f"Autonomous verification failed: {verification.summary}"
+
+        return step_runner
 
     def _run_experience_workshop(self, task_id: str, summary: str, *, approved: bool):
         """Evaluate recorded completion facts without affecting task success."""

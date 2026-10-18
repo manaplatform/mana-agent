@@ -33,6 +33,22 @@ def _append_unique(target: list[str], values: list[str]) -> None:
             seen.add(text)
 
 
+class TaskBoardProgress(dict):
+    """Authoritative task progress metrics supporting both dictionary and attribute access."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"'TaskBoardProgress' object has no attribute '{name}'")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
+
+    def model_dump(self) -> dict[str, Any]:
+        return dict(self)
+
+
 class TaskBoard:
     def __init__(
         self,
@@ -68,7 +84,8 @@ class TaskBoard:
         self,
         *,
         title: str,
-        user_request: str,
+        user_request: str = "",
+        description: str = "",
         normalized_goal: str | None = None,
         priority: int = 100,
         risk_level: RiskLevel = RiskLevel.LOW,
@@ -83,11 +100,16 @@ class TaskBoard:
         trigger_turn_id: str = "",
         relation_type: str = "independent",
         previous_task_id: str = "",
+        parent_task_id: str | None = None,
+        depends_on: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+        plan: list[str] | None = None,
         wiring_required: bool = False,
         wiring_reason: str | None = None,
     ) -> TaskBoardItem:
         task_id = self._new_task_id()
-        goal = normalized_goal or user_request.strip()
+        req_text = str(user_request or description or title).strip()
+        goal = normalized_goal or req_text
         duplicate_of = None
         memory_bundle_id = None
         fingerprint = task_fingerprint(
@@ -123,32 +145,37 @@ class TaskBoard:
                     target_files=related_files or [],
                 )
                 memory_bundle_id = bundle.bundle_id
+        parent_item = self.get_task(parent_task_id) if parent_task_id else None
+        root_id = parent_item.root_task_id if parent_item else task_id
         task = TaskBoardItem(
             task_id=task_id,
-            parent_task_id=None,
-            root_task_id=task_id,
+            parent_task_id=parent_task_id,
+            root_task_id=root_id,
             title=title,
-            user_request=user_request,
+            user_request=req_text,
             normalized_goal=goal,
             # Duplicate detection is advisory. The execution supervisor decides
             # whether the durable work is resumed, reverified, reused, or superseded.
             status=TaskStatus.NEW,
             priority=priority,
             risk_level=risk_level,
-            workspace_id=workspace_id or self.store.workspace_id,
-            session_id=session_id or "",
+            workspace_id=workspace_id or (parent_item.workspace_id if parent_item else self.store.workspace_id),
+            session_id=session_id or (parent_item.session_id if parent_item else ""),
             trigger_turn_id=trigger_turn_id,
             relation_type=relation_type,
-            previous_task_id=previous_task_id,
-            primary_repository_id=primary_repository_id or self.store.repository_id,
-            repository_ids=list(repository_ids or [self.store.repository_id]),
+            previous_task_id=previous_task_id or (parent_task_id or ""),
+            primary_repository_id=primary_repository_id or (parent_item.primary_repository_id if parent_item else self.store.repository_id),
+            repository_ids=list(repository_ids or (parent_item.repository_ids if parent_item else [self.store.repository_id])),
             owner_agent_id=owner_agent_id,
-            supervisor_agent_id=owner_agent_id,
-            delegated_by_agent_id=owner_agent_id,
-            approved_by_agent_id=owner_agent_id,
+            supervisor_agent_id=parent_item.owner_agent_id if parent_item else owner_agent_id,
+            delegated_by_agent_id=parent_item.owner_agent_id if parent_item else owner_agent_id,
+            approved_by_agent_id=parent_item.owner_agent_id if parent_item else owner_agent_id,
             budget_reserved_tokens=0,
             budget_remaining_tokens=0,
             budget_reserved_ms=120_000,
+            acceptance_criteria=list(acceptance_criteria or []),
+            plan=list(plan or []),
+            depends_on=list(depends_on or []),
             blockers=[],
             wiring_required=wiring_required,
             wiring_reason=wiring_reason,
@@ -164,6 +191,9 @@ class TaskBoard:
             },
         )
         self.tasks[task_id] = task
+        if parent_item is not None:
+            _append_unique(parent_item.child_task_ids, [task_id])
+            parent_item.updated_at = utc_now()
         self._record("task.created", task)
         self.save()
         return task
@@ -321,6 +351,137 @@ class TaskBoard:
             self.tasks[task_id] = persisted
             return persisted
         return self.tasks[task_id]
+
+    def list_tasks(
+        self,
+        status: TaskStatus | None = None,
+        parent_task_id: str | None = None,
+        root_task_id: str | None = None,
+    ) -> list[TaskBoardItem]:
+        """List tasks with optional status, parent, or root filters."""
+        items = list(self.tasks.values())
+        if status is not None:
+            items = [t for t in items if t.status == status]
+        if parent_task_id is not None:
+            items = [t for t in items if t.parent_task_id == parent_task_id]
+        if root_task_id is not None:
+            items = [t for t in items if t.root_task_id == root_task_id]
+        return items
+
+    def update_task(
+        self,
+        task_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        priority: int | None = None,
+        progress: str | None = None,
+        owner_agent_id: str | None = None,
+        plan: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+        blockers: list[str] | None = None,
+        crossed_off: bool | None = None,
+        status: TaskStatus | None = None,
+        status_reason: str | None = None,
+    ) -> TaskBoardItem:
+        """Update task details, progress, or assignment atomically."""
+        task = self.get_task(task_id)
+        if title is not None:
+            task.title = str(title).strip()
+        if description is not None:
+            task.user_request = str(description).strip()
+            task.normalized_goal = str(description).strip()
+        if priority is not None:
+            task.priority = int(priority)
+        if progress is not None:
+            task.aggregate_progress = str(progress)
+        if owner_agent_id is not None:
+            task.owner_agent_id = str(owner_agent_id)
+        if plan is not None:
+            task.plan = list(plan)
+        if acceptance_criteria is not None:
+            task.acceptance_criteria = list(acceptance_criteria)
+        if blockers is not None:
+            task.blockers = list(blockers)
+        if crossed_off is not None:
+            task.crossed_off = bool(crossed_off)
+        if status is not None and status != task.status:
+            self.update_status(task_id, status, reason=status_reason)
+        else:
+            task.updated_at = utc_now()
+            self._record("task.updated", {"task_id": task_id})
+            self.save()
+        return task
+
+    def delete_task(self, task_id: str, *, cascade: bool = True) -> None:
+        """Safely delete a task and clean up dependencies and parent/child links."""
+        task = self.tasks.get(task_id) or self.store.repository.get_task_or_none(task_id)
+        if task is None:
+            return
+        if cascade and task.child_task_ids:
+            for child_id in list(task.child_task_ids):
+                self.delete_task(child_id, cascade=True)
+        if task.parent_task_id and task.parent_task_id in self.tasks:
+            parent = self.tasks[task.parent_task_id]
+            if task_id in parent.child_task_ids:
+                parent.child_task_ids.remove(task_id)
+                parent.updated_at = utc_now()
+        for other_task in self.tasks.values():
+            if task_id in other_task.depends_on:
+                other_task.depends_on.remove(task_id)
+                other_task.updated_at = utc_now()
+        if task_id in self.tasks:
+            del self.tasks[task_id]
+        self.store.repository.delete_task(task_id)
+        self._record("task.deleted", {"task_id": task_id})
+        self.save()
+
+    def add_subtask(
+        self,
+        parent_task_id: str,
+        title: str = "",
+        *,
+        description: str = "",
+        owner_agent_id: str | None = None,
+        acceptance_criteria: list[str] | None = None,
+        plan: list[str] | None = None,
+        depends_on: list[str] | None = None,
+        preferred_parallelism: str = "automatic",
+        relation_type: str = "followup",
+        integration_role: str = "",
+    ) -> TaskBoardItem:
+        """Add a subtask under a parent task with acceptance criteria and dependencies."""
+        return self.create_child_task(
+            parent_task_id,
+            title=title,
+            user_request=description,
+            owner_agent_id=owner_agent_id,
+            acceptance_criteria=acceptance_criteria,
+            plan=plan,
+            depends_on=depends_on,
+            preferred_parallelism=preferred_parallelism,
+            relation_type=relation_type,
+            integration_role=integration_role,
+        )
+
+    def add_dependency(self, task_id: str, depends_on_task_id: str) -> None:
+        """Add a prerequisite dependency to a task."""
+        if task_id == depends_on_task_id:
+            raise ValueError(f"Task {task_id} cannot depend on itself")
+        task = self.get_task(task_id)
+        _append_unique(task.depends_on, [depends_on_task_id])
+        task.updated_at = utc_now()
+        self._record("task.dependency_added", {"task_id": task_id, "depends_on": depends_on_task_id})
+        self.save()
+
+    def remove_dependency(self, task_id: str, depends_on_task_id: str) -> None:
+        """Remove a dependency from a task."""
+        task = self.get_task(task_id)
+        if depends_on_task_id in task.depends_on:
+            task.depends_on.remove(depends_on_task_id)
+            task.updated_at = utc_now()
+            self._record("task.dependency_removed", {"task_id": task_id, "depends_on": depends_on_task_id})
+            self.save()
 
     def update_status(self, task_id: str, status: TaskStatus, *, reason: str | None = None) -> None:
         task = self.get_task(task_id)
@@ -516,20 +677,157 @@ class TaskBoard:
     def reopen(self, task_id: str, *, reason: str) -> None:
         """Requeue a stopped task so the same identity can continue incomplete work.
 
-        FAILED, BLOCKED, and CANCELLED children of a multi-task job may reopen under
-        a validated same-task recovery decision so the job can restart from its first
-        incomplete step without inventing a new root identity.
+        FAILED, BLOCKED, CANCELLED, and unverified/reopened DONE tasks may reopen
+        under a model-directed recovery or replanning decision so the job can restart
+        without inventing a new root identity.
         """
         task = self.get_task(task_id)
-        if task.status not in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}:
+        if task.status not in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED, TaskStatus.DONE}:
             raise ValueError(f"task {task_id} is not in a reopenable state")
         task.status = TaskStatus.QUEUED
+        task.crossed_off = False
         task.blockers = []
         task.wiring_outcome = "pending"
         task.wiring_outcome_reason = ""
         task.updated_at = utc_now()
         self._record("task.reopened", {"task_id": task_id, "reason": reason})
         self.save()
+
+    def mark_completed(
+        self,
+        task_id: str,
+        *,
+        evidence: str | None = None,
+        result_summary: str | None = None,
+        cross_off: bool = True,
+    ) -> None:
+        """Mark a task completed and optionally record completion evidence and checklist cross-off."""
+        task = self.get_task(task_id)
+        if cross_off:
+            task.crossed_off = True
+        ev = evidence or result_summary
+        if ev:
+            self.add_evidence(task_id, str(ev))
+        if task.status != TaskStatus.DONE:
+            try:
+                self.update_status(task_id, TaskStatus.DONE, reason=ev or "task marked completed")
+            except Exception:
+                task.status = TaskStatus.DONE
+                task.updated_at = utc_now()
+                self._record("task.completed", {"task_id": task_id, "evidence": ev})
+                self.save()
+
+    def mark_crossed_off(self, task_id: str, crossed_off: bool = True) -> None:
+        """Toggle checklist crossing off without falsely asserting independent verification."""
+        task = self.get_task(task_id)
+        task.crossed_off = bool(crossed_off)
+        task.updated_at = utc_now()
+        self._record("task.crossed_off", {"task_id": task_id, "crossed_off": task.crossed_off})
+        self.save()
+
+    def verify_task(
+        self,
+        task_id: str,
+        *,
+        evidence: dict[str, Any] | str = "",
+        verifier: str = "verifier",
+        commands_run: list[str] | None = None,
+        commands: list[str] | None = None,
+        passed: bool = True,
+        summary: str = "",
+    ) -> VerificationResult:
+        """Verify task completion against acceptance criteria and record independent evidence."""
+        task = self.get_task(task_id)
+        ev_dict = evidence if isinstance(evidence, dict) else {}
+        summary_text = summary or (str(evidence) if isinstance(evidence, str) and evidence else str(ev_dict.get("summary") or "verification completed"))
+        failures = list(ev_dict.get("failures", [])) if not passed and ev_dict.get("failures") else ([] if passed else [summary_text])
+        actual_commands = commands_run or commands or ev_dict.get("commands_run") or []
+        v_result = VerificationResult(
+            verification_id=f"ver_{task_id}_{len(task.verification_results) + 1}",
+            task_id=task_id,
+            verified_by_agent_id=verifier,
+            commands_run=list(actual_commands),
+            passed=bool(passed),
+            summary=summary_text,
+            failures=failures,
+            risks=list(ev_dict.get("risks", [])),
+            execution_job_ids=list(ev_dict.get("execution_job_ids", [])),
+        )
+        task.verification_results.append(v_result)
+        task.verification_status = "passed" if passed else "failed"
+        task.implementation_verified = bool(passed)
+        task.integration_verified = bool(passed)
+        if ev_dict:
+            task.verification_provenance = dict(ev_dict)
+        if passed:
+            task.evidence.append(f"Verification passed: {summary_text}")
+            if task.status not in {TaskStatus.DONE, TaskStatus.CANCELLED}:
+                try:
+                    self.update_status(task_id, TaskStatus.VERIFYING, reason=f"Verification passed: {summary_text}")
+                    self.update_status(task_id, TaskStatus.DONE, reason=f"Verification passed: {summary_text}")
+                except Exception:
+                    task.status = TaskStatus.DONE
+                    task.updated_at = utc_now()
+                    self.save()
+        else:
+            fail_msg = f"Verification failed: {summary_text}"
+            _append_unique(task.blockers, [fail_msg])
+            task.status = TaskStatus.FAILED
+            task.updated_at = utc_now()
+            self._record("task.verification_failed", {"task_id": task_id, "summary": summary_text})
+            self.save()
+        self._record("verification.finished", {"task_id": task_id, "result": serialize(v_result)})
+        self.save()
+        return v_result
+
+    def mark_blocked(self, task_id: str, *, reason: str) -> None:
+        """Mark task blocked with an explanatory reason."""
+        self.update_status(task_id, TaskStatus.BLOCKED, reason=reason)
+
+    def mark_skipped(self, task_id: str, *, reason: str = "") -> None:
+        """Mark task skipped with an explanatory reason."""
+        self.update_status(task_id, TaskStatus.SKIPPED, reason=reason or "skipped by plan")
+
+    def mark_cancelled(self, task_id: str, *, reason: str = "") -> None:
+        """Mark task cancelled."""
+        self.update_status(task_id, TaskStatus.CANCELLED, reason=reason or "cancelled by user or supervisor")
+
+    def get_progress(self, root_task_id: str | None = None) -> TaskBoardProgress:
+        """Return live authoritative task progress metrics and items."""
+        target = self.list_tasks(root_task_id=root_task_id) if root_task_id else list(self.tasks.values())
+        total = len(target)
+        completed = sum(1 for t in target if t.status == TaskStatus.DONE or getattr(t, "crossed_off", False))
+        verified = sum(1 for t in target if t.verification_status == "passed")
+        crossed_off = sum(1 for t in target if getattr(t, "crossed_off", False))
+        in_progress = sum(1 for t in target if t.status in {TaskStatus.IN_PROGRESS, TaskStatus.VERIFYING})
+        blocked = sum(1 for t in target if t.status == TaskStatus.BLOCKED)
+        pending = sum(1 for t in target if t.status in {TaskStatus.NEW, TaskStatus.QUEUED, TaskStatus.WAITING_FOR_TOOLS})
+        percent = round((completed / total) * 100, 1) if total > 0 else 0.0
+        return TaskBoardProgress({
+            "root_task_id": root_task_id,
+            "total_tasks": total,
+            "completed_tasks": completed,
+            "verified_tasks": verified,
+            "crossed_off_tasks": crossed_off,
+            "in_progress_tasks": in_progress,
+            "blocked_tasks": blocked,
+            "pending_tasks": pending,
+            "percent_complete": percent,
+            "tasks": [
+                {
+                    "task_id": t.task_id,
+                    "title": t.title,
+                    "status": t.status.value,
+                    "crossed_off": getattr(t, "crossed_off", False),
+                    "verification_status": t.verification_status,
+                    "implementation_verified": t.implementation_verified,
+                    "blockers": list(t.blockers),
+                    "depends_on": list(t.depends_on),
+                    "child_task_ids": list(t.child_task_ids),
+                }
+                for t in target
+            ],
+        })
 
     def assign(self, task_id: str, agent_id: str) -> None:
         task = self.get_task(task_id)

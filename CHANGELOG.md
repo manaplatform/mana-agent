@@ -2,6 +2,49 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-18
+
+- Fixed UI/UX bug where open activity boxes unexpectedly collapsed on receiving new activity events:
+  - Preserved open/expanded state: when an activity box (`MainActivityBox`, `CodingActivityBox`, or Web Dashboard live chat activity container) is already open, incoming activity events (tool starts, tool progress, intermediate successes, terminal commands, coding operations) do **not** close or collapse the view.
+  - Preserved closed state: if an activity box was explicitly closed by the user, incoming events remain collapsed without forcing an unwanted reopening ("only when already open").
+  - Advancing to latest activity: when open, incoming activities automatically advance, scroll, and focus to the **latest activity** (`activity_log.scroll_end(animate=False)` in TUI; `stream.scrollTop = stream.scrollHeight`, `.activity-latest` visual highlight, and timeline auto-scroll in Web Dashboard).
+  - Fixed premature collapse in `ExecutionPanel`: removed intermediate `status in {"completed", "success"}` and `coding.terminal` checks that were erroneously treating single operation completions as turn-level terminations.
+  - Retained turn terminal collapse only at genuine turn completion (`turn.completed`, `turn.finished`, `turn.cancelled`) when the user has not explicitly chosen to keep the box open.
+  - Added regression tests in `tests/test_execution_trace.py` and `tests/dashboard/live_chat_reducer.test.mjs`.
+  - User verification required:
+    - `python -m pytest tests/test_execution_trace.py tests/test_tui_tool_card_layout.py -v`
+    - `node --test tests/dashboard/live_chat_reducer.test.mjs`
+
+- Bumped the package version to `0.3.0` and updated the README version badge.
+- Refactored Mana-Agent to a **Loop-Driven Architecture with TaskBoard as the State Authority**:
+  - Established the Architectural Triad:
+    - **Autonomous Loop (`AutonomousExecutionController`)**: Primary execution and decision-making engine. Owns the execution cycle, selects actions, and evaluates goal satisfaction independently of whether TaskBoard has pending items.
+    - **TaskBoard (`TaskBoard`)**: Supporting task-management workspace and single source of truth for task status, progress, subtasks, dependencies, blockers, and verification records. Never independently controls the loop.
+    - **Execution Supervisor (`ExecutionSupervisor`)**: Authoritative for runtime leases, attempts, heartbeat, fences, cancellation, checkpoints, and recovery.
+  - Enhanced `TaskBoard` (`src/mana_agent/multi_agent/taskboard/taskboard.py`):
+    - Added full CRUD, subtasks, dependencies (`depends_on`), descriptions, blockers, and live progress reporting (`get_progress()`).
+    - Added `crossed_off: bool` to `TaskBoardItem` and persisted it via `WorkspaceRepository` extra attributes without database schema churn.
+    - Implemented `mark_completed()`, `mark_crossed_off()`, `verify_task()`, and updated `reopen()` to support reopening tasks upon verification failure during replanning.
+    - Enforced verification invariant: a checked-off task is never equated with verified completion; verification requires independent executed evidence.
+  - Implemented Model-Directed TaskBoard Operations:
+    - Created `TaskBoardOperationsHandler` (`src/mana_agent/multi_agent/taskboard/operations.py`) and registered LangChain structured tools (`src/mana_agent/tools/taskboard_tools.py`) under category `"taskboard"`.
+  - Upgraded Autonomous Execution Controller (`src/mana_agent/execution/autonomous_controller.py`):
+    - Injected `taskboard`, `taskboard_operations`, and `taskboard_progress` into step execution context.
+    - Synchronized task creation, cancellations, tool events, files touched, and evidence with TaskBoard.
+    - Enforced that `FINALIZE` triggers `REPLAN` and reopens tasks on TaskBoard if verification failed.
+  - Updated `ContinuationEvaluator` (`src/mana_agent/execution/continuation_evaluator.py`):
+    - Injected TaskBoard progress summary into continuation evaluation prompts.
+    - Added Rule 10 requiring model to evaluate user goal satisfaction independently of crossed-off items.
+  - Integrated `MainAgent` (`src/mana_agent/multi_agent/agents/main_agent.py`):
+    - Instantiated `AutonomousExecutionController` with `TaskBoard` and `ExecutionSupervisor`.
+    - Added `run_autonomous()` and `_build_autonomous_step_runner()` delegating execution cycles to the autonomous loop while orchestrating specialist agents (Planner, Coding, Verifier, Reviewer).
+  - Upgraded Web Dashboard TaskBoard View (`src/mana_agent/dashboard/views/taskboard.py`):
+    - Built lightweight interactive workspace with progress metrics, status filter, search, crossing-off checkboxes, expandable details, and action buttons.
+    - Strictly separated task management workspace from durable supervisor state and execution traces into dedicated tabs.
+  - Updated repository instructions (`AGENTS.md`) and architecture documentation (`docs/08-architecture.md`).
+  - User verification required:
+    - `python -m pytest tests/execution/test_autonomous_loop_taskboard.py tests/execution/test_autonomous_controller.py -v`
+
 ## 2026-10-17
 
 - Bumped the package version to `0.2.1` and updated the README version badge.

@@ -16,6 +16,7 @@ Mana-Agent is a repository-aware, model-directed assistant for general tasks—n
 - Never confuse an attempted action, a tool response, a passing test, and a verified user goal.
 - Show activity in consolidated, structured UI surfaces without flooding the conversation with individual tool cards.
 - Keep secrets, approvals, spending limits, sandbox boundaries, and irreversible side effects under enforceable controls.
+- **Architectural Triad Authority:** Autonomous Loop decides and executes. TaskBoard records, manages, and exposes the authoritative task state and progress. Execution Supervisor enforces runtime lifecycle and safety. None of these components may independently duplicate another component's responsibilities.
 
 ---
 
@@ -43,7 +44,7 @@ Reuse existing typed models, registries, services, tool adapters, event contract
 For substantial work, build a concise plan covering affected areas, dependencies, model decisions, safety risks, acceptance evidence, and user verification commands. Small, obvious edits need only a short implementation outline. Plan mode itself must not make repository changes without an authorized transition to execution.
 
 ### Rule 08 — Maintain a single task source of truth
-Create stable task IDs, parent/child links, explicit owners, dependencies, and completion criteria. Deduplicate equivalent work against the existing taskboard and supervisor state. Do not create phantom tasks or use task creation as a substitute for carrying out already approved work.
+TaskBoard is the single source of truth for task status, progress, subtasks, dependencies, blockers, and verification records; Execution Supervisor enforces runtime lifecycle, leases, fencing, and safety; and the Autonomous Loop is the primary execution brain. Create stable task IDs, parent/child links, explicit owners, dependencies, and completion criteria. Deduplicate equivalent work against the existing taskboard and supervisor state. Do not create phantom tasks or use task creation as a substitute for carrying out already approved work. The Autonomous Loop reads TaskBoard state during execution, updates it dynamically via model-directed operations, and evaluates goal satisfaction independently of whether pending items remain on the board. Never equate a checked-off task with successful independent verification.
 
 ### Rule 09 — Distinguish facts from hypotheses
 Label confirmed behavior, observed evidence, inferred root causes, and unverified possibilities separately. Ground repository claims in read files or command output. Never claim a modification is deployed, a test passed, or a user goal is met without corresponding evidence.
@@ -92,7 +93,7 @@ Before sending messages, changing accounts, deleting data, publishing, deploying
 ## III. Universal autonomous execution
 
 ### Rule 23 — Autonomous execution applies to every domain
-The `model_directed` continuation loop covers repository tasks, research, documents, API workflows, analysis, multi-agent operations, and other supported activities—not only coding. The runtime must not force a coding-oriented loop onto unrelated task types.
+The `model_directed` continuation loop is the primary execution and decision-making brain across repository tasks, research, documents, API workflows, analysis, multi-agent operations, and other supported activities—not only coding. TaskBoard is its supporting task workspace and authoritative progress record. The Loop reads TaskBoard progress and determines next actions dynamically; TaskBoard must never independently control loop execution or select tools. The runtime must not force a coding-oriented loop onto unrelated task types.
 
 ### Rule 24 — Use typed continuation actions
 After meaningful work, request and validate a continuation decision such as `CONTINUE`, `REPLAN`, `FINALIZE`, `WAIT_FOR_USER`, or `BLOCKED`. Include task identity, progress evidence, remaining work, safety, and verification status. A malformed or contradictory decision must stop safely.
