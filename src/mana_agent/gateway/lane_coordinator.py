@@ -335,6 +335,7 @@ class LaneCoordinator:
         self._locks: dict[str, LockLease] = {}
         self._waiters: list[dict[str, Any]] = []
         self._wait_sequence = 0
+        self._claiming_waiters: dict[str, tuple[LaneId, float]] = {}
         supervisor_config = ExecutionSupervisorConfig.from_settings(Settings())
         self.execution_supervisor = execution_supervisor or ExecutionSupervisor(
             supervisor_config,
@@ -672,6 +673,8 @@ class LaneCoordinator:
                     except LaneCapacityError:
                         capacity_available = False
                     if capacity_available and self._next_waiter_id() == waiter["waiter_id"]:
+                        if waiter_persisted:
+                            self._claiming_waiters[waiter["waiter_id"]] = (contract.lane_id, time.monotonic())
                         break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -836,6 +839,7 @@ class LaneCoordinator:
                 routing_decision_id=effective_routing_decision_id, provider=provider, task_type=task_type,
                 trigger_turn_id=trigger_turn_id, relation_type=relation_type, previous_task_id=previous_task_id,
                 user_message_id=user_message_id,
+                waiter_id=waiter["waiter_id"],
                 task_created_at=waiter["created_at"],
                 scheduled_at=scheduled_at_iso,
                 lane_history=[{"lane_id": lane_id.value, "state": "queued", "at": scheduled_at_iso}],
@@ -905,6 +909,8 @@ class LaneCoordinator:
             self.lock_manager.release_task(execution.task_id)
             raise
         with self._condition:
+            if getattr(execution, "waiter_id", ""):
+                self._claiming_waiters.pop(execution.waiter_id, None)
             execution.state = LaneTaskState.RUNNING
             execution.worker_id = f"gateway:{os.getpid()}:{threading.get_ident()}"
             execution.worker_claimed_at = _iso()
@@ -1066,6 +1072,8 @@ class LaneCoordinator:
             effective_provider_metadata = verification_state.get("codex_metadata")
         with self._condition:
             execution = self._executions[task_id]
+            if getattr(execution, "waiter_id", ""):
+                self._claiming_waiters.pop(execution.waiter_id, None)
             if state == LaneTaskState.COMPLETED and execution.heartbeat_failure:
                 state = LaneTaskState.FAILED
                 error = execution.heartbeat_failure
@@ -2641,10 +2649,22 @@ class LaneCoordinator:
             self.emit("lock.expired", task_id=lease.task_id, lane_id=None, lock_id=lease.lease_id)
 
     def _assert_capacity(self, contract: LaneContract, model: str, *, exclude_task_id: str = "") -> None:
+        now = time.monotonic()
+        stale_waiters = [
+            wid for wid, (_, ts) in getattr(self, "_claiming_waiters", {}).items()
+            if now - ts > 5.0
+        ]
+        for wid in stale_waiters:
+            self._claiming_waiters.pop(wid, None)
+
         active = self._active_capacity_executions(exclude_task_id=exclude_task_id)
-        if len(active) >= self.global_worker_limit:
+        claiming = sum(
+            1 for (lane, _) in getattr(self, "_claiming_waiters", {}).values()
+            if lane == contract.lane_id
+        )
+        if len(active) + claiming >= self.global_worker_limit:
             raise LaneCapacityError("global gateway worker limit reached")
-        if sum(item.owning_lane == contract.lane_id for item in active) >= contract.max_concurrent_jobs:
+        if sum(item.owning_lane == contract.lane_id for item in active) + claiming >= contract.max_concurrent_jobs:
             raise LaneCapacityError(f"lane {contract.lane_id.value} concurrency limit reached")
         if model and model in self.provider_limits and sum(item.model == model for item in active) >= self.provider_limits[model]:
             raise LaneCapacityError(f"model/provider concurrency limit reached for {model}")

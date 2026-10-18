@@ -81,6 +81,14 @@ Footer {
     color: #e2e8f0;
 }
 
+.execution-summary {
+    margin: 0 0 1 0;
+    padding: 1;
+    background: #111e2e;
+    border-left: thick #22c55e;
+    color: #e2e8f0;
+}
+
 /* Tool cards styling is also in the Python DEFAULT_CSS of ToolCard */
 ToolCard {
     margin: 0 2 1 2;
@@ -115,6 +123,31 @@ ToolCard .tool-call-header {
 .tool-card-header {
     text-style: bold;
     padding: 0 1;
+}
+
+/* Persistent Activity Boxes */
+MainActivityBox {
+    margin: 0 1 1 1;
+    border: round #3b82f6 50%;
+    background: #111827;
+    height: auto;
+}
+
+MainActivityBox Collapsible {
+    background: #111827;
+    border: none;
+}
+
+CodingActivityBox {
+    margin: 0 1 1 1;
+    border: round #10b981 50%;
+    background: #0f172a;
+    height: auto;
+}
+
+CodingActivityBox Collapsible {
+    background: #0f172a;
+    border: none;
 }
 
 /* Scrollbar */

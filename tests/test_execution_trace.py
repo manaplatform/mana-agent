@@ -410,3 +410,24 @@ def test_chat_log_places_panel_under_user_message_and_clears_on_new() -> None:
             assert chat_log.get_execution_panel("turn-user-1") is None
 
     asyncio.run(run())
+
+
+def test_execution_trace_and_activity_boxes_handle_string_args_without_error() -> None:
+    """Verify that string (JSON-encoded) args in ToolCallEvent do not trigger AttributeError."""
+    trace = ExecutionTrace(turn_id="turn-str-args")
+    trace.apply_event({
+        "event_id": "tc-string-args",
+        "event_type": "coding.progress",
+        "title": "Code: git_status",
+        "tool_name": "git_status",
+        "tool_call_id": "call_123",
+        "status": "running",
+        "detail": '{"repo_path": "/Users/ah/Documents/mana-agent"}',
+        "backend": "coding",
+        "payload": {
+            "args": '{"repo_path": "/Users/ah/Documents/mana-agent", "path": "src/mana_agent/app.py"}',
+        },
+    })
+    assert len(trace.coding_events) == 1
+    assert "src/mana_agent/app.py" in trace.changed_files
+

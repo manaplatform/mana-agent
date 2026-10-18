@@ -212,10 +212,20 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
             await pilot.pause()
             card = app.query_one(ToolCard)
             collapsible = card.query_one(Collapsible)
+            # Allow initial layout pass to settle across platforms (e.g. Windows Proactor)
+            for _ in range(5):
+                if card.size.height > 0:
+                    break
+                await pilot.pause()
             collapsed_height = card.size.height
+            assert collapsed_height > 0
 
             collapsible.collapsed = False
             await pilot.pause()
+            for _ in range(5):
+                if card.size.height > collapsed_height:
+                    break
+                await pilot.pause()
             expanded_height = card.size.height
             assert expanded_height > collapsed_height
 
@@ -231,6 +241,13 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
                 )
             )
             await pilot.pause()
+            # Dynamic text load and container virtual_size recalculation is a
+            # multi-phase operation in Textual across different event loop runners (e.g. Windows Proactor).
+            for _ in range(5):
+                chat_log = app.query_one("#chat-log")
+                if card.size.height >= expanded_height and chat_log.virtual_size.height >= card.size.height:
+                    break
+                await pilot.pause()
             result_body = card.query_one(".tool-result-body", SelectableText)
             assert "line 39: detailed live output" in _rendered_source(result_body)
             assert card.size.height >= expanded_height
@@ -238,14 +255,27 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
 
             collapsible.collapsed = True
             await pilot.pause()
+            for _ in range(5):
+                if card.size.height == collapsed_height:
+                    break
+                await pilot.pause()
             assert card.size.height == collapsed_height
 
             collapsible.collapsed = False
             await pilot.pause()
+            for _ in range(5):
+                if card.size.height >= expanded_height:
+                    break
+                await pilot.pause()
             assert card.size.height >= expanded_height
 
             await pilot.resize_terminal(70, 24)
             await pilot.pause()
+            for _ in range(5):
+                chat_log = app.query_one("#chat-log")
+                if chat_log.virtual_size.height >= card.size.height:
+                    break
+                await pilot.pause()
             assert "line 39: detailed live output" in _rendered_source(result_body)
             assert app.query_one("#chat-log").virtual_size.height >= card.size.height
 
@@ -258,6 +288,7 @@ def test_tool_card_remeasures_after_toggle_live_updates_and_resize() -> None:
                     summary="failed",
                 )
             )
+            await pilot.pause()
             await pilot.pause()
             assert "RuntimeError: failed" in _rendered_source(result_body)
             assert card.has_class("tool-result-error") is False
@@ -374,6 +405,66 @@ def test_coding_tools_only_show_in_execution_panel_and_do_not_mount_cards() -> N
             assert "Code: edit_file" in activity_text
             assert "Code: shell" in activity_text
             assert "editing line 42" in activity_text or "edit_file" in activity_text
+
+    _run(run())
+
+
+def test_coding_finish_renders_summary_card_and_response_card() -> None:
+    history = ChatHistory()
+    app = ManaChatApp(history=history)
+
+    async def run() -> None:
+        async with app.run_test(size=(80, 30)) as pilot:
+            history.add(UserMessageEvent(content="fix the bug in src/main.py", turn_id="turn-finish-1"))
+            await pilot.pause()
+
+            history.add(
+                CodingActivityEvent(
+                    turn_id="turn-finish-1",
+                    activity={
+                        "event_id": "coding-step-1",
+                        "event_type": "coding.progress",
+                        "backend": "codex",
+                        "status": "success",
+                        "title": "edit_file",
+                        "path": "src/main.py",
+                    },
+                )
+            )
+            await pilot.pause()
+
+            # Finish coding
+            history.add(
+                CodingActivityEvent(
+                    turn_id="turn-finish-1",
+                    activity={
+                        "event_id": "coding-finish-1",
+                        "event_type": "turn.completed",
+                        "backend": "codex",
+                        "status": "success",
+                        "title": "Coding turn completed",
+                    },
+                )
+            )
+            # Assistant response card
+            history.add(
+                AssistantMessageEvent(
+                    content="Bug successfully fixed in `src/main.py`.",
+                    turn_id="turn-finish-1",
+                )
+            )
+            await pilot.pause()
+
+            panel = app.query_one(ExecutionPanel)
+            assert panel.summary_card is not None
+            assert panel.summary_card.display is True
+            summary_render = str(panel.summary_card.render())
+            assert "Coding complete" in summary_render
+            assert "src/main.py" in summary_render
+
+            assistant_card = list(app.query(".assistant-message"))[-1]
+            assert assistant_card is not None
+            assert "Bug successfully fixed" in assistant_card.text
 
     _run(run())
 

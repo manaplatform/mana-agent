@@ -476,4 +476,110 @@ test("optimistic and hydrated messages preserve attachments", () => {
   assert.deepEqual(hydMsg.attachments, [attachment]);
 });
 
+test("main activity box aggregates general operations and coding activity box aggregates coding operations", () => {
+  const state = createState("session-boxes");
+  reduce(state, {
+    type: "optimistic",
+    message: { message_id: "user-box-1", content: "Implement feature" },
+  });
+
+  // General tool call
+  reduce(state, {
+    type: "event",
+    event: event(1, "tool.started", {
+      event_id: "t-search-1",
+      execution_id: "user-box-1",
+      metadata: { tool_name: "web_search", tool_call_id: "t-search-1", args_summary: "api docs" },
+    }),
+  });
+  reduce(state, {
+    type: "event",
+    event: event(2, "tool.finished", {
+      event_id: "t-search-1",
+      execution_id: "user-box-1",
+      status: "success",
+      duration_ms: 150,
+      metadata: { tool_name: "web_search", tool_call_id: "t-search-1", result_summary: "found results" },
+    }),
+  });
+
+  // Coding tool call
+  reduce(state, {
+    type: "event",
+    event: event(3, "tool.started", {
+      event_id: "t-edit-1",
+      execution_id: "user-box-1",
+      metadata: { tool_name: "edit_file", tool_call_id: "t-edit-1", path: "src/app.py" },
+    }),
+  });
+  reduce(state, {
+    type: "event",
+    event: event(4, "tool.finished", {
+      event_id: "t-edit-1",
+      execution_id: "user-box-1",
+      status: "success",
+      duration_ms: 80,
+      metadata: { tool_name: "edit_file", tool_call_id: "t-edit-1", path: "src/app.py", result_summary: "modified src/app.py" },
+    }),
+  });
+
+  // Terminal command
+  reduce(state, {
+    type: "event",
+    event: event(5, "command.executed", {
+      event_id: "cmd-1",
+      execution_id: "user-box-1",
+      command: "pytest tests/",
+      status: "success",
+      metadata: { command: "pytest tests/", backend: "internal" },
+    }),
+  });
+
+  const trace = snapshot(state).executionTraces[0];
+  assert.ok(trace);
+  assert.equal(trace.mainBox.events.length, 1);
+  assert.equal(trace.mainBox.events[0].tool_name, "web_search");
+  assert.equal(trace.mainBox.events[0].status, "completed");
+
+  assert.ok(trace.codingBox.events.length >= 2);
+  assert.ok(trace.codingBox.changedFiles.includes("src/app.py"));
+  assert.ok(trace.codingBox.commands.includes("pytest tests/"));
+  assert.equal(trace.codingBox.backend, "internal");
+});
+
+test("main activity box scales cleanly for 100+ consecutive tool calls", () => {
+  const state = createState("session-100-tools");
+  reduce(state, {
+    type: "optimistic",
+    message: { message_id: "user-turn-100", content: "Run batch operations" },
+  });
+
+  for (let i = 1; i <= 105; i++) {
+    reduce(state, {
+      type: "event",
+      event: event(i * 2, "tool.started", {
+        event_id: `tool-${i}`,
+        execution_id: "user-turn-100",
+        metadata: { tool_name: "lookup_data", tool_call_id: `tool-${i}`, args_summary: `item-${i}` },
+      }),
+    });
+    reduce(state, {
+      type: "event",
+      event: event(i * 2 + 1, "tool.finished", {
+        event_id: `tool-${i}`,
+        execution_id: "user-turn-100",
+        status: "success",
+        duration_ms: 20,
+        metadata: { tool_name: "lookup_data", tool_call_id: `tool-${i}`, result_summary: `result-${i}` },
+      }),
+    });
+  }
+
+  const trace = snapshot(state).executionTraces[0];
+  assert.ok(trace);
+  assert.equal(trace.mainBox.events.length, 105);
+  assert.equal(trace.mainBox.status, "completed");
+});
+
+
 
