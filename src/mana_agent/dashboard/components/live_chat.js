@@ -988,7 +988,14 @@
         .main-activity-box>summary,.coding-activity-box>summary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:600;color:#e2e8f0;user-select:none}
         .activity-box-title{font-size:13px;font-weight:600}
         .activity-box-badge{background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;font-size:11px;color:#94a3b8}
-        .activity-stream{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto}
+        .activity-stream{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto;scroll-behavior:smooth}
+        .activity-event-row{display:flex;flex-direction:column;gap:2px;padding:4px 6px;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px;border-radius:4px;transition:background 0.2s}
+        .activity-event-row:last-child{border-bottom:none}
+        .activity-event-row.activity-latest{background:rgba(59,130,246,0.12);border-left:2px solid #3b82f6}
+        .activity-event-header{display:flex;align-items:center;justify-content:space-between;gap:6px}
+        .activity-event-title{display:flex;align-items:center;gap:6px;font-weight:500;color:#cbd5e1}
+        .activity-event-details{margin-top:4px;padding:4px 6px;background:rgba(0,0,0,0.2);border-radius:4px}
+        .activity-event-details summary{cursor:pointer;color:#93c5fd;font-size:11px;user-select:none}
         .activity-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px}
         .activity-row:last-child{border-bottom:none}
         .activity-row-title{font-weight:500;color:#93c5fd}
@@ -1153,9 +1160,34 @@
       const node = document.createElement("details");
       node.className = "main-activity-box";
       const isRunning = box.status === "running" || (!trace.isCompleted && !trace.isFailed && !trace.isCancelled);
-      node.open = activityBoxState.has(key) ? activityBoxState.get(key) : isRunning;
+
+      const getBoxOpen = () => {
+        if (activityBoxState.has(key)) {
+          return activityBoxState.get(key);
+        }
+        for (const alias of (trace.aliases || [])) {
+          const aliasKey = `${alias}:main`;
+          if (activityBoxState.has(aliasKey)) {
+            return activityBoxState.get(aliasKey);
+          }
+        }
+        // First render: initialize from isRunning and persist so new activities don't close it
+        const initial = isRunning;
+        setBoxOpen(initial);
+        return initial;
+      };
+
+      const setBoxOpen = (openVal) => {
+        activityBoxState.set(key, openVal);
+        for (const alias of (trace.aliases || [])) {
+          activityBoxState.set(`${alias}:main`, openVal);
+        }
+      };
+
+      const isOpen = getBoxOpen();
+      node.open = isOpen;
       node.addEventListener("toggle", () => {
-        activityBoxState.set(key, node.open);
+        setBoxOpen(node.open);
       });
 
       const summary = document.createElement("summary");
@@ -1253,6 +1285,11 @@
         if (hasDetails) {
           const det = document.createElement("details");
           det.className = "activity-event-details";
+          const detKey = `${key}:det:${grp.title}:${grp.status}`;
+          det.open = activityBoxState.get(detKey) === true;
+          det.addEventListener("toggle", () => {
+            activityBoxState.set(detKey, det.open);
+          });
           addText(det, "summary", "Details");
           for (const e of grp.events) {
             const meta = e.metadata || {};
@@ -1267,6 +1304,21 @@
         stream.appendChild(row);
       }
       node.appendChild(stream);
+      if (node.open) {
+        stream.scrollTop = stream.scrollHeight;
+        if (stream.lastElementChild) {
+          stream.lastElementChild.classList.add("activity-latest");
+        }
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => {
+            stream.scrollTop = stream.scrollHeight;
+            const latest = stream.querySelector(".activity-latest") || stream.lastElementChild;
+            if (latest && typeof latest.scrollIntoView === "function") {
+              latest.scrollIntoView({ block: "nearest", behavior: "auto" });
+            }
+          });
+        }
+      }
       return node;
     };
 
@@ -1282,9 +1334,34 @@
       const node = document.createElement("details");
       node.className = "coding-activity-box";
       const isRunning = box.status === "running" || (!trace.isCompleted && !trace.isFailed && !trace.isCancelled);
-      node.open = activityBoxState.has(key) ? activityBoxState.get(key) : isRunning;
+
+      const getBoxOpen = () => {
+        if (activityBoxState.has(key)) {
+          return activityBoxState.get(key);
+        }
+        for (const alias of (trace.aliases || [])) {
+          const aliasKey = `${alias}:coding`;
+          if (activityBoxState.has(aliasKey)) {
+            return activityBoxState.get(aliasKey);
+          }
+        }
+        // First render: initialize from isRunning and persist so new activities don't close it
+        const initial = isRunning;
+        setBoxOpen(initial);
+        return initial;
+      };
+
+      const setBoxOpen = (openVal) => {
+        activityBoxState.set(key, openVal);
+        for (const alias of (trace.aliases || [])) {
+          activityBoxState.set(`${alias}:coding`, openVal);
+        }
+      };
+
+      const isOpen = getBoxOpen();
+      node.open = isOpen;
       node.addEventListener("toggle", () => {
-        activityBoxState.set(key, node.open);
+        setBoxOpen(node.open);
       });
 
       const summary = document.createElement("summary");
@@ -1397,6 +1474,11 @@
           if (hasDetails) {
             const det = document.createElement("details");
             det.className = "activity-event-details";
+            const detKey = `${key}:det:${grp.title}:${grp.status}`;
+            det.open = activityBoxState.get(detKey) === true;
+            det.addEventListener("toggle", () => {
+              activityBoxState.set(detKey, det.open);
+            });
             addText(det, "summary", "Details");
             for (const e of grp.events) {
               const meta = e.metadata || {};
@@ -1412,6 +1494,21 @@
           stream.appendChild(row);
         }
         node.appendChild(stream);
+        if (node.open) {
+          stream.scrollTop = stream.scrollHeight;
+          if (stream.lastElementChild) {
+            stream.lastElementChild.classList.add("activity-latest");
+          }
+          if (typeof requestAnimationFrame === "function") {
+            requestAnimationFrame(() => {
+              stream.scrollTop = stream.scrollHeight;
+              const latest = stream.querySelector(".activity-latest") || stream.lastElementChild;
+              if (latest && typeof latest.scrollIntoView === "function") {
+                latest.scrollIntoView({ block: "nearest", behavior: "auto" });
+              }
+            });
+          }
+        }
       }
 
       if (box.commands && box.commands.length > 0) {
@@ -1625,7 +1722,15 @@
       contextMeter.textContent = budget.context_window
         ? `ctx ${budget.used_tokens || 0}/${budget.context_window} (${percent}%) · schema ${breakdown.schema_tokens || budget.schema_tokens || 0} · ${exact} $${Number(budget.cumulative_cost || 0).toFixed(4)}${budget.remaining_cost == null ? "" : ` · $${Number(budget.remaining_cost).toFixed(4)} left`}`
         : "";
-      if (nearBottom) timeline.scrollTop = timeline.scrollHeight;
+      const anyOpen = [...activityBoxState.entries()].some(([k, v]) => v === true && (k.endsWith(":main") || k.endsWith(":coding")));
+      if (nearBottom || anyOpen) {
+        timeline.scrollTop = timeline.scrollHeight;
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => {
+            timeline.scrollTop = timeline.scrollHeight;
+          });
+        }
+      }
     };
 
     const dispatchEvent = (event) => { reduce(state, { type: "event", event }); render(); };

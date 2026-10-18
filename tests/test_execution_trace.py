@@ -431,3 +431,92 @@ def test_execution_trace_and_activity_boxes_handle_string_args_without_error() -
     assert len(trace.coding_events) == 1
     assert "src/mana_agent/app.py" in trace.changed_files
 
+
+def test_activity_box_stays_open_on_new_activity_and_scrolls_to_latest() -> None:
+    """Verify that when an activity box is open, receiving new activity does NOT close it,
+    only advances/scrolls to the latest activity, and preserves user collapse choices."""
+    panel = ExecutionPanel(turn_id="turn-open-test")
+
+    # 1. Start first tool activity - box is open
+    panel.update_trace_event({
+        "event_id": "call-1",
+        "event_type": "tool.started",
+        "tool_name": "web_search",
+        "tool_call_id": "c1",
+        "status": "running",
+        "detail": "searching web",
+    })
+    assert panel.main_box.details.collapsed is False
+
+    # 2. Complete first tool with success - MUST NOT CLOSE
+    panel.update_trace_event({
+        "event_id": "res-1",
+        "event_type": "tool.finished",
+        "tool_name": "web_search",
+        "tool_call_id": "c1",
+        "status": "success",
+        "detail": "found 5 links",
+    })
+    assert panel.main_box.details.collapsed is False, "MainActivityBox should remain open after tool success"
+
+    # 3. New tool activity arrives - MUST NOT CLOSE, must show latest activity
+    panel.update_trace_event({
+        "event_id": "call-2",
+        "event_type": "tool.started",
+        "tool_name": "fetch_page",
+        "tool_call_id": "c2",
+        "status": "running",
+        "detail": "fetching page",
+    })
+    assert panel.main_box.details.collapsed is False
+    assert "fetch_page" in panel.main_box.activity_log.text
+
+    # 4. Coding activity arrives and completes with coding.terminal - MUST NOT CLOSE coding box
+    panel.update_trace_event({
+        "event_id": "code-1",
+        "event_type": "command.started",
+        "status": "running",
+        "command": "git status",
+        "title": "git status",
+    })
+    assert panel.coding_box.details.collapsed is False
+
+    panel.update_trace_event({
+        "event_id": "code-2",
+        "event_type": "coding.terminal",
+        "status": "success",
+        "command": "git status",
+        "title": "git status",
+    })
+    assert panel.coding_box.details.collapsed is False, "CodingActivityBox should remain open after coding.terminal"
+
+    # 5. User explicitly collapses main activity box
+    panel.main_box.details.collapsed = True
+    panel.main_box._user_collapsed = True
+
+    # 6. New activity arrives - MUST NOT force open if user collapsed it
+    panel.update_trace_event({
+        "event_id": "call-3",
+        "event_type": "tool.started",
+        "tool_name": "calculator",
+        "tool_call_id": "c3",
+        "status": "running",
+    })
+    assert panel.main_box.details.collapsed is True, "MainActivityBox should stay closed if user explicitly collapsed it"
+
+    # 7. User explicitly reopens main activity box
+    panel.main_box.details.collapsed = False
+    panel.main_box._user_collapsed = False
+
+    # 8. New activity arrives - stays open
+    panel.update_trace_event({
+        "event_id": "res-3",
+        "event_type": "tool.finished",
+        "tool_name": "calculator",
+        "tool_call_id": "c3",
+        "status": "success",
+    })
+    assert panel.main_box.details.collapsed is False, "MainActivityBox should stay open when user explicitly opened it"
+    assert "calculator" in panel.main_box.activity_log.text
+
+

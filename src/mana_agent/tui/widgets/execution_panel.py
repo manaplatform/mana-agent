@@ -204,13 +204,13 @@ class ExecutionPanel(Vertical):
         self.coding_box.display = len(self.coding_box.events) > 0
         self.main_box.display = len(self.main_box.events) > 0
 
-        is_terminal = event_type in {"turn.completed", "turn.finished", "turn.cancelled", "error", "coding.terminal"} or status in {"completed", "success"}
-        if is_terminal:
-            if self.details:
+        is_turn_terminal = event_type in {"turn.completed", "turn.finished", "turn.cancelled"}
+        if is_turn_terminal:
+            if self.details and getattr(self.coding_box, "_user_collapsed", None) is not False:
                 self.details.collapsed = True
-            if self.coding_box.details:
+            if self.coding_box.details and getattr(self.coding_box, "_user_collapsed", None) is not False:
                 self.coding_box.details.collapsed = True
-            if self.main_box.details:
+            if self.main_box.details and getattr(self.main_box, "_user_collapsed", None) is not False:
                 self.main_box.details.collapsed = True
 
             has_coding = len(self.coding_box.events) > 0 or len(self.coding_box.changed_files) > 0
@@ -229,6 +229,18 @@ class ExecutionPanel(Vertical):
                 self.summary_card.update("")
                 self.summary_card.display = False
         else:
+            # During active execution (new activities arriving):
+            # Do NOT close if already open; scroll to latest activity.
+            if self.coding_box.details and not self.coding_box.details.collapsed:
+                try:
+                    self.coding_box.activity_log.scroll_end(animate=False)
+                except Exception:
+                    pass
+            if self.main_box.details and not self.main_box.details.collapsed:
+                try:
+                    self.main_box.activity_log.scroll_end(animate=False)
+                except Exception:
+                    pass
             self.summary_card.update("")
             self.summary_card.display = False
 

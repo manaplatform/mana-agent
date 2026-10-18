@@ -49,6 +49,9 @@ Critical Rules:
    or made no observable advancement toward the goal.
 8. safe_to_continue must be true for CONTINUE, REPLAN, and FINALIZE; false for BLOCKED.
 9. Return JSON only, with no markdown fences, no conversational prose, and no fallback defaults.
+10. Read taskboard_summary if present to inspect authoritative task progress. A checked-off task is not
+    necessarily independently verified; ensure verification requirements are met before FINALIZE. If all
+    current taskboard tasks are done but the user's overall goal is not yet satisfied, select CONTINUE or REPLAN.
 """
 
 
@@ -90,6 +93,7 @@ class ContinuationEvaluator:
         soft_limit_reached: bool = False,
         consecutive_no_progress_cycles: int = 0,
         independent_verification_status: str | None = None,
+        taskboard_progress: dict[str, Any] | None = None,
     ) -> ContinuationDecision:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise ContinuationDecisionError(
@@ -97,7 +101,7 @@ class ContinuationEvaluator:
                 "Reason: decision model is unavailable."
             )
 
-        payload = {
+        payload: dict[str, Any] = {
             "task_id": task_id,
             "user_goal": user_goal,
             "step_output": step_output,
@@ -116,6 +120,24 @@ class ContinuationEvaluator:
             "consecutive_no_progress_cycles": consecutive_no_progress_cycles,
             "independent_verification_status": independent_verification_status,
         }
+        if taskboard_progress:
+            payload["taskboard_summary"] = {
+                "total_tasks": taskboard_progress.get("total_tasks", 0),
+                "completed_tasks": taskboard_progress.get("completed_tasks", 0),
+                "verified_tasks": taskboard_progress.get("verified_tasks", 0),
+                "percent_complete": taskboard_progress.get("percent_complete", 0.0),
+                "tasks": [
+                    {
+                        "task_id": t.get("task_id"),
+                        "title": t.get("title"),
+                        "status": t.get("status"),
+                        "crossed_off": t.get("crossed_off"),
+                        "verification_status": t.get("verification_status"),
+                        "blockers": t.get("blockers"),
+                    }
+                    for t in (taskboard_progress.get("tasks") or [])
+                ],
+            }
 
         messages = [
             SystemMessage(content=_CONTINUATION_PROMPT),

@@ -1364,6 +1364,7 @@ class AgentChatGateway:
         self._autonomous_controller = AutonomousExecutionController(
             config=AutonomousExecutionConfig(),
             supervisor=self._lane_coordinator.execution_supervisor,
+            taskboard=self._lane_coordinator.taskboard,
             accounting_service=getattr(self._stack.context_cost_governor, "accounting", None),
             context_governor=self._stack.context_cost_governor,
             compactor=getattr(self, "_context_compactor", None),

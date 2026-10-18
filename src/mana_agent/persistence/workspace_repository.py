@@ -122,6 +122,7 @@ class WorkspaceRepository:
             "cost_by_queue_job_id": task.cost_by_queue_job_id,
             "memory_status": task.memory_status,
             "duration_breakdown": task.duration_breakdown,
+            "crossed_off": bool(getattr(task, "crossed_off", False)),
         }
         extra_json = json.dumps(json_safe_tool_payload(extra), sort_keys=True, ensure_ascii=False)
 
@@ -531,6 +532,7 @@ class WorkspaceRepository:
             child_task_ids=collections["child_task_ids"],
             decomposition_id_map=extra.get("decomposition_id_map", {}),
             aggregate_progress=str(row["aggregate_progress"]),
+            crossed_off=bool(extra.get("crossed_off", False)),
             evidence=collections["evidence"],
             blockers=collections["blockers"],
             assumptions=collections["assumptions"],

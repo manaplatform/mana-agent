@@ -46,6 +46,16 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
     ("automation_enable", "Enable a durable automation.", "automation"),
     ("automation_disable", "Disable a durable automation.", "automation"),
     ("automation_run_now", "Run a persisted automation immediately.", "automation"),
+    # TaskBoard state authority & task management tools
+    ("taskboard_create_task", "Create a new task or subtask on the authoritative TaskBoard workspace.", "taskboard"),
+    ("taskboard_update_task", "Update an existing task's description, priority, progress, plan, acceptance criteria, or checklist state.", "taskboard"),
+    ("taskboard_delete_task", "Safely remove an obsolete or superseded task from the TaskBoard.", "taskboard"),
+    ("taskboard_add_subtask", "Decompose a task by adding a subtask with specific acceptance criteria and dependencies.", "taskboard"),
+    ("taskboard_mark_completed", "Mark a task as completed or crossed off with completion evidence.", "taskboard"),
+    ("taskboard_verify_task", "Verify task completion with independent evidence against acceptance criteria.", "taskboard"),
+    ("taskboard_reopen_task", "Reopen a failed, blocked, or incomplete task for autonomous replanning and continued work.", "taskboard"),
+    ("taskboard_list_tasks", "Query the authoritative TaskBoard to inspect active, pending, or completed tasks.", "taskboard"),
+    ("taskboard_get_progress", "Inspect overall live TaskBoard progress metrics and item statuses.", "taskboard"),
     # Context retrieval (bounded episodic conversation & durable memory)
     (
         "conversation_context_read",
