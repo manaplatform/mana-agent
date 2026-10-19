@@ -286,6 +286,9 @@ class CodingActivityBox(Vertical):
         self.backend = ""
         self.model = ""
         self.phase = "queued"
+        self.active_group = ""
+        self.active_concurrency = 0
+        self.batch_progress = ""
         self.events: list[dict[str, Any]] = []
         self.changed_files: list[str] = []
         self._event_ids: set[str] = set()
@@ -325,9 +328,22 @@ class CodingActivityBox(Vertical):
                 self._event_ids.add(event_id)
             self.events.append(ev)
 
-        # Track changed files
-        meta = dict(ev.get("metadata") or ev.get("details") or ev.get("payload") or {})
+        # Track phase and concurrency metadata
         payload_dict = _safe_dict(ev.get("payload"))
+        meta = dict(ev.get("metadata") or ev.get("details") or payload_dict)
+        if meta.get("phase"):
+            self.phase = str(meta["phase"])
+        if "active_concurrency" in meta or "active_concurrency" in payload_dict:
+            self.active_concurrency = int(meta.get("active_concurrency") or payload_dict.get("active_concurrency") or 0)
+        if meta.get("group") or meta.get("operation_group"):
+            self.active_group = str(meta.get("group") or meta.get("operation_group"))
+
+        ev_type = str(ev.get("event_type") or ev.get("type") or "")
+        if ev_type.startswith("parallel.group"):
+            count = payload_dict.get("count") or payload_dict.get("total_operations") or ""
+            self.active_group = f"parallel group ({count} ops)" if count else "parallel group"
+
+        # Track changed files
         args_dict = _safe_dict(payload_dict.get("args")) or _safe_dict(meta.get("args"))
         raw_path = (
             ev.get("path")
@@ -343,14 +359,13 @@ class CodingActivityBox(Vertical):
         )
         if raw_path and str(raw_path).strip() and str(raw_path).strip() not in self.changed_files:
             self.changed_files.append(str(raw_path).strip())
-        for cf in (ev.get("changed_files") or meta.get("changed_files") or []):
+        for cf in (ev.get("changed_files") or meta.get("changed_files") or payload_dict.get("changed_files") or []):
             cf_s = str(cf).strip()
             if cf_s and cf_s not in self.changed_files:
                 self.changed_files.append(cf_s)
 
         # Context meter
-        event_type = str(ev.get("event_type") or ev.get("type") or "")
-        if event_type.startswith(("context.", "cost.", "budget.")):
+        if ev_type.startswith(("context.", "cost.", "budget.")):
             self.context_meter.update(ev.get("payload") or ev.get("metadata") or {})
 
         backend_val = ev.get("backend")
@@ -367,8 +382,9 @@ class CodingActivityBox(Vertical):
 
         icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(status, "◌")
         backend_tag = f"[{self.backend.upper()}] " if self.backend and self.backend.lower() != "coding" else ""
+        phase_tag = f" · Phase: {self.phase.capitalize()}" if self.phase and self.phase != "queued" else ""
         model_tag = f" · {self.model}" if self.model else ""
-        self.header.update(f"{icon} {backend_tag}{title}{model_tag}")
+        self.header.update(f"{icon} {backend_tag}{title}{phase_tag}{model_tag}")
 
         # Update changed files list
         if self.changed_files:
@@ -379,18 +395,25 @@ class CodingActivityBox(Vertical):
         else:
             self.changed_files_view.update("")
 
-        # Activity log (terminal commands, patches, outputs)
+        # Activity log (terminal commands, patches, outputs, parallel events)
         lines: list[str] = []
-        for row in self.events[-20:]:
+        for row in self.events[-30:]:
             row_status = str(row.get("status") or "running").lower()
+            row_type = str(row.get("event_type") or row.get("type") or "")
             row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
-            r_title = str(row.get("title") or row.get("event_type") or row.get("type") or "code")
+            r_title = str(row.get("title") or row_type or "code")
+            dur = row.get("duration_ms")
+            dur_str = f" ({dur}ms)" if dur is not None else ""
             detail = str(row.get("output_preview") or row.get("summary") or row.get("error") or row.get("message") or "")
             cmd = str(row.get("command") or (row.get("payload") or {}).get("command") or "").strip()
-            if cmd:
-                lines.append(f"{row_icon} $ {cmd}")
+
+            if row_type.startswith("parallel.group"):
+                lines.append(f"⚡ {r_title}" + (f" — {detail}" if detail else ""))
+            elif cmd:
+                lines.append(f"{row_icon} $ {cmd}{dur_str}")
             else:
-                lines.append(f"{row_icon} {r_title}" + (f" — {detail}" if detail else ""))
+                lines.append(f"{row_icon} {r_title}{dur_str}" + (f" — {detail}" if detail else ""))
+
             if row.get("error"):
                 lines.append(f"  Error: {str(row.get('error'))[:180]}")
 
@@ -402,6 +425,8 @@ class CodingActivityBox(Vertical):
         tokens = usage.get("total_tokens") or usage.get("totalTokens")
         duration = event.get("duration_ms")
         stats = [f"{len(self.events)} events"]
+        if self.active_concurrency > 0:
+            stats.append(f"{self.active_concurrency} concurrent")
         if tokens is not None:
             stats.append(f"{tokens} tokens")
         if duration is not None:

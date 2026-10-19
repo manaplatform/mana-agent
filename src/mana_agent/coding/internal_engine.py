@@ -40,6 +40,22 @@ from mana_agent.coding.programmatic import (
     build_programmatic_tool_definitions,
 )
 from mana_agent.coding.prompts import INTERNAL_CODING_SYSTEM_INSTRUCTION
+from mana_agent.coding.scheduler import (
+    DependencyGraph,
+    OperationKind,
+    ParallelToolExecutor,
+    classify_tool_operation,
+    extract_target_paths,
+)
+from mana_agent.tools.batch_file_ops import (
+    batch_read_files,
+    batch_write_files,
+    batch_apply_patches,
+    batch_search_files,
+    batch_list_files,
+    batch_move_files,
+    batch_delete_files,
+)
 from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
 
 logger = logging.getLogger(__name__)
@@ -66,6 +82,13 @@ class InternalCodingEngine(CodingEngine):
         max_tool_calls: int = 50,
         extra_tools: dict[str, Callable[..., Any]] | None = None,
         global_memory: Any | None = None,
+        execution_supervisor: Any | None = None,
+        taskboard: Any | None = None,
+        max_concurrency: int = 10,
+        batch_operations_enabled: bool = True,
+        cache_enabled: bool = True,
+        cache_ttl_seconds: int = 300,
+        parallel_scheduling_enabled: bool = True,
     ) -> None:
         self.mode: CodingEngineMode = "internal"
         self.name: str = "internal"
@@ -79,6 +102,20 @@ class InternalCodingEngine(CodingEngine):
         self.programmatic_tool_calling_enabled = programmatic_tool_calling_enabled
         self.max_tool_calls = max_tool_calls
         self.extra_tools = extra_tools or {}
+        self.execution_supervisor = execution_supervisor
+        self.taskboard = taskboard
+        self.max_concurrency = max(1, min(int(max_concurrency or 10), 32))
+        self.batch_operations_enabled = batch_operations_enabled
+        self.cache_enabled = cache_enabled
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.parallel_scheduling_enabled = parallel_scheduling_enabled
+
+        self.executor = ParallelToolExecutor(
+            max_concurrency=self.max_concurrency,
+            cache_enabled=self.cache_enabled,
+            cache_ttl_seconds=self.cache_ttl_seconds,
+        )
+
         if global_memory is not None:
             self.global_memory = global_memory
         else:
@@ -429,27 +466,199 @@ class InternalCodingEngine(CodingEngine):
 
             messages.append(response)
 
-            for tc in tool_calls:
-                if cancel_ev.is_set():
-                    raise asyncio.CancelledError()
+            if self.parallel_scheduling_enabled and len(tool_calls) > 1:
+                # Parallel tool execution with dependency-aware scheduling
+                graph = DependencyGraph.build(tool_calls)
 
-                fn_name = tc.get("name")
-                args = tc.get("args") or {}
-                call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                has_writes = any(n.kind == OperationKind.WRITE for n in graph.nodes.values())
+                has_exec = any(n.kind == OperationKind.EXECUTE for n in graph.nodes.values())
+                if has_exec:
+                    current_phase = "verification"
+                elif has_writes:
+                    current_phase = "implementation"
+                else:
+                    current_phase = "exploration"
 
-                call_spec = {"call_id": call_id, "name": fn_name, "arguments": args}
-                fn_output = session.handle_function_call(call_spec)
-                output_str = fn_output.get("output", "")
+                publish_coding_event(AgentEvent(
+                    event_type="parallel.group.started",
+                    task_id=task.task_id,
+                    backend=self.name,
+                    sequence=session._next_sequence(),
+                    title=f"Parallel tool group ({len(tool_calls)} operations)",
+                    summary=f"Executing {len(tool_calls)} operations in parallel · Phase: {current_phase}",
+                    visibility="progress",
+                    semantic_kind="tool_execution",
+                    payload={"phase": current_phase, "count": len(tool_calls), "concurrency": self.max_concurrency},
+                ))
 
-                messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+                def _on_parallel_event(event_name: str, data: dict[str, Any]) -> None:
+                    if event_name == "tool.started":
+                        cid = data["call_id"]
+                        tname = data["tool_name"]
+                        args = data.get("arguments", {})
+                        session.state.tool_calls_executed += 1
+                        try:
+                            from mana_agent.commands.ui_helpers import emit_tool_event
+                            emit_tool_event("start", tname, args=json.dumps(args, ensure_ascii=False, default=str), event_id=cid)
+                        except Exception:
+                            pass
+                        publish_coding_event(AgentEvent(
+                            event_type="tool.call.started",
+                            task_id=task.task_id,
+                            backend=self.name,
+                            sequence=session._next_sequence(),
+                            title=f"Tool call: {tname}",
+                            tool_name=tname,
+                            visibility="progress",
+                            semantic_kind="tool_execution",
+                            payload={"call_id": cid, "arguments": args, "active_concurrency": data.get("active_concurrency", 1)},
+                        ))
+                    elif event_name == "tool.completed":
+                        cid = data["call_id"]
+                        tname = data["tool_name"]
+                        dur = data.get("duration_ms", 0)
+                        res = data.get("result", {})
+                        if tname in {"write_file", "create_file", "edit_file", "multi_edit_file", "delete_file"}:
+                            cp = str(data.get("arguments", {}).get("path") or "")
+                            if cp and cp not in session.state.changed_files:
+                                session.state.changed_files.append(cp)
+                        elif tname in {"apply_patch", "apply_patch_batch", "batch_write_files", "batch_apply_patches", "batch_move_files"}:
+                            for p in res.get("touched_files") or res.get("changed_files") or res.get("files_changed") or []:
+                                if p not in session.state.changed_files:
+                                    session.state.changed_files.append(str(p))
+                        elif tname == "batch_delete_files":
+                            for p in res.get("deleted_files") or []:
+                                if p not in session.state.changed_files:
+                                    session.state.changed_files.append(str(p))
+                        elif tname in {"run_command", "run_script_once", "shell"}:
+                            cmd = str(data.get("arguments", {}).get("command") or data.get("arguments", {}).get("script") or "")
+                            if cmd:
+                                session.state.commands_run.append(cmd)
 
-                if session.state.tool_calls_executed >= session.state.max_tool_calls:
-                    logger.warning(
-                        "Tool calls limit (%d) reached for task %s",
-                        session.state.max_tool_calls,
-                        task.task_id,
-                    )
-                    break
+                        try:
+                            from mana_agent.commands.ui_helpers import emit_tool_event
+                            emit_tool_event("end", tname, duration=dur / 1000.0, event_id=cid)
+                        except Exception:
+                            pass
+                        publish_coding_event(AgentEvent(
+                            event_type="tool.call.completed",
+                            task_id=task.task_id,
+                            backend=self.name,
+                            sequence=session._next_sequence(),
+                            status="success",
+                            title=f"Tool call: {tname} (success)",
+                            tool_name=tname,
+                            duration_ms=dur,
+                            visibility="progress",
+                            semantic_kind="tool_execution",
+                            payload={"call_id": cid, "result": res},
+                        ))
+                    elif event_name in {"tool.failed", "tool.skipped"}:
+                        cid = data["call_id"]
+                        tname = data["tool_name"]
+                        dur = data.get("duration_ms", 0)
+                        err = data.get("error", "")
+                        session.state.errors.append(f"{tname}: {err}")
+                        try:
+                            from mana_agent.commands.ui_helpers import emit_tool_event
+                            emit_tool_event("error", tname, duration=dur / 1000.0, error=err, event_id=cid)
+                        except Exception:
+                            pass
+                        publish_coding_event(AgentEvent(
+                            event_type="tool.call.failed",
+                            task_id=task.task_id,
+                            backend=self.name,
+                            sequence=session._next_sequence(),
+                            status="failed",
+                            title=f"Tool call: {tname} (failed)",
+                            tool_name=tname,
+                            duration_ms=dur,
+                            error=err,
+                            visibility="progress",
+                            semantic_kind="tool_execution",
+                            payload={"call_id": cid, "error": err},
+                        ))
+                        if self.global_memory is not None:
+                            try:
+                                self.global_memory.record_failure(
+                                    category="tool",
+                                    attempted_action=f"{tname} {cid}",
+                                    error=err,
+                                    metadata={"tool_name": tname, "task_id": task.task_id},
+                                )
+                            except Exception:
+                                pass
+
+                turn_results = await self.executor.execute_turn(
+                    graph,
+                    session.dispatcher,
+                    on_event=_on_parallel_event,
+                    cancel_ev=cancel_ev,
+                )
+
+                publish_coding_event(AgentEvent(
+                    event_type="parallel.group.completed",
+                    task_id=task.task_id,
+                    backend=self.name,
+                    sequence=session._next_sequence(),
+                    title=f"Parallel tool group finished ({len(tool_calls)} operations)",
+                    summary=f"Completed {len(tool_calls)} operations in parallel",
+                    visibility="progress",
+                    semantic_kind="tool_execution",
+                    payload={"count": len(tool_calls)},
+                ))
+
+                # Append ToolMessages preserving original LLM call order
+                for tc in tool_calls:
+                    call_id = tc.get("id") or str(tc.get("call_id") or "")
+                    res_entry = turn_results.get(call_id)
+                    output_str = res_entry.get("output", "") if res_entry else json.dumps({"ok": False, "error": "Not executed"})
+                    messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+
+                # Checkpoint with supervisor if present
+                if self.execution_supervisor is not None and hasattr(self.execution_supervisor, "record_action"):
+                    try:
+                        self.execution_supervisor.record_action(
+                            task_id=task.task_id,
+                            action_name="parallel_tools_turn",
+                            changed_files=list(session.state.changed_files),
+                        )
+                    except Exception:
+                        pass
+
+                # Update TaskBoard progress if present
+                if self.taskboard is not None and hasattr(self.taskboard, "update_task"):
+                    try:
+                        self.taskboard.update_task(
+                            task_id=task.task_id,
+                            progress_summary=f"Executed {len(tool_calls)} operations ({current_phase})",
+                            changed_files=list(session.state.changed_files),
+                        )
+                    except Exception:
+                        pass
+
+            else:
+                for tc in tool_calls:
+                    if cancel_ev.is_set():
+                        raise asyncio.CancelledError()
+
+                    fn_name = tc.get("name")
+                    args = tc.get("args") or {}
+                    call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+
+                    call_spec = {"call_id": call_id, "name": fn_name, "arguments": args}
+                    fn_output = session.handle_function_call(call_spec)
+                    output_str = fn_output.get("output", "")
+
+                    messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+
+                    if session.state.tool_calls_executed >= session.state.max_tool_calls:
+                        logger.warning(
+                            "Tool calls limit (%d) reached for task %s",
+                            session.state.max_tool_calls,
+                            task.task_id,
+                        )
+                        break
 
             if session.state.tool_calls_executed >= session.state.max_tool_calls:
                 break
@@ -494,13 +703,21 @@ class InternalCodingEngine(CodingEngine):
             raise asyncio.CancelledError()
 
         # Execute registered verification or initial read if allowed files are provided
-        for allowed in task.allowed_files:
+        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
             session.handle_function_call({
-                "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
-                "name": "read_file",
-                "arguments": {"path": allowed},
+                "call_id": f"call_batch_init_{uuid.uuid4().hex[:8]}",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
                 "caller": {"type": "program", "call_id": "prog_init"},
             })
+        else:
+            for allowed in task.allowed_files:
+                session.handle_function_call({
+                    "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
+                    "name": "read_file",
+                    "arguments": {"path": allowed},
+                    "caller": {"type": "program", "call_id": "prog_init"},
+                })
 
         return f"Completed internal coding task: {task.goal}"
 
@@ -521,12 +738,19 @@ class InternalCodingEngine(CodingEngine):
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
 
-        for allowed in task.allowed_files:
+        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
             session.handle_function_call({
-                "call_id": f"call_direct_{uuid.uuid4().hex[:8]}",
-                "name": "read_file",
-                "arguments": {"path": allowed},
+                "call_id": f"call_direct_batch_{uuid.uuid4().hex[:8]}",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
             })
+        else:
+            for allowed in task.allowed_files:
+                session.handle_function_call({
+                    "call_id": f"call_direct_{uuid.uuid4().hex[:8]}",
+                    "name": "read_file",
+                    "arguments": {"path": allowed},
+                })
 
         return f"Completed internal direct tool coding task: {task.goal}"
 

@@ -46,6 +46,16 @@ from .write_file import (  # noqa: F401
     safe_delete_file,
     safe_write_file,
 )
+from .batch_file_ops import (  # noqa: F401
+    BatchFileSystemManager,
+    batch_read_files,
+    batch_write_files,
+    batch_apply_patches,
+    batch_search_files,
+    batch_list_files,
+    batch_move_files,
+    batch_delete_files,
+)
 
 from .context_retrieval import (  # noqa: F401
     ConversationContextReadInput,
@@ -95,6 +105,14 @@ __all__ = [
     "safe_write_file",
     "safe_create_file",
     "safe_delete_file",
+    "BatchFileSystemManager",
+    "batch_read_files",
+    "batch_write_files",
+    "batch_apply_patches",
+    "batch_search_files",
+    "batch_list_files",
+    "batch_move_files",
+    "batch_delete_files",
     "ConversationContextReadInput",
     "MemoryReadInput",
     "MemoryTaskBinding",

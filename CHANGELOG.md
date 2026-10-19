@@ -4,6 +4,35 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-19
 
+- Upgraded **Internal Coding Engine with Parallel Tool Calls, Batch File Operations, and Intelligent Dependency-Aware Scheduling**:
+  - Implemented Native Filesystem Batch Layer (`src/mana_agent/tools/batch_file_ops.py`):
+    - `batch_read_files`: Concurrently reads multiple repository files with per-file SHA-256 hashes, line range slicing, and size caps.
+    - `batch_write_files`: Staged atomic writes into temporary files with optimistic concurrency check (`expected_sha256`) and transactional rollback on partial failure.
+    - `batch_apply_patches`: Multi-file Codex patch application with dry-run validation pass and rollback support.
+    - `batch_search_files`: Concurrent regex and literal searches across repository text.
+    - `batch_list_files`: Evaluates multiple glob patterns in a single filesystem pass.
+    - `batch_move_files`: Relocates files safely with boundary checks and rollback.
+    - `batch_delete_files`: Safe multi-file deletion preventing directory removal and path escapes.
+  - Implemented Intelligent Dependency-Aware Scheduler (`src/mana_agent/coding/scheduler.py`):
+    - Built dynamic execution DAG (`DependencyGraph`) analyzing operation kinds and target path overlaps.
+    - Parallel execution of independent reads, searches, and disjoint writes via `ParallelToolExecutor` with configurable concurrency bounds (`asyncio.Semaphore`).
+    - Serialized execution of conflicting writes targeting the same files.
+    - Sequential execution of verification commands and test scripts following mutations.
+    - In-flight deduplication of concurrent identical reads (single-flight) and in-memory caching with write-triggered invalidation.
+    - Partial failure isolation: independent sibling operations continue while dependent children are safely skipped.
+  - Registered Tool Contracts & Auto-Chat Catalog (`src/mana_agent/tools/contracts.py`, `src/mana_agent/tools/catalog.py`):
+    - Defined machine-readable contracts with schemas, safety rules, and examples.
+    - Registered batch tools in `_BUILTIN_AUTO_CHAT_TOOLS` under categories `repository` and `search`.
+  - Upgraded Internal Engine & Dispatcher Integration (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`):
+    - Multi-tool parallel execution in `_run_model_tool_loop` using `ParallelToolExecutor`.
+    - Phased execution tracking (`Exploration`, `Implementation`, `Verification`, `Review`).
+    - Checkpointed mutation milestones with `ExecutionSupervisor` and synchronized progress with `TaskBoard`.
+    - Integrated with `GlobalMemory` to automatically record failure signatures on tool errors.
+  - Enhanced Unified TUI Activity Box (`src/mana_agent/tui/widgets/activity_boxes.py`):
+    - Consolidated streaming inside `CodingActivityBox` displaying operation groups, concurrency meters, batch progress indicators, and phase tracking without card flooding.
+  - User-owned verification commands:
+    - `python -m pytest tests/test_batch_file_ops.py tests/test_parallel_tool_scheduler.py tests/test_internal_coding_engine_workflow.py tests/test_coding_benchmarks.py -v`
+
 - Bumped the package version to `0.4.0` and updated the README version badge.
 
 - Implemented **Global Self-Learning Memory System** (`GlobalMemory` and `MemoryLearningEngine`):

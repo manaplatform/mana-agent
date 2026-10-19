@@ -467,6 +467,164 @@ def coding_tool_contracts() -> list[ToolContract]:
             examples=[{"input": {"patterns": [{"query": "Skill", "glob": "**/*.py", "regex": False, "limit": 20}]}}],
         ),
         ToolContract(
+            name="batch_read_files",
+            description="Read multiple repository files concurrently in a single batch with per-file SHA-256 hashes, line slicing, and size bounding.",
+            input_schema=_schema(
+                {
+                    "files": {"type": "array", "description": "Array of file paths or spec objects with optional start_line/end_line"},
+                    "max_bytes": {"type": "integer", "description": "Maximum total bytes across all files"},
+                    "max_bytes_per_file": {"type": "integer", "description": "Maximum bytes read per file"},
+                    "concurrency": {"type": "integer", "description": "Concurrency limit for parallel reading"},
+                },
+                ["files"],
+            ),
+            output_schema=_schema({"ok": {"type": "boolean"}, "files": {"type": "array"}, "errors": {"type": "array"}, "total_files": {"type": "integer"}}),
+            error_format=common_error,
+            safety_rules=[
+                "Reject paths outside project root, symlink escapes, and directory traversal.",
+                "Skip binary files safely.",
+                "Return structured per-file results even on partial failure.",
+            ],
+            examples=[{"input": {"files": ["src/agent.py", "src/loop.py", {"path": "src/tools.py", "start_line": 1, "end_line": 50}]}}],
+        ),
+        ToolContract(
+            name="batch_write_files",
+            description="Write multiple repository files atomically with optimistic concurrency verification, conflict detection, and transactional rollback.",
+            input_schema=_schema(
+                {
+                    "writes": {
+                        "type": "array",
+                        "description": "List of write specifications: path, content, optional expected_sha256, force",
+                    },
+                    "rollback_on_failure": {"type": "boolean", "description": "Roll back all modifications if any write fails"},
+                    "check_only": {"type": "boolean", "description": "Validate and check for conflicts without writing"},
+                },
+                ["writes"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "changed_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                    "error": {"type": "string"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Verify expected_sha256 against existing content to prevent silent overwrites.",
+                "Stage writes into temporary files and replace atomically.",
+                "Restore snapshot state if rollback_on_failure is enabled and a failure occurs.",
+            ],
+            examples=[{"input": {"writes": [{"path": "a.py", "content": "x = 1\n", "expected_sha256": "abc..."}, {"path": "b.py", "content": "y = 2\n"}]}}],
+        ),
+        ToolContract(
+            name="batch_apply_patches",
+            description="Validate and apply multiple Codex patches in one batch with dry-run verification and transactional rollback.",
+            input_schema=_schema(
+                {
+                    "patches": {"type": "array", "description": "List of patch items with patch text and optional approval ID"},
+                    "rollback_on_failure": {"type": "boolean", "description": "Roll back touched files if any patch application fails"},
+                    "check_only": {"type": "boolean", "description": "Dry-run validate all patches without mutating workspace"},
+                },
+                ["patches"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "changed_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Dry run validate all patches prior to application.",
+                "Capture snapshots and restore on partial failure when rollback_on_failure=True.",
+            ],
+            examples=[{"input": {"patches": [{"patch": "*** Begin Patch\n..."}, {"patch": "*** Begin Patch\n..."}]}}],
+        ),
+        ToolContract(
+            name="batch_search_files",
+            description="Run multiple regex or literal text searches concurrently across repository files and return grouped results.",
+            input_schema=_schema(
+                {
+                    "patterns": {"type": "array", "description": "List of search specifications: query, glob, regex, limit"},
+                    "concurrency": {"type": "integer", "description": "Search worker concurrency limit"},
+                },
+                ["patterns"],
+            ),
+            output_schema=_schema({"ok": {"type": "boolean"}, "results": {"type": "array"}, "errors": {"type": "array"}}),
+            error_format=common_error,
+            safety_rules=["Read-only.", "Respect per-pattern search limits.", "Skip ignored directories and binary files."],
+            examples=[{"input": {"patterns": [{"query": "class InternalCodingEngine", "glob": "*.py"}, {"query": "batch_read_files"}]}}],
+        ),
+        ToolContract(
+            name="batch_list_files",
+            description="List repository files matching multiple glob patterns in a single filesystem traversal.",
+            input_schema=_schema(
+                {
+                    "queries": {"type": "array", "description": "List of glob pattern strings or query spec objects"},
+                    "limit": {"type": "integer", "description": "Maximum files returned per pattern"},
+                },
+                ["queries"],
+            ),
+            output_schema=_schema({"ok": {"type": "boolean"}, "results": {"type": "array"}, "total_patterns": {"type": "integer"}}),
+            error_format=common_error,
+            safety_rules=["Read-only.", "Traverses repository files once to avoid redundant filesystem scans."],
+            examples=[{"input": {"queries": ["src/**/*.py", "tests/**/test_*.py"]}}],
+        ),
+        ToolContract(
+            name="batch_move_files",
+            description="Move or rename multiple repository files safely with boundary checks and transactional recovery.",
+            input_schema=_schema(
+                {
+                    "moves": {"type": "array", "description": "List of move objects with source, destination, and overwrite flag"},
+                    "rollback_on_failure": {"type": "boolean", "description": "Restore moved files if an operation fails"},
+                },
+                ["moves"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "changed_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Reject source and destination outside the repository.",
+                "Prevent accidental destination overwrites unless overwrite=True.",
+            ],
+            examples=[{"input": {"moves": [{"source": "old_dir/a.py", "destination": "new_dir/a.py"}]}}],
+        ),
+        ToolContract(
+            name="batch_delete_files",
+            description="Delete multiple existing repository files safely with rollback support and directory traversal protection.",
+            input_schema=_schema(
+                {
+                    "paths": {"type": "array", "description": "List of file paths to delete"},
+                    "rollback_on_failure": {"type": "boolean", "description": "Restore deleted files if an error occurs"},
+                },
+                ["paths"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "deleted_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Reject paths outside root.",
+                "Only delete regular files; refuse directory deletion.",
+            ],
+            examples=[{"input": {"paths": ["temp_1.txt", "temp_2.txt"]}}],
+        ),
+        ToolContract(
             name="apply_patch",
             description=(
                 "Apply a Codex-style text patch inside the repository. "

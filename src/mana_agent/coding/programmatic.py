@@ -64,6 +64,10 @@ class ToolExecutionDispatcher:
             "delete_file",
             "apply_patch",
             "apply_patch_batch",
+            "batch_write_files",
+            "batch_apply_patches",
+            "batch_move_files",
+            "batch_delete_files",
         }
         if self.workspace.sandbox == "readOnly" and tool_name in write_tools:
             return False
@@ -221,6 +225,84 @@ class ToolExecutionDispatcher:
             patches = list(args.get("patches") or [])
             res = apply_patch_batch(self.repo_root, patches=patches)
             return json.loads(res) if isinstance(res, str) else res
+
+        elif name == "batch_read_files":
+            from mana_agent.tools.batch_file_ops import batch_read_files
+            files = list(args.get("files") or [])
+            max_bytes = int(args.get("max_bytes") or 2_000_000)
+            max_bytes_per_file = int(args.get("max_bytes_per_file") or 150_000)
+            concurrency = int(args.get("concurrency") or 8)
+            return batch_read_files(
+                self.repo_root,
+                files=files,
+                max_bytes=max_bytes,
+                max_bytes_per_file=max_bytes_per_file,
+                concurrency=concurrency,
+            )
+
+        elif name == "batch_write_files":
+            from mana_agent.tools.batch_file_ops import batch_write_files
+            writes = list(args.get("writes") or [])
+            rollback = bool(args.get("rollback_on_failure", True))
+            check_only = bool(args.get("check_only", False))
+            return batch_write_files(
+                self.repo_root,
+                writes=writes,
+                rollback_on_failure=rollback,
+                check_only=check_only,
+            )
+
+        elif name == "batch_apply_patches":
+            from mana_agent.tools.batch_file_ops import batch_apply_patches
+            patches = list(args.get("patches") or [])
+            rollback = bool(args.get("rollback_on_failure", True))
+            check_only = bool(args.get("check_only", False))
+            return batch_apply_patches(
+                self.repo_root,
+                patches=patches,
+                rollback_on_failure=rollback,
+                check_only=check_only,
+            )
+
+        elif name == "batch_search_files":
+            from mana_agent.tools.batch_file_ops import batch_search_files
+            patterns = list(args.get("patterns") or [])
+            concurrency = int(args.get("concurrency") or 4)
+            return batch_search_files(
+                self.repo_root,
+                patterns=patterns,
+                concurrency=concurrency,
+            )
+
+        elif name == "batch_list_files":
+            from mana_agent.tools.batch_file_ops import batch_list_files
+            queries = list(args.get("queries") or [])
+            limit = int(args.get("limit") or 200)
+            return batch_list_files(
+                self.repo_root,
+                queries=queries,
+                limit=limit,
+            )
+
+        elif name == "batch_move_files":
+            from mana_agent.tools.batch_file_ops import batch_move_files
+            moves = list(args.get("moves") or [])
+            rollback = bool(args.get("rollback_on_failure", True))
+            return batch_move_files(
+                self.repo_root,
+                moves=moves,
+                rollback_on_failure=rollback,
+            )
+
+        elif name == "batch_delete_files":
+            from mana_agent.tools.batch_file_ops import batch_delete_files
+            paths = list(args.get("paths") or [])
+            rollback = bool(args.get("rollback_on_failure", True))
+            return batch_delete_files(
+                self.repo_root,
+                paths=paths,
+                rollback_on_failure=rollback,
+            )
 
         elif name in {"run_command", "run_script_once", "shell"}:
             cmd = str(args.get("command") or args.get("script") or "")
@@ -433,9 +515,14 @@ class ProgrammaticExecutionSession:
                 changed_path = str(arguments.get("path") or "")
                 if changed_path and changed_path not in self.state.changed_files:
                     self.state.changed_files.append(changed_path)
-            elif tool_name in {"apply_patch", "apply_patch_batch"}:
-                touched = result.get("touched_files") or []
+            elif tool_name in {"apply_patch", "apply_patch_batch", "batch_apply_patches", "batch_write_files", "batch_move_files"}:
+                touched = result.get("touched_files") or result.get("changed_files") or result.get("files_changed") or []
                 for p in touched:
+                    if p not in self.state.changed_files:
+                        self.state.changed_files.append(str(p))
+            elif tool_name == "batch_delete_files":
+                deleted = result.get("deleted_files") or []
+                for p in deleted:
                     if p not in self.state.changed_files:
                         self.state.changed_files.append(str(p))
             elif tool_name in {"run_command", "run_script_once", "shell"}:

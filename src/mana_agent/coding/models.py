@@ -263,6 +263,16 @@ class InternalCodingEngineConfig(BaseModel):
     program_timeout_seconds: int = Field(default=300, ge=1)
     max_parallel_tool_calls: int = Field(default=10, ge=1)
 
+    # Parallel scheduling and batch execution configuration
+    batch_operations_enabled: bool = True
+    max_batch_size: int = Field(default=50, ge=1)
+    max_batch_bytes: int = Field(default=2_000_000, ge=1000)
+    max_concurrency: int = Field(default=10, ge=1)
+    parallel_scheduling_enabled: bool = True
+    cache_enabled: bool = True
+    cache_ttl_seconds: int = Field(default=300, ge=0)
+    rollback_on_batch_failure: bool = True
+
     @property
     def max_tool_calls(self) -> int:
         return self.max_tool_calls_per_program

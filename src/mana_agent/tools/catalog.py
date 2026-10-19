@@ -93,6 +93,11 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
         "Run multiple repository text searches in one call.",
         "search",
     ),
+    (
+        "batch_search_files",
+        "Run multiple regex or literal text searches concurrently across repository files.",
+        "search",
+    ),
     # Repository inspection
     (
         "read_file",
@@ -102,6 +107,36 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
     (
         "repo_batch_read",
         "Read multiple repository files in one call.",
+        "repository",
+    ),
+    (
+        "batch_read_files",
+        "Read multiple repository files concurrently with per-file size bounding and hashing.",
+        "repository",
+    ),
+    (
+        "batch_write_files",
+        "Write multiple repository files atomically with optimistic concurrency verification and rollback.",
+        "repository",
+    ),
+    (
+        "batch_apply_patches",
+        "Validate and apply multiple Codex patches in one batch with transactional rollback.",
+        "repository",
+    ),
+    (
+        "batch_list_files",
+        "List repository files matching multiple glob patterns in a single filesystem traversal.",
+        "repository",
+    ),
+    (
+        "batch_move_files",
+        "Move or rename multiple repository files safely with boundary checks and rollback.",
+        "repository",
+    ),
+    (
+        "batch_delete_files",
+        "Delete multiple existing repository files safely with rollback support.",
         "repository",
     ),
     (
