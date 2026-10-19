@@ -72,7 +72,7 @@ class OpenAIBatchClient:
         async_client: Any | None = None,
         config: BatchConfig | None = None,
     ) -> None:
-        self.config = config or BatchConfig()
+        self.config = config or BatchConfig.from_settings()
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY") or ""
         self._base_url = base_url or os.environ.get("OPENAI_BASE_URL")
 

@@ -229,8 +229,7 @@ class ManaChatApp(App):
         self._unsubscribe_computer_permissions = self.history.subscribe(
             self._handle_computer_permission_event
         )
-        if self._gateway_session_id:
-            self._subscribe_session_events(self._gateway_session_id)
+        self._subscribe_session_events(self._gateway_session_id or "")
 
         # Safe immediate footer (avoids any early watcher issues)
         self.sub_title = "Ready"
@@ -323,7 +322,7 @@ class ManaChatApp(App):
             transactional=bool(metadata.get("transactional_action_approval")),
         ))
 
-    def _subscribe_session_events(self, session_id: str) -> None:
+    def _subscribe_session_events(self, session_id: str = "") -> None:
         """Subscribe the active TUI session to general execution events from ExecutionEventHub."""
         if self._unsubscribe_session_events is not None:
             try:
@@ -333,26 +332,21 @@ class ManaChatApp(App):
             self._unsubscribe_session_events = None
         self._unsubscribe_api_approval_events = None
 
-        sid = str(session_id or "").strip()
-        if not sid:
-            return
-
         try:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
 
-            unsub = get_execution_event_hub().subscribe(
-                sid,
+            unsub = get_execution_event_hub().subscribe_all(
                 self._handle_hub_session_event,
             )
             self._unsubscribe_session_events = unsub
             self._unsubscribe_api_approval_events = unsub
         except Exception:
-            logger.debug("Failed to subscribe to ExecutionEventHub for session %s", sid, exc_info=True)
+            logger.debug("Failed to subscribe to ExecutionEventHub for session %s", session_id, exc_info=True)
 
     def _handle_hub_session_event(self, event: dict[str, Any]) -> None:
         """Handle execution events from ExecutionEventHub as durable fallback and source of truth."""
         sid = str(event.get("conversation_id") or "")
-        if sid and sid != str(self._gateway_session_id or ""):
+        if sid and self._gateway_session_id and sid != str(self._gateway_session_id):
             return
 
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
@@ -596,7 +590,10 @@ class ManaChatApp(App):
         metadata: dict[str, Any] | None = None,
         title: str = "",
     ) -> None:
+        action_id = str((metadata or {}).get("action_id") or "")
         if inbox_item_id in self._computer_permission_requests_shown:
+            return
+        if action_id and action_id in self._computer_permission_requests_shown:
             return
         item = None
         if self.gateway is not None:
@@ -617,6 +614,13 @@ class ManaChatApp(App):
                             item = matches[0]
                     except Exception:
                         pass
+                if item is None and action_id:
+                    try:
+                        matches = self.gateway.human_inbox_service.repository.find_for_action(action_id)
+                        if matches:
+                            item = matches[0]
+                    except Exception:
+                        pass
 
         if item is None:
             try:
@@ -631,6 +635,13 @@ class ManaChatApp(App):
                         matches = service.repository.find_for_action(inbox_item_id)
                         if matches:
                             item = matches[0]
+                if item is None and action_id:
+                    try:
+                        matches = service.repository.find_for_action(action_id)
+                        if matches:
+                            item = matches[0]
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -655,14 +666,19 @@ class ManaChatApp(App):
             else str(preview_data or f"Approval required for {inbox_item_id}")
         )
         self._saved_modal_previews[inbox_item_id] = preview_str
+        target_id = item.inbox_item_id if item is not None else inbox_item_id
+        if target_id != inbox_item_id:
+            self._saved_modal_previews[target_id] = preview_str
 
         self._computer_permission_requests_shown.add(inbox_item_id)
+        if action_id:
+            self._computer_permission_requests_shown.add(action_id)
         if item is not None:
             self._computer_permission_requests_shown.add(item.inbox_item_id)
             if item.action_intent_id:
                 self._computer_permission_requests_shown.add(item.action_intent_id)
 
-        self._transactional_modal_queue.append(inbox_item_id)
+        self._transactional_modal_queue.append(target_id)
         self._show_next_transactional_modal()
 
     def _show_next_transactional_modal(self) -> None:

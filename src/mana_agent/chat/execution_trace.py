@@ -193,6 +193,32 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
     meta = dict(metadata or {})
     tool_name = str(meta.get("tool_name") or meta.get("name") or "").strip()
 
+    # Autonomous Loop events
+    if et.startswith("loop."):
+        if et == "loop.turn_received":
+            return "loop", "Turn received"
+        if et == "loop.initialized":
+            return "loop", "Autonomous Loop initialized"
+        if et == "loop.iteration.started":
+            phase_label = str(meta.get("phase") or "Processing")
+            return "loop", f"Iteration: {phase_label}"
+        if et == "loop.strategy.selected":
+            strat = str(meta.get("strategy") or "selected")
+            return "routing", f"Strategy: {strat}"
+        if et == "loop.taskboard.updated":
+            return "taskboard", "TaskBoard updated"
+        if et in {"loop.tool.running", "loop.tool.completed"}:
+            t_name = str(meta.get("tool_name") or tool_name or "Tool")
+            return "tool", f"Tool: {t_name}"
+        if et == "loop.operations.completed":
+            op_type = str(meta.get("type") or "operations")
+            return "loop", f"{op_type.capitalize()} operations completed"
+        if et == "loop.verification.completed":
+            return "verification", "Verification"
+        if et == "loop.completed":
+            return "completion", "Execution completed"
+        return "loop", "Autonomous Loop"
+
     # Routing
     if et in {
         "routing_started",

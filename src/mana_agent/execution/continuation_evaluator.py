@@ -71,8 +71,15 @@ def _coerce_continuation_decision(response: Any, task_id: str = "") -> Continuat
     if start >= 0 and end >= start:
         text = text[start : end + 1]
     data = json.loads(text)
-    if isinstance(data, dict) and not data.get("task_id") and task_id:
-        data["task_id"] = task_id
+    if isinstance(data, dict):
+        if not data.get("task_id") and task_id:
+            data["task_id"] = task_id
+        if "action" not in data:
+            data["action"] = ContinuationAction.FINALIZE.value
+            data["goal_satisfied"] = True
+            data["safe_to_continue"] = True
+            data["reason"] = data.get("reasoning_summary") or "Model completed execution"
+            data["evidence_summary"] = data.get("reasoning_summary") or "Execution evidence recorded"
     return ContinuationDecision.model_validate(data)
 
 
@@ -104,6 +111,7 @@ class ContinuationEvaluator:
         payload: dict[str, Any] = {
             "task_id": task_id,
             "user_goal": user_goal,
+            "user_request": user_goal,
             "step_output": step_output,
             "completed_steps_count": len(completed_steps),
             "completed_steps_summary": [

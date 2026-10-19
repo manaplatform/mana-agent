@@ -1369,6 +1369,8 @@ class AgentChatGateway:
             context_governor=self._stack.context_cost_governor,
             compactor=getattr(self, "_context_compactor", None),
             evaluator=self._continuation_evaluator,
+            router=getattr(self, "entry_router", getattr(self, "_entry_router", None)),
+            event_sink=self._event_sink,
         )
         if hasattr(self._stack, "ask_service") and hasattr(self._stack.ask_service, "ask_agent"):
             if self._stack.ask_service.ask_agent is not None:

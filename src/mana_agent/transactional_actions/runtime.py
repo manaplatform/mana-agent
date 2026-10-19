@@ -226,7 +226,7 @@ def create_transactional_runtime(
             if event.get("event_type") == "action.approval.required":
                 try:
                     from mana_agent.chat.history import get_history
-                    from mana_agent.chat.models import CodingActivityEvent
+                    from mana_agent.chat.events import CodingActivityEvent
 
                     get_history().add(CodingActivityEvent(activity=event))
                 except Exception:

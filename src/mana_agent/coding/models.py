@@ -42,7 +42,7 @@ def redact_event_value(value: Any, *, key: str = "") -> Any:
 
 
 class CodingTask(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="allow")
 
     task_id: str
     goal: str
@@ -53,6 +53,8 @@ class CodingTask(BaseModel):
     relevant_context: str = ""
     requires_repository_write: bool = True
     task_created_at: datetime | None = None
+    execution_mode: str = "auto"
+    context: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("task_id", "goal")
     @classmethod

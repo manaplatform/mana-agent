@@ -2,6 +2,50 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-20
+
+- Fixed **OpenAI Batch API Lifecycle, Configuration Loading, URL Normalization & Engine Integration**:
+  - Fixed `BatchConfig` defaults across `BatchLifecycleManager` (`src/mana_agent/batch/manager.py`), `OpenAIBatchClient` (`src/mana_agent/batch/client.py`), and `ExecutionModeRouter` (`src/mana_agent/batch/execution_router.py`) to default to `BatchConfig.from_settings()`, ensuring that `OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED`, `OPENAI_BATCH_MODE`, and `OPENAI_BATCH_ENDPOINT` from `~/.mana/config.toml` and environment variables are honored.
+  - Added URL normalization in `BatchLifecycleManager.submit_batch` and `async_submit_batch` so all request item URLs match the batch endpoint (`/v1/responses` or `/v1/chat/completions`), preventing OpenAI batch validation failures due to URL mismatch.
+  - Integrated batch execution into `InternalCodingEngine.execute` (`src/mana_agent/coding/internal_engine.py`): updated `CodingTask` in `src/mana_agent/coding/models.py` with `extra="allow"` and explicit `execution_mode: str = "auto"`, `context: dict[str, Any]` fields, and refined `execution_mode` resolution so `context={"execution_mode": "batch"}` directly routes to `_run_batch_coding_workflow`. This submits requests to the OpenAI Batch API, registers the batch on `TaskBoard` (`queue_job_ids`), emits `batch.job.submitted`, and returns structured batch tracking details without cancelling.
+  - Fixed `NameError: name 'tool_traces' is not defined` in `src/mana_agent/multi_agent/runtime/ask_agent.py` so continuation evaluation succeeds.
+  - Added regression test `test_internal_engine_execute_batch_mode` in `tests/test_openai_batch_coding_engine.py` using `asyncio.run` conforming to repo test standards.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_openai_batch_coding_engine.py -v`
+    - `./venv/bin/pytest tests/test_openai_batch_tools.py -v`
+
+- Fixed **Realtime Tool Call Approval Modal & Action ID Resolution in TUI**:
+  - Corrected `CodingActivityEvent` import paths across `src/mana_agent/human_inbox/approval_tools.py`, `src/mana_agent/transactional_actions/runtime.py`, and `src/mana_agent/multi_agent/runtime/ask_agent.py` from non-existent `mana_agent.chat.models` to `mana_agent.chat.events`, eliminating silent `ModuleNotFoundError` exceptions so approval activity events are properly appended to `ChatHistory`.
+  - Configured `ManaChatApp._subscribe_session_events` in `src/mana_agent/tui/app.py` to use `subscribe_all` on `ExecutionEventHub`, ensuring system and transactional approval events without per-turn session tags are delivered to the UI message loop.
+  - Fixed action ID resolution in `approval_tools.approval_request`: when `inbox_item_id` is provided as an action intent ID (e.g. `act_...`), the tool now automatically looks up the item via `find_for_action` and ensures an inbox record from `gateway.store`, ensuring the interactive approval modal displays immediately.
+  - Consolidated duplicate `approval_request` dispatch blocks in `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`), supporting `repo_path` and `workspace_root` overrides.
+  - Added end-to-end integration test `test_git_branch_approval_request_flow_displays_modal_and_unblocks` in `tests/test_tui_approval_realtime.py`.
+  - User-owned verification command:
+    - `./venv/bin/pytest tests/test_tui_approval_realtime.py -v`
+
+- Implemented **Unified Routing and Autonomous Loop Execution**:
+  - Unified Execution Authority (`src/mana_agent/execution/autonomous_controller.py`):
+    - Refactored `AutonomousExecutionController` to own the complete execution lifecycle across all request types (simple, coding, multi_task, research, tool, batch, gitops), eliminating independent routing flows and redundant execution controllers.
+    - Preserved existing routing classifications as strategy hints via `ExecutionStrategy` and `normalize_strategy`.
+    - Integrated the 10-step unified execution cycle: receive request -> analyze intent & context -> select/revise execution strategy -> decompose work when necessary -> create/update TaskBoard entries -> select ready actions & tools -> execute sequential/parallel/batch operations -> collect results & update state -> verify results & goal satisfaction -> continue, replan, recover, or finish.
+    - Implemented dynamic strategy switching during execution without restarting the loop.
+    - Added parallel conflict avoidance (`_partition_non_conflicting_tasks`): automatically partitions ready tasks and defers subtasks with overlapping target file paths to prevent data races.
+    - Added native fallback runner (`_build_internal_loop_runner`) when custom runner is omitted, maintaining full backward compatibility for existing callers passing `step_runner`.
+    - Maintained TaskBoard as the authoritative progress store and Execution Supervisor as the safety, lease, and checkpoint authority.
+  - Multi-Agent Orchestration Integration (`src/mana_agent/multi_agent/agents/main_agent.py`):
+    - Unified `run_user_request` to route all requests through `self.autonomous_controller.execute_goal(...)`, passing specialist agent workflows (`HeadDecisionAgent`, `PlannerAgent`, `ReviewerAgent`, `VerifierAgent`, `SummarizerAgent`) through supervised execution.
+    - Delegated `run_autonomous` directly through `run_user_request` to maintain a single execution path.
+  - Gateway Integration (`src/mana_agent/gateway/chat_gateway.py`):
+    - Connected `router` and `event_sink` to `AutonomousExecutionController` in `ChatGateway.__init__`.
+  - Unified TUI Activity Stream (`src/mana_agent/chat/execution_trace.py`, `src/mana_agent/tui/widgets/activity_boxes.py`, `execution_panel.py`):
+    - Added classification for `loop.*` events in `ExecutionTrace.classify_runtime_phase`.
+    - Updated `MainActivityBox._render_stream` to format unified chronological loop activity with sub-operation indentation (`  ↳ Tool A — Running`).
+  - Architecture Documentation & Verification (`docs/08-architecture.md`, `tests/execution/test_unified_autonomous_loop.py`):
+    - Documented the unified routing and autonomous loop architecture in `docs/08-architecture.md`.
+    - Added comprehensive test suite in `tests/execution/test_unified_autonomous_loop.py` covering all 10 areas: single-task, multi-task DAG, parallel execution & conflict avoidance, dynamic strategy switching, failure & recovery, cancellation, TaskBoard consistency, checkpoint resume, goal verification, and TUI activity rendering.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/execution/test_unified_autonomous_loop.py tests/execution/test_autonomous_controller.py tests/execution/test_autonomous_loop_taskboard.py`
+
 ## 2026-10-19
 
 - Implemented **Unified Dynamic Model Metadata, Tool Compatibility, Capability Registry & OpenAI Batch API Tools Layer**:

@@ -395,16 +395,17 @@ def approval_request(
     if not cmd and not req_inbox_id and not req_action_id:
         raise ValueError("Either 'command', 'inbox_item_id', or 'action_id' must be provided.")
 
+    target_action_id = req_action_id or (req_inbox_id if req_inbox_id.startswith("act_") else "")
     item = None
-    if req_inbox_id:
+    if req_inbox_id and not req_inbox_id.startswith("act_"):
         try:
             item = service.repository.get(req_inbox_id)
         except Exception:
             item = None
 
-    if item is None and req_action_id:
+    if item is None and target_action_id:
         try:
-            matches = service.repository.find_for_action(req_action_id)
+            matches = service.repository.find_for_action(target_action_id)
             if matches:
                 item = matches[0]
                 req_inbox_id = item.inbox_item_id
@@ -414,6 +415,22 @@ def approval_request(
     from mana_agent.transactional_actions.runtime import default_action_gateway
 
     gateway = default_action_gateway(root)
+
+    action = None
+    if target_action_id:
+        try:
+            action = gateway.store.get_action(target_action_id)
+        except Exception:
+            action = None
+
+    if item is None and action is not None:
+        try:
+            ensured_inbox_id = gateway._ensure_inbox(action)
+            if ensured_inbox_id:
+                req_inbox_id = ensured_inbox_id
+                item = service.repository.get(ensured_inbox_id)
+        except Exception:
+            item = None
 
     if item is None and cmd:
         from mana_agent.tools.shell_exec import split_shell_command
@@ -496,12 +513,16 @@ def approval_request(
     )
 
     # Post live activity events so connected TUI displays the approval modal immediately
+    preview_data = (
+        item.card() if (item and hasattr(item, "card"))
+        else (action.preview.redacted() if (action and getattr(action, "preview", None)) else {"command": cmd, "reason": reason})
+    )
     approval_metadata = {
-        "permission_request_id": target_inbox_id,
+        "permission_request_id": target_inbox_id or target_action_id,
         "inbox_item_id": target_inbox_id,
         "action_id": target_action_id,
         "permission_scope": "transactional_action.once",
-        "preview": item.card() if (item and hasattr(item, "card")) else {"command": cmd, "reason": reason},
+        "preview": preview_data,
         "transactional_action_approval": True,
         "title": title or (getattr(item, "title", "User approval required") if item else "User approval required"),
         "status": "waiting_approval",
@@ -510,13 +531,13 @@ def approval_request(
     }
     try:
         from mana_agent.chat.history import get_history
-        from mana_agent.chat.models import CodingActivityEvent
+        from mana_agent.chat.events import CodingActivityEvent
 
         get_history().add(
             CodingActivityEvent(
                 activity={
                     "event_type": "action.approval.required",
-                    "title": title or f"Approval required: {cmd or target_inbox_id}",
+                    "title": title or f"Approval required: {cmd or target_inbox_id or target_action_id}",
                     "status": "waiting_approval",
                     "metadata": approval_metadata,
                 }
@@ -533,7 +554,7 @@ def approval_request(
                 "type": "action.approval.required",
                 "event_type": "action.approval.required",
                 "kind": "transactional_action",
-                "title": title or f"Approval required: {cmd or target_inbox_id}",
+                "title": title or f"Approval required: {cmd or target_inbox_id or target_action_id}",
                 "status": "waiting_approval",
                 "metadata": approval_metadata,
             },

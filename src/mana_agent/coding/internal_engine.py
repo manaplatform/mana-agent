@@ -296,11 +296,27 @@ class InternalCodingEngine(CodingEngine):
             status: str = "completed"
             error_msg: str = ""
 
+            ctx_mode = ""
+            if hasattr(task, "context") and isinstance(task.context, dict):
+                ctx_mode = str(task.context.get("execution_mode") or "").strip().lower()
+
+            task_mode = str(getattr(task, "execution_mode", "") or "").strip().lower()
+            if task_mode == "auto":
+                task_mode = ""
+
+            cfg_mode = ""
+            if self.batch_manager and getattr(self.batch_manager.config, "mode", "") in {"batch", "realtime", "parallel"}:
+                cfg_mode = self.batch_manager.config.mode.lower()
+
+            execution_mode = ctx_mode or task_mode or cfg_mode or "realtime"
+
             try:
                 if cancel_ev.is_set():
                     raise asyncio.CancelledError()
 
-                if use_programmatic:
+                if execution_mode == "batch":
+                    final_summary = await self._run_batch_coding_workflow(task, workspace, session, cancel_ev)
+                elif use_programmatic:
                     final_summary = await self._run_programmatic_workflow(task, workspace, session, cancel_ev)
                 else:
                     final_summary = await self._run_direct_tool_workflow(task, workspace, session, cancel_ev)
@@ -699,6 +715,62 @@ class InternalCodingEngine(CodingEngine):
             )
 
         return final_summary
+
+    async def _run_batch_coding_workflow(
+        self,
+        task: CodingTask,
+        workspace: WorkspaceContext,
+        session: ProgrammaticExecutionSession,
+        cancel_ev: asyncio.Event,
+    ) -> str:
+        """Execute or dispatch coding task via OpenAI Batch API."""
+        if self.batch_manager is None:
+            from mana_agent.batch.manager import BatchLifecycleManager
+            self.batch_manager = BatchLifecycleManager()
+
+        target_model = self.model or "gpt-6-luna"
+        files = list(task.allowed_files) if task.allowed_files else []
+
+        logger.info(
+            "Submitting coding task %s to OpenAI Batch API (model=%s, files=%d)",
+            task.task_id,
+            target_model,
+            len(files),
+        )
+
+        job = self.submit_code_analysis_batch(
+            task=task,
+            files=files if files else ["."],
+            prompt=task.goal or "Analyze code and propose required changes.",
+            workspace=workspace,
+            instructions=task.relevant_context or "",
+            model=target_model,
+        )
+
+        publish_coding_event(AgentEvent(
+            event_type="batch.job.submitted",
+            task_id=task.task_id,
+            backend=self.name,
+            sequence=session._next_sequence(),
+            status="running",
+            title=f"OpenAI Batch Job Submitted ({job.batch_id})",
+            summary=f"Batch {job.batch_id} submitted to OpenAI Batch API ({job.total_requests} requests, 50% discount)",
+            visibility="progress",
+            semantic_kind="tool_execution",
+            payload={"batch_id": job.batch_id, "endpoint": job.endpoint, "model": target_model},
+        ))
+
+        return (
+            f"### OpenAI Batch Job Submitted\n\n"
+            f"- **Batch ID:** `{job.batch_id}`\n"
+            f"- **Model:** `{target_model}`\n"
+            f"- **Endpoint:** `{job.endpoint}`\n"
+            f"- **Status:** `{job.status}`\n"
+            f"- **Total Requests:** {job.total_requests}\n"
+            f"- **Completion Window:** {job.completion_window}\n\n"
+            f"The job is actively processing in the OpenAI Batch API queue (50% token cost discount). "
+            f"You can monitor progress using `batch_get_status(batch_id='{job.batch_id}')` or download results once completed."
+        )
 
     async def _run_programmatic_workflow(
         self,

@@ -370,6 +370,51 @@ The model interacts with TaskBoard through registered tools (`taskboard_create_t
 - `taskboard_reopen_task`: Reopen tasks when verification fails or replanning occurs.
 - **Verification Invariant**: A checked-off task is never equated with verified completion. Verification requires independent executed evidence.
 
+## Unified Routing and Autonomous Loop Execution
+
+Mana-Agent integrates routing directly into the `AutonomousExecutionController`. The Autonomous Loop operates as the single execution authority for all user requests, eliminating independent routing execution flows and fragmented execution controllers.
+
+### 1. Single Execution Authority & Strategy Hints
+All requests enter the universal Autonomous Loop regardless of complexity. Routing operates as an internal Loop capability, translating request classifications into strategy hints:
+- `simple`: Direct conversational answers or single-turn questions.
+- `coding`: File edits, patch applications, and native coding engine workflows.
+- `multi_task`: Compound requests requiring DAG decomposition into TaskBoard child tasks.
+- `research`: Repository searches, semantic index queries, and discovery.
+- `tool`: Specific tool invocations, shell executions, and MCP actions.
+- `batch`: Bulk file operations and batch processing.
+- `gitops`: Version control operations and PR management.
+
+### 2. The 10-Step Unified Execution Cycle
+The Loop continuously coordinates execution through a unified 10-step cycle:
+1. **Receive user request**: Registers task in Execution Supervisor and emits `loop.turn_received`.
+2. **Analyze intent and context**: Ingests workspace context, relevant memories, and previous turn state.
+3. **Select or revise execution strategy**: Model selects the initial strategy from hints or dynamically updates strategy during execution without restarting the loop.
+4. **Decompose work when necessary**: For compound or multi-task requests, decomposes work into ordered subtasks with dependencies and acceptance criteria.
+5. **Create or update TaskBoard entries**: Authoritatively registers subtasks on the TaskBoard.
+6. **Select ready actions and tools**: Identifies subtasks whose dependencies are completely satisfied.
+7. **Execute operations**: Executes operations sequentially, in parallel (with file-conflict avoidance), or in batches.
+8. **Collect results and update execution state**: Gathers execution evidence, records touched files, and updates TaskBoard and metrics.
+9. **Verify results and goal satisfaction**: Evaluates completion contracts and independent verification evidence.
+10. **Continue, replan, recover, or finish**: Employs typed continuation decisions (`CONTINUE`, `REPLAN`, `FINALIZE`, `WAIT_FOR_USER`, `BLOCKED`).
+
+### 3. Unified TUI Activity Representation
+The disconnected tool cards and disparate progress streams are replaced with a single continuously updated activity stream:
+```text
+◌ User turn received
+✓ Autonomous Loop initialized
+◌ Iteration 1 — Analyze request
+✓ Strategy: multi_task
+✓ TaskBoard updated
+◌ Iteration 2 — Execute ready tasks
+  ↳ Tool A — Running
+  ↳ Tool B — Running
+✓ Parallel operations completed
+◌ Iteration 3 — Verify results
+✓ Goal satisfied
+✓ Execution completed
+```
+
+
 ## Data Flow (end-to-end)
 
 ### A. Analyze / describe / report artifacts

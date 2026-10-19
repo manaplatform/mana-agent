@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -159,3 +160,46 @@ def test_retrieve_and_apply_batch_results_revision_fencing(tmp_path: Path) -> No
     # util.py should be VERIFIED and READY
     assert applied_map["req-util"]["status"] == "verified_and_ready"
     assert applied_map["req-util"]["output_text"] == "Suggestion for util"
+
+
+def test_internal_engine_execute_batch_mode(tmp_path: Path) -> None:
+    mock_client = MagicMock()
+    mock_client.config = BatchConfig()
+    mock_client.upload_batch_file.return_value = "file-batch-input-99"
+    mock_client.create_batch.return_value = BatchJobRecord(
+        batch_id="batch_exec_99",
+        status=BatchLifecycleStatus.VALIDATING.value,
+        endpoint="/v1/responses",
+        total_requests=1,
+    )
+
+    store = BatchJobStore(":memory:")
+    batch_mgr = BatchLifecycleManager(client=mock_client, store=store)
+
+    engine = InternalCodingEngine(
+        model="gpt-6-luna",
+        batch_manager=batch_mgr,
+    )
+
+    task = CodingTask(
+        task_id="task-batch-exec-1",
+        goal="Audit security headers and dependencies",
+        context={"execution_mode": "batch"},
+    )
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        allow_in_place_write=True,
+    )
+
+    result = asyncio.run(engine.execute(task, workspace))
+    assert result.status == "completed"
+    assert "OpenAI Batch Job Submitted" in result.summary
+    assert "batch_exec_99" in result.summary
+    assert "50% token cost discount" in result.summary
+
+    # Ensure batch job is saved in SQLite and not cancelled
+    job = store.get_job("batch_exec_99")
+    assert job is not None
+    assert job.batch_id == "batch_exec_99"
+    assert job.status != BatchLifecycleStatus.CANCELLED.value

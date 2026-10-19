@@ -237,3 +237,94 @@ def test_app_handles_hub_session_event_approval(tmp_path: Path, monkeypatch) -> 
     assert isinstance(req, ComputerPermissionRequested)
     assert req.request_id == "inbox-hub-456"
     assert "rm -rf" in req.preview
+
+
+def test_git_branch_approval_request_flow_displays_modal_and_unblocks(tmp_path: Path, monkeypatch) -> None:
+    """Verify that when git_create_branch requires approval and approval_request is invoked,
+    the TUI modal is enqueued in real-time and user approval issues the valid grant."""
+    import anyio
+    from mana_agent.chat.history import get_history, reset_global_history
+    from mana_agent.human_inbox.approval_tools import approval_request
+    from mana_agent.multi_agent.tools.git_tools import create_branch
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    mana_home_dir = tmp_path / "mana_home"
+    monkeypatch.setenv("MANA_HOME", str(mana_home_dir))
+
+    # Initialize a mock git repo in axis_dir
+    axis_dir = tmp_path / "axis"
+    axis_dir.mkdir()
+    import subprocess
+    subprocess.run(["git", "init", "-b", "main"], cwd=axis_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=axis_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=axis_dir, check=True, capture_output=True)
+    (axis_dir / "README.md").write_text("Hello", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=axis_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=axis_dir, check=True, capture_output=True)
+
+    # Set up global history and TUI app
+    reset_global_history()
+    global_hist = get_history()
+    app = ManaChatApp(history=global_hist, repo_root=axis_dir)
+    messages_posted = []
+    app.post_message = lambda msg: messages_posted.append(msg)
+    app.on_mount()
+
+    # Step 1: git_create_branch is executed and requires approval
+    branch_res = create_branch(branch_name="feat/implementation", repo_path=axis_dir, switch_to=True)
+    assert branch_res["ok"] is False
+    assert branch_res["error_code"] == "approval_required"
+    action_id = branch_res["action_id"]
+    assert action_id.startswith("act_")
+
+    # Step 2: The model calls approval_request with the action_id
+    # Run approval_request in a background thread with short timeout
+    import threading
+    req_result = {}
+
+    def run_approval():
+        req_result["result"] = approval_request(
+            command="git switch -c feat/implementation",
+            title="Create and switch to feature branch",
+            reason="Create feature branch in /Users/ah/Documents/axis",
+            inbox_item_id=action_id,
+            action_id=action_id,
+            risk_level="LOCAL_SAFE_WRITE",
+            timeout_seconds=2.0,
+            workspace_root=axis_dir,
+        )
+
+    t = threading.Thread(target=run_approval)
+    t.start()
+
+    # Wait briefly for the event to be published and processed by the TUI
+    import time
+    time.sleep(0.1)
+
+    # The modal request MUST have been posted to the TUI message pump!
+    assert len(messages_posted) >= 1
+    modal_req = messages_posted[-1]
+    assert isinstance(modal_req, ComputerPermissionRequested)
+    assert modal_req.transactional is True
+
+    # Step 3: Simulate user approving the modal in the TUI
+    choice = ComputerPermissionChoice(
+        request_id=modal_req.request_id,
+        decision=MagicMock(),  # truthy decision = approve
+        transactional=True,
+    )
+    anyio.run(app._complete_computer_permission, choice)
+
+    # The approval_request thread should now terminate with approved=True
+    t.join(timeout=3.0)
+    assert not t.is_alive()
+    res = req_result.get("result")
+    assert res is not None
+    assert res.get("approved") is True
+    assert res.get("approval_id")
+
+    # Verify that the action is now granted in the gateway
+    gw = default_action_gateway(axis_dir)
+    action = gw.store.get_action(action_id)
+    assert action is not None
+    assert gw.approvals.find_valid(action) is not None

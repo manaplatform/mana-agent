@@ -330,37 +330,6 @@ class ToolExecutionDispatcher:
             res = run_script_once(self.repo_root, script=cmd, cwd=cwd, timeout=timeout_s)
             return res if isinstance(res, dict) else (json.loads(res) if isinstance(res, str) else {"ok": True, "output": str(res)})
 
-        elif name in {"approval_request", "request_user_approval", "wait_for_approval"}:
-            from mana_agent.human_inbox import approval_request
-            cmd = str(args.get("command") or args.get("cmd") or args.get("action") or "").strip()
-            title = str(args.get("title") or (f"Approval required for command: {cmd}" if cmd else "User approval required"))
-            reason = str(args.get("reason") or args.get("summary") or args.get("description") or "")
-            inbox_item_id = str(args.get("inbox_item_id") or "").strip()
-            action_id = str(args.get("action_id") or "").strip()
-            risk_level = str(args.get("risk_level") or "medium")
-            timeout_seconds = float(args.get("timeout_seconds") or 60.0)
-
-            if not cmd and not inbox_item_id and not action_id:
-                cmd = title or reason or "approval_action"
-
-            try:
-                res = approval_request(
-                    command=cmd,
-                    title=title,
-                    reason=reason,
-                    inbox_item_id=inbox_item_id,
-                    action_id=action_id,
-                    risk_level=risk_level,
-                    timeout_seconds=timeout_seconds,
-                    workspace_root=self.repo_root,
-                )
-                if isinstance(res, dict):
-                    if "ok" not in res:
-                        res["ok"] = True
-                    return res
-                return {"ok": True, "result": res}
-            except Exception as exc:
-                return {"ok": False, "error": str(exc), "error_code": "APPROVAL_FAILED"}
 
         elif name == "conversation_context_read":
             from mana_agent.chat.history import get_history
@@ -486,20 +455,34 @@ class ToolExecutionDispatcher:
 
         elif name in {"approval_request", "request_user_approval"}:
             from mana_agent.human_inbox.approval_tools import approval_request
+            cmd = str(args.get("command") or args.get("cmd") or args.get("action") or "").strip()
+            title = str(args.get("title") or (f"Approval required for command: {cmd}" if cmd else "User approval required"))
+            reason = str(args.get("reason") or args.get("summary") or args.get("description") or "")
+            inbox_item_id = str(args.get("inbox_item_id") or "").strip()
+            action_id = str(args.get("action_id") or "").strip()
+            risk_level = str(args.get("risk_level") or "medium")
+            timeout_seconds = float(args.get("timeout_seconds") or 120.0)
+            ws_root = args.get("workspace_root") or args.get("repo_path") or args.get("cwd") or self.repo_root
+
+            if not cmd and not inbox_item_id and not action_id:
+                cmd = title or reason or "approval_action"
+
             try:
                 res = approval_request(
-                    command=str(args.get("command") or ""),
-                    title=str(args.get("title") or ""),
-                    reason=str(args.get("reason") or ""),
-                    inbox_item_id=str(args.get("inbox_item_id") or ""),
-                    action_id=str(args.get("action_id") or ""),
-                    risk_level=str(args.get("risk_level") or "high"),
-                    timeout_seconds=float(args.get("timeout_seconds") or 300.0),
-                    workspace_root=self.repo_root,
+                    command=cmd,
+                    title=title,
+                    reason=reason,
+                    inbox_item_id=inbox_item_id,
+                    action_id=action_id,
+                    risk_level=risk_level,
+                    timeout_seconds=timeout_seconds,
+                    workspace_root=ws_root,
                 )
-                if isinstance(res, dict) and "ok" not in res:
-                    res["ok"] = bool(res.get("approved", True))
-                return res
+                if isinstance(res, dict):
+                    if "ok" not in res:
+                        res["ok"] = bool(res.get("approved", True))
+                    return res
+                return {"ok": True, "result": res}
             except Exception as exc:
                 return {"ok": False, "error": str(exc), "error_code": "APPROVAL_REQUEST_FAILED"}
 
@@ -508,6 +491,9 @@ class ToolExecutionDispatcher:
             try:
                 res = wait_for_approval(
                     inbox_item_id=str(args.get("inbox_item_id") or ""),
+                    source_decision_id=str(args.get("source_decision_id") or "decision_wait"),
+                    task_id=str(args.get("task_id") or "task_wait"),
+                    agent_id=str(args.get("agent_id") or "ask_agent"),
                     timeout_seconds=float(args.get("timeout_seconds") or 300.0),
                     poll_interval_seconds=float(args.get("poll_interval_seconds") or 0.25),
                 )

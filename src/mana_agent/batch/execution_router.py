@@ -68,7 +68,7 @@ class ExecutionModeRouter:
         config: BatchConfig | None = None,
         registry: ModelCapabilityRegistry | None = None,
     ) -> None:
-        self.config = config or BatchConfig()
+        self.config = config or BatchConfig.from_settings()
         self.registry = registry or GLOBAL_CAPABILITY_REGISTRY
 
     def route(

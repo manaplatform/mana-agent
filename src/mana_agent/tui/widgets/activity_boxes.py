@@ -239,20 +239,25 @@ class MainActivityBox(Vertical):
                 or "approval.required" in item["tool_name"]
             ) and st not in {"success", "completed", "done", "failed", "error", "cancelled"}
 
+            is_sub = bool(item["latest_ev"].get("sub_operation") or item["latest_ev"].get("indent"))
+            prefix = "  ↳ " if is_sub else ""
+
             if is_item_approval:
-                st_icon = "⚠️"
+                st_icon = "⚠️ "
+            elif is_sub:
+                st_icon = ""
             else:
-                st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌")
+                st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌") + " "
 
             count_suffix = f" (x{item['count']})" if item["count"] > 1 else ""
             dur = item["latest_ev"].get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
-            summary_part = f" — {item['summary']}" if item["summary"] else ""
+            summary_part = f" — {item['summary']}" if item["summary"] and item["summary"] != item["tool_name"] else ""
 
             if is_item_approval:
-                lines.append(f"{st_icon} {item['tool_name']}{count_suffix} [WAITING FOR APPROVAL]{summary_part}")
+                lines.append(f"{prefix}{st_icon}{item['tool_name']}{count_suffix} [WAITING FOR APPROVAL]{summary_part}")
             else:
-                lines.append(f"{st_icon} {item['tool_name']}{count_suffix}{dur_str}{summary_part}")
+                lines.append(f"{prefix}{st_icon}{item['tool_name']}{count_suffix}{dur_str}{summary_part}")
 
             err = item["latest_ev"].get("error")
             if err:

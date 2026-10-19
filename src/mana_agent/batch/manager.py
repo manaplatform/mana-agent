@@ -39,7 +39,7 @@ class BatchLifecycleManager:
         event_sink: Callable[..., Any] | None = None,
         accounting_service: Any | None = None,
     ) -> None:
-        self.config = config or BatchConfig()
+        self.config = config or BatchConfig.from_settings()
         self.client = client or OpenAIBatchClient(config=self.config)
         self.store = store or BatchJobStore()
         self.event_sink = event_sink
@@ -108,6 +108,23 @@ class BatchLifecycleManager:
                 "model": model,
             },
         )
+
+        # Normalize request items to align with target endpoint
+        items = [
+            BatchItemRequest(
+                custom_id=it.custom_id,
+                body=it.body,
+                method=it.method,
+                url=endpoint,
+                origin_task_id=it.origin_task_id,
+                origin_run_id=it.origin_run_id,
+                created_at=it.created_at,
+                target_revision=it.target_revision,
+                file_path=it.file_path,
+                expected_sha256=it.expected_sha256,
+            ) if it.url != endpoint else it
+            for it in items
+        ]
 
         # 1. Upload JSONL requests file
         filename = f"batch_{task_id or 'run'}_{int(time.time())}.jsonl"
@@ -197,6 +214,23 @@ class BatchLifecycleManager:
                 "model": model,
             },
         )
+
+        # Normalize request items to align with target endpoint
+        items = [
+            BatchItemRequest(
+                custom_id=it.custom_id,
+                body=it.body,
+                method=it.method,
+                url=endpoint,
+                origin_task_id=it.origin_task_id,
+                origin_run_id=it.origin_run_id,
+                created_at=it.created_at,
+                target_revision=it.target_revision,
+                file_path=it.file_path,
+                expected_sha256=it.expected_sha256,
+            ) if it.url != endpoint else it
+            for it in items
+        ]
 
         filename = f"batch_{task_id or 'run'}_{int(time.time())}.jsonl"
         input_file_id = await self.client.async_upload_batch_file(items, filename=filename)

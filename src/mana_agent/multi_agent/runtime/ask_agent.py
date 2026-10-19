@@ -1662,7 +1662,7 @@ class AskAgent:
                     }
                     try:
                         from mana_agent.chat.history import get_history
-                        from mana_agent.chat.models import CodingActivityEvent
+                        from mana_agent.chat.events import CodingActivityEvent
 
                         get_history().add(
                             CodingActivityEvent(
@@ -2852,7 +2852,7 @@ class AskAgent:
                             metrics={
                                 "step_idx": step_idx,
                                 "tool_calls_count": len(seen_tool_args),
-                                "traces_count": len(tool_traces),
+                                "traces_count": len(seen_tool_args),
                             },
                         )
                         if eval_decision.action == ContinuationAction.CONTINUE:
