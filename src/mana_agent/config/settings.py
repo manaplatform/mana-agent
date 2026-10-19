@@ -107,6 +107,17 @@ class Settings(BaseSettings):
     # Left unset by default so the embedding model can be auto-selected from the
     # active base URL (see ``resolve_embed_model``). An explicit value always wins.
     openai_embed_model: str | None = Field(default=None, alias="OPENAI_EMBED_MODEL")
+    openai_batch_enabled: bool = Field(default=True, alias="OPENAI_BATCH_ENABLED")
+    openai_batch_mode: str = Field(default="auto", alias="OPENAI_BATCH_MODE")
+    openai_batch_endpoint: str = Field(default="/v1/responses", alias="OPENAI_BATCH_ENDPOINT")
+    openai_batch_completion_window: str = Field(default="24h", alias="OPENAI_BATCH_COMPLETION_WINDOW")
+    openai_batch_min_requests: int = Field(default=1, alias="OPENAI_BATCH_MIN_REQUESTS")
+    openai_batch_always_enable_if_supported: bool = Field(default=True, alias="OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED")
+    openai_batch_max_requests_per_batch: int = Field(default=50000, alias="OPENAI_BATCH_MAX_REQUESTS_PER_BATCH")
+    openai_batch_max_file_size_mb: int = Field(default=200, alias="OPENAI_BATCH_MAX_FILE_SIZE_MB")
+    openai_batch_auto_resume: bool = Field(default=True, alias="OPENAI_BATCH_AUTO_RESUME")
+    openai_batch_retry_failed_requests: bool = Field(default=True, alias="OPENAI_BATCH_RETRY_FAILED_REQUESTS")
+    openai_batch_cost_optimization: bool = Field(default=True, alias="OPENAI_BATCH_COST_OPTIMIZATION")
     mana_adaptive_routing_enabled: bool = Field(
         default=True, alias="MANA_ADAPTIVE_ROUTING_ENABLED"
     )

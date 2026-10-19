@@ -342,6 +342,17 @@ class CodingActivityBox(Vertical):
         if ev_type.startswith("parallel.group"):
             count = payload_dict.get("count") or payload_dict.get("total_operations") or ""
             self.active_group = f"parallel group ({count} ops)" if count else "parallel group"
+        elif ev_type.startswith("batch."):
+            b_id = str(payload_dict.get("batch_id") or meta.get("batch_id") or ev.get("batch_id") or "")
+            b_status = str(payload_dict.get("status") or meta.get("status") or ev.get("status") or "")
+            tot = payload_dict.get("total_requests") or meta.get("total_requests") or ev.get("total_requests") or ""
+            comp = payload_dict.get("completed_requests") or meta.get("completed_requests") or ev.get("completed_requests") or ""
+            if comp and tot:
+                self.batch_progress = f"{comp}/{tot} reqs"
+            elif tot:
+                self.batch_progress = f"{tot} reqs"
+            if b_id:
+                self.active_group = f"batch {b_id[:12]} ({b_status or 'active'})"
 
         # Track changed files
         args_dict = _safe_dict(payload_dict.get("args")) or _safe_dict(meta.get("args"))
@@ -409,6 +420,9 @@ class CodingActivityBox(Vertical):
 
             if row_type.startswith("parallel.group"):
                 lines.append(f"⚡ {r_title}" + (f" — {detail}" if detail else ""))
+            elif row_type.startswith("batch."):
+                b_badge = " [50% off]" if "discount" in row or "50%" in str(detail) or "50%" in str(row) else ""
+                lines.append(f"📦 {r_title}{b_badge}" + (f" — {detail}" if detail else ""))
             elif cmd:
                 lines.append(f"{row_icon} $ {cmd}{dur_str}")
             else:
@@ -427,6 +441,8 @@ class CodingActivityBox(Vertical):
         stats = [f"{len(self.events)} events"]
         if self.active_concurrency > 0:
             stats.append(f"{self.active_concurrency} concurrent")
+        if self.batch_progress:
+            stats.append(f"batch: {self.batch_progress}")
         if tokens is not None:
             stats.append(f"{tokens} tokens")
         if duration is not None:

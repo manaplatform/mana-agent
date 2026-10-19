@@ -143,6 +143,7 @@ class AutonomousExecutionController:
         evaluator: ContinuationEvaluator | None = None,
         continuation_evaluator: ContinuationEvaluator | None = None,
         global_memory: Any | None = None,
+        batch_manager: Any | None = None,
     ) -> None:
         self.config = config or AutonomousExecutionConfig()
         self.supervisor = supervisor
@@ -163,6 +164,14 @@ class AutonomousExecutionController:
                 self.global_memory = get_global_memory()
             except Exception:
                 self.global_memory = None
+        if batch_manager is not None:
+            self.batch_manager = batch_manager
+        else:
+            try:
+                from mana_agent.batch.manager import BatchLifecycleManager
+                self.batch_manager = BatchLifecycleManager(accounting_service=accounting_service)
+            except Exception:
+                self.batch_manager = None
 
     def run(
         self,
@@ -284,11 +293,19 @@ class AutonomousExecutionController:
             except Exception as mem_exc:
                 logger.debug("Pre-execution memory retrieval failed safely: %s", mem_exc)
 
+        # Pre-execution resumption of pending OpenAI Batch API jobs
+        if self.batch_manager is not None and getattr(self.batch_manager.config, "auto_resume", True):
+            try:
+                self.batch_manager.resume_pending_batches()
+            except Exception as resume_exc:
+                logger.debug("Pre-execution batch auto-resume failed safely: %s", resume_exc)
+
         while True:
-            # 0. Provide live TaskBoard progress and operations in execution context
+            # 0. Provide live TaskBoard progress, operations, and batch manager in execution context
             ctx.setdefault("evidence", [])
             ctx.setdefault("touched_files", [])
             ctx.setdefault("tool_events", [])
+            ctx["batch_manager"] = self.batch_manager
             if self.taskboard is not None:
                 ctx["taskboard_progress"] = self.taskboard.get_progress(root_task_id=root_task_id)
                 ctx["taskboard"] = self.taskboard
@@ -318,11 +335,21 @@ class AutonomousExecutionController:
             current_task = self.supervisor.get_task(task_id)
             if current_task.state == ExecutionState.RUNNING and current_task.attempt_id and current_task.lease_token:
                 try:
+                    batch_job_ids: list[str] = []
+                    if self.batch_manager is not None:
+                        try:
+                            batch_job_ids = [b.batch_id for b in self.batch_manager.store.list_jobs(task_id=task_id)]
+                        except Exception:
+                            pass
                     self.supervisor.checkpoint(
                         task_id,
                         attempt_id=current_task.attempt_id,
                         lease_token=current_task.lease_token,
-                        resume_payload={"step_index": step_index, "metrics": metrics.model_dump(mode="json")},
+                        resume_payload={
+                            "step_index": step_index,
+                            "metrics": metrics.model_dump(mode="json"),
+                            "batch_job_ids": batch_job_ids,
+                        },
                         resume_cursor=f"step_{step_index}",
                         completed_steps=[str(s.get("summary", "")) for s in completed_steps],
                         pending_steps=["execute_step", "evaluate_continuation"],
@@ -628,6 +655,12 @@ class AutonomousExecutionController:
             current_task = self.supervisor.get_task(task_id)
             if current_task.state == ExecutionState.RUNNING and current_task.attempt_id and current_task.lease_token:
                 try:
+                    post_batch_job_ids: list[str] = []
+                    if self.batch_manager is not None:
+                        try:
+                            post_batch_job_ids = [b.batch_id for b in self.batch_manager.store.list_jobs(task_id=task_id)]
+                        except Exception:
+                            pass
                     self.supervisor.checkpoint(
                         task_id,
                         attempt_id=current_task.attempt_id,
@@ -636,6 +669,7 @@ class AutonomousExecutionController:
                             "step_index": step_index,
                             "metrics": metrics.model_dump(mode="json"),
                             "last_answer": last_answer,
+                            "batch_job_ids": post_batch_job_ids,
                         },
                         resume_cursor=f"after_step_{step_index}",
                         completed_steps=[str(s.get("summary", "")) for s in completed_steps],

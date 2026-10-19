@@ -9,6 +9,7 @@ as a graceful fallback for unsupported models.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -89,6 +90,7 @@ class InternalCodingEngine(CodingEngine):
         cache_enabled: bool = True,
         cache_ttl_seconds: int = 300,
         parallel_scheduling_enabled: bool = True,
+        batch_manager: Any | None = None,
     ) -> None:
         self.mode: CodingEngineMode = "internal"
         self.name: str = "internal"
@@ -124,6 +126,15 @@ class InternalCodingEngine(CodingEngine):
                 self.global_memory = get_global_memory()
             except Exception:
                 self.global_memory = None
+
+        if batch_manager is not None:
+            self.batch_manager = batch_manager
+        else:
+            try:
+                from mana_agent.batch.manager import BatchLifecycleManager
+                self.batch_manager = BatchLifecycleManager()
+            except Exception:
+                self.batch_manager = None
 
         self._task_statuses: dict[str, CodingStatus] = {}
         self._active_sessions: dict[str, ProgrammaticExecutionSession] = {}
@@ -796,11 +807,207 @@ class InternalCodingEngine(CodingEngine):
             backend=self.name,
         )
 
-    async def close(self) -> None:
-        for ev in self._cancellation_events.values():
-            ev.set()
-        self._cancellation_events.clear()
-        self._active_sessions.clear()
+    def _get_current_git_commit(self, repo_root: str | Path) -> str:
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                return res.stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    def submit_code_analysis_batch(
+        self,
+        task: CodingTask,
+        files: list[str],
+        prompt: str,
+        *,
+        workspace: WorkspaceContext | None = None,
+        instructions: str = "",
+        model: str = "",
+    ) -> Any:
+        """Submit a bulk code analysis/review batch via OpenAI Batch API."""
+        if self.batch_manager is None:
+            raise RuntimeError("BatchLifecycleManager is not available on InternalCodingEngine")
+
+        from mana_agent.batch.models import BatchItemRequest
+
+        target_model = model or self.model or "gpt-4o"
+        raw_root = (
+            getattr(workspace, "worktree_path", None)
+            or getattr(workspace, "repository_path", None)
+            or getattr(workspace, "repo_root", None)
+            or getattr(task, "workspace_context", None)
+            or "."
+        )
+        if hasattr(raw_root, "repo_root"):
+            raw_root = raw_root.repo_root
+        elif hasattr(raw_root, "worktree_path"):
+            raw_root = raw_root.worktree_path
+        repo_root = Path(raw_root)
+        current_commit = self._get_current_git_commit(repo_root)
+
+        items: list[BatchItemRequest] = []
+        for idx, file_rel in enumerate(files):
+            file_path = repo_root / file_rel
+            content = ""
+            file_sha = ""
+            if file_path.is_file():
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                    file_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                except Exception as exc:
+                    logger.warning("Could not read file %s for batch request: %s", file_path, exc)
+
+            custom_id = f"{task.task_id}-review-{idx}-{Path(file_rel).name}"
+            req_prompt = (
+                f"{instructions}\n\nFile: {file_rel}\n```\n{content}\n```\n\nTask: {prompt}"
+                if content
+                else f"{instructions}\n\nFile: {file_rel}\n\nTask: {prompt}"
+            )
+
+            # Build request body matching the configured endpoint (/v1/responses preferred)
+            if self.batch_manager.config.endpoint == "/v1/chat/completions":
+                body = {
+                    "model": target_model,
+                    "messages": [
+                        {"role": "system", "content": self.system_instruction},
+                        {"role": "user", "content": req_prompt},
+                    ],
+                }
+                url = "/v1/chat/completions"
+            else:
+                body = {
+                    "model": target_model,
+                    "input": req_prompt,
+                }
+                url = "/v1/responses"
+
+            items.append(
+                BatchItemRequest(
+                    custom_id=custom_id,
+                    body=body,
+                    url=url,
+                    origin_task_id=task.task_id,
+                    file_path=file_rel,
+                    expected_sha256=file_sha,
+                    target_revision=current_commit,
+                )
+            )
+
+        job = self.batch_manager.submit_batch(
+            items,
+            model=target_model,
+            endpoint=self.batch_manager.config.endpoint,
+            task_id=task.task_id,
+            idempotency_key=f"analysis-{task.task_id}-{len(files)}",
+            git_commit_sha=current_commit,
+        )
+
+        if self.taskboard is not None:
+            try:
+                tb_item = self.taskboard.get_task(task.task_id)
+                if tb_item and hasattr(tb_item, "queue_job_ids"):
+                    if job.batch_id not in tb_item.queue_job_ids:
+                        tb_item.queue_job_ids.append(job.batch_id)
+                        self.taskboard.save()
+            except Exception:
+                pass
+
+        return job
+
+    def retrieve_and_apply_batch_results(
+        self,
+        batch_id: str,
+        workspace: WorkspaceContext | Any,
+    ) -> list[dict[str, Any]]:
+        """Retrieve results from OpenAI Batch API, enforcing revision fencing against file/repo drift."""
+        if self.batch_manager is None:
+            raise RuntimeError("BatchLifecycleManager is not available on InternalCodingEngine")
+
+        from mana_agent.batch.manager import BatchLifecycleManager
+
+        job, results = self.batch_manager.finalize_batch(batch_id)
+        items_map = {it.custom_id: it for it in self.batch_manager.store.get_items(batch_id)}
+
+        raw_root = (
+            getattr(workspace, "worktree_path", None)
+            or getattr(workspace, "repository_path", None)
+            or getattr(workspace, "repo_root", None)
+            or "."
+        )
+        repo_root = Path(raw_root)
+        current_commit = self._get_current_git_commit(repo_root)
+
+        applied: list[dict[str, Any]] = []
+
+        for res in results:
+            item = items_map.get(res.custom_id)
+            if not item:
+                continue
+
+            current_content: str | None = None
+            if item.file_path:
+                fp = repo_root / item.file_path
+                if fp.is_file():
+                    try:
+                        current_content = fp.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+
+            # Enforce revision fencing check
+            fencing_ok = BatchLifecycleManager.verify_revision_fencing(
+                item,
+                current_file_content=current_content,
+                current_git_commit=current_commit,
+            )
+
+            if not fencing_ok:
+                logger.warning(
+                    "Revision fencing rejected batch result for %s: concurrent workspace drift detected.",
+                    item.file_path,
+                )
+                applied.append(
+                    {
+                        "custom_id": res.custom_id,
+                        "file_path": item.file_path,
+                        "status": "stale_revision_rejected",
+                        "error": "Workspace or file revision changed while batch was processing.",
+                    }
+                )
+                continue
+
+            # Extract output text
+            output_text = ""
+            if res.response_body:
+                # /v1/responses format
+                output_text = res.response_body.get("output_text") or ""
+                # /v1/chat/completions format
+                if not output_text and "choices" in res.response_body:
+                    choices = res.response_body.get("choices") or []
+                    if choices and isinstance(choices[0], dict):
+                        msg = choices[0].get("message") or {}
+                        output_text = msg.get("content") or ""
+
+            applied.append(
+                {
+                    "custom_id": res.custom_id,
+                    "file_path": item.file_path,
+                    "status": "verified_and_ready",
+                    "output_text": output_text,
+                    "response_body": res.response_body,
+                    "ok": res.ok,
+                }
+            )
+
+        return applied
 
 
 __all__ = ["InternalCodingEngine"]

@@ -4,6 +4,39 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-19
 
+- Integrated **Official OpenAI Batch API (`/v1/batches`) into Model Execution Infrastructure**:
+  - Implemented Native Batch Client (`src/mana_agent/batch/client.py`):
+    - Full support for `/v1/batches` and `/v1/files` with `purpose=batch` using the official OpenAI SDK.
+    - Fixed `_convert_sdk_batch` AttributeError on Pydantic `openai.types.Batch` instances where attributes evaluate to `None`.
+    - JSONL payload validation and serialization with strict caps (up to 50,000 requests and 200 MB per batch).
+    - Asynchronous and synchronous upload, creation, retrieval, cancellation, and out-of-order result parsing by `custom_id`.
+  - Implemented Durable Batch Storage (`src/mana_agent/batch/store.py`):
+    - SQLite WAL-mode persistence (`batches` and `batch_items` tables) for all jobs and request-level outputs.
+    - Atomic upserts, idempotency indexing, task/status filtering, and result correlation.
+  - Implemented Automatic Execution Router (`src/mana_agent/batch/router.py`):
+    - Added model support validation (`is_model_supported_for_batch`) recognizing OpenAI chat, reasoning, and embedding model families (`gpt-5`, `gpt-4o`, `gpt-4o-mini`, `o1`, `o3`, `gpt-4`, etc.).
+    - Defaulted primary endpoint to `/v1/responses` with strict 50,000 request and 200 MB limits, and 24h completion window.
+    - Always enables Batch API by default when model is supported (`always_enable_if_supported=True`, `min_requests=1`) providing 50% token cost discount.
+    - Preserves low-latency Realtime API for streaming workloads and unsupported models.
+  - Implemented Batch Lifecycle Manager (`src/mana_agent/batch/manager.py`):
+    - Durable state machine (`CREATED`, `UPLOADING`, `SUBMITTED`, `VALIDATING`, `IN_PROGRESS`, `FINALIZING`, `COMPLETED`, `RESULTS_IMPORTED`, `VERIFIED`, `FAILED`, `EXPIRED`, `CANCELLING`, `CANCELLED`).
+    - Deduplication via `idempotency_key` preventing redundant submissions.
+    - Startup crash recovery (`resume_pending_batches()`) polling and finalizing jobs across agent restarts.
+    - Selective re-submission of failed requests (`retry_failed_requests()`).
+  - Integrated with Internal Coding Engine (`src/mana_agent/coding/internal_engine.py`):
+    - Multi-file code analysis/review batch submissions (`submit_code_analysis_batch`).
+    - Revision fencing (`retrieve_and_apply_batch_results`): validates target file SHA-256 and Git commit SHA to reject stale model suggestions if the workspace was modified concurrently.
+    - Correlates batch jobs with TaskBoard items (`queue_job_ids`).
+  - Integrated with Autonomous Controller & Supervisor (`src/mana_agent/execution/autonomous_controller.py`):
+    - Injected `batch_manager` into execution context and recorded active `batch_job_ids` in checkpoints.
+  - Enhanced TUI Activity Boxes (`src/mana_agent/tui/widgets/activity_boxes.py`):
+    - Rendered live `batch.*` events with `📦` icons, 50% discount badges (`[50% off]`), and progress meters (`batch: X/Y reqs`).
+  - Added configuration support in `src/mana_agent/config/settings.py` and `user_config.py` for `OPENAI_BATCH_*` keys.
+  - Added documentation: `docs/26-openai-batch-api.md`.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_openai_batch_client.py tests/test_openai_batch_router.py tests/test_openai_batch_lifecycle.py tests/test_openai_batch_coding_engine.py`
+    - `MANA_ENABLE_LIVE_OPENAI_BATCH_TEST=1 OPENAI_API_KEY=<key> ./venv/bin/pytest -v tests/test_openai_batch_live_integration.py`
+
 - Fixed **Internal Coding Engine Approval Request Tool & Shell Execution Argument Inversion**:
   - Resolved `UNKNOWN_TOOL` error on `approval_request`: Added native dispatching for `approval_request`, `request_user_approval`, and `wait_for_approval` in `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`).
   - Fixed policy-allowed issue in `approval_request` (`src/mana_agent/human_inbox/approval_tools.py`): Handled pre-approved action intents whose policy outcome is `PolicyOutcome.ALLOW` without erroneously invoking `gateway.approvals.issue()`.
