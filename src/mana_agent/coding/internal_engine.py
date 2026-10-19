@@ -175,13 +175,21 @@ class InternalCodingEngine(CodingEngine):
 
         if not api_key:
             try:
+                from mana_agent.config.inference_provider import resolve_inference_connection
                 from mana_agent.config.settings import Settings
-                from mana_agent.config.user_config import resolve_inference_connection
-                conn = resolve_inference_connection(Settings(), require_api_key=False)
-                if conn.api_key:
-                    api_key = conn.api_key
-                if not base_url and conn.base_url:
-                    base_url = conn.base_url
+
+                settings = Settings()
+                if getattr(settings, "openai_api_key", None):
+                    api_key = str(settings.openai_api_key).strip()
+                if not base_url and getattr(settings, "openai_base_url", None):
+                    base_url = str(settings.openai_base_url).strip()
+
+                if not api_key:
+                    conn = resolve_inference_connection(settings, provider=provider, require_api_key=False)
+                    if conn.api_key:
+                        api_key = conn.api_key
+                    if not base_url and conn.base_url:
+                        base_url = conn.base_url
             except Exception:
                 pass
 

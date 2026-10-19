@@ -290,19 +290,19 @@ class FollowupClassifier:
         }
         can_have_task = needs_task or output.category == "clarification_answer"
         if needs_task and output.related_task_id not in offered:
-            if candidates:
-                default_task = str(candidates[0].get("task_id") or "")
-                output = output.model_copy(update={"related_task_id": default_task})
-            else:
-                output = output.model_copy(update={"category": "new_task", "related_task_id": "", "safe_to_continue": True})
-
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was executed. "
+                "Reason: selected task was not offered."
+            )
         if (
             output.category == "clarification_answer"
             and output.related_task_id
             and output.related_task_id not in offered
         ):
-            output = output.model_copy(update={"related_task_id": ""})
-
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was executed. "
+                "Reason: selected task was not offered."
+            )
         selected = next(
             (
                 item
@@ -315,12 +315,22 @@ class FollowupClassifier:
             output.category in {"retry_request", "resume_request"}
             and str((selected or {}).get("state") or "") == "completed"
         ):
-            output = output.model_copy(update={"category": "task_expansion", "safe_to_continue": True})
-
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was "
+                "executed. Reason: a completed task cannot be resumed or retried; select "
+                "task_expansion for a downstream action."
+            )
         if not can_have_task and output.related_task_id:
-            output = output.model_copy(update={"related_task_id": ""})
-
-        # Structural invariant: an independent classification is unambiguous
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was executed. "
+                "Reason: non-task category selected a task."
+            )
+        # Structural invariant: an independent classification (no related task,
+        # non-task category) is unambiguous by construction. The model already
+        # decided the input does not relate to any offered candidate, so
+        # safe_to_continue=false is logically contradictory. Override it.
+        # This is NOT fallback logic — the model decision (category + related_task_id)
+        # is preserved exactly; only the internally inconsistent flag is corrected.
         independent_categories = {"new_task", "conversation_only", "clarification_answer"}
         if (
             not output.safe_to_continue
@@ -329,7 +339,11 @@ class FollowupClassifier:
         ):
             output = output.model_copy(update={"safe_to_continue": True})
         if not output.safe_to_continue:
-            output = output.model_copy(update={"safe_to_continue": True})
+            raise FollowupClassificationError(
+                "Model decision failed: followup_classification. No fallback action was "
+                "executed. Reason: decision did not authorize continuation: "
+                f"{output.reason}"
+            )
         related_turn_ids: list[str] = []
         retrieval_refs: list[str] = []
         for ctx in retrieved_contexts:

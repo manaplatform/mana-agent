@@ -487,13 +487,17 @@ class ModelDiscoveryService:
         p_clean = str(provider or "openai").strip().lower()
         if not api_key:
             try:
+                from mana_agent.config.inference_provider import resolve_inference_connection
                 from mana_agent.config.settings import Settings
-                from mana_agent.config.user_config import resolve_inference_connection
 
-                conn = resolve_inference_connection(Settings(), require_api_key=False)
-                api_key = conn.api_key or ""
-                if not base_url or base_url == "https://api.openai.com/v1":
-                    base_url = conn.base_url or base_url
+                settings = Settings()
+                if p_clean == "openai" and getattr(settings, "openai_api_key", None):
+                    api_key = str(settings.openai_api_key).strip()
+                if not api_key:
+                    conn = resolve_inference_connection(settings, provider=p_clean, require_api_key=False)
+                    api_key = conn.api_key or ""
+                    if not base_url or base_url == "https://api.openai.com/v1":
+                        base_url = conn.base_url or base_url
             except Exception:
                 pass
 

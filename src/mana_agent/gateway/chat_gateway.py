@@ -1377,6 +1377,7 @@ class AgentChatGateway:
             if self._stack.ask_service.ask_agent is not None:
                 self._stack.ask_service.ask_agent.human_inbox_service = self.human_inbox_service
                 self._stack.ask_service.ask_agent.continuation_evaluator = self._continuation_evaluator
+                self._stack.ask_service.ask_agent.global_memory = getattr(self._stack.memory_service, "learning", None)
         from mana_agent.connectors.browser.session import default_browser_manager
         from mana_agent.sessions.service import SessionService
 

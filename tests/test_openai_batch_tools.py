@@ -485,3 +485,70 @@ def test_batch_tools_mode_selection_auto() -> None:
     assert not is_openai_batch_supported("google/gemini-2.5-pro")
     assert not is_openai_batch_supported("gpt-4o-realtime-preview")
 
+
+def test_batch_create_openai_mode_creates_on_openai_platform() -> None:
+    """Verify that OpenAI supported models submit to OpenAI platform API."""
+    store = BatchJobStore(":memory:")
+    mock_client = MagicMock()
+    mock_client.config = BatchConfig()
+    mock_client.upload_batch_file.return_value = "file-batch-input-123"
+    mock_client.create_batch.return_value = BatchJobRecord(
+        batch_id="batch_openai_platform_999",
+        status=BatchLifecycleStatus.VALIDATING.value,
+        endpoint="/v1/responses",
+        total_requests=2,
+        input_file_id="file-batch-input-123",
+    )
+
+    mgr = BatchLifecycleManager(client=mock_client, store=store)
+
+    with patch("mana_agent.batch.tools.get_batch_manager", return_value=mgr):
+        res = batch_create_job(
+            requests=[
+                {"custom_id": "r1", "body": {"input": "Hello"}},
+                {"custom_id": "r2", "body": {"input": "World"}},
+            ],
+            model="gpt-4o",
+            endpoint="/v1/responses",
+        )
+        assert res["ok"]
+        assert res["mode"] == "openai"
+        assert res["batch_id"] == "batch_openai_platform_999"
+        assert res["discount"] == "50%"
+        assert res["input_file_id"] == "file-batch-input-123"
+        mock_client.upload_batch_file.assert_called_once()
+        mock_client.create_batch.assert_called_once()
+
+
+def test_batch_openai_failure_does_not_silently_fallback() -> None:
+    """Verify that when OpenAI platform submission fails, it fails closed with an error and does NOT silently divert to internal."""
+    store = BatchJobStore(":memory:")
+    mock_client = MagicMock()
+    mock_client.config = BatchConfig()
+    mock_client.upload_batch_file.side_effect = RuntimeError("OpenAI 401 Unauthorized: Invalid API key")
+
+    mgr = BatchLifecycleManager(client=mock_client, store=store)
+
+    with patch("mana_agent.batch.tools.get_batch_manager", return_value=mgr):
+        res = batch_create_job(
+            requests=[{"custom_id": "r1", "body": {"input": "Hello"}}],
+            model="gpt-4o",
+        )
+        assert not res["ok"]
+        assert res["error_code"] == "BATCH_SUBMISSION_FAILED"
+        assert "OpenAI 401 Unauthorized" in res["error"]
+        # Ensure no internal job was stealthily created in store
+        assert len(store.list_jobs()) == 0
+
+
+def test_batch_job_store_default_durable_path(tmp_path: Path, monkeypatch: Any) -> None:
+    """Verify BatchJobStore defaults to a durable SQLite database under mana_home()."""
+    fake_home = tmp_path / "mana_home"
+    monkeypatch.setenv("MANA_HOME", str(fake_home))
+
+    store = BatchJobStore()
+    expected_db = fake_home / "batch" / "batches.db"
+    assert store._db_path == str(expected_db.resolve())
+    assert expected_db.exists()
+
+

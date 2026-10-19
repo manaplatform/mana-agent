@@ -78,16 +78,23 @@ class OpenAIBatchClient:
 
         if not self._api_key:
             try:
+                from mana_agent.config.inference_provider import resolve_inference_connection
                 from mana_agent.config.settings import Settings
-                from mana_agent.config.user_config import resolve_inference_connection
 
-                conn = resolve_inference_connection(Settings(), require_api_key=False)
-                if conn.api_key:
-                    self._api_key = conn.api_key
-                if not self._base_url and conn.base_url:
-                    self._base_url = conn.base_url
-            except Exception:
-                pass
+                settings = Settings()
+                if getattr(settings, "openai_api_key", None):
+                    self._api_key = str(settings.openai_api_key).strip()
+                if not self._base_url and getattr(settings, "openai_base_url", None):
+                    self._base_url = str(settings.openai_base_url).strip()
+
+                if not self._api_key:
+                    conn = resolve_inference_connection(settings, provider="openai", require_api_key=False)
+                    if conn.api_key:
+                        self._api_key = conn.api_key
+                    if not self._base_url and conn.base_url:
+                        self._base_url = conn.base_url
+            except Exception as exc:
+                logger.debug("Failed to resolve OpenAI inference connection for batch client: %s", exc)
 
         self._client = client
         self._async_client = async_client

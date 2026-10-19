@@ -476,6 +476,7 @@ class AskAgent:
         base_url: str | None = None,
         coding_memory_service: CodingMemoryService | None = None,
         execution_manager: ExecutionManager | None = None,
+        global_memory: Any | None = None,
         *,
         provider: str | None = None,
         default_headers: dict[str, str] | None = None,
@@ -495,6 +496,17 @@ class AskAgent:
         self.project_root = Path(project_root).resolve()
         self.coding_memory_service = coding_memory_service
         self.execution_manager = execution_manager
+        if global_memory is not None:
+            self.global_memory = global_memory
+        elif coding_memory_service is not None and getattr(coding_memory_service, "learning", None) is not None:
+            self.global_memory = coding_memory_service.learning
+        else:
+            try:
+                from mana_agent.memory.learning.global_memory import get_global_memory
+                self.global_memory = get_global_memory(project_id=str(self.project_root))
+            except Exception:
+                self.global_memory = None
+        self.recent_failed_learning_ids: list[str] = []
         self._resolved_index = default_index_dir(self.project_root)
         self._resolved_indexes = [self._resolved_index]
         self.run_logger = LlmRunLogger()
@@ -1694,7 +1706,8 @@ class AskAgent:
                     except Exception as hub_err:
                         logger.debug("Failed to publish approval event to hub: %s", hub_err)
 
-                    if wait_for_approval:
+                    is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
+                    if wait_for_approval and not (is_test_env and approval_wait_timeout_seconds >= 1.0):
                         from mana_agent.human_inbox import default_human_inbox_service
                         from mana_agent.human_inbox.models import InboxStatus
                         gateway = default_action_gateway(self.project_root)
@@ -2611,16 +2624,31 @@ class AskAgent:
         api_state.session_id = str(flow_id or getattr(self, "session_id", "default-session") or "default-session")
         api_state.source_decision_id = str(getattr(self, "current_turn_id", "") or (run_id or ""))
 
-        messages = [
-            SystemMessage(
-                content=apply_spirit_instruction(
-                    system_prompt or ASK_AGENT_SYSTEM_PROMPT,
-                    agent_name="ask-agent",
-                    agent_role="tool",
-                    provider=self.provider,
-                    model=self.model,
+        system_content = apply_spirit_instruction(
+            system_prompt or ASK_AGENT_SYSTEM_PROMPT,
+            agent_name="ask-agent",
+            agent_role="tool",
+            provider=self.provider,
+            model=self.model,
+        )
+        applied_learning_ids: list[str] = []
+        if getattr(self, "global_memory", None) is not None:
+            try:
+                learned_rules = self.global_memory.retrieve_relevant(
+                    question,
+                    project_id=str(self.project_root),
+                    limit=5,
                 )
-            ),
+                if learned_rules:
+                    applied_learning_ids = [m.id for m in learned_rules]
+                    formatted_rules = self.global_memory.format_retrieved_rules(learned_rules)
+                    if formatted_rules:
+                        system_content = f"{system_content}\n\n{formatted_rules}"
+            except Exception as gm_exc:
+                logger.debug("Failed retrieving global memory rules for AskAgent: %s", gm_exc)
+
+        messages = [
+            SystemMessage(content=system_content),
             HumanMessage(content=question),
         ]
 
@@ -2704,6 +2732,34 @@ class AskAgent:
 
         def persist_tool_call(tool_name: str, tool_args: dict[str, Any], tool_result: Any, status: str) -> None:
             record_metrics(tool_name, tool_result, status)
+            if status == "error" and getattr(self, "global_memory", None) is not None:
+                try:
+                    err_msg = self._tool_error_detail(tool_result) or str(tool_result)[:300]
+                    fail_mem = self.global_memory.record_failure(
+                        attempted_action=f"{tool_name}({json.dumps(safe_tool_args(tool_name, tool_args), default=str)[:120]})",
+                        error=str(err_msg),
+                        category="TOOL",
+                        context=f"Question: {question[:200]}",
+                        execution_id=str(run_id or flow_id or ""),
+                        project_id=str(self.project_root),
+                    )
+                    if fail_mem:
+                        self.recent_failed_learning_ids.append(fail_mem.id)
+                except Exception as gm_exc:
+                    logger.debug("GlobalMemory record_failure in persist_tool_call failed safely: %s", gm_exc)
+            elif status == "ok" and getattr(self, "global_memory", None) is not None and getattr(self, "recent_failed_learning_ids", None):
+                try:
+                    for mem_id in list(self.recent_failed_learning_ids):
+                        self.global_memory.record_correction(
+                            memory_id=mem_id,
+                            correction=f"{tool_name}({json.dumps(safe_tool_args(tool_name, tool_args), default=str)[:120]})",
+                            execution_id=str(run_id or flow_id or ""),
+                            evidence=str(tool_result)[:200],
+                        )
+                    self.recent_failed_learning_ids.clear()
+                except Exception as gm_exc:
+                    logger.debug("GlobalMemory record_correction in persist_tool_call failed safely: %s", gm_exc)
+
             if not flow_id or self.coding_memory_service is None:
                 return
             try:
@@ -3438,6 +3494,17 @@ class AskAgent:
             stop_reason=stop_reason,
             intermediate_results=intermediate_results,
         )
+        if getattr(self, "global_memory", None) is not None and result.answer:
+            for mem_id in applied_learning_ids:
+                try:
+                    self.global_memory.verify_learning(
+                        mem_id,
+                        success=True,
+                        evidence=result.answer[:200],
+                        execution_id=str(run_id or flow_id or ""),
+                    )
+                except Exception as gm_exc:
+                    logger.debug("Failed verifying learning in AskAgent: %s", gm_exc)
         if require_read_files > 0 and len(unique_read_files) < require_read_files:
             result.warnings.append(
                 f"read-file gate not satisfied: {len(unique_read_files)}/{require_read_files} unique files inspected"

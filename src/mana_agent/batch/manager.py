@@ -171,23 +171,8 @@ class BatchLifecycleManager:
                 metadata=meta,
             )
         except Exception as exc:
-            if (mode or "auto").strip().lower() == "auto":
-                logger.warning(
-                    "OpenAI Batch submission failed (%s); falling back to internal batch engine",
-                    exc,
-                )
-                return self._submit_internal_batch(
-                    items,
-                    model=model,
-                    endpoint=endpoint,
-                    completion_window=completion_window,
-                    task_id=task_id,
-                    run_id=run_id,
-                    idempotency_key=idempotency_key,
-                    git_commit_sha=git_commit_sha,
-                    metadata=meta,
-                )
-            raise
+            logger.error("OpenAI Batch submission failed on OpenAI platform: %s", exc)
+            raise RuntimeError(f"OpenAI Batch API creation failed on OpenAI platform: {exc}") from exc
 
         # Populate local tracking fields
         created_record.model = model
@@ -323,23 +308,8 @@ class BatchLifecycleManager:
                 metadata=meta,
             )
         except Exception as exc:
-            if (mode or "auto").strip().lower() == "auto":
-                logger.warning(
-                    "OpenAI Batch async submission failed (%s); falling back to internal batch engine",
-                    exc,
-                )
-                return await self._async_submit_internal_batch(
-                    items,
-                    model=model,
-                    endpoint=endpoint,
-                    completion_window=completion_window,
-                    task_id=task_id,
-                    run_id=run_id,
-                    idempotency_key=idempotency_key,
-                    git_commit_sha=git_commit_sha,
-                    metadata=meta,
-                )
-            raise
+            logger.error("OpenAI Batch async submission failed on OpenAI platform: %s", exc)
+            raise RuntimeError(f"OpenAI Batch API async creation failed on OpenAI platform: {exc}") from exc
 
         created_record.model = model
         created_record.task_id = task_id
@@ -768,8 +738,8 @@ class BatchLifecycleManager:
                 body = item.body or {}
                 item_model = body.get("model") or model or "gpt-4o"
 
+                from mana_agent.config.inference_provider import resolve_inference_connection
                 from mana_agent.config.settings import Settings
-                from mana_agent.config.user_config import resolve_inference_connection
                 from mana_agent.multi_agent.runtime.compatibility import create_chat_model
                 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 

@@ -66,6 +66,29 @@ class ToolsManager:
         return self.root
 
     def execute_job(self, job: QueueJob) -> ToolResult:
+        res = self._execute_job_inner(job)
+        if not res.ok and res.error:
+            learning = getattr(self.memory_service, "learning", None)
+            if learning is None:
+                try:
+                    from mana_agent.memory.learning.global_memory import get_global_memory
+                    learning = get_global_memory(project_id=str(self.root))
+                except Exception:
+                    learning = None
+            if learning is not None:
+                try:
+                    learning.record_failure(
+                        attempted_action=f"{job.job_type.value}({json.dumps(job.payload, default=str)[:100]})",
+                        error=str(res.error),
+                        category="TOOL",
+                        context=f"ToolManager job {job.id} for task {job.task_id}",
+                        execution_id=job.task_id,
+                    )
+                except Exception:
+                    pass
+        return res
+
+    def _execute_job_inner(self, job: QueueJob) -> ToolResult:
         try:
             root = self.execution_root_for_job(job)
             cache_key = self._cache_key(job, root=root)

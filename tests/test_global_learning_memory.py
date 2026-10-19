@@ -426,3 +426,174 @@ def test_14_autonomous_loop_supervisor_taskboard_compatibility(tmp_path: Path):
     assert tb_task.crossed_off is True
     sup_task = supervisor.get_task("auto_compat_task")
     assert sup_task.state == ExecutionState.COMPLETED
+
+
+# 15. AskAgent records tool mistakes and injects learned prevention rules
+def test_15_ask_agent_records_tool_mistake_and_injects_prevention_rule(tmp_path: Path):
+    from langchain_core.messages import SystemMessage
+    from mana_agent.context_cost import ContextCostGovernor
+    from mana_agent.multi_agent.runtime.ask_agent import AskAgent
+    from mana_agent.search.config import SearchConfig
+
+    gm = GlobalMemory(store=LearningMemoryStore(db_path=tmp_path / "ask_learning.sqlite3"), default_project_id=str(tmp_path))
+
+    class FakeAIMessage:
+        def __init__(self, content: str, tool_calls: list | None = None) -> None:
+            self.content = content
+            self.tool_calls = tool_calls or []
+
+    captured_messages: list[list[Any]] = []
+
+    class FakeLLM:
+        def __init__(self, responses: list[FakeAIMessage]) -> None:
+            self._responses = list(responses)
+
+        def bind_tools(self, tools: list[Any], tool_choice: str | None = None) -> "FakeLLM":
+            return self
+
+        def invoke(self, messages: list[Any], config: Any = None, **kwargs: Any) -> FakeAIMessage:
+            captured_messages.append(list(messages))
+            return self._responses.pop(0)
+
+    governor = ContextCostGovernor(
+        session_id="test-ask-agent-learning",
+        settings=SimpleNamespace(
+            mana_context_governor_enabled=False,
+            mana_context_cost_log_enabled=False,
+        ),
+    )
+
+    class FakeSearchService:
+        pass
+
+    agent = AskAgent(
+        api_key="test",
+        model="fake-agent",
+        search_service=FakeSearchService(),
+        project_root=tmp_path,
+        context_cost_governor=governor,
+        global_memory=gm,
+    )
+    agent._resolved_index = tmp_path / ".mana/index"
+    agent.search_config = SearchConfig(enable_ask_agent=False)
+
+    # Turn 1: model calls a tool with an error
+    agent.llm = FakeLLM(
+        [
+            FakeAIMessage(
+                "",
+                tool_calls=[{"id": "c1", "name": "unknown_tool", "args": {"foo": "bar"}}],
+            ),
+            FakeAIMessage(
+                "I see unknown_tool failed. Let me answer with what I have.",
+                tool_calls=[],
+            ),
+        ]
+    )
+
+    res1 = agent.run("Why did unknown_tool fail?", tmp_path / ".mana/index", 2, max_steps=3)
+    assert res1.answer != ""
+
+    # Verify that GlobalMemory recorded the failure
+    failures = gm.store.search("unknown_tool", active_only=False)
+    assert len(failures) >= 1
+    failed_mem = failures[0]
+    assert failed_mem.category == LearningCategory.TOOL
+    assert "unknown tool" in failed_mem.error.lower()
+
+    # Add a verified correction / prevention rule
+    gm.record_correction(
+        failed_mem.id,
+        correction="list_files",
+        prevention_rule="Do not call unknown_tool; use list_files instead.",
+    )
+    gm.verify_learning(failed_mem.id, success=True, evidence="list_files works")
+
+    # Turn 2: AskAgent is asked a similar question; verified prevention rule MUST be injected in SystemMessage
+    captured_messages.clear()
+    agent.llm = FakeLLM(
+        [
+            FakeAIMessage("Answer using injected rule.", tool_calls=[]),
+        ]
+    )
+
+    res2 = agent.run("Why did unknown_tool fail?", tmp_path / ".mana/index", 2, max_steps=1)
+    assert len(captured_messages) > 0
+    first_messages = captured_messages[0]
+    sys_msgs = [m for m in first_messages if isinstance(m, SystemMessage)]
+    assert len(sys_msgs) >= 1
+    system_text = str(sys_msgs[0].content)
+    assert "Past Learnings & Prevention Rules" in system_text
+    assert "Do not call unknown_tool; use list_files instead." in system_text
+
+
+# 16. Subtask failure in AutonomousExecutionController records to GlobalMemory and updates TaskBoard
+def test_16_controller_subtask_failure_records_to_global_memory_and_taskboard(tmp_path: Path):
+    from mana_agent.execution.continuation_decision import ContinuationAction, ContinuationDecision
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+    from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+    from mana_agent.multi_agent.core.types import TaskStatus
+
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig(root=tmp_path / "supervisor", startup_recovery=False))
+    taskboard = TaskBoard(root=tmp_path / "workspace")
+    gm = GlobalMemory(store=LearningMemoryStore(db_path=tmp_path / "subtask_learning.sqlite3"), default_project_id=str(tmp_path))
+
+    class FakeEvaluator:
+        def evaluate(self, **kwargs):
+            return ContinuationDecision(
+                task_id=kwargs["task_id"],
+                action=ContinuationAction.FINALIZE,
+                goal_satisfied=True,
+                progress_detected=True,
+                evidence_summary="Subtask executed and verified",
+                safe_to_continue=True,
+                reason="subtask executed and verified",
+            )
+
+    controller = AutonomousExecutionController(
+        supervisor=supervisor,
+        taskboard=taskboard,
+        continuation_evaluator=FakeEvaluator(),
+        global_memory=gm,
+    )
+
+    # Subtask that encounters an error
+    def failing_subtask_executor(task_item, ctx):
+        return {
+            "output": "",
+            "error": "command failed: missing required config file config.json",
+            "success": False,
+        }
+
+    ctx = {
+        "subtasks": [
+            {
+                "local_id": "sub_1",
+                "title": "Run initial configuration",
+                "description": "Configure system using config.json",
+                "tool": "config_tool",
+                "tool_args": {"path": "config.json"},
+            }
+        ],
+        "task_executors": {
+            "sub_1": failing_subtask_executor,
+            "config_tool": failing_subtask_executor,
+        },
+    }
+
+    controller.execute_goal(
+        task_id="subtask_fail_task",
+        user_goal="Configure system using config.json",
+        context=ctx,
+        max_turns=1,
+    )
+
+    # Verify GlobalMemory captured the subtask failure
+    tool_failures = gm.store.search("config_tool", active_only=False)
+    assert len(tool_failures) >= 1
+    assert "missing required config file" in tool_failures[0].error
+
+    # Verify TaskBoard has learning reference
+    tb_task = taskboard.get_task("subtask_fail_task")
+    assert len(tb_task.learning_references) >= 1
+

@@ -1182,7 +1182,7 @@ class AutonomousExecutionController:
         sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[str, bool, str]:
         """Determine or dynamically revise the execution strategy without restarting the loop."""
-        initial = current_strategy or ctx.get("strategy_hint")
+        initial = current_strategy or ctx.get("strategy_hint") or ("multi_task" if ctx.get("subtasks") else None)
         revised = ctx.get("revised_strategy")
         if revised and normalize_strategy(revised) != normalize_strategy(current_strategy):
             new_strat = normalize_strategy(revised)
@@ -1499,6 +1499,36 @@ class AutonomousExecutionController:
             except Exception:
                 pass
 
+        if not success or error_msg:
+            if self.global_memory is not None:
+                try:
+                    fail_mem = self.global_memory.record_failure(
+                        attempted_action=f"{tool_name}({json.dumps(tool_args, default=str)[:100]})",
+                        error=error_msg,
+                        category="TOOL",
+                        context=f"Subtask: {title} ({child_id})",
+                        execution_id=root_task_id,
+                    )
+                    if fail_mem and self.taskboard is not None:
+                        self.taskboard.add_learning_reference(root_task_id, fail_mem.id)
+                        self.taskboard.add_learning_reference(child_id, fail_mem.id)
+                except Exception as gm_exc:
+                    logger.debug("Failed recording subtask failure in global memory: %s", gm_exc)
+        else:
+            if self.global_memory is not None:
+                try:
+                    if self.taskboard is not None:
+                        tb_task = self.taskboard.get_task(child_id)
+                        for ref_id in getattr(tb_task, "learning_references", []):
+                            self.global_memory.verify_learning(
+                                ref_id,
+                                success=True,
+                                evidence=result_output[:200],
+                                execution_id=root_task_id,
+                            )
+                except Exception as gm_exc:
+                    logger.debug("Failed verifying subtask learning in global memory: %s", gm_exc)
+
         if result_output or error_msg:
             ctx.setdefault("evidence", []).append({
                 "subtask_id": child_id,
@@ -1645,7 +1675,7 @@ class AutonomousExecutionController:
                 sink=event_sink,
             )
 
-            if strat == ExecutionStrategy.MULTI_TASK.value and not ctx.get("decomposed"):
+            if (ctx.get("subtasks") or strat == ExecutionStrategy.MULTI_TASK.value) and not ctx.get("decomposed"):
                 self._decompose_work(task_id, user_goal, ctx, sink=event_sink)
                 ctx["decomposed"] = True
 
@@ -1653,6 +1683,33 @@ class AutonomousExecutionController:
             executed_results: list[dict[str, Any]] = []
             changed_files: list[str] = []
             tool_calls: list[dict[str, Any]] = []
+
+            # If no ready tasks on TaskBoard, query memory to unblock/recover any failed or blocked subtasks
+            if not ready_tasks and self.taskboard is not None:
+                all_children = [t for t in self.taskboard.list_tasks(root_task_id=task_id) if t.task_id != task_id]
+                blocked_or_failed = [t for t in all_children if t.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, "failed", "blocked"}]
+                if blocked_or_failed and not ctx.get("_retried_with_memory"):
+                    ctx["_retried_with_memory"] = True
+                    for bf_task in blocked_or_failed:
+                        if self.global_memory is not None:
+                            try:
+                                past_learnings = self.global_memory.retrieve_relevant(
+                                    action_or_query=f"{bf_task.title} {getattr(bf_task, 'result_summary', '')}",
+                                    limit=3,
+                                )
+                                if past_learnings:
+                                    rules_text = self.global_memory.format_retrieved_rules(past_learnings)
+                                    ctx["learned_prevention_rules"] = rules_text
+                                    for mem in past_learnings:
+                                        self.taskboard.add_learning_reference(bf_task.task_id, mem.id)
+                            except Exception as mem_ret_exc:
+                                logger.debug("Memory retrieval during taskboard recovery failed: %s", mem_ret_exc)
+                        try:
+                            self.taskboard.reopen(bf_task.task_id, reason="Reopening with learned prevention rules from memory")
+                        except Exception:
+                            pass
+                    self.taskboard.save()
+                    ready_tasks = self._get_ready_tasks(task_id)
 
             if ready_tasks:
                 concurrent_batch, deferred = self._partition_non_conflicting_tasks(ready_tasks)
@@ -1696,19 +1753,34 @@ class AutonomousExecutionController:
                         },
                         sink=event_sink,
                     )
-            elif not ctx.get("decomposed") and strat != ExecutionStrategy.MULTI_TASK.value:
+            else:
                 direct_fn = ctx.get("direct_executor")
                 if callable(direct_fn):
                     direct_res = direct_fn(user_goal, ctx)
                     if isinstance(direct_res, dict):
                         ans = str(direct_res.get("answer") or direct_res.get("output") or "")
                         cf = list(direct_res.get("changed_files") or [])
+                        err = str(direct_res.get("error") or "")
+                        ok = bool(direct_res.get("success", not bool(err)))
                         changed_files.extend(cf)
-                        executed_results.append({"output": ans, "changed_files": cf, "success": True})
+                        executed_results.append({"output": ans, "changed_files": cf, "success": ok, "error": err})
+                        if not ok and err and self.global_memory is not None:
+                            try:
+                                fail_mem = self.global_memory.record_failure(
+                                    attempted_action=f"direct_executor({user_goal[:80]})",
+                                    error=err,
+                                    category="EXECUTION",
+                                    context=f"Direct execution for goal: {user_goal[:200]}",
+                                    execution_id=task_id,
+                                )
+                                if fail_mem and self.taskboard is not None:
+                                    self.taskboard.add_learning_reference(task_id, fail_mem.id)
+                            except Exception as gm_exc:
+                                logger.debug("Failed recording direct executor error: %s", gm_exc)
                     else:
                         ans = str(direct_res)
                         executed_results.append({"output": ans, "success": True})
-                else:
+                elif not executed_results:
                     ans = f"Processed request: {user_goal}"
                     executed_results.append({"output": ans, "success": True})
 

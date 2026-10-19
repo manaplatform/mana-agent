@@ -101,17 +101,30 @@ def batch_create_job(
         return {"ok": False, "error": "Requests list cannot be empty.", "error_code": "EMPTY_REQUESTS"}
 
     items: list[BatchItemRequest] = []
-    target_model = model or mgr.config.endpoint
+    target_model = str(model or "").strip()
+    if not target_model:
+        for raw in requests:
+            if isinstance(raw, dict) and isinstance(raw.get("body"), dict):
+                m = raw["body"].get("model")
+                if m:
+                    target_model = str(m).strip()
+                    break
+    if not target_model:
+        try:
+            from mana_agent.config.settings import Settings
+
+            s = Settings()
+            target_model = getattr(s, "openai_chat_model", None) or "gpt-4o"
+        except Exception:
+            target_model = "gpt-4o"
 
     for idx, raw in enumerate(requests):
         if not isinstance(raw, dict):
             continue
         cid = str(raw.get("custom_id") or f"req-{idx}").strip()
         body = dict(raw.get("body") or {})
-        if model and "model" not in body:
-            body["model"] = model
-        if not target_model and body.get("model"):
-            target_model = str(body["model"])
+        if target_model and "model" not in body:
+            body["model"] = target_model
 
         items.append(
             BatchItemRequest(
@@ -209,11 +222,20 @@ def batch_list_jobs(
     limit: int = 20,
     status: str = "",
     task_id: str = "",
+    sync_platform: bool = True,
     manager: BatchLifecycleManager | None = None,
 ) -> dict[str, Any]:
     """List recent OpenAI batch jobs with their lifecycle status and counts."""
     mgr = manager or get_batch_manager()
     try:
+        if sync_platform and not task_id:
+            try:
+                platform_jobs = mgr.client.list_batches(limit=limit)
+                for pj in platform_jobs:
+                    mgr.store.save_job(pj)
+            except Exception as sync_exc:
+                logger.debug("Failed to sync platform batches: %s", sync_exc)
+
         jobs = mgr.store.list_jobs(task_id=task_id, limit=limit)
         if status:
             s_clean = status.strip().lower()

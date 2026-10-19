@@ -20,12 +20,26 @@ from mana_agent.batch.models import (
 logger = logging.getLogger(__name__)
 
 
+def default_batch_db_path() -> Path:
+    """Return default durable SQLite database path for OpenAI Batch jobs."""
+    try:
+        from mana_agent.workspaces.paths import mana_home
+
+        return mana_home() / "batch" / "batches.db"
+    except Exception:
+        return Path.home() / ".mana" / "batch" / "batches.db"
+
+
 class BatchJobStore:
     """Thread-safe SQLite store maintaining durable batch job states and item results."""
 
-    def __init__(self, db_path: Path | str = ":memory:") -> None:
+    def __init__(self, db_path: Path | str | None = None) -> None:
         self._mem_conn: sqlite3.Connection | None = None
-        if db_path != ":memory:":
+        if db_path is None:
+            path = default_batch_db_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._db_path = str(path.resolve())
+        elif db_path != ":memory:":
             path = Path(db_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._db_path = str(path.resolve())
