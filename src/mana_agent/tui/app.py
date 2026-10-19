@@ -181,6 +181,7 @@ class ManaChatApp(App):
         self._computer_permission_requests_shown: set[str] = set()
         self._transactional_modal_queue: list[str] = []
         self._transactional_modal_active = False
+        self._saved_modal_previews: dict[str, str] = {}
         self._unsubscribe_computer_permissions = None
         self._unsubscribe_session_events = None
         self._unsubscribe_api_approval_events = None
@@ -290,10 +291,10 @@ class ManaChatApp(App):
             return
         metadata = activity.get("metadata") or {}
         request_id = str(metadata.get("permission_request_id") or "")
-        if bool(metadata.get("transactional_action_approval")):
+        if bool(metadata.get("transactional_action_approval")) or activity.get("event_type") == "action.approval.required":
             inbox_item_id = str(metadata.get("inbox_item_id") or request_id)
             if inbox_item_id:
-                self._enqueue_transactional_modal(inbox_item_id)
+                self._enqueue_transactional_modal(inbox_item_id, metadata=metadata, title=str(activity.get("title") or ""))
             return
         if not request_id or request_id in self._computer_permission_requests_shown:
             return
@@ -369,25 +370,50 @@ class ManaChatApp(App):
                 or self._current_frontend_turn_id
                 or execution_id
             )
+            metadata = dict(event.get("metadata") or {})
+            act_title = str(
+                event.get("title")
+                or (
+                    "Server action approval required"
+                    if event_type == "server.waiting_approval"
+                    else (
+                        "Transactional action approval required"
+                        if event_type == "action.approval.required"
+                        else "API request approval required"
+                    )
+                )
+            )
             act = {
                 "event_id": event_id,
                 "event_type": event_type,
-                "title": str(
-                    event.get("title")
-                    or (
-                        "Server action approval required"
-                        if event_type == "server.waiting_approval"
-                        else (
-                            "Transactional action approval required"
-                            if event_type == "action.approval.required"
-                            else "API request approval required"
-                        )
-                    )
-                ),
-                "status": str(event.get("status") or "running"),
-                "metadata": dict(event.get("metadata") or {}),
+                "title": act_title,
+                "status": "waiting_approval",
+                "metadata": metadata,
             }
             self._safe_post_activity(act, target_turn_id)
+
+            # Trigger approval modal directly in real time
+            req_id = str(metadata.get("permission_request_id") or metadata.get("inbox_item_id") or event_id or "")
+            if event_type == "action.approval.required" or bool(metadata.get("transactional_action_approval")):
+                inbox_item_id = str(metadata.get("inbox_item_id") or req_id)
+                if inbox_item_id:
+                    self._enqueue_transactional_modal(inbox_item_id, metadata=metadata, title=act_title)
+            elif req_id and req_id not in self._computer_permission_requests_shown:
+                self._computer_permission_requests_shown.add(req_id)
+                from mana_agent.tui.computer_permission import ComputerPermissionRequested
+                preview_val = metadata.get("approval_display") or metadata.get("preview") or act_title
+                preview_str = (
+                    json.dumps(preview_val, indent=2, ensure_ascii=False, default=str)
+                    if isinstance(preview_val, (dict, list))
+                    else str(preview_val)
+                )
+                self.post_message(ComputerPermissionRequested(
+                    request_id=req_id,
+                    scope=str(metadata.get("permission_scope") or ""),
+                    preview=preview_str,
+                    server=bool(event_type == "server.waiting_approval" or metadata.get("server_approval")),
+                    api=bool(event_type == "api.waiting_approval" or metadata.get("api_approval")),
+                ))
             return
 
         if event_type in {
@@ -563,67 +589,128 @@ class ManaChatApp(App):
             if item.request_type.value == "approval" and item.action_intent_id:
                 self._enqueue_transactional_modal(item.inbox_item_id)
 
-    def _enqueue_transactional_modal(self, inbox_item_id: str) -> None:
-        if self.gateway is None or inbox_item_id in self._computer_permission_requests_shown:
+    def _enqueue_transactional_modal(
+        self,
+        inbox_item_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        title: str = "",
+    ) -> None:
+        if inbox_item_id in self._computer_permission_requests_shown:
             return
         item = None
-        try:
-            item = self.gateway.human_inbox_service.get(
-                inbox_item_id,
-                actor_id=getpass.getuser(),
-            )
-        except Exception:
+        if self.gateway is not None:
             try:
-                item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
+                item = self.gateway.human_inbox_service.get(
+                    inbox_item_id,
+                    actor_id=getpass.getuser(),
+                )
             except Exception:
-                pass
-            if item is None:
                 try:
-                    matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
-                    if matches:
-                        item = matches[0]
+                    item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
                 except Exception:
                     pass
+                if item is None:
+                    try:
+                        matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
+                        if matches:
+                            item = matches[0]
+                    except Exception:
+                        pass
+
         if item is None:
+            try:
+                from mana_agent.human_inbox import default_human_inbox_service
+                service = default_human_inbox_service()
+                try:
+                    item = service.get(inbox_item_id, actor_id=getpass.getuser())
+                except Exception:
+                    try:
+                        item = service.repository.get(inbox_item_id)
+                    except Exception:
+                        matches = service.repository.find_for_action(inbox_item_id)
+                        if matches:
+                            item = matches[0]
+            except Exception:
+                pass
+
+        if item is not None and (item.request_type.value != "approval" or item.status.value not in {"pending", "delivered"}):
             return
-        if item.request_type.value != "approval" or item.status.value not in {"pending", "delivered"}:
-            return
+
+        preview_data = None
+        if item is not None and hasattr(item, "card"):
+            preview_data = item.card()
+        elif metadata:
+            preview_data = metadata.get("approval_display") or metadata.get("preview") or {
+                "command": metadata.get("command"),
+                "reason": metadata.get("reason"),
+                "title": title or metadata.get("title") or "User approval required",
+            }
+        elif title:
+            preview_data = {"title": title}
+
+        preview_str = (
+            json.dumps(preview_data, indent=2, ensure_ascii=False, default=str)
+            if isinstance(preview_data, (dict, list))
+            else str(preview_data or f"Approval required for {inbox_item_id}")
+        )
+        self._saved_modal_previews[inbox_item_id] = preview_str
+
         self._computer_permission_requests_shown.add(inbox_item_id)
-        self._computer_permission_requests_shown.add(item.inbox_item_id)
-        if item.action_intent_id:
-            self._computer_permission_requests_shown.add(item.action_intent_id)
-        self._transactional_modal_queue.append(item.inbox_item_id)
+        if item is not None:
+            self._computer_permission_requests_shown.add(item.inbox_item_id)
+            if item.action_intent_id:
+                self._computer_permission_requests_shown.add(item.action_intent_id)
+
+        self._transactional_modal_queue.append(inbox_item_id)
         self._show_next_transactional_modal()
 
     def _show_next_transactional_modal(self) -> None:
-        if self._transactional_modal_active or not self._transactional_modal_queue or self.gateway is None:
+        if self._transactional_modal_active or not self._transactional_modal_queue:
             return
         inbox_item_id = self._transactional_modal_queue.pop(0)
         item = None
-        try:
-            item = self.gateway.human_inbox_service.get(inbox_item_id, actor_id=getpass.getuser())
-        except Exception:
+        if self.gateway is not None:
             try:
-                item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
+                item = self.gateway.human_inbox_service.get(inbox_item_id, actor_id=getpass.getuser())
             except Exception:
-                pass
-            if item is None:
                 try:
-                    matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
-                    if matches:
-                        item = matches[0]
+                    item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
                 except Exception:
                     pass
+                if item is None:
+                    try:
+                        matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
+                        if matches:
+                            item = matches[0]
+                    except Exception:
+                        pass
         if item is None:
-            self._show_next_transactional_modal()
-            return
+            try:
+                from mana_agent.human_inbox import default_human_inbox_service
+                service = default_human_inbox_service()
+                try:
+                    item = service.repository.get(inbox_item_id)
+                except Exception:
+                    matches = service.repository.find_for_action(inbox_item_id)
+                    if matches:
+                        item = matches[0]
+            except Exception:
+                pass
+
+        preview_str = self._saved_modal_previews.get(inbox_item_id)
+        if item is not None and hasattr(item, "card"):
+            preview_str = json.dumps(item.card(), indent=2, ensure_ascii=False, default=str)
+        if not preview_str:
+            preview_str = f"Approval required for: {inbox_item_id}"
+
         self._transactional_modal_active = True
         from mana_agent.tui.computer_permission import ComputerPermissionRequested
 
         self.post_message(ComputerPermissionRequested(
-            request_id=item.inbox_item_id,
+            request_id=inbox_item_id,
             scope="transactional_action.once",
-            preview=json.dumps(item.card(), indent=2, ensure_ascii=False, default=str),
+            preview=preview_str,
             transactional=True,
         ))
 
@@ -665,18 +752,94 @@ class ManaChatApp(App):
 
         try:
             if choice.transactional:
-                command = (
-                    self.gateway.transactional_action_approval_command
-                    if choice.decision is not None
-                    else self.gateway.deny_transactional_action_command
+                is_approve = choice.decision is not None
+                handled = False
+                msg = ""
+                if self.gateway is not None:
+                    command = (
+                        self.gateway.transactional_action_approval_command
+                        if is_approve
+                        else self.gateway.deny_transactional_action_command
+                    )
+                    try:
+                        result = await asyncio.to_thread(
+                            command,
+                            choice.request_id,
+                            session_id=self._gateway_session_id or "",
+                        )
+                        msg = str(result.get("message") or "")
+                        handled = True
+                    except Exception as exc:
+                        logger.warning("Gateway transactional approval command error: %s", exc)
+
+                if not handled:
+                    try:
+                        from mana_agent.human_inbox import default_human_inbox_service
+                        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+                        from mana_agent.transactional_actions.runtime import default_action_gateway
+
+                        service = (
+                            self.gateway.human_inbox_service
+                            if (self.gateway and getattr(self.gateway, "human_inbox_service", None))
+                            else default_human_inbox_service()
+                        )
+                        item = None
+                        try:
+                            item = service.repository.get(choice.request_id)
+                        except Exception:
+                            try:
+                                matches = service.repository.find_for_action(choice.request_id)
+                                if matches:
+                                    item = matches[0]
+                            except Exception:
+                                pass
+
+                        actor_id = (
+                            getattr(item, "assigned_reviewer_id", "")
+                            or getpass.getuser()
+                        )
+                        operation = ResponseOperation.APPROVE if is_approve else ResponseOperation.DENY
+                        if item is not None:
+                            service.respond(ResponseSubmission(
+                                inbox_item_id=item.inbox_item_id,
+                                operation=operation,
+                                actor_id=actor_id,
+                                channel="tui-local",
+                                idempotency_key=f"tui-resp:{item.inbox_item_id}:{item.version}",
+                                expected_version=item.version,
+                                current_action_digest=item.action_digest,
+                            ))
+
+                        if is_approve:
+                            act_gw = default_action_gateway(self.repo_root)
+                            act_id = getattr(item, "action_intent_id", "") or choice.request_id
+                            action = act_gw.store.get_action(act_id) if act_id else None
+                            if action is not None:
+                                act_gw.approvals.issue(action, approved_by=actor_id, ttl_seconds=300)
+
+                        msg = f"Transactional action {'approved' if is_approve else 'denied'}."
+                        handled = True
+                    except Exception as exc:
+                        logger.exception("Failed to resolve transactional action approval directly")
+                        msg = f"Failed to record approval decision: {exc}"
+
+                decided_event = "action.approval.granted" if is_approve else "action.approval.denied"
+                self.history.add(
+                    CodingActivityEvent(
+                        activity={
+                            "event_type": decided_event,
+                            "title": f"Transactional action {'approved' if is_approve else 'denied'}",
+                            "status": "completed" if is_approve else "failed",
+                            "metadata": {
+                                "decision": "approve" if is_approve else "deny",
+                                "inbox_item_id": choice.request_id,
+                                "permission_request_id": choice.request_id,
+                            },
+                        }
+                    )
                 )
-                result = await asyncio.to_thread(
-                    command,
-                    choice.request_id,
-                    session_id=self._gateway_session_id or "",
-                )
-                self.notify(result["message"])
-                self.history.add(AssistantMessageEvent(content=result["message"]))
+                self.notify(msg, severity="information" if is_approve else "warning")
+                self.history.add(AssistantMessageEvent(content=msg))
                 return
             if choice.server:
                 command = (

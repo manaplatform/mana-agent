@@ -108,10 +108,18 @@ class BatchItemResult:
     response_body: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] | None = None
     duration_ms: float = 0.0
+    response: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.response is not None and not self.response_body:
+            self.response_body = self.response
+        elif self.response_body and self.response is None:
+            self.response = self.response_body
 
     @property
     def ok(self) -> bool:
         return self.status_code == 200 and self.error is None
+
 
     @classmethod
     def from_jsonl_row(cls, data: dict[str, Any]) -> BatchItemResult:
@@ -143,6 +151,7 @@ class BatchJobRecord:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     completed_at: float | None = None
+    cancelled_at: float | None = None
     expires_at: float | None = None
     total_requests: int = 0
     completed_requests: int = 0

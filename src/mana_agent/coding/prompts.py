@@ -101,6 +101,7 @@ Potential capabilities include:
 - Browser automation.
 - Computer-use tools.
 - Programmatic Tool Calling.
+- OpenAI Batch API operations (`batch_create_job`, `batch_get_status`, `batch_list_jobs`, `batch_cancel_job`, `batch_download_results`) providing 50% cost discounts for eligible bulk asynchronous workloads.
 - Dynamic tool discovery.
 - Custom application functions.
 

@@ -1089,6 +1089,181 @@ def coding_tool_contracts() -> list[ToolContract]:
                 }
             ],
         ),
+        ToolContract(
+            name="request_user_approval",
+            description="Create a pending human approval request in the durable inbox and return inbox_item_id.",
+            input_schema=_schema(
+                {
+                    "source_decision_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "risk_level": {"type": "string"},
+                },
+                ["source_decision_id", "task_id", "agent_id"],
+            ),
+            output_schema=_schema({"inbox_item_id": {"type": "string"}}),
+            error_format=common_error,
+            safety_rules=["Require explicit source_decision_id, task_id, and agent_id."],
+            examples=[{"input": {"source_decision_id": "dec-1", "task_id": "task-1", "agent_id": "agent-1"}}],
+        ),
+        ToolContract(
+            name="wait_for_approval",
+            description="Wait for a user or reviewer to resolve a pending inbox approval request.",
+            input_schema=_schema(
+                {
+                    "inbox_item_id": {"type": "string"},
+                    "timeout_seconds": {"type": "number"},
+                    "poll_interval_seconds": {"type": "number"},
+                },
+                ["inbox_item_id"],
+            ),
+            output_schema=_schema({"verdict": {"type": "string"}, "may_continue": {"type": "boolean"}}),
+            error_format=common_error,
+            safety_rules=["Never poll indefinitely without timeout."],
+            examples=[{"input": {"inbox_item_id": "inbox-123", "timeout_seconds": 60}}],
+        ),
+        ToolContract(
+            name="batch_create_job",
+            description=(
+                "Submit a batch of independent model requests to the OpenAI Batch API for asynchronous execution. "
+                "Provides a 50% cost discount compared to realtime API. Ideal for bulk code review, analysis, and evaluations."
+            ),
+            input_schema=_schema(
+                {
+                    "requests": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "custom_id": {"type": "string"},
+                                "body": {"type": "object"},
+                                "url": {"type": "string"},
+                                "method": {"type": "string"},
+                            },
+                            "required": ["custom_id", "body"],
+                        },
+                    },
+                    "endpoint": {"type": "string"},
+                    "completion_window": {"type": "string"},
+                    "model": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "metadata": {"type": "object"},
+                },
+                ["requests"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "total_requests": {"type": "integer"},
+                    "input_file_id": {"type": "string"},
+                    "created_at": {"type": "number"},
+                    "discount": {"type": "string"},
+                    "discount_factor": {"type": "number"},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Every request item must include a unique custom_id.",
+                "Target model must support OpenAI Batch API.",
+                "Do not submit interactive operations requiring immediate human response.",
+            ],
+            examples=[
+                {
+                    "input": {
+                        "requests": [
+                            {"custom_id": "req-1", "body": {"model": "gpt-6-luna", "input": "Analyze file A."}},
+                            {"custom_id": "req-2", "body": {"model": "gpt-6-luna", "input": "Analyze file B."}},
+                        ],
+                        "endpoint": "/v1/responses",
+                    }
+                }
+            ],
+        ),
+        ToolContract(
+            name="batch_get_status",
+            description="Retrieve execution status, request counters, and output file IDs for an OpenAI batch job.",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "total_requests": {"type": "integer"},
+                    "completed_requests": {"type": "integer"},
+                    "failed_requests": {"type": "integer"},
+                    "output_file_id": {"type": ["string", "null"]},
+                    "error_file_id": {"type": ["string", "null"]},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Never poll continuously in a tight loop without timeout or backoff."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_list_jobs",
+            description="List recent OpenAI batch jobs and their current execution statuses.",
+            input_schema=_schema(
+                {
+                    "limit": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+                [],
+            ),
+            output_schema=_schema(
+                {"ok": {"type": "boolean"}, "total": {"type": "integer"}, "jobs": {"type": "array"}},
+                ["ok", "jobs"],
+            ),
+            error_format=common_error,
+            safety_rules=["Use pagination or bounded limit."],
+            examples=[{"input": {"limit": 10}}],
+        ),
+        ToolContract(
+            name="batch_cancel_job",
+            description="Cancel an active or queued OpenAI batch job.",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {"ok": {"type": "boolean"}, "batch_id": {"type": "string"}, "status": {"type": "string"}},
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Only cancel batches that belong to the active or authorized task."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_download_results",
+            description="Download and parse results (outputs and errors) for a completed OpenAI batch job.",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "total_results": {"type": "integer"},
+                    "results": {"type": "array"},
+                },
+                ["ok", "batch_id", "results"],
+            ),
+            error_format=common_error,
+            safety_rules=["Match results by custom_id, never JSONL line order."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
     ]
 
 

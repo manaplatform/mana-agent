@@ -178,7 +178,19 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             self._internal_engine.provider = self.codex_settings.provider
 
         try:
-            res: CodingTaskResult = asyncio.run(self._internal_engine.execute(coding_task, workspace))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    res: CodingTaskResult = pool.submit(
+                        asyncio.run, self._internal_engine.execute(coding_task, workspace)
+                    ).result()
+            else:
+                res: CodingTaskResult = asyncio.run(self._internal_engine.execute(coding_task, workspace))
         except Exception as exc:
             return {
                 "answer": f"Internal coding execution failed: {exc}",

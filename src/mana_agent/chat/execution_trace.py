@@ -280,6 +280,30 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
     if et in {"error", "turn.cancelled", "turn.timeout", "tool.timeout", "cancelled"}:
         return "failure", "Failed" if "cancelled" not in et else "Cancelled"
 
+    # Approval
+    if (
+        et in {
+            "action.approval.required",
+            "server.waiting_approval",
+            "api.waiting_approval",
+            "computer.waiting_permission",
+            "remote_execution.waiting_permission",
+        }
+        or tool_name in {"approval_request", "request_user_approval", "wait_for_approval"}
+    ):
+        return "approval", "Approval required"
+
+    if et in {
+        "action.approval.granted",
+        "action.approval.denied",
+        "server.approval_decided",
+        "api.approval_decided",
+        "computer.permission_decided",
+    }:
+        decision = str(meta.get("decision") or "")
+        is_denied = "denied" in et or decision == "deny"
+        return "approval", "Approval denied" if is_denied else "Approval granted"
+
     # Generic Fallback: supports future runtime phases automatically
     parts = et.replace("_", ".").split(".")
     phase = parts[0] if parts else "activity"
@@ -400,7 +424,10 @@ class ExecutionTrace:
                 self.main_events.append(ev)
 
         # Determine step ID
-        if phase == "tool":
+        if phase == "approval":
+            appr_id = str(meta.get("inbox_item_id") or meta.get("permission_request_id") or meta.get("action_id") or event_id or "").strip()
+            step_id = f"{self.turn_id}:approval:{appr_id}" if appr_id else f"{self.turn_id}:approval"
+        elif phase == "tool":
             tool_call_id = str(ev.get("tool_call_id") or meta.get("tool_call_id") or meta.get("call_id") or event_id or "").strip()
             step_id = f"{self.turn_id}:tool:{tool_call_id}" if tool_call_id else f"{self.turn_id}:tool:{event_type}"
         elif phase in {"routing", "context", "coding", "model", "completion", "failure"}:
@@ -410,6 +437,7 @@ class ExecutionTrace:
 
         # Status normalization
         is_terminal_step = raw_status in {"success", "completed", "done", "failed", "error", "cancelled"}
+        is_approval_waiting = phase == "approval" or raw_status in {"waiting_approval", "pending_approval", "approval_required"}
 
         # If turn finished or failed, mark previous running steps
         if phase in {"completion", "failure"}:
@@ -422,7 +450,7 @@ class ExecutionTrace:
 
             # Clean up any stale running step
             for st in self.steps:
-                if st.status == "running":
+                if st.status in {"running", "waiting_approval"}:
                     st.finish(status="completed" if self.is_completed else ("cancelled" if self.is_cancelled else "failed"))
             self.active_step_id = None
 
@@ -437,6 +465,8 @@ class ExecutionTrace:
                 if self.active_step_id == step_id:
                     self.active_step_id = None
             else:
+                if is_approval_waiting:
+                    existing.status = "waiting_approval"
                 if detail:
                     existing.detail = detail
                 if step_title and existing.title == default_title:
@@ -458,12 +488,13 @@ class ExecutionTrace:
                 active_step.finish(status="completed")
 
         # Create new step
+        initial_status = "completed" if is_terminal_step else ("waiting_approval" if is_approval_waiting else "running")
         step = ExecutionStep(
             step_id=step_id,
             turn_id=self.turn_id,
             phase=phase,
             title=step_title,
-            status="completed" if is_terminal_step else "running",
+            status=initial_status,
             detail=detail,
             metadata=meta,
         )

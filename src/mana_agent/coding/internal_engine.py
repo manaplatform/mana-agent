@@ -94,6 +94,20 @@ class InternalCodingEngine(CodingEngine):
     ) -> None:
         self.mode: CodingEngineMode = "internal"
         self.name: str = "internal"
+
+        if not model:
+            try:
+                from mana_agent.config.user_config import get_setting
+                resolved_m = str(
+                    get_setting("MANA_PRIMARY_MODEL", "")
+                    or get_setting("MANA_DECISIONS_MODEL", "")
+                    or get_setting("OPENAI_MODEL", "")
+                    or "gpt-6-luna"
+                )
+                model = resolved_m.removeprefix("openai/")
+            except Exception:
+                model = "gpt-6-luna"
+
         self.model = model
         self.provider = provider
         self.api_key = api_key
@@ -839,7 +853,7 @@ class InternalCodingEngine(CodingEngine):
 
         from mana_agent.batch.models import BatchItemRequest
 
-        target_model = model or self.model or "gpt-4o"
+        target_model = model or self.model or "gpt-6-luna"
         raw_root = (
             getattr(workspace, "worktree_path", None)
             or getattr(workspace, "repository_path", None)

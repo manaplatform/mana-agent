@@ -4,6 +4,65 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-19
 
+- Implemented **Unified Dynamic Model Metadata, Tool Compatibility, Capability Registry & OpenAI Batch API Tools Layer**:
+  - Model Discovery & Capability Resolution (`src/mana_agent/config/model_discovery.py`, `src/mana_agent/config/model_catalog.py`):
+    - `ModelDiscoveryService`: queries official OpenAI endpoints `GET /v1/models` and `GET /v1/models/{model_id}` with fallback to maintained capability registry, capturing ownership, creation timestamp, and permissions.
+    - `ModelMetadataResolver`: resolves comprehensive model specifications (context window, max output tokens, modalities, reasoning effort levels, streaming, structured outputs, function calling, prompt caching), tool support (web search, file search, code interpreter, shell, apply patch, computer use, image gen, MCP, tool search, programmatic tool calling, skills), and Batch API support (supported endpoints, input modalities, restrictions, 50% discount pricing, rate limits, completion windows).
+    - `ModelCapabilityRegistry`: thread-safe versioned capability registry (`2026.10.1`) pre-populated with authoritative profiles for flagship models (`gpt-6-luna`, `gpt-6`, `gpt-6-astra`, `gpt-5.6-luna`, `gpt-5.*`, `gpt-4o.*`, `gpt-4.1.*`, `o1`, `o3`, `o4`, `luna`, `astra`, `text-embedding-3-*`) and explicit non-batch models (`realtime`, `whisper`, `dall-e`, `tts`).
+    - Added `gpt-6-luna`, `gpt-5.6-luna`, `luna`, and their `openai/` variants to `_MAINTAINED_TOKEN_LIMITS` and `_MAINTAINED` in `src/mana_agent/config/model_catalog.py`, and updated `normalize_capabilities` to recognize `luna` and `astra` within the OpenAI text family.
+  - Tool Compatibility & Configuration Validator (`src/mana_agent/config/tool_compatibility.py`):
+    - `ToolCompatibilityResolver`: evaluates model capability against requested agent tools, enforcing batch mode execution constraints (interactive shell tools cannot execute server-side within OpenAI Batch API).
+    - `ModelConfigurationValidator`: verifies model parameters, token bounds, credentials, and endpoint compatibility before job submission.
+  - Batch Request Builder, Execution Service & Result Processor (`src/mana_agent/batch/builder.py`, `src/mana_agent/batch/service.py`, `src/mana_agent/batch/processor.py`):
+    - `BatchRequestBuilder`: generates validated JSONL payloads with versioned limits (up to 50,000 requests, 200 MB file limit, 24h completion window, upload purpose `batch`), validates `custom_id` uniqueness, and groups requests by compatible model and endpoint.
+    - `BatchExecutionService`: manages official OpenAI SDK operations (`POST /v1/files`, `POST /v1/batches`, `GET /v1/batches/{id}`, `GET /v1/batches`, `POST /v1/batches/{id}/cancel`, `GET /v1/files/{id}/content`).
+    - `BatchResultProcessor`: correlates returned results strictly by `custom_id` (never line order), processes both output and error JSONL files, enforces revision fencing against workspace drift, and extracts only failed items for idempotent retry.
+  - Intelligent Execution Mode Router (`src/mana_agent/batch/execution_router.py`, `src/mana_agent/batch/router.py`):
+    - `ExecutionModeRouter`: intelligently selects among `realtime`, `parallel`, `batch`, and `auto` modes based on model capabilities, tool availability, workload independence, latency requirements, and task dependencies.
+    - Enforces that latency-sensitive, streaming, or dependent tasks are never routed to batch mode merely to save cost, while bulk independent workloads on supported models automatically receive the 50% Batch API cost discount.
+  - Model-Facing Batch Tools & LangChain Integration (`src/mana_agent/batch/tools.py`, `src/mana_agent/tools/contracts.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/multi_agent/runtime/ask_agent.py`):
+    - Created callable tools: `batch_create_job` (alias: `batch_submit_requests`), `batch_get_status` (alias: `batch_check_status`), `batch_list_jobs`, `batch_cancel_job`, and `batch_download_results` (alias: `batch_retrieve_results`).
+    - Added strict `ToolContract` specifications to `coding_tool_contracts()` in `src/mana_agent/tools/contracts.py`.
+    - Added dispatching for all batch tools in `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`).
+    - Added `build_batch_langchain_tools()` and integrated batch tools into `ask_agent.py` tool assembly.
+    - Documented Batch API tools in internal coding system instructions (`src/mana_agent/coding/prompts.py`).
+  - TUI Model Selection Enhancements (`src/mana_agent/tui/model_picker.py`):
+    - Displayed Batch API capability badges and context window indicators in interactive model selection menus (e.g. `gpt-6-luna (Batch: Yes · 1050k ctx)`).
+  - Fixed `ToolExecutionDispatcher` and Dispatcher Aliases:
+    - Added `execute_tool` alias to `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`) and eliminated local `Path` variable shadowing.
+    - Updated `finalize_batch` and `async_finalize_batch` in `BatchLifecycleManager` to refresh from remote client and support fallback download when local output file ID is missing.
+    - Added batch tools (`batch_create_job`, `batch_get_status`, `batch_list_jobs`, `batch_cancel_job`, `batch_download_results`, etc.) to `REGISTERED_TOOLS` and `TOOL_GROUPS["batch"]` in `src/mana_agent/utils/tool_policy.py`.
+    - Documented Batch API tools and 50% discount usage rules across agent prompts (`TOOL_FIRST` and `HEAD_TOOLS_PLANNER_PROMPT` in `src/mana_agent/multi_agent/runtime/prompts.py`).
+    - Configured `InternalCodingEngine` to default to `gpt-6-luna` / configured primary model for code analysis batch submissions.
+    - Updated `tests/test_openai_batch_live_integration.py` to use dynamic model selection defaulting to `gpt-6-luna` and prevented premature automatic cancellation so real batches are processed on OpenAI.
+    - Fixed `tests/test_tui_approval_realtime.py` test suite: normalized `InboxRequest` fields, enabled `anyio.run` execution, and fixed reviewer identity authorization in `ManaChatApp._complete_computer_permission`.
+    - Restored `self.mode = "internal"` and `self.name = "internal"` in `InternalCodingEngine.__init__` (`src/mana_agent/coding/internal_engine.py`) and enabled running event-loop detection in `UnifiedCodingAgentFacade` (`src/mana_agent/coding/facade.py`) via `ThreadPoolExecutor` to eliminate `INTERNAL_EXECUTION_FAILED`.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_coding_engine_modes.py tests/test_internal_coding_engine_workflow.py tests/test_programmatic_tool_calling.py`
+    - `./venv/bin/pytest -v tests/test_openai_batch_tools.py tests/test_openai_batch_router.py tests/test_openai_batch_lifecycle.py tests/test_openai_batch_client.py tests/test_openai_batch_coding_engine.py tests/test_tui_approval_realtime.py`
+
+- Fixed **Real-Time Tool Call Approval Display & Interactive Modal Delivery on TUI (`ManaChatApp`)**:
+  - Interactive Modal Triggering (`src/mana_agent/tui/app.py`):
+    - Resolved silent modal dropping in `_enqueue_transactional_modal`: removed hard failure when `gateway` is `None` or when repository lookup fails, adding fallback lookup to `default_human_inbox_service()` and caching fallback preview metadata so the interactive approval modal is reliably presented.
+    - Added direct modal trigger in `_handle_hub_session_event`: execution events arriving via `ExecutionEventHub` (`action.approval.required`, `server.waiting_approval`, `api.waiting_approval`) now immediately dispatch `ComputerPermissionRequested` and enqueue modals instead of only posting background activity.
+    - Fixed crash in `_complete_computer_permission`: when `gateway` is `None` or `transactional_action_approval_command` fails (e.g. general inbox item without `action_intent_id`), directly resolves the item via `HumanInboxService.respond(ResponseSubmission(operation=APPROVE/DENY))` and issues the grant via `ActionGateway`, ensuring the approval unblocks the waiting tool immediately.
+    - Added immediate emission of `action.approval.granted` and `action.approval.denied` on decision submission so that UI activity boxes update in real-time.
+  - Visual Status Badges & Indicators (`src/mana_agent/tui/widgets/activity_boxes.py`, `tool_card.py`, `execution_panel.py`):
+    - `MainActivityBox._render_stream`: recognizes `waiting_approval` status, `action.approval.required` events, and `approval_request` tools, rendering `⚠️ agent activity · WAITING APPROVAL` header, `⚠️` warning icons, and `[WAITING FOR APPROVAL]` row badges.
+    - `CodingActivityBox._render_state`: updates header with `⚠️ [CODING] ... · WAITING APPROVAL` and displays rows with `⚠️` and `[WAITING FOR APPROVAL]` badges.
+    - `ToolCard._build_call_header`: displays `⚠️ [APPROVAL REQUIRED]` badge on approval tools (`approval_request`, `request_user_approval`).
+    - `ExecutionPanel._render_steps` & `_render_state`: displays `⚠️ ... · waiting for approval` header and step status in amber.
+  - Execution Trace & Tool Dispatch Integration (`src/mana_agent/chat/execution_trace.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/human_inbox/approval_tools.py`, `src/mana_agent/tools/contracts.py`):
+    - `ExecutionTrace`: added `"approval"` runtime phase and preserved `waiting_approval` step status for real-time trace inspection.
+    - `approval_tools.py`: explicitly set `"status": "waiting_approval"` and metadata on `CodingActivityEvent` and `ExecutionEventHub` publication.
+    - `programmatic.py`: added native dispatching for `approval_request`, `request_user_approval`, and `wait_for_approval` in `ToolExecutionDispatcher`.
+    - `contracts.py`: added `ToolContract` definitions for `request_user_approval` and `wait_for_approval`.
+  - Added unit test suite in `tests/test_tui_approval_realtime.py` verifying real-time approval rendering, modal dispatch, and fallback completion.
+  - Fixed dispatcher initialization's `Path` name-shadowing failure by using an explicit `FilePath` alias; async coverage uses `anyio.run` instead of relying on an undeclared `pytest-asyncio` plugin.
+  - Fixed the test module's stale `mana_agent.coding.workspace` import and constructed `WorkspaceContext` using the required repository/worktree paths in read-only mode.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_tui_approval_realtime.py tests/human_inbox/test_approval_tools.py tests/gateway/test_transactional_approval.py`
+
 - Integrated **Official OpenAI Batch API (`/v1/batches`) into Model Execution Infrastructure**:
   - Implemented Native Batch Client (`src/mana_agent/batch/client.py`):
     - Full support for `/v1/batches` and `/v1/files` with `purpose=batch` using the official OpenAI SDK.
@@ -14,7 +73,7 @@ All notable repository changes should be recorded here.
     - SQLite WAL-mode persistence (`batches` and `batch_items` tables) for all jobs and request-level outputs.
     - Atomic upserts, idempotency indexing, task/status filtering, and result correlation.
   - Implemented Automatic Execution Router (`src/mana_agent/batch/router.py`):
-    - Added model support validation (`is_model_supported_for_batch`) recognizing OpenAI chat, reasoning, and embedding model families (`gpt-5`, `gpt-4o`, `gpt-4o-mini`, `o1`, `o3`, `gpt-4`, etc.).
+    - Replaced hardcoded model family lists with dynamic metadata parsing (`parse_batch_support_from_metadata` and `is_model_supported_for_batch`), evaluating model documentation cards (modalities, endpoints, features), provider catalog metadata, and capability registry records.
     - Defaulted primary endpoint to `/v1/responses` with strict 50,000 request and 200 MB limits, and 24h completion window.
     - Always enables Batch API by default when model is supported (`always_enable_if_supported=True`, `min_requests=1`) providing 50% token cost discount.
     - Preserves low-latency Realtime API for streaming workloads and unsupported models.

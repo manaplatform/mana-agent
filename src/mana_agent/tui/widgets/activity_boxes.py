@@ -174,20 +174,35 @@ class MainActivityBox(Vertical):
         if total_count == 0:
             return
 
+        has_waiting_approval = any(
+            (
+                str(e.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}
+                or str(e.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                or str(e.get("tool_name") or "") in {"approval_request", "request_user_approval"}
+            )
+            and str(e.get("status") or "").lower() not in {"success", "completed", "done", "failed", "error", "cancelled"}
+            for e in self.events
+        )
         has_failed = any(str(e.get("status") or "").lower() in {"failed", "error"} for e in self.events)
         all_completed = all(str(e.get("status") or "").lower() in {"success", "completed", "done"} for e in self.events)
 
-        if has_failed:
+        if has_waiting_approval:
+            self._active_status = "waiting_approval"
+            icon = "⚠️"
+            status_label = "WAITING APPROVAL"
+        elif has_failed:
             self._active_status = "failed"
             icon = "✗"
+            status_label = "failed"
         elif all_completed and len(self.events) > 0:
             self._active_status = "success"
             icon = "✓"
+            status_label = "completed"
         else:
             self._active_status = "running"
             icon = "◌"
+            status_label = "running"
 
-        status_label = "completed" if self._active_status == "success" else self._active_status
         self.header.update(f"{icon} agent activity · {status_label} ({total_count} operations)")
 
         # Render rows with bounded rendering (display up to 40 recent rows, full history preserved in self.events)
@@ -218,12 +233,26 @@ class MainActivityBox(Vertical):
 
         for item in grouped:
             st = item["status"]
-            st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌")
+            is_item_approval = (
+                st in {"waiting_approval", "pending_approval", "approval_required"}
+                or item["tool_name"] in {"approval_request", "request_user_approval"}
+                or "approval.required" in item["tool_name"]
+            ) and st not in {"success", "completed", "done", "failed", "error", "cancelled"}
+
+            if is_item_approval:
+                st_icon = "⚠️"
+            else:
+                st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌")
+
             count_suffix = f" (x{item['count']})" if item["count"] > 1 else ""
             dur = item["latest_ev"].get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
             summary_part = f" — {item['summary']}" if item["summary"] else ""
-            lines.append(f"{st_icon} {item['tool_name']}{count_suffix}{dur_str}{summary_part}")
+
+            if is_item_approval:
+                lines.append(f"{st_icon} {item['tool_name']}{count_suffix} [WAITING FOR APPROVAL]{summary_part}")
+            else:
+                lines.append(f"{st_icon} {item['tool_name']}{count_suffix}{dur_str}{summary_part}")
 
             err = item["latest_ev"].get("error")
             if err:
@@ -390,12 +419,34 @@ class CodingActivityBox(Vertical):
     def _render_state(self, event: dict[str, Any]) -> None:
         status = str(event.get("status") or "running").lower()
         title = str(event.get("title") or event.get("event_type") or event.get("type") or "Coding")
+        has_waiting_approval = (
+            status in {"waiting_approval", "pending_approval", "approval_required"}
+            or str(event.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+            or str(event.get("tool_name") or "") in {"approval_request", "request_user_approval"}
+        ) and status not in {"success", "completed", "done", "failed", "error", "cancelled"}
 
-        icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(status, "◌")
+        if not has_waiting_approval:
+            has_waiting_approval = any(
+                (
+                    str(e.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}
+                    or str(e.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                    or str(e.get("tool_name") or "") in {"approval_request", "request_user_approval"}
+                )
+                and str(e.get("status") or "").lower() not in {"success", "completed", "done", "failed", "error", "cancelled"}
+                for e in self.events
+            )
+
+        if has_waiting_approval:
+            icon = "⚠️"
+            approval_suffix = " · WAITING APPROVAL"
+        else:
+            icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(status, "◌")
+            approval_suffix = ""
+
         backend_tag = f"[{self.backend.upper()}] " if self.backend and self.backend.lower() != "coding" else ""
         phase_tag = f" · Phase: {self.phase.capitalize()}" if self.phase and self.phase != "queued" else ""
         model_tag = f" · {self.model}" if self.model else ""
-        self.header.update(f"{icon} {backend_tag}{title}{phase_tag}{model_tag}")
+        self.header.update(f"{icon} {backend_tag}{title}{phase_tag}{model_tag}{approval_suffix}")
 
         # Update changed files list
         if self.changed_files:
@@ -411,7 +462,17 @@ class CodingActivityBox(Vertical):
         for row in self.events[-30:]:
             row_status = str(row.get("status") or "running").lower()
             row_type = str(row.get("event_type") or row.get("type") or "")
-            row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
+            row_tool = str(row.get("tool_name") or "")
+            row_is_approval = (
+                row_status in {"waiting_approval", "pending_approval", "approval_required"}
+                or row_type.startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                or row_tool in {"approval_request", "request_user_approval"}
+            ) and row_status not in {"success", "completed", "done", "failed", "error", "cancelled"}
+
+            if row_is_approval:
+                row_icon = "⚠️"
+            else:
+                row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
             r_title = str(row.get("title") or row_type or "code")
             dur = row.get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
@@ -423,6 +484,8 @@ class CodingActivityBox(Vertical):
             elif row_type.startswith("batch."):
                 b_badge = " [50% off]" if "discount" in row or "50%" in str(detail) or "50%" in str(row) else ""
                 lines.append(f"📦 {r_title}{b_badge}" + (f" — {detail}" if detail else ""))
+            elif row_is_approval:
+                lines.append(f"⚠️ {r_title} [WAITING FOR APPROVAL]" + (f" — {detail}" if detail else ""))
             elif cmd:
                 lines.append(f"{row_icon} $ {cmd}{dur_str}")
             else:

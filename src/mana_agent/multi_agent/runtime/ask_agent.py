@@ -2338,6 +2338,10 @@ class AskAgent:
         inbox_service = getattr(self, "human_inbox_service", None)
         approval_tools = build_approval_tools(inbox_service=inbox_service)
 
+        from mana_agent.batch.tools import build_batch_langchain_tools
+
+        batch_tools = build_batch_langchain_tools()
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
@@ -2353,6 +2357,7 @@ class AskAgent:
             *api_manager_tools,
             *mcp_tools,
             *approval_tools,
+            *batch_tools,
             *list(getattr(self, "tools", []) or []),
         ]
         return all_tools, traces, sources, warnings

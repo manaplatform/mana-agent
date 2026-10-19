@@ -308,10 +308,28 @@ class BatchLifecycleManager:
 
         results: list[BatchItemResult] = []
 
+        if not job.output_file_id:
+            try:
+                refreshed = self.client.retrieve_batch(batch_id)
+                if refreshed and refreshed.output_file_id:
+                    job.output_file_id = refreshed.output_file_id
+                    job.status = refreshed.status
+                    if refreshed.error_file_id:
+                        job.error_file_id = refreshed.error_file_id
+            except Exception as exc:
+                logger.debug("Failed refreshing batch %s: %s", batch_id, exc)
+
         if job.output_file_id:
             logger.info("Downloading batch results for %s from file %s", batch_id, job.output_file_id)
             results = self.client.download_results(job.output_file_id)
             self.store.save_results(batch_id, results)
+        else:
+            try:
+                results = self.client.download_results(batch_id)
+                if results:
+                    self.store.save_results(batch_id, results)
+            except Exception:
+                pass
 
         if job.error_file_id:
             try:

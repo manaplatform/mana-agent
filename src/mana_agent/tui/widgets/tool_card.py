@@ -135,6 +135,8 @@ class ToolCard(Vertical):
     def _build_call_header(self) -> str:
         name = self.call_event.tool_name or "tool"
         summary = self.call_event.summary or ""
+        if name in {"approval_request", "request_user_approval"} or "approval" in name:
+            return f"⚠️ [APPROVAL REQUIRED] {name}" + (f"  {summary}" if summary else "")
         return f"🔧 {name}" + (f"  {summary}" if summary else "")
 
     def _build_call_body(self) -> tuple[str, str | None]:

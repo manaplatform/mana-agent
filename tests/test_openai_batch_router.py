@@ -9,7 +9,11 @@ from mana_agent.batch.models import (
     BatchExecutionMode,
     BatchItemRequest,
 )
-from mana_agent.batch.router import BatchExecutionRouter, is_model_supported_for_batch
+from mana_agent.batch.router import (
+    BatchExecutionRouter,
+    is_model_supported_for_batch,
+    parse_batch_support_from_metadata,
+)
 
 
 def test_model_support_check() -> None:
@@ -137,3 +141,94 @@ def test_router_mode_override_forces_batch() -> None:
     decision = router.route(items, mode_override="batch")
     assert decision.mode == BatchExecutionMode.BATCH
     assert decision.discount_factor == 0.5
+
+
+def test_parse_batch_support_from_metadata_dict() -> None:
+    # Explicit boolean flags
+    assert parse_batch_support_from_metadata({"batch_supported": True}) is True
+    assert parse_batch_support_from_metadata({"batch_supported": False}) is False
+    assert parse_batch_support_from_metadata({"supports_batch": True}) is True
+    assert parse_batch_support_from_metadata({"supports_batch_api": "enabled"}) is True
+    assert parse_batch_support_from_metadata({"batch_api_supported": "unavailable"}) is False
+    assert parse_batch_support_from_metadata(
+        {"metadata": {"supports_batch_api": True}}
+    ) is True
+
+    # Features dictionary
+    assert parse_batch_support_from_metadata({"features": {"Batch API": "Supported"}}) is True
+    assert parse_batch_support_from_metadata({"features": {"Batch": "Not supported"}}) is False
+    assert parse_batch_support_from_metadata({"features": ["batch", "streaming"]}) is True
+    assert parse_batch_support_from_metadata({"features": ["Batch API (not supported)"]}) is False
+
+    # Endpoints list
+    assert parse_batch_support_from_metadata({"endpoints": ["/v1/batches", "/v1/responses"]}) is True
+    assert parse_batch_support_from_metadata({"supported_endpoints": ["/v1/responses"]}) is True
+    assert parse_batch_support_from_metadata(
+        {"endpoints": ["https://api.example.test/v1/responses"]}
+    ) is True
+    assert parse_batch_support_from_metadata({"endpoints": ["/v1/realtime"]}) is False
+    # Endpoint matching must not accept a similarly named, unsupported route.
+    assert parse_batch_support_from_metadata(
+        {"endpoints": ["/v1/responses-preview"]}, endpoint="/v1/responses"
+    ) is False
+
+
+def test_parse_batch_support_from_metadata_text_card() -> None:
+    raw_card_supported = """
+Modalities
+Text
+Input and output
+Endpoints
+v1/batches
+v1/responses
+Features
+Batch API
+Supported
+"""
+    assert parse_batch_support_from_metadata(raw_card_supported) is True
+
+    raw_card_unsupported = """
+Features
+Batch
+Not supported
+"""
+    assert parse_batch_support_from_metadata(raw_card_unsupported) is False
+
+
+def test_model_support_check_with_metadata() -> None:
+    # Custom unknown model verified via passed metadata card
+    card_ok = "Endpoints\nv1/batches\nFeatures\nBatch: Supported\n"
+    assert is_model_supported_for_batch("custom-fine-tuned-model", metadata=card_ok) is True
+
+    card_bad = "Features\nBatch: Not supported\n"
+    assert is_model_supported_for_batch("custom-fine-tuned-model", metadata=card_bad) is False
+
+    # Router using item metadata
+    router = BatchExecutionRouter(BatchConfig(min_requests=1))
+    items_ok = [
+        BatchItemRequest(
+            custom_id="1",
+            body={"model": "custom-special", "metadata": {"batch_supported": True}},
+            url="/v1/responses",
+        )
+    ]
+    dec_ok = router.route(items_ok)
+    assert dec_ok.mode == BatchExecutionMode.BATCH
+
+    # Request metadata is still considered when the caller also passes model=.
+    dec_explicit_model = router.route(items_ok, model="custom-special")
+    assert dec_explicit_model.mode == BatchExecutionMode.BATCH
+
+    items_bad = [
+        BatchItemRequest(
+            custom_id="1",
+            body={"model": "custom-special", "metadata": {"batch_supported": False}},
+            url="/v1/responses",
+        )
+    ]
+    dec_bad = router.route(items_bad)
+    assert dec_bad.mode == BatchExecutionMode.REALTIME
+    assert "not supported" in dec_bad.reason.lower()
+
+    dec_explicit_model_bad = router.route(items_bad, model="custom-special")
+    assert dec_explicit_model_bad.mode == BatchExecutionMode.REALTIME

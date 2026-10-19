@@ -372,7 +372,21 @@ def select_model(
     options: list[MenuOption] = []
     if allow_same_as_main:
         options.append(MenuOption("same_as_main", "Same as main model"))
-    options.extend(MenuOption(model, model) for model in models)
+    for model in models:
+        label = model
+        try:
+            from mana_agent.config.model_discovery import GLOBAL_CAPABILITY_REGISTRY
+
+            prof = GLOBAL_CAPABILITY_REGISTRY.get("openai", model)
+            if prof:
+                b_badge = "Batch: Yes" if prof.supports_batch else ("Batch: No" if prof.supports_batch is False else "Batch: ?")
+                ctx_str = f"{prof.context_window // 1000}k ctx" if prof.context_window else ""
+                parts = [p for p in (b_badge, ctx_str) if p]
+                if parts:
+                    label = f"{model} ({' · '.join(parts)})"
+        except Exception:
+            pass
+        options.append(MenuOption(model, label))
     if allow_manual:
         options.append(MenuOption("manual", "Manual model ID"))
     selected = select_option(

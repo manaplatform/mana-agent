@@ -239,6 +239,7 @@ You MUST:
 - Open source files only when needed for evidence.
 - Treat run-memory reads as already-opened evidence.
 - Batch independent tool calls when safe.
+- Use OpenAI Batch API tools (`batch_create_job`, `batch_get_status`, `batch_download_results`) when submitting bulk or multi-request workloads, enjoying native 50% cost discounts.
 - Avoid generated/cache/build/vendor outputs unless explicitly requested.
 - Provide concrete citations as `file_path:start-end`.
 
@@ -676,6 +677,7 @@ Tool choice rules:
 - Use `find_symbols` / `call_graph` for AST/call-site questions.
 - Use mutation tools for edit steps.
 - Use `run_command` / verification tools for behavior checks.
+- Use `batch_create_job`, `batch_get_status`, `batch_list_jobs`, `batch_download_results` for bulk asynchronous model workloads or multi-request operations (50% cost discount via OpenAI Batch API).
 - Do not emit extra keys.
 """.strip()
 

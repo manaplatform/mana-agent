@@ -504,6 +504,9 @@ def approval_request(
         "preview": item.card() if (item and hasattr(item, "card")) else {"command": cmd, "reason": reason},
         "transactional_action_approval": True,
         "title": title or (getattr(item, "title", "User approval required") if item else "User approval required"),
+        "status": "waiting_approval",
+        "command": cmd,
+        "reason": reason,
     }
     try:
         from mana_agent.chat.history import get_history
@@ -514,6 +517,7 @@ def approval_request(
                 activity={
                     "event_type": "action.approval.required",
                     "title": title or f"Approval required: {cmd or target_inbox_id}",
+                    "status": "waiting_approval",
                     "metadata": approval_metadata,
                 }
             )
@@ -530,6 +534,7 @@ def approval_request(
                 "event_type": "action.approval.required",
                 "kind": "transactional_action",
                 "title": title or f"Approval required: {cmd or target_inbox_id}",
+                "status": "waiting_approval",
                 "metadata": approval_metadata,
             },
             persist=False,
