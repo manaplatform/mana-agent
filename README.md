@@ -22,7 +22,7 @@
 
 <p align="center">
   <a href="#quick-start">Get Started</a> ·
-  <a href="#what-can-mana-agent-do">Capabilities</a> ·
+  <a href="#what-can-mana-agent-do">Capabilities</a> 
 </p>
 
 ---
