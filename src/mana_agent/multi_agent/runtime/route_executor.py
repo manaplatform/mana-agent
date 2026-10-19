@@ -465,6 +465,14 @@ def available_tool_names(*, required_mcp_server: str | None = None) -> list[str]
         "email_search",
         "email_read",
         "email_thread_read",
+        "batch_create_job",
+        "batch_get_status",
+        "batch_list_jobs",
+        "batch_cancel_job",
+        "batch_download_results",
+        "batch_submit_requests",
+        "batch_check_status",
+        "batch_retrieve_results",
     ]
     from mana_agent.config.user_config import get_setting
     if bool(get_setting("MANA_BROWSER_ENABLED", True)):

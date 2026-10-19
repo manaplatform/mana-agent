@@ -13,6 +13,7 @@ from mana_agent.batch.router import (
     BatchDecision,
     BatchExecutionRouter,
     is_model_supported_for_batch,
+    is_openai_batch_supported,
     parse_batch_support_from_metadata,
 )
 from mana_agent.batch.execution_router import (
@@ -74,5 +75,6 @@ __all__ = [
     "batch_submit_requests",
     "build_batch_langchain_tools",
     "is_model_supported_for_batch",
+    "is_openai_batch_supported",
     "parse_batch_support_from_metadata",
 ]

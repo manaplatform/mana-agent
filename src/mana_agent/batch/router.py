@@ -291,6 +291,46 @@ def is_model_supported_for_batch(
     return not any(unsupported in m for unsupported in ["audio", "image", "realtime"])
 
 
+def is_openai_batch_supported(
+    model: str,
+    endpoint: str = "/v1/responses",
+    *,
+    metadata: dict[str, Any] | str | Any = None,
+    provider: str = "openai",
+) -> bool:
+    """Determine whether a model and provider support the official OpenAI Batch API.
+
+    Returns True ONLY if the provider is OpenAI/Azure OpenAI and the model supports batch.
+    Returns False for third-party providers (Anthropic, Ollama, Google, Groq, Bedrock, etc.)
+    and unsupported models (audio, voice, realtime, dalle, whisper).
+    """
+    if not model or not isinstance(model, str):
+        return False
+
+    target_model = model.strip()
+    target_provider = (provider or "openai").strip().lower()
+
+    if "/" in target_model:
+        prefix, suffix = target_model.split("/", 1)
+        if prefix.lower() in {"openai", "azure_openai", "azure"}:
+            target_provider = prefix.lower()
+            target_model = suffix
+        else:
+            return False
+
+    if target_provider not in {"openai", "azure_openai", "azure"}:
+        return False
+
+    m_lower = target_model.lower()
+    for kw in UNSUPPORTED_BATCH_MODEL_KEYWORDS:
+        if kw in m_lower:
+            return False
+    if any(unsupported in m_lower for unsupported in ("audio", "realtime", "whisper", "tts", "dall-e", "vision-preview")):
+        return False
+
+    return is_model_supported_for_batch(target_model, endpoint=endpoint, metadata=metadata, provider=target_provider)
+
+
 @dataclass
 class BatchDecision:
     """Decision outcome explaining why a batch or realtime execution was chosen."""
@@ -481,5 +521,6 @@ __all__ = [
     "SUPPORTED_BATCH_ENDPOINTS",
     "SUPPORTED_BATCH_MODEL_FAMILIES",
     "is_model_supported_for_batch",
+    "is_openai_batch_supported",
     "parse_batch_support_from_metadata",
 ]

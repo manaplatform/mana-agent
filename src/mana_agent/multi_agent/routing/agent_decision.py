@@ -89,6 +89,14 @@ KNOWN_AGENT_TOOLS = frozenset(
         "browser_tabs",
         "browser_switch_tab",
         "browser_close",
+        "batch_create_job",
+        "batch_get_status",
+        "batch_list_jobs",
+        "batch_cancel_job",
+        "batch_download_results",
+        "batch_submit_requests",
+        "batch_check_status",
+        "batch_retrieve_results",
     }
 )
 
@@ -196,6 +204,7 @@ Use both web_search and github_search when the user asks for internet/web plus G
 Use repo_search/read_file for local repository inspection.
 Use browser tools for interactive website tasks that require navigation, page inspection, forms, clicks, uploads, downloads, tabs, account creation, sign-up, login, or authenticated browser state. Website actions do not edit repository code: set intent="tool", repo_context_needed=false, and code_editing_needed=false. Words such as create, change, submit, delete, or edit refer to the website when their target is a page, account, form, or URL; they must not select repository mutation tools. Select browser_open and browser_inspect plus the browser interaction capabilities the browser operator may need. Choose each concrete action later from current page evidence; do not assume a website-specific workflow.
 Never select browser actions intended to bypass CAPTCHA, MFA, access restrictions, or website security controls. Sensitive or irreversible final actions require explicit user approval before execution.
+Batch tools boundary: When the user requests batch operations, testing batch tools, submitting requests in batch, checking batch job status, listing batch jobs, cancelling batch jobs, or retrieving/downloading batch results, select the appropriate batch tool (`batch_create_job`, `batch_submit_requests`, `batch_get_status`, `batch_check_status`, `batch_list_jobs`, `batch_cancel_job`, `batch_download_results`, or `batch_retrieve_results`) with intent="tool", requested_effect="execute", and target_surface="external_service" or "repository".
 Use apply_patch or edit/write tools only when the user wants code or files changed.
 Set runtime_capability_change=true only when the requested repository change adds
 or changes production runtime behavior (for example a provider, connector,

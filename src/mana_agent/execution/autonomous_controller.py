@@ -1352,13 +1352,14 @@ class AutonomousExecutionController:
                     if t.task_id != root_task_id
                 ]
             done_statuses = {TaskStatus.DONE, TaskStatus.SKIPPED, "completed", "skipped"}
-            completed_ids = {t.task_id for t in tasks if t.status in done_statuses}
+            evaluated_statuses = done_statuses | {TaskStatus.FAILED, TaskStatus.BLOCKED, "failed", "blocked"}
+            evaluated_ids = {t.task_id for t in tasks if t.status in evaluated_statuses}
             ready = []
             for t in tasks:
                 if t.status in done_statuses or t.status in {TaskStatus.CANCELLED, "cancelled"}:
                     continue
                 deps = getattr(t, "depends_on", []) or []
-                if all(dep in completed_ids for dep in deps):
+                if all(dep in evaluated_ids for dep in deps):
                     ready.append(t)
             return ready
         except Exception as exc:
@@ -1497,6 +1498,22 @@ class AutonomousExecutionController:
                 self.taskboard.save()
             except Exception:
                 pass
+
+        if result_output or error_msg:
+            ctx.setdefault("evidence", []).append({
+                "subtask_id": child_id,
+                "title": title,
+                "tool_name": tool_name,
+                "output": result_output,
+                "error": error_msg,
+                "success": success,
+            })
+            if self.taskboard is not None:
+                try:
+                    summary_text = f"[{title}] {result_output or error_msg}"[:300]
+                    self.taskboard.add_evidence(root_task_id, summary_text)
+                except Exception:
+                    pass
 
         self._emit(
             "loop.tool.completed",

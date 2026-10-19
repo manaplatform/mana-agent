@@ -1371,6 +1371,7 @@ class AgentChatGateway:
             evaluator=self._continuation_evaluator,
             router=getattr(self, "entry_router", getattr(self, "_entry_router", None)),
             event_sink=self._event_sink,
+            global_memory=getattr(self._stack.memory_service, "learning", None),
         )
         if hasattr(self._stack, "ask_service") and hasattr(self._stack.ask_service, "ask_agent"):
             if self._stack.ask_service.ask_agent is not None:
@@ -4247,10 +4248,6 @@ class AgentChatGateway:
         self._active.discard(sid)
         if sid in self._sessions:
             self._sessions[sid]["session_status"] = status
-        try:
-            self._stack.memory_service.close_blocking()
-        except MemoryError as exc:
-            logger.warning("Memory backend close failed: %s", exc)
         return sid
 
 
@@ -5870,13 +5867,31 @@ class AgentChatGateway:
                         "history_injected": False,
                     },
                 )
+            conv_summary = ""
+            if prior_messages:
+                last_user = next((str(m.get("content") or "") for m in reversed(prior_messages) if m.get("role") == "user"), "")
+                last_assistant = next((str(m.get("content") or "") for m in reversed(prior_messages) if m.get("role") == "assistant"), "")
+                if last_user or last_assistant:
+                    conv_summary = f"Prior user turn: {last_user[:300]}\nPrior assistant response: {last_assistant[:300]}".strip()
+            if not conv_summary and not capsules_enabled:
+                try:
+                    recalled_ctx, _ = self._recall_followup_memory(
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        query=text,
+                        task_id=prev_task_id,
+                    )
+                    if recalled_ctx:
+                        conv_summary = recalled_ctx[:500]
+                except Exception:
+                    pass
             route_context = EntryRouteContext(
                 session_id=session_id,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 user_message_id=user_message_id,
                 previous_route=str(state.get("active_route") or ""),
-                conversation_summary="",
+                conversation_summary=conv_summary,
                 artifact_evidence=artifact_ev,
                 memory_task_candidates=memory_task_candidates,
                 memory_capsules_enabled=capsules_enabled,

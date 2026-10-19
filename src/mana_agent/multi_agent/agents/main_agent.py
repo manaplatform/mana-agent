@@ -199,6 +199,7 @@ class MainAgent:
             taskboard=self.taskboard,
             router=self.router,
             evaluator=ContinuationEvaluator(llm=routing_llm) if routing_llm is not None else None,
+            global_memory=getattr(self.memory_service, "learning", None),
         )
 
     def run_user_request(

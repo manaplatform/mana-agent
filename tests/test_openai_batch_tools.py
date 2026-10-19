@@ -287,6 +287,9 @@ def test_batch_tool_contracts_presence() -> None:
     assert "batch_list_jobs" in names
     assert "batch_cancel_job" in names
     assert "batch_download_results" in names
+    assert "batch_submit_requests" in names
+    assert "batch_check_status" in names
+    assert "batch_retrieve_results" in names
 
 
 def test_tool_dispatcher_executes_batch_tools() -> None:
@@ -368,13 +371,117 @@ def test_tool_dispatcher_executes_batch_tools() -> None:
         assert res_cancel["ok"]
         assert res_cancel["status"] == BatchLifecycleStatus.CANCELLED.value
 
+        # 6. Test aliases: batch_submit_requests, batch_check_status, batch_retrieve_results
+        res_sub = dispatcher.execute_tool(
+            "batch_submit_requests",
+            {
+                "requests": [{"custom_id": "req-2", "body": {"model": "gpt-6-luna", "input": "World"}}],
+                "model": "gpt-6-luna",
+            },
+        )
+        assert res_sub["ok"]
+
+        res_check = dispatcher.execute_tool(
+            "batch_check_status",
+            {"batch_id": "batch_mock123"},
+        )
+        assert res_check["ok"]
+
+        res_ret = dispatcher.execute_tool(
+            "batch_retrieve_results",
+            {"batch_id": "batch_mock123"},
+        )
+        assert res_ret["ok"]
+
 
 def test_build_batch_langchain_tools() -> None:
     tools = build_batch_langchain_tools()
-    assert len(tools) == 5
+    assert len(tools) == 8
     names = {t.name for t in tools}
     assert "batch_create_job" in names
     assert "batch_get_status" in names
     assert "batch_list_jobs" in names
     assert "batch_cancel_job" in names
     assert "batch_download_results" in names
+    assert "batch_submit_requests" in names
+    assert "batch_check_status" in names
+    assert "batch_retrieve_results" in names
+
+
+def test_batch_tools_internal_mode_execution() -> None:
+    """Test mode 2: Internal batch engine for non-OpenAI models or explicit internal mode."""
+    store = BatchJobStore(":memory:")
+    # OpenAIBatchClient mock will fail if called, ensuring internal mode does NOT call OpenAI
+    mock_client = MagicMock()
+    mock_client.upload_batch_file.side_effect = AssertionError("OpenAI upload should not be called in internal mode")
+    mock_client.create_batch.side_effect = AssertionError("OpenAI create should not be called in internal mode")
+
+    def mock_internal_handler(item: BatchItemRequest) -> BatchItemResult:
+        return BatchItemResult(
+            custom_id=item.custom_id,
+            status_code=200,
+            response={
+                "id": f"resp_{item.custom_id}",
+                "custom_id": item.custom_id,
+                "response": {
+                    "body": {
+                        "choices": [{"message": {"role": "assistant", "content": f"Result for {item.custom_id}"}}]
+                    }
+                },
+            },
+        )
+
+    mgr = BatchLifecycleManager(client=mock_client, store=store, internal_handler=mock_internal_handler)
+
+    with patch("mana_agent.batch.tools.get_batch_manager", return_value=mgr):
+        # 1. Non-OpenAI model (e.g. claude-3-5-sonnet) automatically routes to internal mode
+        res_create = batch_create_job(
+            requests=[
+                {"custom_id": "req-c1", "body": {"input": "Analyze A"}},
+                {"custom_id": "req-c2", "body": {"input": "Analyze B"}},
+            ],
+            model="claude-3-5-sonnet",
+            provider="anthropic",
+        )
+        assert res_create["ok"]
+        assert res_create["mode"] == "internal"
+        batch_id = res_create["batch_id"]
+        assert batch_id.startswith("batch_int_")
+        assert res_create["total_requests"] == 2
+
+        # 2. Status check retrieves from local SQLite store
+        res_status = batch_get_status(batch_id=batch_id)
+        assert res_status["ok"]
+        assert res_status["batch_id"] == batch_id
+        assert res_status["completed_requests"] == 2
+
+        # 3. Retrieve results loads parsed results from store
+        res_dl = batch_download_results(batch_id=batch_id)
+        assert res_dl["ok"]
+        assert res_dl["total_results"] == 2
+        results_map = {r["custom_id"]: r for r in res_dl["results"]}
+        assert "req-c1" in results_map
+        assert "req-c2" in results_map
+
+        # 4. List jobs contains the internal job
+        res_list = batch_list_jobs()
+        assert res_list["ok"]
+        assert any(j["batch_id"] == batch_id for j in res_list["jobs"])
+
+
+def test_batch_tools_mode_selection_auto() -> None:
+    """Test auto mode correctly dispatches: OpenAI model -> OpenAI Batch API, non-OpenAI -> Internal."""
+    from mana_agent.batch.router import is_openai_batch_supported
+
+    # OpenAI supported models
+    assert is_openai_batch_supported("gpt-4o")
+    assert is_openai_batch_supported("gpt-6-luna")
+    assert is_openai_batch_supported("o3-mini")
+
+    # Non-OpenAI models / providers -> False (routes to internal mode)
+    assert not is_openai_batch_supported("claude-3-5-sonnet", provider="anthropic")
+    assert not is_openai_batch_supported("anthropic/claude-3-5-sonnet")
+    assert not is_openai_batch_supported("ollama/llama3")
+    assert not is_openai_batch_supported("google/gemini-2.5-pro")
+    assert not is_openai_batch_supported("gpt-4o-realtime-preview")
+

@@ -4,6 +4,45 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-20
 
+- Implemented **Dual-Mode Batch Architecture (OpenAI Batch API & Internal Engine) and Full 8-Tool Discovery**:
+  - Dual-Mode Batch Execution (`src/mana_agent/batch/manager.py`, `src/mana_agent/batch/router.py`, `src/mana_agent/batch/tools.py`):
+    - Added `is_openai_batch_supported(model, endpoint, provider)` helper in `src/mana_agent/batch/router.py` to evaluate whether a model and provider can execute via the official OpenAI Batch API (`POST /v1/batches`), returning `True` for OpenAI models (`gpt-4o`, `gpt-6-luna`, `o3-mini`, etc.) and `False` for third-party providers (Anthropic, Ollama, Google, etc.) or unsupported models (audio, voice, realtime, dalle).
+    - Implemented dual-mode dispatch in `BatchLifecycleManager.submit_batch` and `async_submit_batch`: supports `mode="auto"`, `mode="openai"`, and `mode="internal"`. When OpenAI Batch API is supported, jobs execute via OpenAI with native 50% cost discounts; when non-OpenAI models or offline/local models are used, requests execute seamlessly via Mana's internal batch engine (`_submit_internal_batch`), persisting jobs (`batch_int_...`) and item results in SQLite `BatchJobStore`.
+    - Added graceful automatic fallback: if OpenAI mode is attempted in auto mode and encounters missing API credentials, it falls back to the internal batch engine without failing the session.
+    - Updated `poll_batch`, `finalize_batch`, and `cancel_batch` to handle internal batch records directly from SQLite without invoking the OpenAI client.
+  - Complete 8-Tool Surface Discovery & Routing Integration (`src/mana_agent/batch/tools.py`, `src/mana_agent/tools/contracts.py`, `src/mana_agent/multi_agent/routing/agent_decision.py`, `src/mana_agent/multi_agent/runtime/route_executor.py`):
+    - Registered all 8 batch tools in `KNOWN_AGENT_TOOLS` (`src/mana_agent/multi_agent/routing/agent_decision.py`) and `available_tool_names()` (`src/mana_agent/multi_agent/runtime/route_executor.py`): `batch_create_job`, `batch_get_status`, `batch_list_jobs`, `batch_cancel_job`, `batch_download_results`, `batch_submit_requests`, `batch_check_status`, and `batch_retrieve_results`.
+    - Updated `build_batch_langchain_tools` in `src/mana_agent/batch/tools.py` to build StructuredTools for all 8 tools including the aliases (`batch_submit_requests`, `batch_check_status`, `batch_retrieve_results`).
+    - Added corresponding ToolContracts in `src/mana_agent/tools/contracts.py` with `mode: auto|openai|internal` parameter schema.
+    - Added batch tools intent guidance in `AGENT_DECISION_PROMPT` to route batch operations, job monitoring, and testing to tool execution on external service / repository surfaces.
+  - Regression and Unit Testing (`tests/test_openai_batch_tools.py`):
+    - Added tests `test_batch_tool_contracts_presence`, `test_build_batch_langchain_tools` (verifying all 8 tools), `test_batch_tools_internal_mode_execution` (verifying internal mode executes and stores without calling OpenAI), and `test_batch_tools_mode_selection_auto`.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_openai_batch_tools.py`
+    - `./venv/bin/pytest -v tests/test_openai_batch_lifecycle.py`
+    - `./venv/bin/pytest -v tests/test_openai_batch_coding_engine.py`
+    - `./venv/bin/pytest -v tests/test_openai_batch_router.py`
+    - `./venv/bin/pytest -v tests/test_agent_decision_routing.py`
+
+- Fixed **Resilient Memory Service, Continuous Global Learning Memory, TaskBoard-Driven Execution & Seamless Followups**:
+  - Memory Service & Self-Learning Continuity:
+    - Fixed memory service disconnection bug in `ChatGateway.close_session` (`src/mana_agent/gateway/chat_gateway.py`): removed `close_blocking()` on the gateway-wide singleton `MemoryService` when closing an individual chat session, preserving semantic memory recall and capsule storage across turns and sessions.
+    - Updated `InternalMemoryBackend` (`src/mana_agent/memory/providers/internal/backend.py`) so `self.closed = False` is automatically re-armed on every operation (`add`, `search`, etc.), ensuring memory operations never fail from lingering closed state.
+    - Explicitly injected `global_memory=getattr(memory_service, "learning", None)` into `AutonomousExecutionController` across `ChatGateway` and `MainAgent` (`src/mana_agent/multi_agent/agents/main_agent.py`), guaranteeing mistakes, tool errors, and prevention rules persist continuously.
+  - TaskBoard-Driven Execution & Elimination of Rigid Multi-Task DAG Cascade:
+    - Replaced brittle dependency cascade-blocking in `MultiTaskOrchestrator` (`src/mana_agent/multi_agent/runtime/multi_task_orchestrator.py`) and `AutonomousExecutionController` (`src/mana_agent/execution/autonomous_controller.py`): downstream subtasks are no longer cascade-blocked when an upstream task encounters partial errors; instead, partial findings and errors are recorded in `TaskBoard.add_evidence` and `ctx["evidence"]`, allowing downstream tasks to evaluate and execute with merged evidence.
+    - Updated `_get_ready_tasks` to recognize evaluated dependencies and allow continuous progress on TaskBoard until goal satisfaction.
+  - Seamless Followup Execution:
+    - Fixed follow-up classification in `FollowupClassifier` (`src/mana_agent/gateway/followup_classifier.py`): when a follow-up references an unoffered or unselected task ID, gracefully binds to the candidate or transitions cleanly without throwing fatal `FollowupClassificationError`.
+    - Automatically maps retry/resume requests on completed tasks to `task_expansion` instead of erroring out.
+    - Injected `conversation_summary` from prior user and assistant turns into `EntryRouteContext` in `ChatGateway.process_chat_turn`, giving `EntryRouter` proper conversational history for follow-up turns.
+    - Expanded `_FOLLOWUP_RE` in `src/mana_agent/multi_agent/runtime/auto_chat.py` to match natural follow-up phrasing.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/execution/test_unified_autonomous_loop.py`
+    - `./venv/bin/pytest -v tests/gateway/test_followup_and_memory_integration.py tests/test_global_learning_memory.py tests/test_memory_architecture.py`
+    - `./venv/bin/pytest -v tests/execution/test_autonomous_controller.py tests/execution/test_autonomous_loop_taskboard.py`
+    - `./venv/bin/pytest -v tests/test_multi_agent_core.py tests/test_managed_worktrees.py`
+
 - Fixed **OpenAI Batch API Lifecycle, Configuration Loading, URL Normalization & Engine Integration**:
   - Fixed `BatchConfig` defaults across `BatchLifecycleManager` (`src/mana_agent/batch/manager.py`), `OpenAIBatchClient` (`src/mana_agent/batch/client.py`), and `ExecutionModeRouter` (`src/mana_agent/batch/execution_router.py`) to default to `BatchConfig.from_settings()`, ensuring that `OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED`, `OPENAI_BATCH_MODE`, and `OPENAI_BATCH_ENDPOINT` from `~/.mana/config.toml` and environment variables are honored.
   - Added URL normalization in `BatchLifecycleManager.submit_batch` and `async_submit_batch` so all request item URLs match the batch endpoint (`/v1/responses` or `/v1/chat/completions`), preventing OpenAI batch validation failures due to URL mismatch.

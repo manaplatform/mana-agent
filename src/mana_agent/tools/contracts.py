@@ -1151,6 +1151,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                     "task_id": {"type": "string"},
                     "idempotency_key": {"type": "string"},
                     "metadata": {"type": "object"},
+                    "mode": {"type": "string", "enum": ["auto", "openai", "internal"]},
                 },
                 ["requests"],
             ),
@@ -1170,7 +1171,7 @@ def coding_tool_contracts() -> list[ToolContract]:
             error_format=common_error,
             safety_rules=[
                 "Every request item must include a unique custom_id.",
-                "Target model must support OpenAI Batch API.",
+                "Target model must support OpenAI Batch API or fallback to internal batch.",
                 "Do not submit interactive operations requiring immediate human response.",
             ],
             examples=[
@@ -1187,7 +1188,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="batch_get_status",
-            description="Retrieve execution status, request counters, and output file IDs for an OpenAI batch job.",
+            description="Retrieve execution status, request counters, and output file IDs for a batch job.",
             input_schema=_schema(
                 {"batch_id": {"type": "string"}},
                 ["batch_id"],
@@ -1245,7 +1246,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="batch_download_results",
-            description="Download and parse results (outputs and errors) for a completed OpenAI batch job.",
+            description="Download and parse results (outputs and errors) for a completed batch job.",
             input_schema=_schema(
                 {"batch_id": {"type": "string"}},
                 ["batch_id"],
@@ -1256,6 +1257,72 @@ def coding_tool_contracts() -> list[ToolContract]:
                     "batch_id": {"type": "string"},
                     "status": {"type": "string"},
                     "total_results": {"type": "integer"},
+                    "results": {"type": "array"},
+                },
+                ["ok", "batch_id", "results"],
+            ),
+            error_format=common_error,
+            safety_rules=["Match results by custom_id, never JSONL line order."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_submit_requests",
+            description="Submit a batch of requests for asynchronous execution (alias for batch_create_job).",
+            input_schema=_schema(
+                {
+                    "requests": {"type": "array"},
+                    "endpoint": {"type": "string"},
+                    "completion_window": {"type": "string"},
+                    "model": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "metadata": {"type": "object"},
+                    "mode": {"type": "string", "enum": ["auto", "openai", "internal"]},
+                },
+                ["requests"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Every request item must include a unique custom_id."],
+            examples=[{"input": {"requests": [{"custom_id": "req-1", "body": {"input": "Analyze"}}]}}],
+        ),
+        ToolContract(
+            name="batch_check_status",
+            description="Retrieve execution status and counters for a batch job (alias for batch_get_status).",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Never poll continuously without backoff."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_retrieve_results",
+            description="Retrieve and parse results for a completed batch job (alias for batch_download_results).",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
                     "results": {"type": "array"},
                 },
                 ["ok", "batch_id", "results"],

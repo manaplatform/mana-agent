@@ -57,10 +57,11 @@ class BatchCreateJobInput(BaseModel):
     task_id: str = Field(default="", description="Originating task ID for traceability.")
     idempotency_key: str = Field(default="", description="Deduplication key to prevent duplicate batch submission.")
     metadata: dict[str, str] | None = Field(default=None, description="Optional metadata key-value pairs.")
+    mode: str = Field(default="auto", description="Execution mode: 'auto' (default), 'openai', or 'internal'.")
 
 
 class BatchGetStatusInput(BaseModel):
-    batch_id: str = Field(description="The OpenAI batch ID (e.g. 'batch_abc123').")
+    batch_id: str = Field(description="The OpenAI or internal batch ID (e.g. 'batch_abc123', 'batch_int_...').")
 
 
 class BatchListJobsInput(BaseModel):
@@ -70,11 +71,11 @@ class BatchListJobsInput(BaseModel):
 
 
 class BatchCancelJobInput(BaseModel):
-    batch_id: str = Field(description="The OpenAI batch ID to cancel.")
+    batch_id: str = Field(description="The batch ID to cancel.")
 
 
 class BatchDownloadResultsInput(BaseModel):
-    batch_id: str = Field(description="The OpenAI batch ID whose output results should be downloaded.")
+    batch_id: str = Field(description="The batch ID whose output results should be downloaded.")
 
 
 # --- Tool Implementations ---
@@ -90,9 +91,11 @@ def batch_create_job(
     run_id: str = "",
     idempotency_key: str = "",
     metadata: dict[str, str] | None = None,
+    mode: str = "auto",
+    provider: str = "openai",
     manager: BatchLifecycleManager | None = None,
 ) -> dict[str, Any]:
-    """Submit a batch of requests to the OpenAI Batch API for 50% discounted asynchronous execution."""
+    """Submit a batch of requests for asynchronous execution via OpenAI Batch API or internal engine."""
     mgr = manager or get_batch_manager()
     if not requests:
         return {"ok": False, "error": "Requests list cannot be empty.", "error_code": "EMPTY_REQUESTS"}
@@ -130,17 +133,26 @@ def batch_create_job(
             run_id=run_id,
             idempotency_key=idempotency_key,
             metadata=metadata,
+            mode=mode,
+            provider=provider,
         )
+        is_internal = bool(record.metadata.get("engine") == "internal" or record.metadata.get("mode") == "internal")
         return {
             "ok": True,
             "batch_id": record.batch_id,
             "status": record.status,
+            "mode": "internal" if is_internal else "openai",
+            "engine": "internal" if is_internal else "openai",
             "total_requests": record.total_requests,
             "input_file_id": record.input_file_id,
             "created_at": record.created_at,
-            "discount": "50%",
-            "discount_factor": 0.5,
-            "message": f"Submitted batch job {record.batch_id} with {record.total_requests} requests.",
+            "discount": "none (internal)" if is_internal else "50%",
+            "discount_factor": 1.0 if is_internal else 0.5,
+            "message": (
+                f"Executed internal batch job {record.batch_id} with {record.total_requests} requests."
+                if is_internal
+                else f"Submitted OpenAI Batch API job {record.batch_id} with {record.total_requests} requests (50% cost discount)."
+            ),
         }
     except Exception as exc:
         logger.warning("batch_create_job failed: %s", exc)
@@ -297,7 +309,15 @@ def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) ->
     """Build LangChain StructuredTool instances for inclusion in agent tool surfaces."""
     mgr = manager or get_batch_manager()
 
-    def _create(requests: list[dict[str, Any]], endpoint: str = "/v1/responses", completion_window: str = "24h", model: str = "", task_id: str = "", idempotency_key: str = "") -> dict[str, Any]:
+    def _create(
+        requests: list[dict[str, Any]],
+        endpoint: str = "/v1/responses",
+        completion_window: str = "24h",
+        model: str = "",
+        task_id: str = "",
+        idempotency_key: str = "",
+        mode: str = "auto",
+    ) -> dict[str, Any]:
         return batch_create_job(
             requests=requests,
             endpoint=endpoint,
@@ -305,6 +325,7 @@ def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) ->
             model=model,
             task_id=task_id,
             idempotency_key=idempotency_key,
+            mode=mode,
             manager=mgr,
         )
 
@@ -327,8 +348,8 @@ def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) ->
             func=_create,
             name="batch_create_job",
             description=(
-                "Submit a batch of independent model requests to the OpenAI Batch API for asynchronous execution. "
-                "Provides a 50% cost discount compared to realtime API. Useful for bulk code review, analysis, and evaluations."
+                "Submit a batch of independent model requests for asynchronous execution. "
+                "Supports OpenAI Batch API (50% cost discount) and internal batch engine."
             ),
             args_schema=BatchCreateJobInput,
             metadata=metadata,
@@ -336,28 +357,52 @@ def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) ->
         StructuredTool.from_function(
             func=_status,
             name="batch_get_status",
-            description="Check the execution status and request counters of an OpenAI batch job.",
+            description="Check the execution status and request counters of a batch job.",
             args_schema=BatchGetStatusInput,
             metadata=metadata,
         ),
         StructuredTool.from_function(
             func=_list,
             name="batch_list_jobs",
-            description="List recent OpenAI batch jobs and their current execution statuses.",
+            description="List recent batch jobs and their current execution statuses.",
             args_schema=BatchListJobsInput,
             metadata=metadata,
         ),
         StructuredTool.from_function(
             func=_cancel,
             name="batch_cancel_job",
-            description="Cancel an active or queued OpenAI batch job.",
+            description="Cancel an active or queued batch job.",
             args_schema=BatchCancelJobInput,
             metadata=metadata,
         ),
         StructuredTool.from_function(
             func=_download,
             name="batch_download_results",
-            description="Download and parse results (outputs and errors) for a completed OpenAI batch job.",
+            description="Download and parse results (outputs and errors) for a completed batch job.",
+            args_schema=BatchDownloadResultsInput,
+            metadata=metadata,
+        ),
+        StructuredTool.from_function(
+            func=_create,
+            name="batch_submit_requests",
+            description=(
+                "Submit a batch of requests for asynchronous execution (alias for batch_create_job). "
+                "Supports OpenAI Batch API and internal batch execution."
+            ),
+            args_schema=BatchCreateJobInput,
+            metadata=metadata,
+        ),
+        StructuredTool.from_function(
+            func=_status,
+            name="batch_check_status",
+            description="Check the execution status and request counters of a batch job (alias for batch_get_status).",
+            args_schema=BatchGetStatusInput,
+            metadata=metadata,
+        ),
+        StructuredTool.from_function(
+            func=_download,
+            name="batch_retrieve_results",
+            description="Retrieve and parse results for a completed batch job (alias for batch_download_results).",
             args_schema=BatchDownloadResultsInput,
             metadata=metadata,
         ),
