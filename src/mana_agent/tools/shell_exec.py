@@ -353,6 +353,7 @@ class ShellExecutor:
         on_approval: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         audit_log_path: Path | str | None = None,
         conversation_id: str = "",
+        global_memory: Any | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         if not self.workspace_root.is_dir():
@@ -369,6 +370,14 @@ class ShellExecutor:
         self.approval_wait_timeout_seconds = max(0.01, float(approval_wait_timeout_seconds))
         self.on_approval = on_approval
         self.conversation_id = str(conversation_id or "").strip()
+        if global_memory is not None:
+            self.global_memory = global_memory
+        else:
+            try:
+                from mana_agent.memory.learning import get_global_memory
+                self.global_memory = get_global_memory()
+            except Exception:
+                self.global_memory = None
 
     def _sanitize_env(self) -> tuple[dict[str, str], list[str]]:
         """Construct a sanitized process environment and gather secret values to redact."""
@@ -563,6 +572,29 @@ class ShellExecutor:
             duration_ms=duration_ms,
             outcome=outcome.to_dict(),
         )
+
+        if self.global_memory is not None:
+            try:
+                if outcome.type == "exit" and exit_code not in (0, None):
+                    self.global_memory.record_failure(
+                        attempted_action=cmd,
+                        error=stderr or f"Command failed with exit code {exit_code}",
+                        category="COMMAND",
+                        context=f"CWD: {target_cwd}",
+                        metadata={"exit_code": exit_code},
+                    )
+                elif outcome.type == "exit" and exit_code == 0:
+                    prior = self.global_memory.store.find_by_action_exact(cmd)
+                    for p in prior:
+                        if p.is_active() and p.status.value == "CANDIDATE":
+                            self.global_memory.record_correction(
+                                p.id,
+                                correction=cmd,
+                                evidence="Command succeeded with exit code 0",
+                            )
+                            self.global_memory.verify_learning(p.id, success=True, evidence="Exit code 0")
+            except Exception as gm_exc:
+                logger.debug("ShellExecutor GlobalMemory observation failed safely: %s", gm_exc)
 
         return result
 

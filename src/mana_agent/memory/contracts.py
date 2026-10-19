@@ -32,6 +32,7 @@ class MemoryCapabilities:
     coding_flow: bool = True
     task_state: bool = True
     multi_agent_runtime: bool = False
+    self_learning: bool = True
 
     def supports(self, capability: str) -> bool:
         return bool(getattr(self, capability, False))
@@ -45,6 +46,7 @@ class MemoryCapabilities:
             "coding_flow": self.coding_flow,
             "task_state": self.task_state,
             "multi_agent_runtime": self.multi_agent_runtime,
+            "self_learning": self.self_learning,
         }
 
 

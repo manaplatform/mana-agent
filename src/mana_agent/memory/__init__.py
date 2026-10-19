@@ -49,6 +49,18 @@ from mana_agent.memory.service import (
     MemoryService,
     MultiAgentMemoryService,
 )
+from mana_agent.memory.learning import (
+    GlobalMemory,
+    LearningCategory,
+    LearningHistoryEntry,
+    LearningMemory,
+    LearningMemoryStore,
+    LearningScope,
+    LearningStatus,
+    MemoryLearningEngine,
+    get_global_memory,
+    reset_global_memory,
+)
 # Legacy data shapes remain public through this package while storage classes
 # themselves stay isolated behind MemoryService.
 from mana_agent.services.coding_memory_service import FlowSummary
@@ -87,6 +99,13 @@ __all__ = [
     "EvidenceMemory",
     "FileReadMemoryRecord",
     "FlowSummary",
+    "GlobalMemory",
+    "LearningCategory",
+    "LearningHistoryEntry",
+    "LearningMemory",
+    "LearningMemoryStore",
+    "LearningScope",
+    "LearningStatus",
     "MemoryAuthenticationError",
     "MemoryBackend",
     "MemoryCapabilities",
@@ -98,6 +117,7 @@ __all__ = [
     "MemoryError",
     "MemoryHealth",
     "MemoryHealthStatus",
+    "MemoryLearningEngine",
     "MemoryNetworkError",
     "MemoryNotFoundError",
     "MemoryProviderError",
@@ -121,6 +141,7 @@ __all__ = [
     "TrustState",
     "AuthorizationDecision",
     "VerificationMemoryRecord",
+    "get_global_memory",
     "normalize_file_path",
     "normalize_text",
     "normalize_tool_name",

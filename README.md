@@ -1,43 +1,114 @@
+# Mana-Agent
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/manaplatform/mana-agent/refs/heads/main/logo.png" alt="Mana-Agent" width="100%" />
 </p>
 
-<h1 align="center">Mana-Agent</h1>
-
 <p align="center">
-  <strong>Repository intelligence and safe multi-agent coding automation.</strong>
+  <strong>Think beyond prompts. Build beyond boundaries.</strong>
 </p>
 
 <p align="center">
-  <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-blue" /></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.3.0-purple" />
+  Your AI-powered execution workspace.<br>
+  One goal. Multiple agents. Real tools. Verified results.
 </p>
 
-Mana-Agent is a Python CLI and optional dashboard for understanding, operating, and safely changing software repositories.
+<p align="center">
+  <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-3776AB?logo=python&logoColor=white" /></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-22A06B" /></a>
+  <img alt="Version" src="https://img.shields.io/badge/Version-v0.4.0-8B5CF6" />
+  <a href="https://github.com/manaplatform/mana-agent"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Mana--Agent-181717?logo=github" /></a>
+</p>
 
-## Features
+<p align="center">
+  <a href="#quick-start">Get Started</a> ·
+  <a href="#what-can-mana-agent-do">Capabilities</a> 
+</p>
 
-- Repository analysis and evidence-backed chat
-- Multi-agent planning, coding, review, and verification
-- Safe Git, document, browser, and computer-control tools
-- Reusable external API integrations with validated requests, approvals, and SSRF protection
-- Adaptive model routing and repository-scoped memory
-- Visible context/cost budgets, lazy tool schemas, and lossless-backed result compression
-- Automations, Teach Mode, Live Canvas, and media generation
-- Gmail, Telegram, ACP, A2A, MCP, SSH, and reverse-worker integrations
-- CLI, dashboard, and reusable analysis artifacts
-- Durable execution supervision with leases, checkpoints, safe recovery, cancellation, result escrow, and verified completion
+---
 
-## Install
+## What if your AI could do more than answer?
 
-### pipx
+Most AI tools stop at the answer.
+
+You ask a question. They generate a response. Then you're left to figure out what to do next.
+
+**Mana-Agent is built for what happens after the answer.**
+
+It can understand your goals, explore your environment, plan actions, coordinate specialized agents, use real tools, and verify outcomes.
+
+Not just for writing code.
+
+For researching, building, debugging, managing, automating, and solving complex tasks across connected systems.
+
+**You define the destination. Mana-Agent helps navigate the journey.**
+
+## Meet Mana-Agent
+
+Mana-Agent is an open-source, Python-based AI agent orchestration platform combining an autonomous execution loop, specialized agents, persistent task management, supervised tool execution, and extensible integrations.
+
+It brings multiple capabilities into one coordinated environment:
+
+- **Understand:** Analyze repositories, documents, APIs, and available evidence before taking action.
+- **Decide:** Select suitable models, agents, tools, and execution strategies.
+- **Execute:** Use coding tools, browser automation, external services, and connected systems.
+- **Coordinate:** Distribute work among specialized agents while tracking dependencies and progress.
+- **Remember:** Reuse authorized context, decisions, and lessons across relevant tasks.
+- **Verify:** Evaluate actual outcomes rather than treating tool completion as success.
+- **Continue:** Replan, recover, or request human intervention when the goal remains unresolved.
+
+The objective is simple:
+
+**Make AI useful not only for thinking about work, but for carrying work through to a trustworthy result.**
+
+## What can Mana-Agent do?
+
+| Your challenge | What Mana-Agent can help with |
+|---|---|
+| "I don't understand this codebase." | Explore architecture, dependencies, execution flows, and relevant files. |
+| "Something is broken." | Investigate symptoms, identify likely causes, propose fixes, and run verification. |
+| "I want to build something complex." | Decompose goals, coordinate coding agents, manage dependencies, and review implementation. |
+| "This task has too many steps." | Track progress through the autonomous loop, TaskBoard, and execution supervisor. |
+| "I need information from an API." | Inspect API documentation, validate requests, and execute supported operations. |
+| "I keep repeating this workflow." | Create automations or teach repeatable actions using Teach Mode. |
+| "I want AI to work across tools." | Integrate browser, Git, SSH, email, Telegram, protocols, and external services. |
+| "What happened during execution?" | Inspect activity, tools, decisions, errors, checkpoints, and artifacts. |
+
+### One interface. Many kinds of work.
+
+```text
+> Explain how authentication works in this repository.
+
+> Find why the latest deployment failed.
+
+> Plan and implement a new feature, then run its tests.
+
+> Read this API documentation and help me call the right endpoint.
+
+> Analyze these files and produce an actionable report.
+
+> Break this project into independent tasks and track progress.
+
+> Review previous mistakes before attempting this operation again.
+```
+
+Mana-Agent is designed to support both focused questions and multi-step workflows.
+
+---
+
+## Quick Start
+
+### 1. Install
+
+Requires Python 3.10–3.14.
+
+Recommended installation with pipx:
 
 ```bash
 pipx install git+https://github.com/manaplatform/mana-agent.git
 ```
 
-### From source
+Or install directly from the repository:
 
 ```bash
 git clone https://github.com/manaplatform/mana-agent.git
@@ -45,110 +116,65 @@ cd mana-agent
 
 python3 -m venv .venv
 source .venv/bin/activate
+
 python -m pip install -e .
 ```
 
-Install all optional features:
-
-```bash
-python -m pip install -e ".[full]"
-```
-
-## Quick start
+### 2. Configure
 
 ```bash
 mana-agent --configure
-cd /path/to/project
+```
+
+Configure your model provider, credentials, model preferences, and supported capabilities.
+
+### 3. Start
+
+```bash
+cd /path/to/your/project
 mana-agent
 ```
 
-Useful commands:
+You're ready.
+
+Start with a question about your repository, ask for an investigation, or describe something you want to accomplish.
+
+**Your first task doesn't need to be complicated.**
+
+Try:
+
+```text
+Analyze this project and explain its architecture,
+main components, dependencies, and potential risks.
+```
+
+### 4. Explore the dashboard
 
 ```bash
-mana-agent doctor
-mana-agent chat --root-dir .
 mana-agent dashboard --root-dir .
-mana-agent git -- status
-mana-agent context report --since 7d
-mana-agent tasks list --incomplete
-mana-agent tasks status <task-id>
-# `mana-agent runs ...` is the visible root-help alias for the same commands.
 ```
 
-Inside chat:
+The optional dashboard provides another way to interact with Mana-Agent, inspect activity, and manage workflows.
 
-```text
-/analyze
-/tasks
-/models
-/route explain
-```
-
-## How it works
-
-Each user message is stored as an independent durable chat turn. A completed
-task therefore does not close its conversation: later messages are classified
-as independent work, a linked follow-up, a safe retry/resume, a status request,
-or ordinary conversation. Re-delivery is idempotent only for the same client
-message ID; verified task artifacts remain immutable inputs to follow-up work.
-
-```text
-Request → Router → Planner → Taskboard → Execution Supervisor → Tools → Verifier → Verified Result
-```
-
-Repository changes run through constrained tools, isolated worktrees, permission gates, and verification before being returned as merge candidates.
-
-## Optional capabilities
-
-```bash
-python -m pip install -e ".[dashboard]"
-python -m pip install -e ".[automations]"
-python -m pip install -e ".[observability]"
-python -m pip install -e ".[protocols]"
-```
-
-Browser support:
-
-```bash
-python -m playwright install chromium
-```
-
-## Configuration
-
-Run:
-
-```bash
-mana-agent --configure
-```
-
-Mana-Agent stores configuration under:
-
-```text
-~/.mana/config.toml
-~/.mana/secrets.toml
-```
-
-Credentials remain separate from normal settings.
-
-## Documentation
-
-See the [`docs/`](docs/) directory for installation, architecture, commands,
-connectors, [connector health](docs/33-connector-health.md),
-[resilient execution](docs/29-resilient-execution.md),
-[API Manager](docs/api-manager.md), automation, Teach Mode, media generation,
-workers, protocols, and development guides.
-
-## Development
-
-```bash
-python -m pip install -e ".[full]"
-python -m pip install pytest ruff mypy
-
-pytest -q
-ruff check src tests
-mypy src tests
-```
-
+---
 ## License
 
-Released under the [MIT License](LICENSE).
+Mana-Agent is open source under the [MIT License](LICENSE).
+
+---
+
+<p align="center">
+  <strong>Mana-Agent</strong><br>
+  <em>From intention to execution. From execution to evidence.</em>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Get Started</a> ·
+  <a href="https://github.com/manaplatform/mana-agent">GitHub</a> ·
+  <a href="https://github.com/manaplatform/mana-agent/issues">Report an Issue</a> ·
+  <a href="docs/">Explore the Docs</a>
+</p>
+
+<p align="center">
+  <strong>Have a goal in mind? Start with Mana.</strong>
+</p>

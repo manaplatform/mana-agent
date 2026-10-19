@@ -142,6 +142,7 @@ class AutonomousExecutionController:
         compactor: ContextCompactor | None = None,
         evaluator: ContinuationEvaluator | None = None,
         continuation_evaluator: ContinuationEvaluator | None = None,
+        global_memory: Any | None = None,
     ) -> None:
         self.config = config or AutonomousExecutionConfig()
         self.supervisor = supervisor
@@ -154,6 +155,14 @@ class AutonomousExecutionController:
         self.context_governor = context_governor
         self.compactor = compactor
         self.evaluator = evaluator or continuation_evaluator
+        if global_memory is not None:
+            self.global_memory = global_memory
+        else:
+            try:
+                from mana_agent.memory.learning import get_global_memory
+                self.global_memory = get_global_memory()
+            except Exception:
+                self.global_memory = None
 
     def run(
         self,
@@ -253,6 +262,27 @@ class AutonomousExecutionController:
         last_evidence_fingerprint = ""
         last_answer = ""
         warnings: list[str] = []
+        last_failed_memory_id: str | None = None
+
+        # Pre-execution retrieval from GlobalMemory
+        if self.global_memory is not None:
+            try:
+                past_learnings = self.global_memory.retrieve_relevant(
+                    action_or_query=user_goal,
+                    limit=5,
+                )
+                if past_learnings:
+                    ctx["learning_memories"] = past_learnings
+                    rules_text = self.global_memory.format_retrieved_rules(past_learnings)
+                    ctx["learned_prevention_rules"] = rules_text
+                    if self.taskboard is not None:
+                        for mem in past_learnings:
+                            try:
+                                self.taskboard.add_learning_reference(task_id, mem.id)
+                            except Exception:
+                                pass
+            except Exception as mem_exc:
+                logger.debug("Pre-execution memory retrieval failed safely: %s", mem_exc)
 
         while True:
             # 0. Provide live TaskBoard progress and operations in execution context
@@ -403,6 +433,40 @@ class AutonomousExecutionController:
                         self.taskboard.add_evidence(task_id, evidence_summary)
                 except Exception as tb_exc:
                     logger.debug("TaskBoard update after step %d failed: %s", step_index, tb_exc)
+
+            # 5b. Observe Step Mistakes & Corrections with GlobalMemory
+            step_error = step_result.get("error")
+            if step_error:
+                if self.global_memory is not None:
+                    try:
+                        failed_mem = self.global_memory.record_failure(
+                            attempted_action=tool_calls[0].get("name", "step_execution") if tool_calls else "step_execution",
+                            error=str(step_error),
+                            category="EXECUTION",
+                            context=f"Goal: {user_goal} | Step {step_index}",
+                            execution_id=task_id,
+                        )
+                        if failed_mem:
+                            last_failed_memory_id = failed_mem.id
+                            if self.taskboard is not None:
+                                try:
+                                    self.taskboard.add_learning_reference(task_id, failed_mem.id)
+                                except Exception:
+                                    pass
+                    except Exception as mem_exc:
+                        logger.debug("GlobalMemory record_failure failed safely: %s", mem_exc)
+            elif last_failed_memory_id and not step_error:
+                if self.global_memory is not None:
+                    try:
+                        self.global_memory.record_correction(
+                            memory_id=last_failed_memory_id,
+                            correction=evidence_summary,
+                            execution_id=task_id,
+                            evidence=step_answer,
+                        )
+                    except Exception as mem_exc:
+                        logger.debug("GlobalMemory record_correction failed safely: %s", mem_exc)
+                last_failed_memory_id = None
 
             # 6. Check for Pending Human Approval Gate
             if step_result.get("is_approval_pending"):
@@ -703,6 +767,20 @@ class AutonomousExecutionController:
                 if not verification_passed:
                     # Cannot finalize when verification fails
                     logger.warning("Completion verification failed for task %s; rejecting FINALIZE", task_id)
+                    if self.global_memory is not None:
+                        try:
+                            fail_mem = self.global_memory.record_failure(
+                                attempted_action=f"Verification for goal: {user_goal[:80]}",
+                                error="independent completion verification failed",
+                                category="EXECUTION",
+                                context=f"Completed {len(completed_steps)} steps; independent verification failed.",
+                                execution_id=task_id,
+                            )
+                            if fail_mem and self.taskboard is not None:
+                                self.taskboard.add_learning_reference(task_id, fail_mem.id)
+                        except Exception as gm_exc:
+                            logger.debug("GlobalMemory record failure for verification failed safely: %s", gm_exc)
+
                     if self.taskboard is not None:
                         try:
                             for child in self.taskboard.list_tasks(root_task_id=root_task_id):
@@ -736,6 +814,21 @@ class AutonomousExecutionController:
                             self.taskboard.save()
                         except Exception:
                             pass
+
+                    # Reinforce verified learning memories
+                    if self.global_memory is not None:
+                        try:
+                            if self.taskboard is not None:
+                                tb_task = self.taskboard.get_task(task_id)
+                                for ref_id in getattr(tb_task, "learning_references", []):
+                                    self.global_memory.verify_learning(
+                                        ref_id,
+                                        success=True,
+                                        evidence=final_answer,
+                                        execution_id=task_id,
+                                    )
+                        except Exception as gm_exc:
+                            logger.debug("GlobalMemory verify_learning reinforcement failed safely: %s", gm_exc)
                     return AutonomousExecutionResult(
                         task_id=task_id,
                         status="completed",

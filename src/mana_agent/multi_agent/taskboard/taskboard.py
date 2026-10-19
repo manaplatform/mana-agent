@@ -857,6 +857,14 @@ class TaskBoard:
     def add_evidence(self, task_id: str, evidence: str) -> None:
         self._add_text(task_id, "evidence", evidence)
 
+    def add_learning_reference(self, task_id: str, memory_id: str) -> None:
+        """Associate a GlobalMemory learning record ID with this task without duplicating storage."""
+        task = self.get_task(task_id)
+        _append_unique(task.learning_references, [memory_id])
+        task.updated_at = utc_now()
+        self._record("learning.referenced", {"task_id": task_id, "memory_id": memory_id})
+        self.save()
+
     def add_blocker(self, task_id: str, blocker: str, *, save: bool = True) -> None:
         self._add_text(task_id, "blockers", blocker, save=save)
 
