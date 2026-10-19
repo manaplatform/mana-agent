@@ -305,10 +305,99 @@ class ToolExecutionDispatcher:
             )
 
         elif name in {"run_command", "run_script_once", "shell"}:
-            cmd = str(args.get("command") or args.get("script") or "")
+            cmd = str(args.get("command") or args.get("script") or args.get("cmd") or "")
             cwd = args.get("cwd")
-            res = run_script_once(cmd, cwd=cwd, repo_root=self.repo_root)
-            return json.loads(res) if isinstance(res, str) else {"ok": True, "output": str(res)}
+            timeout_s = int(args.get("timeout") or (int(args["timeout_ms"]) // 1000 if args.get("timeout_ms") else 120))
+            res = run_script_once(self.repo_root, script=cmd, cwd=cwd, timeout=timeout_s)
+            return res if isinstance(res, dict) else (json.loads(res) if isinstance(res, str) else {"ok": True, "output": str(res)})
+
+        elif name in {"approval_request", "request_user_approval", "wait_for_approval"}:
+            from mana_agent.human_inbox import approval_request
+            cmd = str(args.get("command") or args.get("cmd") or args.get("action") or "").strip()
+            title = str(args.get("title") or (f"Approval required for command: {cmd}" if cmd else "User approval required"))
+            reason = str(args.get("reason") or args.get("summary") or args.get("description") or "")
+            inbox_item_id = str(args.get("inbox_item_id") or "").strip()
+            action_id = str(args.get("action_id") or "").strip()
+            risk_level = str(args.get("risk_level") or "medium")
+            timeout_seconds = float(args.get("timeout_seconds") or 60.0)
+
+            if not cmd and not inbox_item_id and not action_id:
+                cmd = title or reason or "approval_action"
+
+            try:
+                res = approval_request(
+                    command=cmd,
+                    title=title,
+                    reason=reason,
+                    inbox_item_id=inbox_item_id,
+                    action_id=action_id,
+                    risk_level=risk_level,
+                    timeout_seconds=timeout_seconds,
+                    workspace_root=self.repo_root,
+                )
+                if isinstance(res, dict):
+                    if "ok" not in res:
+                        res["ok"] = True
+                    return res
+                return {"ok": True, "result": res}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "error_code": "APPROVAL_FAILED"}
+
+        elif name == "conversation_context_read":
+            from mana_agent.chat.history import get_history
+            from mana_agent.tools.context_retrieval import execute_conversation_context_read
+            query = args.get("query")
+            max_turns = int(args.get("max_turns") or 5)
+            max_tokens = int(args.get("max_tokens") or 2000)
+            before_turn_id = args.get("before_turn_id")
+            try:
+                hist = get_history()
+                res = execute_conversation_context_read(
+                    session_id=getattr(hist, "session_id", "default_session"),
+                    conversation_id=getattr(hist, "conversation_id", "default_conversation"),
+                    authenticated_user_id="default_user",
+                    history_store=hist,
+                    query=query,
+                    max_turns=max_turns,
+                    max_tokens=max_tokens,
+                    before_turn_id=before_turn_id,
+                )
+                return {"ok": True, "result": res}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "error_code": "CONTEXT_READ_FAILED"}
+
+        elif name == "memory_read":
+            from mana_agent.memory.capsules.service import default_capsule_service
+            from mana_agent.tools.context_retrieval import execute_memory_read
+            query = str(args.get("query") or "")
+            max_capsules = int(args.get("max_capsules") or 3)
+            max_tokens = int(args.get("max_tokens") or 1000)
+            tags = list(args.get("tags") or [])
+            try:
+                res = execute_memory_read(
+                    capsule_service=default_capsule_service(self.repo_root),
+                    authenticated_user_id="default_user",
+                    session_id="default_session",
+                    repository_id=str(self.repo_root),
+                    query=query,
+                    max_capsules=max_capsules,
+                    max_tokens=max_tokens,
+                    tags=tags,
+                )
+                return {"ok": True, "result": res}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "error_code": "MEMORY_READ_FAILED"}
+
+        elif name.startswith("email_"):
+            from mana_agent.connectors.email.runtime_tools import build_email_tools
+            try:
+                tools = {t.name: t for t in build_email_tools()}
+                if name in tools:
+                    res = tools[name].invoke(args)
+                    return json.loads(res) if isinstance(res, str) else {"ok": True, "result": res}
+                return {"ok": False, "error": f"Email tool not found: {name}", "error_code": "UNKNOWN_TOOL"}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "error_code": "EMAIL_TOOL_ERROR"}
 
         elif name == "verify_project":
             res = verify_project(self.repo_root)

@@ -149,3 +149,59 @@ def test_parallel_executor_partial_failure_isolation() -> None:
 
     # Downstream dependent c_child must be skipped due to upstream failure
     assert results["c_child"]["status"] == "skipped"
+
+
+def test_dependency_graph_approval_request_gates_subsequent_mutations() -> None:
+    tool_calls = [
+        {"id": "call_appr", "name": "approval_request", "arguments": {"command": "git commit -m fix"}},
+        {"id": "call_exec", "name": "run_command", "arguments": {"command": "git commit -m fix"}},
+        {"id": "call_read", "name": "read_file", "arguments": {"path": "README.md"}},
+    ]
+    graph = DependencyGraph.build(tool_calls)
+
+    # run_command must depend on approval_request
+    assert "call_appr" in graph.nodes["call_exec"].dependencies
+    assert "call_exec" in graph.nodes["call_appr"].dependents
+
+    # read_file is read-only and does not depend on approval_request
+    assert "call_appr" not in graph.nodes["call_read"].dependencies
+
+
+def test_parallel_executor_approval_denied_skips_downstream_action() -> None:
+    class ApprovalDispatcher:
+        def __init__(self, approved: bool) -> None:
+            self.approved = approved
+            self.executed_tools: list[str] = []
+
+        def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            self.executed_tools.append(tool_name)
+            if tool_name == "approval_request":
+                return {
+                    "ok": True,
+                    "approved": self.approved,
+                    "status": "approved" if self.approved else "denied",
+                    "message": "Approved" if self.approved else "Denied by user",
+                }
+            return {"ok": True, "output": "success"}
+
+    # Case 1: Denied approval skips downstream execution
+    disp_denied = ApprovalDispatcher(approved=False)
+    graph1 = DependencyGraph.build([
+        {"id": "appr1", "name": "approval_request", "arguments": {"command": "git commit"}},
+        {"id": "exec1", "name": "run_command", "arguments": {"command": "git commit"}},
+    ])
+    results1 = asyncio.run(ParallelToolExecutor().execute_turn(graph1, disp_denied))
+    assert results1["appr1"]["status"] == "failed"
+    assert results1["exec1"]["status"] == "skipped"
+    assert "run_command" not in disp_denied.executed_tools
+
+    # Case 2: Granted approval allows downstream execution
+    disp_granted = ApprovalDispatcher(approved=True)
+    graph2 = DependencyGraph.build([
+        {"id": "appr2", "name": "approval_request", "arguments": {"command": "git commit"}},
+        {"id": "exec2", "name": "run_command", "arguments": {"command": "git commit"}},
+    ])
+    results2 = asyncio.run(ParallelToolExecutor().execute_turn(graph2, disp_granted))
+    assert results2["appr2"]["status"] == "completed"
+    assert results2["exec2"]["status"] == "completed"
+    assert "run_command" in disp_granted.executed_tools

@@ -53,6 +53,8 @@ READ_TOOL_NAMES = frozenset({
     "git_log",
     "read_skill",
     "semantic_search",
+    "conversation_context_read",
+    "memory_read",
     "ls",
 })
 
@@ -254,6 +256,13 @@ class DependencyGraph:
                     prev.dependents.add(curr.call_id)
                     continue
 
+                # Human approval requests must precede and gate subsequent mutating/executing operations
+                if prev.tool_name in {"approval_request", "request_user_approval", "wait_for_approval"}:
+                    if curr.kind != OperationKind.READ:
+                        curr.dependencies.add(prev.call_id)
+                        prev.dependents.add(curr.call_id)
+                        continue
+
                 # Multiple terminal/shell commands are serialized
                 if prev.kind == OperationKind.EXECUTE and curr.kind == OperationKind.EXECUTE:
                     curr.dependencies.add(prev.call_id)
@@ -432,7 +441,12 @@ class ParallelToolExecutor:
                     node.duration_ms = int((time.perf_counter() - t0) * 1000)
                     node.result = result
 
-                    if result.get("ok", True):
+                    is_ok = bool(result.get("ok", True))
+                    if node.tool_name in {"approval_request", "request_user_approval", "wait_for_approval"}:
+                        if not bool(result.get("approved", False)):
+                            is_ok = False
+
+                    if is_ok:
                         node.status = "completed"
                         completed_nodes.add(node.call_id)
                         if on_event is not None:
@@ -449,7 +463,7 @@ class ParallelToolExecutor:
                             )
                     else:
                         node.status = "failed"
-                        node.error = str(result.get("error") or "Tool execution returned not ok")
+                        node.error = str(result.get("error") or result.get("message") or "Tool execution returned not ok")
                         failed_nodes.add(node.call_id)
                         if on_event is not None:
                             on_event(

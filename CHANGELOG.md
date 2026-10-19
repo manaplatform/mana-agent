@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-19
 
+- Fixed **Internal Coding Engine Approval Request Tool & Shell Execution Argument Inversion**:
+  - Resolved `UNKNOWN_TOOL` error on `approval_request`: Added native dispatching for `approval_request`, `request_user_approval`, and `wait_for_approval` in `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`).
+  - Fixed policy-allowed issue in `approval_request` (`src/mana_agent/human_inbox/approval_tools.py`): Handled pre-approved action intents whose policy outcome is `PolicyOutcome.ALLOW` without erroneously invoking `gateway.approvals.issue()`.
+  - Corrected `run_script_once` argument ordering in `ToolExecutionDispatcher`: Inverted arguments previously caused a `TypeError` and internal tool error when running commands.
+  - Added approval gating in `DependencyGraph` and `ParallelToolExecutor`: Serialized downstream operations on human approval and safely skipped dependents when approval is denied or pending.
+  - Added native dispatching for `conversation_context_read`, `memory_read`, and `email_*` connectors in `ToolExecutionDispatcher`.
+  - User-owned verification:
+    - `./venv/bin/pytest tests/test_parallel_tool_scheduler.py tests/test_programmatic_tool_calling.py -v`
+
+- Bumped the package version to `0.5.0` and updated the README version badge.
+  - User-owned verification: `python -m pytest tests/test_package_version.py -q`.
+
 - Upgraded **Internal Coding Engine with Parallel Tool Calls, Batch File Operations, and Intelligent Dependency-Aware Scheduling**:
   - Implemented Native Filesystem Batch Layer (`src/mana_agent/tools/batch_file_ops.py`):
     - `batch_read_files`: Concurrently reads multiple repository files with per-file SHA-256 hashes, line range slicing, and size caps.

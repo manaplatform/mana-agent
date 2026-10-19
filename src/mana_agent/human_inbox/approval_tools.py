@@ -448,11 +448,10 @@ def approval_request(
             }
         if action_intent.policy_decision and action_intent.policy_decision.outcome is PolicyOutcome.ALLOW:
             grant = gateway.approvals.find_valid(action_intent)
-            if grant is None:
-                grant = gateway.approvals.issue(action_intent, approved_by="policy_allow", ttl_seconds=300)
+            grant_id = grant.approval_id if grant is not None else f"policy_allow_{action_intent.action_id}"
             return {
                 "approved": True,
-                "approval_id": grant.approval_id,
+                "approval_id": grant_id,
                 "inbox_item_id": "",
                 "status": "approved",
                 "command": cmd,
