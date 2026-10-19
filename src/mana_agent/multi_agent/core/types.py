@@ -295,6 +295,7 @@ class TaskBoardItem:
     verification_commands: list[str] = field(default_factory=list)
     verification_results: list[VerificationResult] = field(default_factory=list)
     memory_status: dict[str, Any] = field(default_factory=dict)
+    learning_references: list[str] = field(default_factory=list)
     task_created_at: datetime | None = None
     scheduled_at: datetime | None = None
     worker_claimed_at: datetime | None = None

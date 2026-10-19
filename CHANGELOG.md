@@ -2,6 +2,32 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-19
+
+- Bumped the package version to `0.4.0` and updated the README version badge.
+
+- Implemented **Global Self-Learning Memory System** (`GlobalMemory` and `MemoryLearningEngine`):
+  - Established the Architectural Quad:
+    - **Autonomous Loop (`AutonomousExecutionController`)**: Execution and decision brain.
+    - **TaskBoard (`TaskBoard`)**: Authoritative progress and task state workspace; references learning IDs via `learning_references` without duplicating memory storage (Rule 08).
+    - **Execution Supervisor (`ExecutionSupervisor`)**: Runtime authority for leases, attempts, heartbeat, checkpoints, and recovery.
+    - **GlobalMemory (`GlobalMemory`)**: Centralized authority for learned mistakes, corrections, and reusable execution knowledge.
+  - Implemented `src/mana_agent/memory/learning/`:
+    - `models.py`: Typed `LearningMemory` schema, `LearningCategory`, `LearningScope`, `LearningStatus`, and `LearningHistoryEntry`.
+    - `store.py`: WAL-mode SQLite persistence (`LearningMemoryStore`) with indexes and audit history.
+    - `engine.py`: `MemoryLearningEngine` providing automatic mistake detection, heuristic typo/command correction, transient error filtering, contradiction detection, and global promotion evaluation.
+    - `global_memory.py`: Centralized `GlobalMemory` class with public methods `record_failure`, `record_correction`, `verify_learning`, `retrieve_relevant`, `search`, `invalidate`, `supersede`, and `get_learning_history`.
+  - Integrated across execution, coding, API, and tool engines:
+    - `AutonomousExecutionController`: Pre-execution retrieval of prevention rules and post-step/verification learning recording and reinforcement.
+    - `InternalCodingEngine`: Injected learned rules into system instruction and per-turn context.
+    - `ExternalCodingEngine` (Codex): Pre-turn injection of past learnings into task prompt adhering strictly to Rule 32.
+    - `ApiExecutor`: Automatic 4xx mistake detection and retry correction recording.
+    - `ShellExecutor`: Automatic command typo detection and successful fix correlation.
+  - Added architectural documentation in `docs/33-global-self-learning-memory.md`.
+  - Added comprehensive automated test suite in `tests/test_global_learning_memory.py` validating all 14 requirement scenarios.
+  - User verification required:
+    - `python -m pytest tests/test_global_learning_memory.py -v`
+
 ## 2026-10-18
 
 - Fixed UI/UX bug where open activity boxes unexpectedly collapsed on receiving new activity events:

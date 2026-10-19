@@ -65,6 +65,7 @@ class InternalCodingEngine(CodingEngine):
         programmatic_tool_calling_enabled: bool = True,
         max_tool_calls: int = 50,
         extra_tools: dict[str, Callable[..., Any]] | None = None,
+        global_memory: Any | None = None,
     ) -> None:
         self.mode: CodingEngineMode = "internal"
         self.name: str = "internal"
@@ -78,6 +79,14 @@ class InternalCodingEngine(CodingEngine):
         self.programmatic_tool_calling_enabled = programmatic_tool_calling_enabled
         self.max_tool_calls = max_tool_calls
         self.extra_tools = extra_tools or {}
+        if global_memory is not None:
+            self.global_memory = global_memory
+        else:
+            try:
+                from mana_agent.memory.learning import get_global_memory
+                self.global_memory = get_global_memory()
+            except Exception:
+                self.global_memory = None
 
         self._task_statuses: dict[str, CodingStatus] = {}
         self._active_sessions: dict[str, ProgrammaticExecutionSession] = {}
@@ -370,6 +379,18 @@ class InternalCodingEngine(CodingEngine):
             context_parts.append(f"Context: {task.relevant_context}")
         context_parts.append(f"Repository Root: {workspace.repository_path}")
         context_parts.append(f"Workspace Directory: {workspace.worktree_path}")
+
+        if self.global_memory is not None:
+            try:
+                learnings = self.global_memory.retrieve_relevant(
+                    action_or_query=task.goal or task.relevant_context or str(task.allowed_files),
+                    limit=5,
+                )
+                if learnings:
+                    rules_text = self.global_memory.format_retrieved_rules(learnings)
+                    context_parts.append(rules_text)
+            except Exception as gm_exc:
+                logger.debug("InternalCodingEngine memory retrieval failed safely: %s", gm_exc)
 
         user_content = "\n\n".join(context_parts)
 

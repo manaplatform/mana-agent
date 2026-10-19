@@ -265,6 +265,7 @@ class ExecutionSupervisor:
         clock: Clock = utc_now,
         startup_recovery: bool | None = None,
         recovery_review_publisher: RecoveryReviewPublisher | None = None,
+        global_memory: Any | None = None,
     ) -> None:
         self.config = config or ExecutionSupervisorConfig()
         self.store = store or LocalExecutionStore(self.config.root)
@@ -277,6 +278,14 @@ class ExecutionSupervisor:
             self.recovery_review_publisher._supervisor = self
         self._last_live_heartbeat: dict[str, datetime] = {}
         self.startup_recovery_summary: RecoverySummary | None = None
+        if global_memory is not None:
+            self.global_memory = global_memory
+        else:
+            try:
+                from mana_agent.memory.learning import get_global_memory
+                self.global_memory = get_global_memory()
+            except Exception:
+                self.global_memory = None
         if (
             self.config.startup_recovery
             if startup_recovery is None
@@ -803,6 +812,17 @@ class ExecutionSupervisor:
                     attempt.failure_reason = reason
                 self.store.save_attempt(attempt)
         self._emit(event_name, task, previous_state=prior.value if prior else "", reason=reason or recovery_reason)
+        if target in {ExecutionState.FAILED, ExecutionState.BUDGET_EXHAUSTED} and self.global_memory is not None:
+            try:
+                self.global_memory.record_failure(
+                    attempted_action=f"task:{task.normalized_intent or task.requested_operation or task.task_id}",
+                    error=reason or recovery_reason or f"task transitioned to {target.value}",
+                    category="EXECUTION",
+                    context=f"Agent: {task.assigned_agent} | Model: {task.assigned_model}",
+                    execution_id=task.task_id,
+                )
+            except Exception as gm_exc:
+                logger.debug("ExecutionSupervisor GlobalMemory record_failure failed safely: %s", gm_exc)
         return task
 
     def record_terminal_result(

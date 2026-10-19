@@ -63,7 +63,13 @@ class CodexProviderAdapter:
 class ExternalCodingEngine(CodingEngine):
     """External coding engine that delegates to external providers without altering their tool loop."""
 
-    def __init__(self, provider_adapter: CodexProviderAdapter | None = None, *, backend_factory: Callable[[], Any] | None = None) -> None:
+    def __init__(
+        self,
+        provider_adapter: CodexProviderAdapter | None = None,
+        *,
+        backend_factory: Callable[[], Any] | None = None,
+        global_memory: Any | None = None,
+    ) -> None:
         self.mode: CodingEngineMode = "external"
         self.name: str = "codex"
         if provider_adapter is not None:
@@ -73,6 +79,14 @@ class ExternalCodingEngine(CodingEngine):
         else:
             raise ValueError("ExternalCodingEngine requires either provider_adapter or backend_factory")
         self._task_statuses: dict[str, CodingStatus] = {}
+        if global_memory is not None:
+            self.global_memory = global_memory
+        else:
+            try:
+                from mana_agent.memory.learning import get_global_memory
+                self.global_memory = get_global_memory()
+            except Exception:
+                self.global_memory = None
 
     async def start(self) -> None:
         await self._adapter.start()
@@ -83,8 +97,32 @@ class ExternalCodingEngine(CodingEngine):
             status="running",
             backend=self.name,
         )
+        effective_task = task
+        if self.global_memory is not None:
+            try:
+                learnings = self.global_memory.retrieve_relevant(
+                    action_or_query=task.user_request or task.objective,
+                    limit=5,
+                )
+                if learnings:
+                    rules_header = self.global_memory.format_retrieved_rules(learnings)
+                    enriched_request = f"{rules_header}\n\n{task.user_request}"
+                    effective_task = CodingTask(
+                        task_id=task.task_id,
+                        objective=task.objective,
+                        user_request=enriched_request,
+                        file_paths=task.file_paths,
+                        context=task.context,
+                        constraints=task.constraints,
+                        expected_deliverables=task.expected_deliverables,
+                        assigned_model=task.assigned_model,
+                        timeout_seconds=task.timeout_seconds,
+                    )
+            except Exception as gm_exc:
+                logger.debug("ExternalCodingEngine memory retrieval failed safely: %s", gm_exc)
+
         try:
-            result = await self._adapter.execute(task, workspace)
+            result = await self._adapter.execute(effective_task, workspace)
             self._task_statuses[task.task_id] = CodingStatus(
                 task_id=task.task_id,
                 status=result.status,
@@ -93,6 +131,17 @@ class ExternalCodingEngine(CodingEngine):
                 changed_files=list(result.changed_files),
                 error="; ".join(result.errors) if result.errors else "",
             )
+            if self.global_memory is not None and result.errors:
+                try:
+                    self.global_memory.record_failure(
+                        attempted_action=f"codex_task:{task.objective[:80]}",
+                        error="; ".join(result.errors),
+                        category="CODING",
+                        context=f"Files: {list(task.file_paths)}",
+                        execution_id=task.task_id,
+                    )
+                except Exception as gm_exc:
+                    logger.debug("ExternalCodingEngine record failure failed safely: %s", gm_exc)
             return result
         except BaseException as exc:
             self._task_statuses[task.task_id] = CodingStatus(

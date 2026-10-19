@@ -19,6 +19,7 @@ from mana_agent.memory.models import (
     MemoryUpdateRequest,
     MemoryWriteRequest,
 )
+from mana_agent.memory.learning import GlobalMemory, get_global_memory
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,9 @@ class MemoryService:
             repository_id or (repository_ids or [""])[0] or ""
         )
         self.conversation_id = ""
+        self.learning = get_global_memory(
+            project_id=self.repository_id or str(self.root)
+        )
         if enable_compatibility:
             # Coding-flow continuity is system state, not hosted AI memory.
             from mana_agent.services.coding_memory_service import CodingMemoryService as LegacyCodingMemoryService
@@ -131,6 +135,7 @@ class MemoryService:
             coding_flow=bool(enable_compatibility),
             task_state=bool(enable_compatibility),
             multi_agent_runtime=bool(enable_compatibility),
+            self_learning=True,
         )
 
     @property

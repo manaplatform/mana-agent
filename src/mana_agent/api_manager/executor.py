@@ -436,6 +436,7 @@ class ApiExecutor:
         artifact_directory: Path | None = None,
         transport: HttpTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        global_memory: Any | None = None,
     ) -> None:
         self.network_policy = network_policy or NetworkAccessPolicy()
         self.approval_broker = approval_broker or DenyMutationApprovalBroker()
@@ -443,6 +444,14 @@ class ApiExecutor:
         self.artifact_directory = artifact_directory
         self.transport = transport or PinnedHttpTransport()
         self.sleep = sleep
+        if global_memory is not None:
+            self.global_memory = global_memory
+        else:
+            try:
+                from mana_agent.memory.learning import get_global_memory
+                self.global_memory = get_global_memory()
+            except Exception:
+                self.global_memory = None
 
     def execute(
         self,
@@ -631,6 +640,29 @@ class ApiExecutor:
                         attempt=attempt,
                         error_code="" if result.upstream_ok else "upstream_api_failure",
                     )
+                    if self.global_memory is not None:
+                        try:
+                            if not result.upstream_ok and 400 <= result.status_code < 500:
+                                self.global_memory.record_failure(
+                                    attempted_action=f"{result.method} {result.redacted_url}",
+                                    error=f"HTTP {result.status_code}: {result.text_body[:200]}",
+                                    category="API",
+                                    context=f"Integration: {request.integration_id} | Operation: {request.operation_id}",
+                                    execution_id=request.idempotency_key or "",
+                                    metadata={"status_code": result.status_code, "method": result.method, "url": result.redacted_url},
+                                )
+                            elif result.upstream_ok:
+                                prior = self.global_memory.store.find_by_action_exact(f"{result.method} {result.redacted_url}")
+                                for p in prior:
+                                    if p.is_active() and p.status.value == "CANDIDATE":
+                                        self.global_memory.record_correction(
+                                            p.id,
+                                            correction=f"{result.method} {result.redacted_url} succeeded",
+                                            evidence=f"HTTP {result.status_code}",
+                                        )
+                                        self.global_memory.verify_learning(p.id, success=True, evidence=f"HTTP {result.status_code}")
+                        except Exception as gm_exc:
+                            logger.debug("ApiExecutor GlobalMemory observation failed safely: %s", gm_exc)
                     return result
             if attempt < attempts and self._retry_allowed(request):
                 delay = min(
