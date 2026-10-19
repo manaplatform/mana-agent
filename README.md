@@ -23,8 +23,6 @@
 <p align="center">
   <a href="#quick-start">Get Started</a> ·
   <a href="#what-can-mana-agent-do">Capabilities</a> ·
-  <a href="#how-mana-agent-thinks-and-works">Architecture</a> ·
-  <a href="#documentation">Documentation</a>
 </p>
 
 ---
