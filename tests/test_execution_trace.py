@@ -608,4 +608,11 @@ def test_tool_execution_start_and_finish_update_step_in_place() -> None:
     assert "approval bound" in step_b_fail.detail
 
 
+def test_execution_panel_steps_view_is_hidden_by_default() -> None:
+    """ExecutionPanel.steps_view must be hidden by default to avoid duplicating activity boxes."""
+    panel = ExecutionPanel(turn_id="turn-hide-steps")
+    assert panel.steps_view.display is False
+
+
+
 

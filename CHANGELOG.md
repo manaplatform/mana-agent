@@ -8,6 +8,10 @@ All notable repository changes should be recorded here.
   - User-owned verification: `python -m pytest tests/test_package_version.py -q`.
 
 - Fixed duplicate internal coding engine timeline steps and lifecycle noise in TUI Execution Panel:
+  - Hidden Duplicate Raw Steps Timeline (`src/mana_agent/tui/widgets/execution_panel.py`, `src/mana_agent/tui/app.tcss`):
+    - Set `steps_view.display = False` and `.execution-steps { display: none; }` in `ExecutionPanel` and Textual application CSS so the duplicate raw steps dump is hidden by default while the consolidated `MainActivityBox` and `CodingActivityBox` remain visible.
+  - Chat Viewport End Pinning (`src/mana_agent/tui/widgets/chat_log.py`):
+    - Updated `_scroll_to_latest` and `_pin_to_tool` to pin viewport smoothly at the end of chats (`scroll_end`) rather than snapping/aligning the screen to the top of tool cards or execution panels with `scroll_to_widget`.
   - Deduplicated Internal Tool Calling Events (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/coding/live_events.py`):
     - Removed redundant `publish_coding_event` calls with `title=f"Tool call: {tname}"` from parallel and programmatic tool execution paths, standardizing on canonical `emit_tool_event` / `publish_internal_tool_event`.
     - Added `payload={"call_id": cid}` to internal tool event emissions for reliable lifecycle tracking across UI components.
@@ -15,11 +19,14 @@ All notable repository changes should be recorded here.
     - Classified engine lifecycle markers (`backend.selected`, `turn.starting`, `turn.started`, `turn.finalizing`) as `phase="lifecycle"`, preventing spurious backend/turn steps from cluttering the execution timeline.
     - Normalized `tool_call_id` across started, completed, and failed phases (including stripping status suffixes and checking `call_id`), enabling running tool execution steps to update in-place to completed/failed without ghost entries.
     - Updated `CodingActivityBox.update_event` to match and correlate events by `call_id` in addition to `event_id`.
-  - Regression and Unit Testing (`tests/test_execution_trace.py`):
+  - Regression and Unit Testing (`tests/test_execution_trace.py`, `tests/test_tui_live_tools_scroll.py`):
+    - Added `test_execution_panel_steps_view_is_hidden_by_default` asserting `steps_view` is hidden by default.
+    - Added `test_chat_log_pins_to_end_of_chats_without_scroll_to_widget` asserting that pinning keeps the viewport at the end of chats without forcing `scroll_to_widget`.
     - Added `test_lifecycle_events_do_not_create_duplicate_steps` asserting that backend selection and turn start events do not create task execution steps.
     - Added `test_tool_execution_start_and_finish_update_step_in_place` asserting tool execution steps transition in-place from running to success or failed with duration and detail preserved.
   - User-owned verification commands:
     - `./venv/bin/pytest tests/test_execution_trace.py -q`
+    - `./venv/bin/pytest tests/test_tui_live_tools_scroll.py -q`
     - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py -q`
 
 

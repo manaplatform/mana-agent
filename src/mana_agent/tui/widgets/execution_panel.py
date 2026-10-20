@@ -16,7 +16,7 @@ class ExecutionPanel(Vertical):
     DEFAULT_CSS = """
     ExecutionPanel { height: auto; margin: 0 0 1 0; padding: 0; }
     .execution-header { text-style: bold; color: $accent; margin: 0 0 0 0; padding: 0 1; }
-    .execution-steps { height: auto; margin: 0 0 0 0; padding: 0 1; }
+    .execution-steps { height: auto; margin: 0 0 0 0; padding: 0 1; display: none; }
     .execution-summary { height: auto; margin: 0 0 1 0; padding: 0 1; color: $success; }
     .execution-footer { color: $text-muted; margin-top: 0; padding: 0 1; }
     .execution-log { height: auto; max-height: 18; }
@@ -39,6 +39,7 @@ class ExecutionPanel(Vertical):
         # Header, steps, summary and footer widgets for overall turn
         self.header = Static("◌ execution · queued", classes="execution-header")
         self.steps_view = Static("", classes="execution-steps")
+        self.steps_view.display = False
         self.summary_card = Static("", classes="execution-summary")
         self.footer = Static("0 events", classes="execution-footer")
         self.context_meter: dict[str, Any] = {}
