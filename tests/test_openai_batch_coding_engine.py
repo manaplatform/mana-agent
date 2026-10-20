@@ -193,10 +193,12 @@ def test_internal_engine_execute_batch_mode(tmp_path: Path) -> None:
     )
 
     result = asyncio.run(engine.execute(task, workspace))
-    assert result.status == "completed"
-    assert "OpenAI Batch Job Submitted" in result.summary
+    assert result.status == "waiting"
+    assert "Waiting for OpenAI Batch" in result.summary
     assert "batch_exec_99" in result.summary
-    assert "50% token cost discount" in result.summary
+    assert result.tests_passed is False
+    assert result.tests_run == []
+    assert result.pending_operation.batch_id == "batch_exec_99"
 
     # Ensure batch job is saved in SQLite and not cancelled
     job = store.get_job("batch_exec_99")

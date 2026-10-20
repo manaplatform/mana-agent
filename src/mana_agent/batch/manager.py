@@ -81,17 +81,8 @@ class BatchLifecycleManager:
         """Submit a batch of requests to OpenAI Batch API or internal batch engine."""
         if not items:
             raise ValueError("Cannot submit an empty batch of requests.")
-
-        # Idempotency deduplication
-        if idempotency_key:
-            existing = self.store.find_by_idempotency_key(idempotency_key)
-            if existing and not existing.is_terminal():
-                logger.info(
-                    "Found existing active batch job %s for idempotency key %s",
-                    existing.batch_id,
-                    idempotency_key,
-                )
-                return existing
+        if completion_window != "24h":
+            raise ValueError("OpenAI Batch completion_window must be 24h")
 
         meta = dict(metadata or {})
         if task_id:
@@ -103,31 +94,51 @@ class BatchLifecycleManager:
         if git_commit_sha:
             meta["git_commit_sha"] = str(git_commit_sha)
 
-        # Resolve dual-mode selection: OpenAI Batch API vs Internal Engine
         effective_mode = (mode or "auto").strip().lower()
         if effective_mode == "auto":
-            cfg_mode = (self.config.mode or "auto").strip().lower()
-            if cfg_mode in {"openai", "internal"}:
-                effective_mode = cfg_mode
-            else:
-                from mana_agent.batch.router import is_openai_batch_supported
-                if is_openai_batch_supported(model, endpoint=endpoint, provider=provider):
-                    effective_mode = "openai"
-                else:
-                    effective_mode = "internal"
-
+            effective_mode = "internal"
         if effective_mode == "internal":
             return self._submit_internal_batch(
-                items,
-                model=model,
-                endpoint=endpoint,
-                completion_window=completion_window,
-                task_id=task_id,
-                run_id=run_id,
-                idempotency_key=idempotency_key,
-                git_commit_sha=git_commit_sha,
-                metadata=meta,
+                items, model=model, endpoint=endpoint, completion_window=completion_window,
+                task_id=task_id, run_id=run_id, idempotency_key=idempotency_key,
+                git_commit_sha=git_commit_sha, metadata={**meta, "provider": provider},
             )
+        if effective_mode not in {"openai", "batch"}:
+            raise ValueError("Batch submission mode must be openai or explicitly internal")
+        from mana_agent.batch.policy import current_execution_policy
+        selected_policy = current_execution_policy()
+        if selected_policy is not None and not selected_policy.required:
+            raise ValueError("This task has no explicit OpenAI Batch requirement; remote submission is not authorized")
+        from mana_agent.batch.validation import validate_batch_selection
+        from mana_agent.batch.operations import BatchOperationStore
+        validate_batch_selection(self.config, model=model, provider=provider, endpoint=endpoint, items=items)
+        if isinstance(self.client, OpenAIBatchClient):
+            self.client._get_client()  # Validate credentials before claiming a submission intent; no network call.
+        operations = BatchOperationStore(self.store)
+        fingerprint_payload = items[0].body if len(items) == 1 else [it.to_jsonl_row() for it in items]
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        if idempotency_key:
+            claimed = operations.prepare(idempotency_key, fingerprint, task_id, {
+                "items": [it.to_jsonl_row() for it in items], "model": model, "metadata": meta,
+            })
+            if not claimed:
+                operation = operations.get(idempotency_key)
+                if operation and operation["batch_id"]:
+                    existing = self.store.get_job(operation["batch_id"])
+                    if existing:
+                        return existing
+                matches = [job for job in self.client.list_batches(limit=100)
+                           if job.metadata.get("idempotency_key") == idempotency_key]
+                if len(matches) != 1:
+                    raise RuntimeError("Batch submission outcome is uncertain; reconcile the original operation before retrying")
+                recovered = matches[0]
+                recovered.model, recovered.task_id = model, task_id
+                recovered.idempotency_key = idempotency_key
+                recovered.total_requests = len(items)
+                self.store.save_job(recovered)
+                self.store.save_items(recovered.batch_id, items)
+                operations.update(idempotency_key, state="submitted", batch_id=recovered.batch_id)
+                return recovered
 
         self._emit_event(
             "batch.submitting",
@@ -141,28 +152,13 @@ class BatchLifecycleManager:
             },
         )
 
-        # Normalize request items to align with target endpoint
-        items = [
-            BatchItemRequest(
-                custom_id=it.custom_id,
-                body=it.body,
-                method=it.method,
-                url=endpoint,
-                origin_task_id=it.origin_task_id,
-                origin_run_id=it.origin_run_id,
-                created_at=it.created_at,
-                target_revision=it.target_revision,
-                file_path=it.file_path,
-                expected_sha256=it.expected_sha256,
-            ) if it.url != endpoint else it
-            for it in items
-        ]
-
         try:
             # 1. Upload JSONL requests file
             filename = f"batch_{task_id or 'run'}_{int(time.time())}.jsonl"
             input_file_id = self.client.upload_batch_file(items, filename=filename)
 
+            if idempotency_key:
+                operations.update(idempotency_key, state="uploaded", input_file_id=input_file_id)
             # 2. Create batch job
             created_record = self.client.create_batch(
                 input_file_id=input_file_id,
@@ -171,10 +167,13 @@ class BatchLifecycleManager:
                 metadata=meta,
             )
         except Exception as exc:
-            logger.error("OpenAI Batch submission failed on OpenAI platform: %s", exc)
-            raise RuntimeError(f"OpenAI Batch API creation failed on OpenAI platform: {exc}") from exc
+            from mana_agent.utils.redaction import redact_secrets
+            detail = str(redact_secrets(str(exc)))
+            logger.error("OpenAI Batch submission failed on OpenAI platform: %s", detail)
+            raise RuntimeError(f"OpenAI Batch API creation failed on OpenAI platform: {detail}") from exc
 
         # Populate local tracking fields
+        created_record.metadata.update(meta)
         created_record.model = model
         created_record.task_id = task_id
         created_record.run_id = run_id
@@ -185,6 +184,8 @@ class BatchLifecycleManager:
         # 3. Persist job and items in SQLite store
         self.store.save_job(created_record)
         self.store.save_items(created_record.batch_id, items)
+        if idempotency_key:
+            operations.update(idempotency_key, state="submitted", batch_id=created_record.batch_id)
 
         logger.info(
             "Submitted OpenAI Batch API job %s with %d requests (input_file: %s)",
@@ -224,118 +225,14 @@ class BatchLifecycleManager:
         mode: str = "auto",
         provider: str = "openai",
     ) -> BatchJobRecord:
-        """Asynchronously submit a batch of requests to OpenAI Batch API or internal engine."""
-        if not items:
-            raise ValueError("Cannot submit an empty batch of requests.")
-
-        if idempotency_key:
-            existing = self.store.find_by_idempotency_key(idempotency_key)
-            if existing and not existing.is_terminal():
-                return existing
-
-        meta = dict(metadata or {})
-        if task_id:
-            meta["task_id"] = str(task_id)
-        if run_id:
-            meta["run_id"] = str(run_id)
-        if idempotency_key:
-            meta["idempotency_key"] = str(idempotency_key)
-        if git_commit_sha:
-            meta["git_commit_sha"] = str(git_commit_sha)
-
-        effective_mode = (mode or "auto").strip().lower()
-        if effective_mode == "auto":
-            cfg_mode = (self.config.mode or "auto").strip().lower()
-            if cfg_mode in {"openai", "internal"}:
-                effective_mode = cfg_mode
-            else:
-                from mana_agent.batch.router import is_openai_batch_supported
-                if is_openai_batch_supported(model, endpoint=endpoint, provider=provider):
-                    effective_mode = "openai"
-                else:
-                    effective_mode = "internal"
-
-        if effective_mode == "internal":
-            return await self._async_submit_internal_batch(
-                items,
-                model=model,
-                endpoint=endpoint,
-                completion_window=completion_window,
-                task_id=task_id,
-                run_id=run_id,
-                idempotency_key=idempotency_key,
-                git_commit_sha=git_commit_sha,
-                metadata=meta,
-            )
-
-        self._emit_event(
-            "batch.submitting",
-            {
-                "task_id": task_id,
-                "run_id": run_id,
-                "item_count": len(items),
-                "endpoint": endpoint,
-                "model": model,
-                "mode": "openai",
-            },
+        """Use the same durable submission contract for sync and async callers."""
+        import asyncio
+        return await asyncio.to_thread(
+            self.submit_batch, items, model=model, endpoint=endpoint,
+            completion_window=completion_window, task_id=task_id, run_id=run_id,
+            idempotency_key=idempotency_key, git_commit_sha=git_commit_sha,
+            metadata=metadata, mode=mode, provider=provider,
         )
-
-        # Normalize request items to align with target endpoint
-        items = [
-            BatchItemRequest(
-                custom_id=it.custom_id,
-                body=it.body,
-                method=it.method,
-                url=endpoint,
-                origin_task_id=it.origin_task_id,
-                origin_run_id=it.origin_run_id,
-                created_at=it.created_at,
-                target_revision=it.target_revision,
-                file_path=it.file_path,
-                expected_sha256=it.expected_sha256,
-            ) if it.url != endpoint else it
-            for it in items
-        ]
-
-        try:
-            filename = f"batch_{task_id or 'run'}_{int(time.time())}.jsonl"
-            input_file_id = await self.client.async_upload_batch_file(items, filename=filename)
-
-            created_record = await self.client.async_create_batch(
-                input_file_id=input_file_id,
-                endpoint=endpoint,
-                completion_window=completion_window or self.config.completion_window,
-                metadata=meta,
-            )
-        except Exception as exc:
-            logger.error("OpenAI Batch async submission failed on OpenAI platform: %s", exc)
-            raise RuntimeError(f"OpenAI Batch API async creation failed on OpenAI platform: {exc}") from exc
-
-        created_record.model = model
-        created_record.task_id = task_id
-        created_record.run_id = run_id
-        created_record.idempotency_key = idempotency_key
-        created_record.git_commit_sha = git_commit_sha
-        created_record.total_requests = len(items)
-
-        self.store.save_job(created_record)
-        self.store.save_items(created_record.batch_id, items)
-
-        self._emit_event(
-            "batch.submitted",
-            {
-                "batch_id": created_record.batch_id,
-                "status": created_record.status,
-                "total_requests": len(items),
-                "input_file_id": input_file_id,
-                "task_id": task_id,
-                "mode": "openai",
-                "discount_factor": 0.5,
-                "message": f"Submitted batch {created_record.batch_id} with {len(items)} requests (50% cost discount).",
-            },
-        )
-
-        return created_record
 
     def poll_batch(self, batch_id: str) -> BatchJobRecord:
         """Poll current batch status from OpenAI or SQLite store, and finalize if completed."""
@@ -346,8 +243,11 @@ class BatchLifecycleManager:
                 return finalized_job
             return local_job
 
+        if local_job and (local_job.status in {"results_imported", "verified"} or local_job.metadata.get("results_imported") == "true"):
+            return local_job
         remote_job = self.client.retrieve_batch(batch_id)
         if local_job:
+            remote_job.metadata = {**local_job.metadata, **remote_job.metadata}
             # Preserve local metadata
             remote_job.model = remote_job.model or local_job.model
             remote_job.task_id = remote_job.task_id or local_job.task_id
@@ -357,220 +257,77 @@ class BatchLifecycleManager:
 
         self.store.save_job(remote_job)
 
-        self._emit_event(
-            "batch.status_updated",
-            {
-                "batch_id": remote_job.batch_id,
-                "status": remote_job.status,
-                "completed_requests": remote_job.completed_requests,
-                "total_requests": remote_job.total_requests,
-                "failed_requests": remote_job.failed_requests,
-                "output_file_id": remote_job.output_file_id,
-            },
-        )
+        if local_job is None or (local_job.status, local_job.completed_requests, local_job.failed_requests) != (remote_job.status, remote_job.completed_requests, remote_job.failed_requests):
+            self._emit_event(
+                "batch.status_updated",
+                {
+                    "batch_id": remote_job.batch_id,
+                    "task_id": remote_job.task_id,
+                    "status": remote_job.status,
+                    "completed_requests": remote_job.completed_requests,
+                    "total_requests": remote_job.total_requests,
+                    "failed_requests": remote_job.failed_requests,
+                    "output_file_id": remote_job.output_file_id,
+                },
+            )
 
-        if remote_job.status == BatchLifecycleStatus.COMPLETED.value:
+        if remote_job.status in {"completed", "failed", "expired", "cancelled"}:
             finalized_job, _ = self.finalize_batch(batch_id)
             return finalized_job
 
         return remote_job
 
     async def async_poll_batch(self, batch_id: str) -> BatchJobRecord:
-        """Asynchronously poll current batch status from OpenAI or SQLite store."""
-        local_job = self.store.get_job(batch_id)
-        if local_job and (local_job.metadata.get("engine") == "internal" or batch_id.startswith("batch_int_")):
-            if local_job.status == BatchLifecycleStatus.COMPLETED.value:
-                finalized_job, _ = await self.async_finalize_batch(batch_id)
-                return finalized_job
-            return local_job
-
-        remote_job = await self.client.async_retrieve_batch(batch_id)
-        if local_job:
-            remote_job.model = remote_job.model or local_job.model
-            remote_job.task_id = remote_job.task_id or local_job.task_id
-            remote_job.run_id = remote_job.run_id or local_job.run_id
-            remote_job.idempotency_key = remote_job.idempotency_key or local_job.idempotency_key
-            remote_job.git_commit_sha = remote_job.git_commit_sha or local_job.git_commit_sha
-
-        self.store.save_job(remote_job)
-
-        self._emit_event(
-            "batch.status_updated",
-            {
-                "batch_id": remote_job.batch_id,
-                "status": remote_job.status,
-                "completed_requests": remote_job.completed_requests,
-                "total_requests": remote_job.total_requests,
-                "failed_requests": remote_job.failed_requests,
-                "output_file_id": remote_job.output_file_id,
-            },
-        )
-
-        if remote_job.status == BatchLifecycleStatus.COMPLETED.value:
-            finalized_job, _ = await self.async_finalize_batch(batch_id)
-            return finalized_job
-
-        return remote_job
+        import asyncio
+        return await asyncio.to_thread(self.poll_batch, batch_id)
 
     def finalize_batch(self, batch_id: str) -> tuple[BatchJobRecord, list[BatchItemResult]]:
-        """Download batch results, correlate by custom_id, calculate 50% discounted cost, and update store."""
-        job = self.store.get_job(batch_id)
-        if job and (job.metadata.get("engine") == "internal" or batch_id.startswith("batch_int_")):
+        """Import only terminal, fully correlated results; import is not verification."""
+        job = self.store.get_job(batch_id) or self.client.retrieve_batch(batch_id)
+        if job.status in {"results_imported", "verified"} or job.metadata.get("results_imported") == "true":
+            return job, self.store.get_results(batch_id)
+        if job.status not in {"completed", "expired", "cancelled", "failed"}:
+            raise RuntimeError(f"Batch {batch_id} is still {job.status}; results are not ready")
+        if job.metadata.get("engine") == "internal":
             results = self.store.get_results(batch_id)
-            if job.status != BatchLifecycleStatus.RESULTS_IMPORTED.value:
-                job.status = BatchLifecycleStatus.RESULTS_IMPORTED.value
-                job.completed_at = job.completed_at or time.time()
-                self.store.save_job(job)
-            self._emit_event(
-                "batch.results_imported",
-                {
-                    "batch_id": batch_id,
-                    "imported_count": len(results),
-                    "cost_usd": job.cost_estimate_usd,
-                    "discount": "none (internal)",
-                    "status": job.status,
-                },
-            )
-            return job, results
-
-        if not job:
-            job = self.client.retrieve_batch(batch_id)
-
-        existing_results = self.store.get_results(batch_id)
-        if job.status == BatchLifecycleStatus.RESULTS_IMPORTED.value and existing_results:
-            return job, existing_results
-
-        results: list[BatchItemResult] = []
-
-        if not job.output_file_id:
-            try:
-                refreshed = self.client.retrieve_batch(batch_id)
-                if refreshed and refreshed.output_file_id:
-                    job.output_file_id = refreshed.output_file_id
-                    job.status = refreshed.status
-                    if refreshed.error_file_id:
-                        job.error_file_id = refreshed.error_file_id
-            except Exception as exc:
-                logger.debug("Failed refreshing batch %s: %s", batch_id, exc)
-
-        if job.output_file_id:
-            logger.info("Downloading batch results for %s from file %s", batch_id, job.output_file_id)
-            results = self.client.download_results(job.output_file_id)
-            self.store.save_results(batch_id, results)
         else:
-            try:
-                results = self.client.download_results(batch_id)
-                if results:
-                    self.store.save_results(batch_id, results)
-            except Exception:
-                pass
-
-        if job.error_file_id:
-            try:
-                raw_errors = self.client.download_errors(job.error_file_id)
-                error_results = [
-                    BatchItemResult(
-                        custom_id=str(e.get("custom_id") or ""),
-                        status_code=int(e.get("response", {}).get("status_code", 400)),
-                        error=e.get("error") if isinstance(e.get("error"), dict) else {"message": str(e.get("error"))},
-                    )
-                    for e in raw_errors
-                    if e.get("custom_id")
-                ]
-                if error_results:
-                    self.store.save_results(batch_id, error_results)
-                    results.extend(error_results)
-            except Exception as exc:
-                logger.warning("Failed to download batch errors for %s: %s", batch_id, exc)
-
-        # Calculate cost estimate with 50% discount
+            if job.status == "completed" and not job.output_file_id and not job.error_file_id:
+                refreshed = self.client.retrieve_batch(batch_id)
+                job.output_file_id, job.error_file_id = refreshed.output_file_id, refreshed.error_file_id
+            results = self.client.download_results(job.output_file_id) if job.output_file_id else []
+            if job.error_file_id:
+                results += [BatchItemResult.from_jsonl_row(row) for row in self.client.download_errors(job.error_file_id)]
+        expected = {item.custom_id for item in self.store.get_items(batch_id)}
+        actual = [result.custom_id for result in results]
+        if len(actual) != len(set(actual)) or any(cid not in expected for cid in actual):
+            raise ValueError("Batch output contains duplicate or unknown custom_id values")
+        missing = expected - set(actual)
+        if missing and job.status == "completed":
+            raise ValueError("Completed Batch output is missing expected custom_id values")
+        results += [BatchItemResult(custom_id=cid, status_code=400,
+                    error={"code": job.status, "message": "No result returned before terminal batch status"}) for cid in missing]
+        usage: dict[str, int] = {}
+        for result in results:
+            item_usage = result.response_body.get("usage") or {}
+            for key in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens"):
+                usage[key] = usage.get(key, 0) + int(item_usage.get(key) or 0)
+        if any(usage.values()):
+            job.usage = usage
         job.cost_estimate_usd = self._calculate_batch_cost(job)
-        job.status = BatchLifecycleStatus.RESULTS_IMPORTED.value
+        job.metadata["results_imported"] = "true"
+        if job.status == "completed":
+            job.status = BatchLifecycleStatus.RESULTS_IMPORTED.value
         job.completed_at = job.completed_at or time.time()
-        self.store.save_job(job)
-
-        self._emit_event(
-            "batch.results_imported",
-            {
-                "batch_id": batch_id,
-                "imported_count": len(results),
-                "cost_usd": job.cost_estimate_usd,
-                "discount": "50%",
-                "status": job.status,
-            },
-        )
-
+        self.store.import_results(job, results)
+        self._emit_event("batch.results_imported", {
+            "batch_id": batch_id, "imported_count": len(results), "status": job.status,
+            "task_id": job.task_id, "cost_usd": job.cost_estimate_usd,
+        })
         return job, results
 
     async def async_finalize_batch(self, batch_id: str) -> tuple[BatchJobRecord, list[BatchItemResult]]:
-        """Asynchronously download and import batch results."""
-        job = self.store.get_job(batch_id)
-        if job and (job.metadata.get("engine") == "internal" or batch_id.startswith("batch_int_")):
-            results = self.store.get_results(batch_id)
-            if job.status != BatchLifecycleStatus.RESULTS_IMPORTED.value:
-                job.status = BatchLifecycleStatus.RESULTS_IMPORTED.value
-                job.completed_at = job.completed_at or time.time()
-                self.store.save_job(job)
-            self._emit_event(
-                "batch.results_imported",
-                {
-                    "batch_id": batch_id,
-                    "imported_count": len(results),
-                    "cost_usd": job.cost_estimate_usd,
-                    "discount": "none (internal)",
-                    "status": job.status,
-                },
-            )
-            return job, results
-
-        if not job:
-            job = await self.client.async_retrieve_batch(batch_id)
-
-        existing_results = self.store.get_results(batch_id)
-        if job.status == BatchLifecycleStatus.RESULTS_IMPORTED.value and existing_results:
-            return job, existing_results
-
-        results: list[BatchItemResult] = []
-
-        if job.output_file_id:
-            results = await self.client.async_download_results(job.output_file_id)
-            self.store.save_results(batch_id, results)
-
-        if job.error_file_id:
-            try:
-                raw_errors = self.client.download_errors(job.error_file_id)
-                error_results = [
-                    BatchItemResult(
-                        custom_id=str(e.get("custom_id") or ""),
-                        status_code=int(e.get("response", {}).get("status_code", 400)),
-                        error=e.get("error") if isinstance(e.get("error"), dict) else {"message": str(e.get("error"))},
-                    )
-                    for e in raw_errors
-                    if e.get("custom_id")
-                ]
-                if error_results:
-                    self.store.save_results(batch_id, error_results)
-                    results.extend(error_results)
-            except Exception as exc:
-                logger.warning("Failed to download async batch errors for %s: %s", batch_id, exc)
-
-        job.cost_estimate_usd = self._calculate_batch_cost(job)
-        job.status = BatchLifecycleStatus.RESULTS_IMPORTED.value
-        job.completed_at = job.completed_at or time.time()
-        self.store.save_job(job)
-
-        self._emit_event(
-            "batch.results_imported",
-            {
-                "batch_id": batch_id,
-                "imported_count": len(results),
-                "cost_usd": job.cost_estimate_usd,
-                "discount": "50%",
-                "status": job.status,
-            },
-        )
-
-        return job, results
+        import asyncio
+        return await asyncio.to_thread(self.finalize_batch, batch_id)
 
     def resume_pending_batches(self) -> list[BatchJobRecord]:
         """Poll and reconcile all active, pending batch jobs after agent startup or restart."""
@@ -608,6 +365,11 @@ class BatchLifecycleManager:
             return local_job
 
         cancelled = self.client.cancel_batch(batch_id)
+        if local_job:
+            cancelled.metadata = {**local_job.metadata, **cancelled.metadata}
+            for name in ("model", "task_id", "run_id", "idempotency_key", "git_commit_sha"):
+                if not getattr(cancelled, name):
+                    setattr(cancelled, name, getattr(local_job, name))
         self.store.save_job(cancelled)
         self._emit_event(
             "batch.cancelled",
@@ -668,7 +430,7 @@ class BatchLifecycleManager:
             },
         )
 
-        results = self._process_internal_batch_items(items, model=model)
+        results = self._process_internal_batch_items(items, model=model, provider=meta.get("provider", "openai"))
         self.store.save_results(batch_id, results)
 
         record.completed_requests = len([r for r in results if r.ok])
@@ -726,6 +488,7 @@ class BatchLifecycleManager:
         items: Sequence[BatchItemRequest],
         *,
         model: str,
+        provider: str = "openai",
     ) -> list[BatchItemResult]:
         """Execute batch items internally using model client or provided handler."""
         if hasattr(self, "_internal_handler") and callable(self._internal_handler):
@@ -736,14 +499,18 @@ class BatchLifecycleManager:
         def _execute_single(item: BatchItemRequest) -> BatchItemResult:
             try:
                 body = item.body or {}
-                item_model = body.get("model") or model or "gpt-4o"
+                item_model = body.get("model") or model
+                if not item_model:
+                    raise ValueError("Internal batch inference requires a selected model")
+                unsupported = set(body) - {"model", "messages", "input", "prompt", "metadata"}
+                if unsupported:
+                    raise ValueError(f"Internal batch request options are unsupported: {sorted(unsupported)}; use the native tool loop for tool-bearing requests")
 
                 from mana_agent.config.inference_provider import resolve_inference_connection
                 from mana_agent.config.settings import Settings
                 from mana_agent.multi_agent.runtime.compatibility import create_chat_model
-                from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-                conn = resolve_inference_connection(Settings(), require_api_key=False)
+                conn = resolve_inference_connection(Settings(), provider=provider, require_api_key=False)
                 if not conn.api_key:
                     raise ValueError("No model API key configured for live inference.")
 
@@ -754,76 +521,27 @@ class BatchLifecycleManager:
                     provider=conn.provider,
                 )
 
-                messages = []
-                raw_msgs = body.get("messages")
-                if isinstance(raw_msgs, list):
-                    for m in raw_msgs:
-                        role = m.get("role", "user")
-                        content = m.get("content", "")
-                        if role == "system":
-                            messages.append(SystemMessage(content=content))
-                        elif role == "assistant":
-                            messages.append(AIMessage(content=content))
-                        else:
-                            messages.append(HumanMessage(content=content))
-                elif body.get("input"):
-                    messages.append(HumanMessage(content=str(body.get("input"))))
-                elif body.get("prompt"):
-                    messages.append(HumanMessage(content=str(body.get("prompt"))))
-                else:
-                    messages.append(HumanMessage(content=json.dumps(body)))
-
-                response = llm.invoke(messages)
+                from langchain_core.messages import convert_to_messages
+                raw_messages = body.get("messages")
+                if raw_messages is None:
+                    raw_input = body.get("input", body.get("prompt"))
+                    raw_messages = raw_input if isinstance(raw_input, list) else [{"role": "user", "content": raw_input}]
+                if not raw_messages or any(not isinstance(message, dict) or message.get("content") is None for message in raw_messages):
+                    raise ValueError("Internal batch requires valid conversation messages or text input")
+                response = llm.invoke(convert_to_messages(raw_messages))
                 content = getattr(response, "content", "") or ""
-
-                return BatchItemResult(
-                    custom_id=item.custom_id,
-                    status_code=200,
-                    response={
-                        "id": f"resp_{item.custom_id}",
-                        "custom_id": item.custom_id,
-                        "response": {
-                            "status_code": 200,
-                            "body": {
-                                "id": f"chatcmpl-{item.custom_id}",
-                                "object": "chat.completion",
-                                "model": item_model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "message": {"role": "assistant", "content": content},
-                                        "finish_reason": "stop",
-                                    }
-                                ],
-                            },
-                        },
-                    },
-                )
+                if not content:
+                    raise ValueError("Internal batch model returned no output")
+                usage = getattr(response, "usage_metadata", None) or {}
+                return BatchItemResult(custom_id=item.custom_id, status_code=200, response_body={
+                    "id": f"resp_{item.custom_id}", "model": item_model, "usage": usage,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                })
             except Exception as exc:
-                logger.info("Internal batch item execution fallback for %s: %s", item.custom_id, exc)
-                return BatchItemResult(
-                    custom_id=item.custom_id,
-                    status_code=200,
-                    response={
-                        "id": f"resp_{item.custom_id}",
-                        "custom_id": item.custom_id,
-                        "response": {
-                            "status_code": 200,
-                            "body": {
-                                "id": f"chatcmpl-{item.custom_id}",
-                                "object": "chat.completion",
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "message": {"role": "assistant", "content": f"Internal batch processed for {item.custom_id}"},
-                                        "finish_reason": "stop",
-                                    }
-                                ],
-                            },
-                        },
-                    },
-                )
+                from mana_agent.utils.redaction import redact_secrets
+                logger.warning("Internal batch item %s failed: %s", item.custom_id, type(exc).__name__)
+                return BatchItemResult(custom_id=item.custom_id, status_code=500,
+                    error={"code": "INTERNAL_BATCH_INFERENCE_FAILED", "message": str(redact_secrets(str(exc)))})
 
         workers = min(len(items), 10) or 1
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -856,38 +574,31 @@ class BatchLifecycleManager:
             run_id=job.run_id if job else "",
             idempotency_key=retry_key,
             git_commit_sha=job.git_commit_sha if job else "",
+            mode="internal" if job and job.metadata.get("engine") == "internal" else "openai",
         )
 
     def _calculate_batch_cost(self, job: BatchJobRecord) -> float:
-        """Calculate token cost with official OpenAI Batch API 50% discount."""
+        """Use selected-model prices; the Batch discount applies only to official jobs."""
         usage = job.usage or {}
         input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
         output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
 
         if input_tokens == 0 and output_tokens == 0:
+            job.metadata["cost_estimate_known"] = "false"
             return 0.0
 
-        if self.accounting_service is not None and hasattr(self.accounting_service, "calculate_cost"):
-            try:
-                # If ModelTokenAccountingService is available, resolve profile and compute with 50% discount
-                from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver
-
-                identity = ModelIdentity(provider="openai", model=job.model or "gpt-4o")
-                profile = ModelTokenProfileResolver().resolve(identity)
-                cost = self.accounting_service.calculate_cost(
-                    profile,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                )
-                if cost is not None:
-                    # 50% discount
-                    return float(cost * Decimal("0.5"))
-            except Exception as exc:
-                logger.debug("Failed to calculate cost via accounting service: %s", exc)
-
-        # Baseline fallback estimation: $2.50 / M input, $10.00 / M output discounted by 50%
-        base_cost = (input_tokens * 2.50 + output_tokens * 10.00) / 1_000_000.0
-        return round(base_cost * 0.5, 6)
+        from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver
+        try:
+            profile = ModelTokenProfileResolver().resolve(ModelIdentity(provider=job.metadata.get("provider", "openai"), model=job.model))
+            if profile.input_price_per_million is not None and profile.output_price_per_million is not None:
+                job.metadata["cost_estimate_known"] = "true"
+                return float((Decimal(input_tokens) * profile.input_price_per_million
+                    + Decimal(output_tokens) * profile.output_price_per_million)
+                    * (Decimal("1") if job.metadata.get("engine") == "internal" else Decimal("0.5")) / Decimal(1_000_000))
+        except ValueError:
+            pass
+        job.metadata["cost_estimate_known"] = "false"
+        return 0.0  # Unknown estimate, never represented as zero actual spend.
 
     @staticmethod
     def verify_revision_fencing(
@@ -901,6 +612,8 @@ class BatchLifecycleManager:
         Returns True if safe to apply (no drift), False if stale.
         """
         # If target revision was pinned and git commit is known, ensure they match
+        if item.target_revision and not current_git_commit:
+            return False
         if item.target_revision and current_git_commit:
             if item.target_revision.strip() != current_git_commit.strip():
                 logger.warning(
@@ -912,6 +625,8 @@ class BatchLifecycleManager:
                 return False
 
         # If expected file sha256 was pinned and file content is provided, verify SHA-256
+        if item.expected_sha256 and current_file_content is None:
+            return False
         if item.expected_sha256 and current_file_content is not None:
             actual_sha = hashlib.sha256(current_file_content.encode("utf-8")).hexdigest()
             if actual_sha != item.expected_sha256.strip():

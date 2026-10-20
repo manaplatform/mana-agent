@@ -86,33 +86,16 @@ class ToolCompatibilityResolver:
         requires_batch = False
         requires_parallel = False
 
-        is_batch_mode = execution_mode.lower() == "batch"
-
         for tool in tool_names:
             t_lower = tool.lower().replace("-", "_")
 
             # 1. Batch API tools
-            if t_lower.startswith("batch_") or "batch" in t_lower:
+            if t_lower in {"batch_create_job", "batch_submit_requests", "batch_get_status", "batch_check_status",
+                           "batch_list_jobs", "batch_cancel_job", "batch_download_results", "batch_retrieve_results"}:
                 requires_batch = True
-                if not profile.supports_batch:
-                    incompatible.append(
-                        (tool, f"Model '{profile.model_id}' does not support OpenAI Batch API operations.")
-                    )
-                else:
-                    compatible.append(tool)
-                continue
-
-            # 2. Check interactive / local execution tools when in batch mode
-            if is_batch_mode:
-                if t_lower in {"shell", "local_shell", "terminal", "bash", "approval_request", "wait_for_approval"}:
-                    batch_restricted.append(tool)
-                    incompatible.append(
-                        (
-                            tool,
-                            f"Tool '{tool}' requires local interactive execution and cannot run server-side inside OpenAI Batch API.",
-                        )
-                    )
-                    continue
+                # This is a client-side function. The target request's model
+                # and transport are validated when the selected tool runs.
+                # Native batch file tools never imply official Batch access.
 
             # 3. Computer use
             if "computer" in t_lower:

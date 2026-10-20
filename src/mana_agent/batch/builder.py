@@ -88,6 +88,8 @@ class BatchRequestBuilder:
         """Validate all items, ensure uniqueness of custom_id, and generate JSONL bytes."""
         if not items:
             raise ValueError("Cannot serialize an empty batch request list.")
+        if len(self.group_by_model_and_endpoint(items)) != 1:
+            raise ValueError("Split Batch requests by model and endpoint before serialization")
 
         if len(items) > self.limits.max_requests_per_batch:
             raise ValueError(
@@ -98,6 +100,8 @@ class BatchRequestBuilder:
         lines: list[str] = []
 
         for idx, item in enumerate(items):
+            if item.method.upper() != "POST" or item.body.get("stream"):
+                raise ValueError("Batch requests require POST and do not support streaming")
             cid = str(item.custom_id or "").strip()
             if not cid:
                 raise ValueError(f"Batch item at index {idx} has an empty 'custom_id'.")

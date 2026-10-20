@@ -130,12 +130,23 @@ class ChatService:
         if "recent_history" in parameters or any(
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
         ):
+            if recent_history is None:
+                from mana_agent.gateway.conversation_context import recent_conversation_context
+                messages = [message for index, (question_text, answer_text) in enumerate(self._history[-3:])
+                            for message in ({"role": "user", "content": question_text, "turn_id": str(index)},
+                                            {"role": "assistant", "content": answer_text, "turn_id": str(index)})]
+                recent_history = recent_conversation_context(messages)["messages"]
             kwargs["recent_history"] = recent_history
         if "multimodal_content" in parameters or any(
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
         ):
             kwargs["multimodal_content"] = multimodal_content
-        return chat(payload, **kwargs)
+        answer = chat(payload, **kwargs)
+        # Direct service clients share the same user/assistant continuity. An
+        # explicit history (including []) remains authoritative for gateways.
+        self._history.append((payload, str(answer)))
+        self._history = self._history[-40:]
+        return answer
 
     def ask(
         self,

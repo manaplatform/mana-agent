@@ -74,12 +74,6 @@ def _coerce_continuation_decision(response: Any, task_id: str = "") -> Continuat
     if isinstance(data, dict):
         if not data.get("task_id") and task_id:
             data["task_id"] = task_id
-        if "action" not in data:
-            data["action"] = ContinuationAction.FINALIZE.value
-            data["goal_satisfied"] = True
-            data["safe_to_continue"] = True
-            data["reason"] = data.get("reasoning_summary") or "Model completed execution"
-            data["evidence_summary"] = data.get("reasoning_summary") or "Execution evidence recorded"
     return ContinuationDecision.model_validate(data)
 
 
@@ -177,7 +171,7 @@ class ContinuationEvaluator:
                     raise coerce_exc
 
             if decision.task_id != task_id:
-                object.__setattr__(decision, "task_id", task_id)
+                raise ValueError("continuation decision selected a different task")
             return decision
 
         except Exception as exc:

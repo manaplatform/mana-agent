@@ -286,3 +286,20 @@ descendants, and `tasks artefacts` for verification evidence. Run `tasks
 recover` after an operator-confirmed service interruption. Do not manually edit
 task JSON. For a corrupted checkpoint, select another valid checkpoint through
 the model decision layer or restart only if the side-effect policy permits it.
+
+
+## Deferred OpenAI Batch operations
+
+Explicit Batch tasks use `waiting_for_batch` with an operation ID, provider expiry,
+checkpoint, and resume operation. A background provider poll is a wake observation;
+it does not execute tools, choose the next action, or verify the goal. The
+Supervisor releases the old lease while waiting and requires fresh authority for
+the matching resume. TaskBoard remains the task/progress record, and the
+Autonomous Loop advances model/tool and continuation phases.
+
+Default active execution time is paused for eligible root waits; explicit and
+active-parent deadlines are preserved. Idle polls do not consume model turns.
+Human approval waits are distinct and cannot be bypassed by Batch completion.
+See [Batch execution](26-openai-batch-api.md) and the
+[permanent regression note](regressions/batch-and-followup-context.md) for failure,
+reconciliation, result delivery, and user-owned verification details.

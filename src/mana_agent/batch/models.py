@@ -123,9 +123,19 @@ class BatchItemResult:
 
     @classmethod
     def from_jsonl_row(cls, data: dict[str, Any]) -> BatchItemResult:
+        if not isinstance(data, dict):
+            raise ValueError("Batch result row must be an object")
         custom_id = str(data.get("custom_id") or "")
+        if not custom_id.strip():
+            raise ValueError("Batch result is missing custom_id")
         err = data.get("error")
         resp = data.get("response") or {}
+        if not isinstance(resp, dict):
+            raise ValueError("Batch result response must be an object")
+        if err is None and (not isinstance(resp, dict) or "status_code" not in resp or not isinstance(resp.get("body"), dict)):
+            raise ValueError("Batch result is missing a valid response or error")
+        if err is not None and not isinstance(err, dict):
+            raise ValueError("Batch result error must be an object")
         status_code = resp.get("status_code", 200 if not err else 400)
         body = resp.get("body") or {}
         return cls(

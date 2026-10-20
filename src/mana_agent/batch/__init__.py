@@ -1,7 +1,7 @@
 """Official OpenAI Batch API integration for Mana-Agent.
 
-Provides native support for /v1/batches, /v1/files (purpose=batch), automatic routing
-for bulk asynchronous model workloads, 50% cost accounting discount, durable SQLite state
+Provides native support for /v1/batches, /v1/files (purpose=batch), explicit task selection
+for asynchronous model workloads, 50% cost accounting discount, durable SQLite state
 machine, crash resumption, and revision fencing.
 """
 

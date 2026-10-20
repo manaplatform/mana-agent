@@ -58,6 +58,7 @@ class BatchCreateJobInput(BaseModel):
     idempotency_key: str = Field(default="", description="Deduplication key to prevent duplicate batch submission.")
     metadata: dict[str, str] | None = Field(default=None, description="Optional metadata key-value pairs.")
     mode: str = Field(default="auto", description="Execution mode: 'auto' (default), 'openai', or 'internal'.")
+    provider: str = Field(default="openai", description="Explicit target inference provider.")
 
 
 class BatchGetStatusInput(BaseModel):
@@ -68,6 +69,7 @@ class BatchListJobsInput(BaseModel):
     limit: int = Field(default=20, description="Maximum number of batch jobs to return.")
     status: str = Field(default="", description="Filter by status (e.g. 'completed', 'in_progress', 'validating').")
     task_id: str = Field(default="", description="Filter by originating task ID.")
+    sync_platform: bool = Field(default=False, description="Explicitly synchronize jobs from OpenAI; ordinary listing uses local state.")
 
 
 class BatchCancelJobInput(BaseModel):
@@ -110,17 +112,11 @@ def batch_create_job(
                     target_model = str(m).strip()
                     break
     if not target_model:
-        try:
-            from mana_agent.config.settings import Settings
-
-            s = Settings()
-            target_model = getattr(s, "openai_chat_model", None) or "gpt-4o"
-        except Exception:
-            target_model = "gpt-4o"
+        return {"ok": False, "error": "A selected model is required", "error_code": "MODEL_REQUIRED"}
 
     for idx, raw in enumerate(requests):
         if not isinstance(raw, dict):
-            continue
+            return {"ok": False, "error": "Every Batch request must be an object", "error_code": "INVALID_REQUEST"}
         cid = str(raw.get("custom_id") or f"req-{idx}").strip()
         body = dict(raw.get("body") or {})
         if target_model and "model" not in body:
@@ -139,7 +135,7 @@ def batch_create_job(
     try:
         record = mgr.submit_batch(
             items,
-            model=target_model or "gpt-4o-mini",
+            model=target_model,
             endpoint=endpoint,
             completion_window=completion_window,
             task_id=task_id,
@@ -156,6 +152,7 @@ def batch_create_job(
             "status": record.status,
             "mode": "internal" if is_internal else "openai",
             "engine": "internal" if is_internal else "openai",
+            "cost_estimate_known": record.metadata.get("cost_estimate_known") == "true",
             "total_requests": record.total_requests,
             "input_file_id": record.input_file_id,
             "created_at": record.created_at,
@@ -222,7 +219,7 @@ def batch_list_jobs(
     limit: int = 20,
     status: str = "",
     task_id: str = "",
-    sync_platform: bool = True,
+    sync_platform: bool = False,
     manager: BatchLifecycleManager | None = None,
 ) -> dict[str, Any]:
     """List recent OpenAI batch jobs with their lifecycle status and counts."""
@@ -234,7 +231,7 @@ def batch_list_jobs(
                 for pj in platform_jobs:
                     mgr.store.save_job(pj)
             except Exception as sync_exc:
-                logger.debug("Failed to sync platform batches: %s", sync_exc)
+                raise RuntimeError("Explicit OpenAI Batch synchronization failed") from sync_exc
 
         jobs = mgr.store.list_jobs(task_id=task_id, limit=limit)
         if status:
@@ -339,6 +336,8 @@ def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) ->
         task_id: str = "",
         idempotency_key: str = "",
         mode: str = "auto",
+        provider: str = "openai",
+        metadata: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         return batch_create_job(
             requests=requests,
@@ -348,14 +347,16 @@ def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) ->
             task_id=task_id,
             idempotency_key=idempotency_key,
             mode=mode,
+            provider=provider,
+            metadata=metadata,
             manager=mgr,
         )
 
     def _status(batch_id: str) -> dict[str, Any]:
         return batch_get_status(batch_id=batch_id, manager=mgr)
 
-    def _list(limit: int = 20, status: str = "", task_id: str = "") -> dict[str, Any]:
-        return batch_list_jobs(limit=limit, status=status, task_id=task_id, manager=mgr)
+    def _list(limit: int = 20, status: str = "", task_id: str = "", sync_platform: bool = False) -> dict[str, Any]:
+        return batch_list_jobs(limit=limit, status=status, task_id=task_id, sync_platform=sync_platform, manager=mgr)
 
     def _cancel(batch_id: str) -> dict[str, Any]:
         return batch_cancel_job(batch_id=batch_id, manager=mgr)

@@ -10,13 +10,10 @@ from typing import Any
 
 from mana_agent.batch.models import (
     BatchConfig,
-    BatchExecutionMode,
     BatchItemRequest,
 )
 from mana_agent.batch.router import (
-    SUPPORTED_BATCH_ENDPOINTS,
-    BatchDecision,
-    is_model_supported_for_batch,
+    parse_batch_support_from_metadata,
 )
 from mana_agent.config.model_discovery import (
     GLOBAL_CAPABILITY_REGISTRY,
@@ -104,141 +101,25 @@ class ExecutionModeRouter:
                     break
 
         configured_mode = (mode_override or self.config.mode).lower()
-
-        # Explicit overrides
-        if configured_mode == ExecutionMode.REALTIME.value:
+        if mode_override == ExecutionMode.BATCH.value:
+            from mana_agent.batch.validation import validate_batch_selection
+            if parse_batch_support_from_metadata(model_metadata) is False:
+                raise ValueError("Selected model metadata explicitly disables OpenAI Batch")
+            validate_batch_selection(self.config, model=target_model, provider=target_provider,
+                                     endpoint=items[0].url if items else self.config.endpoint, items=items)
+            if requires_streaming or has_intra_dependencies:
+                raise ValueError("Explicit OpenAI Batch requires non-streaming independent requests; split dependent waves")
             return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.REALTIME,
-                reason="Execution mode explicitly set to realtime.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
+                selected_mode=ExecutionMode.BATCH, reason="Explicit user-selected OpenAI Batch execution.",
+                eligible_items=list(items), discount_factor=0.5, requires_approval=requires_approval,
             )
-
-        if configured_mode == ExecutionMode.PARALLEL.value:
-            return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.PARALLEL,
-                reason="Execution mode explicitly set to parallel tool execution.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
-            )
-
-        # Provider constraint: Batch API is OpenAI-compatible
-        if target_provider not in {"openai", "azure_openai"}:
-            return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.REALTIME,
-                reason=f"Provider '{target_provider}' does not support OpenAI Batch API.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
-            )
-
-        # Model batch support check
-        model_batch_ok = is_model_supported_for_batch(
-            target_model,
-            metadata=model_metadata,
-            provider=target_provider,
-        )
-
-        if not model_batch_ok:
-            return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.REALTIME,
-                reason=f"Model '{target_model}' does not support OpenAI Batch API.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
-            )
-
-        # Latency-sensitive constraints: never schedule latency-sensitive work in batch
-        if is_latency_sensitive:
-            mode = ExecutionMode.PARALLEL if has_parallel_tool_calls else ExecutionMode.REALTIME
-            return ExecutionRoutingDecision(
-                selected_mode=mode,
-                reason="Task is latency-sensitive; routed to realtime/parallel execution to guarantee immediate latency.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
-                is_latency_sensitive=True,
-            )
-
-        if requires_streaming:
-            return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.REALTIME,
-                reason="Workload requires real-time streaming output.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
-            )
-
-        if has_intra_dependencies:
-            return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.REALTIME,
-                reason="Requests have intra-batch dependencies and must execute sequentially.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
-            )
-
-        # Check interactive turn constraint when always_enable_if_supported is disabled
-        if is_interactive and configured_mode != ExecutionMode.BATCH.value and not self.config.always_enable_if_supported:
-            mode = ExecutionMode.PARALLEL if has_parallel_tool_calls else ExecutionMode.REALTIME
-            return ExecutionRoutingDecision(
-                selected_mode=mode,
-                reason="Interactive conversational turn requires immediate response.",
-                ineligible_items=list(items),
-                discount_factor=1.0,
-            )
-
-        # Filter items by supported endpoints
-        eligible: list[BatchItemRequest] = []
-        ineligible: list[BatchItemRequest] = []
-        for it in items:
-            norm_url = (it.url or "/v1/responses").lower().rstrip("/")
-            if norm_url in SUPPORTED_BATCH_ENDPOINTS:
-                eligible.append(it)
-            else:
-                ineligible.append(it)
-
-        if not eligible:
-            mode = ExecutionMode.PARALLEL if has_parallel_tool_calls else ExecutionMode.REALTIME
-            return ExecutionRoutingDecision(
-                selected_mode=mode,
-                reason="No items target supported OpenAI Batch API endpoints (/v1/responses, /v1/chat/completions, /v1/embeddings).",
-                eligible_items=[],
-                ineligible_items=list(items),
-                discount_factor=1.0,
-            )
-
-        # When always_enable_if_supported is active or batch mode explicitly requested
-        if self.config.always_enable_if_supported or configured_mode == ExecutionMode.BATCH.value:
-            logger.info(
-                "ExecutionModeRouter selected Batch API for %d items on model '%s' (always_enable_if_supported=True, 50%% discount)",
-                len(eligible),
-                target_model,
-            )
-            return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.BATCH,
-                reason=f"OpenAI Batch API selected for supported model '{target_model}' ({len(eligible)} requests, 50% token discount).",
-                eligible_items=eligible,
-                ineligible_items=ineligible,
-                discount_factor=0.5,
-                requires_approval=requires_approval,
-            )
-
-        # Check request count threshold for bulk workloads
-        if len(eligible) >= self.config.min_requests:
-            return ExecutionRoutingDecision(
-                selected_mode=ExecutionMode.BATCH,
-                reason=f"Eligible bulk workload: {len(eligible)} independent requests routed to OpenAI Batch API (50% token discount).",
-                eligible_items=eligible,
-                ineligible_items=ineligible,
-                discount_factor=0.5,
-                requires_approval=requires_approval,
-            )
-
-        # Fallback to parallel or realtime
-        fallback_mode = ExecutionMode.PARALLEL if (has_parallel_tool_calls or len(eligible) > 1) else ExecutionMode.REALTIME
         return ExecutionRoutingDecision(
-            selected_mode=fallback_mode,
-            reason=f"Request count ({len(eligible)}) is below batch threshold ({self.config.min_requests}).",
-            eligible_items=eligible,
-            ineligible_items=ineligible,
-            discount_factor=1.0,
+            selected_mode=(ExecutionMode.REALTIME if mode_override == "realtime" else
+                           ExecutionMode.PARALLEL if configured_mode == "parallel" or has_parallel_tool_calls or len(items) > 1 else ExecutionMode.REALTIME),
+            reason="No explicit OpenAI Batch selection; native internal/parallel execution remains selected.",
+            ineligible_items=list(items),
         )
+
 
 
 __all__ = [

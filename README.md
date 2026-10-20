@@ -27,6 +27,12 @@
 
 ---
 
+OpenAI Batch is used only when explicitly requested. Other batching uses Mana's
+internal parallel execution. Required Batch tasks pause durably and resume with
+results; conversation follow-ups retain both user and assistant context across
+frontends. See [Batch execution and recovery](docs/26-openai-batch-api.md).
+
+
 ## What if your AI could do more than answer?
 
 Most AI tools stop at the answer.

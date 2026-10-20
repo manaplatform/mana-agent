@@ -28,7 +28,10 @@ class FollowupRetrievalAction(BaseModel):
 
 class FollowupClassificationOutput(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    action: Literal["classify", "retrieve_context"] = "classify"
+    action: Literal["classify", "retrieve_context", "request_clarification"] = "classify"
+    resolved_request: str = ""
+    source_message_ids: list[str] = Field(default_factory=list)
+    clarification_question: str = ""
     retrieval: FollowupRetrievalAction | None = None
     category: Literal[
         "new_task",
@@ -41,10 +44,10 @@ class FollowupClassificationOutput(BaseModel):
         "clarification_answer",
         "conversation_only",
         "duplicate_message",
-    ] = "new_task"
+    ] | None = None
     related_task_id: str = ""
-    safe_to_continue: bool = Field(
-        default=True,
+    safe_to_continue: bool | None = Field(
+        default=None,
         description=(
             "Whether this classification is unambiguous enough to proceed to the next "
             "validated decision boundary; this does not authorize tools, mutations, or "
@@ -52,6 +55,12 @@ class FollowupClassificationOutput(BaseModel):
         ),
     )
     reason: str = Field(default="", min_length=1)
+
+    @model_validator(mode="after")
+    def require_classification(self) -> "FollowupClassificationOutput":
+        if self.action == "classify" and (self.category is None or self.safe_to_continue is None):
+            raise ValueError("Classification requires an explicit category and continuation decision")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -100,6 +109,9 @@ class FollowupClassification:
     reason: str
     related_turn_ids: tuple[str, ...] = ()
     retrieval_refs: tuple[str, ...] = ()
+    resolved_request: str = ""
+    source_message_ids: tuple[str, ...] = ()
+    clarification_question: str = ""
 
 
 _PROMPT = """Classify this newly received chat turn. A completed task does not complete its conversation.
@@ -122,7 +134,7 @@ be the empty string.
 If prior conversation context is required to safely classify this turn (for example, if the input is a terse
 follow-up such as "why?", "continue", "do that", "what did you mean?", or "and memory?" and pointers indicate
 prior context exists), you may request a bounded context retrieval by setting action="retrieve_context"
-and providing retrieval query/max_turns. Only the current turn is provided automatically; do not guess
+and providing retrieval query/max_turns. Read both roles in recent_history; do not guess
 unobserved context. Once sufficient context is available, set action="classify".
 
 safe_to_continue authorizes only use of this classification to reach the next independently validated
@@ -132,12 +144,10 @@ conversation_only with safe_to_continue true when no offered task applies. Set i
 turn cannot be safely classified at all, and explain the concrete ambiguity in reason. Do not set it
 false merely because downstream work may be consequential or require separate approval.
 
-CRITICAL: When you select new_task, conversation_only, or clarification_answer with an empty
-related_task_id, you MUST set safe_to_continue to true. A classification that says "this input is
-independent of all offered tasks" is unambiguous by definition. Terse, bare, or context-free inputs
-(single words, email addresses, URLs, numbers, short phrases) are valid new_task or conversation_only
-inputs. Empty recent_history does not make a classification ambiguous when no offered task applies.
-Do not block the user because their input is short or lacks conversational context."""
+When a prior assistant proposal resolves a confirmation, return resolved_request and
+source_message_ids from the observed conversation. If the referent is unavailable or ambiguous,
+request context or return action=request_clarification with a concrete clarification_question.
+Never change safe_to_continue=false into authorization because an input is short."""
 
 
 def _coerce_followup_output(raw: Any) -> FollowupClassificationOutput:
@@ -178,7 +188,8 @@ class FollowupClassifier:
         self,
         *,
         message: str,
-        recent_history: list[tuple[str, str]] | None = None,
+        recent_history: list[tuple[str, str] | dict[str, Any]] | None = None,
+        current_message_id: str = "",
         candidates: list[dict[str, Any]],
         pointers: Any | None = None,
         retrieval_hints: list[str] | None = None,
@@ -278,6 +289,20 @@ class FollowupClassifier:
                 continue
             break
 
+        observed_ids = {str(item.get("message_id")) for item in safe_history if isinstance(item, dict) and item.get("message_id")}
+        if current_message_id:
+            observed_ids.add(current_message_id)
+        for retrieved in retrieved_contexts:
+            for turn in retrieved.get("turns") or []:
+                if not isinstance(turn, dict):
+                    continue
+                if turn.get("message_id"):
+                    observed_ids.add(str(turn["message_id"]))
+                for item in turn.get("messages") or []:
+                    if isinstance(item, dict) and item.get("message_id"):
+                        observed_ids.add(str(item["message_id"]))
+        if any(message_id not in observed_ids for message_id in output.source_message_ids):
+            raise FollowupClassificationError("Reference resolution selected an unobserved message")
         offered = {str(item.get("task_id") or "") for item in candidates}
         needs_task = output.category in {
             "followup_task",
@@ -325,19 +350,16 @@ class FollowupClassifier:
                 "Model decision failed: followup_classification. No fallback action was executed. "
                 "Reason: non-task category selected a task."
             )
-        # Structural invariant: an independent classification (no related task,
-        # non-task category) is unambiguous by construction. The model already
-        # decided the input does not relate to any offered candidate, so
-        # safe_to_continue=false is logically contradictory. Override it.
-        # This is NOT fallback logic — the model decision (category + related_task_id)
-        # is preserved exactly; only the internally inconsistent flag is corrected.
-        independent_categories = {"new_task", "conversation_only", "clarification_answer"}
-        if (
-            not output.safe_to_continue
-            and output.category in independent_categories
-            and not output.related_task_id
-        ):
-            output = output.model_copy(update={"safe_to_continue": True})
+        if output.action == "request_clarification":
+            if not output.clarification_question.strip():
+                raise FollowupClassificationError("Clarification action requires a question")
+            return FollowupClassification(
+                decision_id=f"followup:{uuid.uuid4().hex[:12]}", category="clarification_answer",
+                related_task_id=output.related_task_id, safe_to_continue=False, reason=output.reason,
+                clarification_question=output.clarification_question,
+            )
+        if output.action != "classify":
+            raise FollowupClassificationError("Follow-up context retrieval did not produce a classification")
         if not output.safe_to_continue:
             raise FollowupClassificationError(
                 "Model decision failed: followup_classification. No fallback action was "
@@ -362,6 +384,8 @@ class FollowupClassifier:
 
         fields = {
             "category": output.category,
+            "resolved_request": output.resolved_request,
+            "source_message_ids": tuple(output.source_message_ids),
             "related_task_id": output.related_task_id,
             "safe_to_continue": output.safe_to_continue,
             "reason": output.reason or "Followup classified",

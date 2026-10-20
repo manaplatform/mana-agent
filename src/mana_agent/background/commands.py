@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from contextvars import ContextVar
 from typing import Any
+
+
+idle_retirement: ContextVar[Callable[[Callable[[], bool]], bool] | None] = ContextVar("mana_background_idle_retirement", default=None)
 
 
 @dataclass(frozen=True)
@@ -46,7 +50,13 @@ def _telegram_secrets(_args: dict[str, str]) -> tuple[str, ...]:
     return tuple(name for name in (config.bot_token_env, config.webhook.secret_env) if name)
 
 
+def _batch_watch(args: dict[str, str]) -> None:
+    from mana_agent.batch.watcher import watch
+    watch(args)
+
+
 _COMMANDS = {
+    "batch.watch": RegisteredBackgroundCommand("batch.watch", _batch_watch, lambda _args: ("OPENAI_API_KEY",)),
     "connector.telegram": RegisteredBackgroundCommand("connector.telegram", _telegram, _telegram_secrets),
 }
 

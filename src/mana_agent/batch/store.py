@@ -218,7 +218,6 @@ class BatchJobStore:
     def list_pending_jobs(self) -> list[BatchJobRecord]:
         """List all non-terminal batch jobs that require active synchronization."""
         terminal_statuses = [
-            BatchLifecycleStatus.COMPLETED.value,
             BatchLifecycleStatus.RESULTS_IMPORTED.value,
             BatchLifecycleStatus.VERIFIED.value,
             BatchLifecycleStatus.FAILED.value,
@@ -305,6 +304,23 @@ class BatchJobStore:
                     )
                 )
             return results
+
+    def import_results(self, job: BatchJobRecord, results: Sequence[BatchItemResult]) -> None:
+        """Commit correlated item results and import status in one transaction."""
+        with self._get_connection() as conn:
+            for result in results:
+                changed = conn.execute(
+                    "UPDATE batch_items SET status_code=?, response_body=?, error=?, duration_ms=? "
+                    "WHERE batch_id=? AND custom_id=?",
+                    (result.status_code, json.dumps(result.response_body), json.dumps(result.error) if result.error else None,
+                     result.duration_ms, job.batch_id, result.custom_id),
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("Cannot import a result without its original Batch request")
+            conn.execute(
+                "UPDATE batches SET status=?, usage_json=?, metadata_json=?, cost_estimate_usd=?, completed_at=?, updated_at=? WHERE batch_id=?",
+                (job.status, json.dumps(job.usage), json.dumps(job.metadata), job.cost_estimate_usd, job.completed_at, time.time(), job.batch_id),
+            )
 
     def get_items(self, batch_id: str) -> list[BatchItemRequest]:
         """Retrieve all initial requests for a batch."""

@@ -14,7 +14,16 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _validated_chat_route(monkeypatch) -> None:
-    """Keep planning-flow tests independent of the routing-model transport."""
+    """Exercise frontend planning against the shared gateway's public contract."""
+    from mana_agent.gateway.turn_engine import ChatTurnResult
+    from mana_agent.commands.chat_cli import _planning_questions
+    RecordingCodingAgent.calls = []
+    monkeypatch.setattr("mana_agent.commands.chat_cli._generate_planning_question_llm",
+        lambda *, asked_count, max_questions, **kwargs: _planning_questions(max_questions)[asked_count])
+    def process_turn(gateway, session_id, question, **kwargs):
+        payload = gateway._coding_agent.generate(question)
+        return ChatTurnResult(answer=payload["answer"], payload=payload, used_coding_agent=True)
+    monkeypatch.setattr("mana_agent.gateway.AgentChatGateway.process_turn", process_turn)
     monkeypatch.setattr(
         "mana_agent.commands.chat_cli._decide_chat_route",
         lambda **_kwargs: AgentDecision(
@@ -220,7 +229,7 @@ def test_chat_planning_mode_uses_llm_generated_questions(monkeypatch, tmp_path: 
     assert generated_args[2]["prior_answers"] == ["answer one", "answer two"]
 
 
-def test_chat_planning_mode_falls_back_to_static_on_llm_question_failure(monkeypatch, tmp_path: Path) -> None:
+def test_chat_planning_mode_stops_on_llm_question_failure(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
 
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
@@ -252,10 +261,12 @@ def test_chat_planning_mode_falls_back_to_static_on_llm_question_failure(monkeyp
     )
 
     assert result.exit_code == 0
-    assert "What is the concrete goal and the success criteria?" in result.stdout
+    assert "Planning question generation failed" in result.stdout
+    assert "What is the concrete goal and the success criteria?" not in result.stdout
+    assert not calls
 
 
-def test_planning_question_auth_failure_logs_once_and_uses_static_fallback(monkeypatch, tmp_path: Path, caplog) -> None:
+def test_planning_question_auth_failure_stops_without_static_fallback(monkeypatch, tmp_path: Path, caplog) -> None:
     calls: list[str] = []
     llm_calls = 0
 
@@ -293,6 +304,7 @@ def test_planning_question_auth_failure_logs_once_and_uses_static_fallback(monke
 
     assert result.exit_code == 0
     assert llm_calls == 1
-    assert result.stdout.count("What is the concrete goal and the success criteria?") == 1
-    assert "What should be in scope and out of scope?" in result.stdout
-    assert caplog.text.count("Planning question generation failed; using static fallback") == 1
+    assert "Planning question generation failed" in result.stdout
+    assert "What should be in scope and out of scope?" not in result.stdout
+    assert "using static fallback" not in caplog.text
+    assert not calls

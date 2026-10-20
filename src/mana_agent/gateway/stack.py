@@ -496,6 +496,7 @@ def build_chat_stack(
                 api_key=inference_connection.api_key,
                 base_url=effective_base_url,
             )
+            internal_engine.enabled = bool(getattr(settings, "mana_internal_coding_enabled", True))
             coding_agent_instance = facade_cls(
                 repo_root=coding_repository_root,
                 working_directory=coding_working_directory,

@@ -110,13 +110,14 @@ def test_manager_submit_and_idempotency_dedup() -> None:
     )
 
     items = [
-        BatchItemRequest(custom_id="i1", body={"input": "a"}),
-        BatchItemRequest(custom_id="i2", body={"input": "b"}),
+        BatchItemRequest(custom_id="i1", body={"model": "gpt-4o", "input": "a"}),
+        BatchItemRequest(custom_id="i2", body={"model": "gpt-4o", "input": "b"}),
     ]
 
     # First submission
     record1 = manager.submit_batch(
         items,
+        mode="openai",
         model="gpt-4o",
         task_id="t-100",
         idempotency_key="unique-token-xyz",
@@ -129,6 +130,7 @@ def test_manager_submit_and_idempotency_dedup() -> None:
     # Second submission with same idempotency key returns existing job without calling API again
     record2 = manager.submit_batch(
         items,
+        mode="openai",
         model="gpt-4o",
         task_id="t-100",
         idempotency_key="unique-token-xyz",
@@ -152,6 +154,8 @@ def test_manager_poll_and_auto_finalize() -> None:
             task_id="t-poll",
         )
     )
+
+    store.save_items("batch_poll_test", [BatchItemRequest(custom_id="c1", body={"model": "gpt-4o", "input": "a"})])
 
     # When polled, OpenAI API returns status='completed' with output_file_id
     mock_client.retrieve_batch.return_value = BatchJobRecord(
@@ -198,8 +202,8 @@ def test_manager_resume_pending_batches() -> None:
     manager = BatchLifecycleManager(client=mock_client, store=store)
     reconciled = manager.resume_pending_batches()
 
-    assert len(reconciled) == 2
-    assert {r.batch_id for r in reconciled} == {"b1", "b2"}
+    assert len(reconciled) == 3
+    assert {r.batch_id for r in reconciled} == {"b1", "b2", "b3"}
 
 
 def test_revision_fencing_verification() -> None:
@@ -287,6 +291,7 @@ def test_lifecycle_with_real_sdk_batch_models() -> None:
     # 1. Submit
     rec = manager.submit_batch(
         items,
+        mode="openai",
         model="gpt-4o-mini",
         task_id="live-task-01",
         idempotency_key="live-idemp-01",

@@ -1632,6 +1632,21 @@ class AskAgent:
                 from mana_agent.transactional_actions.adapters import ShellActionAdapter
                 from mana_agent.transactional_actions.gateway import ApprovalRequired
                 from mana_agent.transactional_actions.runtime import default_action_gateway
+                from mana_agent.batch.policy import current_batch_tool_call_id
+                batch_call_id = current_batch_tool_call_id()
+                action_gateway = default_action_gateway(self.project_root)
+                operation_input = {"run_id": run_id, "argv": shell_argv}
+                if batch_call_id:
+                    operation_input.update(call_id=batch_call_id, cwd=str(command_cwd))
+                    wait_for_approval = False  # The durable inbox resumes deferred work.
+                operation_key = "shell:" + hashlib.sha256(json.dumps(operation_input, sort_keys=True).encode()).hexdigest()
+                if batch_call_id and action_approval_id:
+                    grant = action_gateway.approvals.get(action_approval_id)
+                    if grant:
+                        approved_action = action_gateway.store.get_action(grant.action_id)
+                        if approved_action.parent_task_id != str(run_id or "ask-run-command"):
+                            raise ValueError("Command approval belongs to a different task")
+                        operation_key = approved_action.idempotency_key
                 shell_adapter = ShellActionAdapter(
                     argv=shell_argv,
                     cwd=command_cwd,
@@ -1641,12 +1656,13 @@ class AskAgent:
                     actor="user",
                     originating_agent="ask_agent",
                     policy_context={"tool": "run_command"},
-                    idempotency_key=f"shell:{hashlib.sha256(json.dumps({'run_id': run_id, 'argv': shell_argv}, sort_keys=True).encode()).hexdigest()}",
+                    idempotency_key=operation_key,
                     timeout_seconds=timeout_seconds,
                     runner=transactional_runner,
+                    allow_command_result_verification=bool(batch_call_id),
                 )
                 try:
-                    outcome = default_action_gateway(self.project_root).execute(
+                    outcome = action_gateway.execute(
                         shell_adapter, approval_id=action_approval_id
                     )
                 except ApprovalRequired as exc:

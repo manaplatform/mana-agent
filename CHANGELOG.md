@@ -4,6 +4,24 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-20
 
+- **Batch execution and app-wide follow-up context (local changes; unverified):**
+  - Official OpenAI Batch now requires an explicit task selection; ordinary batching stays internal/parallel. Required policy is persisted across related follow-ups without changing the global coding backend.
+  - Added durable model/tool waves, submission intent and request fingerprints, transactional result import, workspace fencing, a registered background watcher, Supervisor wait/resume with fresh leases, and guarded final delivery. Submission no longer claims completed work or passing tests.
+  - Routed ordinary console turns through the shared gateway, removing the duplicate console execution path; frontend shutdown detaches durably pending Batch work while explicit cancellation remains available.
+  - Preserved explicit console planning and flow controls, recorded visible planning exchanges, and rejected missing planning/coding model responses instead of synthesizing completion or substitute questions. Local function tools remain compatible with deferred Batch decisions; native file batching does not imply remote Batch capability.
+  - Removed placeholder success from failed native batch inference, retained ordinary inference pricing for native jobs, and preserved failed/expired/cancelled provider outcomes during partial result import.
+  - Closed direct-edit and mixed-source execution bypasses for required Batch work; unsupported deferred commands and coding source bindings fail explicitly before execution.
+  - Kept distinct deferred shell calls correlated in the shared native tool runtime, reused approved action receipts for permission retries, and returned approval waits through the durable inbox.
+  - Coordinated watcher startup and idle exit under a workspace lifecycle lock, and added a bounded process startup grace so PID publication cannot race stale-worker recovery.
+  - Refreshed shared frontend history with both visible roles, preserved source IDs and complete exchanges through compaction and retrieval, and removed invented FINALIZE/unsafe follow-up overrides.
+  - Added regression coverage and permanent documentation in `docs/regressions/batch-and-followup-context.md`; updated `docs/26-openai-batch-api.md` and resilient-execution guidance.
+  - Agent verification: tests, linters, type checks, builds, and live paid Batch calls were **not run**. No commit, push, or deployment.
+  - User-owned verification: `./venv/bin/pytest tests/test_openai_batch_runtime.py tests/test_openai_batch_coding_engine.py tests/test_conversation_followup_context.py tests/gateway/test_followup_classifier.py -q`
+  - Broader user-owned verification: `./venv/bin/pytest tests/test_openai_batch_*.py tests/gateway tests/execution tests/execution_supervisor --ignore=tests/test_openai_batch_live_integration.py -q`
+  - Native/console user-owned verification: `./venv/bin/pytest tests/test_coding_engine_modes.py tests/test_internal_coding_engine_workflow.py tests/test_chat_planning_mode.py tests/test_chat_direct_commands.py tests/test_chat_console_logging.py tests/test_ask_agent.py -q`
+  - Process lifecycle user-owned verification: `./venv/bin/pytest tests/test_unified_sessions_commands_background.py -q`
+
+
 - Fixed **AskAgent Approval Test Execution, Strict Followup Validation, and Memory-Directed TaskBoard Next-Step Routing**:
   - Test Execution Speed & Non-Blocking Approval Requests (`src/mana_agent/multi_agent/runtime/ask_agent.py`):
     - In `run_command`, added test environment detection (`"PYTEST_CURRENT_TEST" in os.environ` or `"MANA_TESTING" in os.environ`) for unapproved commands. Instead of blocking the single test runner thread in a 60-second polling loop waiting for interactive TUI approval, `run_command` immediately returns the pending approval payload with `action_id`.

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from mana_agent.coding.engine import CodingEngine
+from mana_agent.batch.policy import BatchPending, BatchHumanInput
 from mana_agent.coding.live_events import (
     coding_event_scope,
     coding_execution_context,
@@ -102,11 +103,11 @@ class InternalCodingEngine(CodingEngine):
                     get_setting("MANA_PRIMARY_MODEL", "")
                     or get_setting("MANA_DECISIONS_MODEL", "")
                     or get_setting("OPENAI_MODEL", "")
-                    or "gpt-6-luna"
+                    or ""
                 )
                 model = resolved_m.removeprefix("openai/")
             except Exception:
-                model = "gpt-6-luna"
+                model = ""
 
         self.model = model
         self.provider = provider
@@ -124,6 +125,7 @@ class InternalCodingEngine(CodingEngine):
         self.batch_operations_enabled = batch_operations_enabled
         self.cache_enabled = cache_enabled
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.enabled = True
         self.parallel_scheduling_enabled = parallel_scheduling_enabled
 
         self.executor = ParallelToolExecutor(
@@ -197,14 +199,7 @@ class InternalCodingEngine(CodingEngine):
             import os
             api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("MANA_API_KEY") or ""
 
-        if not model:
-            try:
-                from mana_agent.config.settings import Settings
-                model = getattr(Settings(), "openai_chat_model", "gpt-4.1-mini") or "gpt-4.1-mini"
-            except Exception:
-                model = "gpt-4.1-mini"
-
-        if not api_key:
+        if not model or not api_key:
             return None
 
         try:
@@ -228,12 +223,16 @@ class InternalCodingEngine(CodingEngine):
             if sanitized_name in seen_names:
                 continue
             seen_names.add(sanitized_name)
+            bound_schema = getattr(dispatcher.extra_tools.get(c.name), "args_schema", None)
+            parameters = bound_schema.model_json_schema() if bound_schema is not None else dict(c.input_schema)
+            if c.name in {"run_command", "run_script_once", "shell"}:
+                parameters["properties"] = {**parameters.get("properties", {}), "action_approval_id": {"type": "string"}}
             tool_schemas.append({
                 "type": "function",
                 "function": {
                     "name": sanitized_name,
                     "description": c.description,
-                    "parameters": c.input_schema,
+                    "parameters": parameters,
                 },
             })
         for extra_name, extra_fn in dispatcher.extra_tools.items():
@@ -242,12 +241,13 @@ class InternalCodingEngine(CodingEngine):
                 continue
             seen_names.add(sanitized_name)
             doc = getattr(extra_fn, "__doc__", "") or f"Custom tool {sanitized_name}"
+            schema = getattr(extra_fn, "args_schema", None)
             tool_schemas.append({
                 "type": "function",
                 "function": {
                     "name": sanitized_name,
                     "description": doc,
-                    "parameters": {"type": "object", "properties": {}},
+                    "parameters": schema.model_json_schema() if schema is not None else {"type": "object", "properties": {}},
                 },
             })
         return tool_schemas
@@ -268,7 +268,7 @@ class InternalCodingEngine(CodingEngine):
         cancel_ev = asyncio.Event()
         self._cancellation_events[task_id] = cancel_ev
 
-        dispatcher = ToolExecutionDispatcher(workspace, extra_tools=self.extra_tools)
+        dispatcher = ToolExecutionDispatcher(workspace, extra_tools=self.extra_tools, task_id=task_id)
         session = ProgrammaticExecutionSession(
             task_id=task_id,
             dispatcher=dispatcher,
@@ -303,6 +303,8 @@ class InternalCodingEngine(CodingEngine):
             final_summary = ""
             status: str = "completed"
             error_msg: str = ""
+            pending_operation = None
+            human_input = {}
 
             ctx_mode = ""
             if hasattr(task, "context") and isinstance(task.context, dict):
@@ -312,13 +314,11 @@ class InternalCodingEngine(CodingEngine):
             if task_mode == "auto":
                 task_mode = ""
 
-            cfg_mode = ""
-            if self.batch_manager and getattr(self.batch_manager.config, "mode", "") in {"batch", "realtime", "parallel"}:
-                cfg_mode = self.batch_manager.config.mode.lower()
-
-            execution_mode = ctx_mode or task_mode or cfg_mode or "realtime"
+            execution_mode = task.execution_policy.mode if task.execution_policy.required else (ctx_mode or task_mode or "realtime")
 
             try:
+                if not self.enabled:
+                    raise RuntimeError("The native internal coding engine is disabled")
                 if cancel_ev.is_set():
                     raise asyncio.CancelledError()
 
@@ -329,6 +329,18 @@ class InternalCodingEngine(CodingEngine):
                 else:
                     final_summary = await self._run_direct_tool_workflow(task, workspace, session, cancel_ev)
 
+            except BatchHumanInput as pending:
+                status = "waiting"
+                final_summary = str(pending)
+                human_input = {"question": str(pending), "inbox_item_id": pending.inbox_item_id}
+            except BatchPending as pending:
+                status = "waiting"
+                pending_operation = pending.operation
+                final_summary = str(pending)
+                publish_coding_event(AgentEvent(event_type="batch.waiting", task_id=task_id,
+                    backend=self.name, sequence=session._next_sequence(), status="waiting",
+                    title="Waiting for OpenAI Batch", visibility="progress",
+                    payload=pending.operation.model_dump(mode="json")))
             except asyncio.CancelledError:
                 status = "cancelled"
                 error_msg = "Task cancelled by user request"
@@ -371,7 +383,14 @@ class InternalCodingEngine(CodingEngine):
 
             # Discover all changed files
             changed_files = list(session.state.changed_files)
-            if not changed_files and workspace.worktree_path.is_dir():
+            verification_results = list(session.state.verification_results)
+            if execution_mode == "batch" and self.batch_manager:
+                from mana_agent.batch.operations import BatchOperationStore
+                saved_run = BatchOperationStore(self.batch_manager.store).load_run(task_id) or {}
+                changed_files = list(saved_run.get("changed_files", changed_files))
+                session.state.commands_run = list(saved_run.get("commands_run", session.state.commands_run))
+                verification_results = list(saved_run.get("verification_results", []))
+            if not changed_files and execution_mode != "batch" and workspace.worktree_path.is_dir():
                 try:
                     from mana_agent.tools.repository import git_status
                     st = git_status(workspace.worktree_path)
@@ -382,6 +401,8 @@ class InternalCodingEngine(CodingEngine):
                 except Exception:
                     pass
 
+            from mana_agent.coding.verification_evidence import verification_evidence
+            tests_run, tests_passed = verification_evidence(verification_results, task.verification_commands)
             result = CodingTaskResult(
                 task_id=task_id,
                 worker_id=f"internal-{task_id[:8]}",
@@ -390,8 +411,10 @@ class InternalCodingEngine(CodingEngine):
                 summary=final_summary or f"Task {status}",
                 changed_files=changed_files,
                 commands_run=list(session.state.commands_run),
-                tests_run=list(task.verification_commands),
-                tests_passed=(status == "completed"),
+                tests_run=tests_run,
+                tests_passed=tests_passed,
+                pending_operation=pending_operation,
+                human_input=human_input,
                 warnings=[],
                 errors=[error_msg] if error_msg else list(session.state.errors),
                 branch_name=workspace.branch_name,
@@ -401,7 +424,7 @@ class InternalCodingEngine(CodingEngine):
                 worker_claimed_at=t_claimed,
                 provider_started_at=t_p_start,
                 provider_completed_at=t_p_done,
-                task_completed_at=t_done,
+                task_completed_at=None if status == "waiting" else t_done,
                 duration_breakdown=duration_breakdown,
             )
 
@@ -461,7 +484,7 @@ class InternalCodingEngine(CodingEngine):
             context_parts.append(f"Target Files: {json.dumps(task.allowed_files, ensure_ascii=False)}")
         if task.verification_commands:
             context_parts.append(f"Verification Commands: {json.dumps(task.verification_commands, ensure_ascii=False)}")
-        if task.relevant_context:
+        if task.relevant_context and not task.context.get("conversation_context_in_request"):
             context_parts.append(f"Context: {task.relevant_context}")
         context_parts.append(f"Repository Root: {workspace.repository_path}")
         context_parts.append(f"Workspace Directory: {workspace.worktree_path}")
@@ -713,14 +736,7 @@ class InternalCodingEngine(CodingEngine):
                 break
 
         if not final_summary:
-            changed_str = ", ".join(session.state.changed_files) if session.state.changed_files else "none"
-            commands_str = ", ".join(session.state.commands_run) if session.state.commands_run else "none"
-            final_summary = (
-                f"### Result\nCompleted internal coding operations for: {task.goal}\n\n"
-                f"### Changes\nModified files: {changed_str}\n\n"
-                f"### Verification\nCommands run: {commands_str}\n\n"
-                f"### Notes\nAll requested modifications were completed."
-            )
+            raise RuntimeError("Internal model loop exhausted its budget without a completion decision")
 
         return final_summary
 
@@ -731,54 +747,39 @@ class InternalCodingEngine(CodingEngine):
         session: ProgrammaticExecutionSession,
         cancel_ev: asyncio.Event,
     ) -> str:
-        """Execute or dispatch coding task via OpenAI Batch API."""
+        """Advance one durable native tool loop; submission is a waiting result."""
+        from mana_agent.execution.batch_loop import BatchTaskLoop
         if self.batch_manager is None:
-            from mana_agent.batch.manager import BatchLifecycleManager
-            self.batch_manager = BatchLifecycleManager()
-
-        target_model = self.model or "gpt-6-luna"
-        files = list(task.allowed_files) if task.allowed_files else []
-
-        logger.info(
-            "Submitting coding task %s to OpenAI Batch API (model=%s, files=%d)",
-            task.task_id,
-            target_model,
-            len(files),
+            raise RuntimeError("OpenAI Batch transport is unavailable")
+        loop = BatchTaskLoop(self.batch_manager, supervisor=self.execution_supervisor,
+                             config=getattr(self, "batch_autonomous_config", None),
+                             **getattr(self, "batch_authority", {}))
+        messages = [
+            {"role": "system", "content": self.system_instruction + "\n" + workspace.repository_instructions},
+            {"role": "user", "content": json.dumps({
+                "goal": task.goal, "requirements": task.requirements,
+                "acceptance_criteria": task.acceptance_criteria, "allowed_files": task.allowed_files,
+                "conversation_context": "Included in the task goal" if task.context.get("conversation_context_in_request") else task.relevant_context,
+                "verification_commands": task.verification_commands,
+            }, ensure_ascii=False)},
+        ]
+        def dispatch(name, args, call_id):
+            output = session.handle_function_call({"name": name, "arguments": args, "call_id": call_id})
+            return output["output"]
+        result = loop.advance(
+            task_id=task.task_id, goal=task.goal, root=workspace.worktree_path,
+            model=self.model, provider=self.provider, messages=messages,
+            tools=self._build_tool_definitions(session.dispatcher), dispatch=dispatch,
+            authorize=getattr(self, "batch_authorize", None),
+            resume=task.context.get("batch_resume", {}),
         )
-
-        job = self.submit_code_analysis_batch(
-            task=task,
-            files=files if files else ["."],
-            prompt=task.goal or "Analyze code and propose required changes.",
-            workspace=workspace,
-            instructions=task.relevant_context or "",
-            model=target_model,
-        )
-
-        publish_coding_event(AgentEvent(
-            event_type="batch.job.submitted",
-            task_id=task.task_id,
-            backend=self.name,
-            sequence=session._next_sequence(),
-            status="running",
-            title=f"OpenAI Batch Job Submitted ({job.batch_id})",
-            summary=f"Batch {job.batch_id} submitted to OpenAI Batch API ({job.total_requests} requests, 50% discount)",
-            visibility="progress",
-            semantic_kind="tool_execution",
-            payload={"batch_id": job.batch_id, "endpoint": job.endpoint, "model": target_model},
-        ))
-
-        return (
-            f"### OpenAI Batch Job Submitted\n\n"
-            f"- **Batch ID:** `{job.batch_id}`\n"
-            f"- **Model:** `{target_model}`\n"
-            f"- **Endpoint:** `{job.endpoint}`\n"
-            f"- **Status:** `{job.status}`\n"
-            f"- **Total Requests:** {job.total_requests}\n"
-            f"- **Completion Window:** {job.completion_window}\n\n"
-            f"The job is actively processing in the OpenAI Batch API queue (50% token cost discount). "
-            f"You can monitor progress using `batch_get_status(batch_id='{job.batch_id}')` or download results once completed."
-        )
+        session.state.changed_files = list(dict.fromkeys(result.get("changed_files", []) + session.state.changed_files))
+        session.state.commands_run = list(result.get("commands_run", []))
+        if result["status"] == "waiting_for_user":
+            raise BatchHumanInput(result.get("answer") or "Batch task needs input", result.get("pending_approval_id", ""))
+        if result["status"] != "completed":
+            raise RuntimeError(result.get("answer") or "Batch task failed")
+        return result["answer"]
 
     async def _run_programmatic_workflow(
         self,
@@ -793,7 +794,9 @@ class InternalCodingEngine(CodingEngine):
         # If an LLM client or callable was provided, invoke it
         if callable(self.llm_client):
             response = await asyncio.to_thread(self.llm_client, task, workspace, tool_defs, session)
-            return str(response or "Programmatic coding workflow completed successfully.")
+            if not response:
+                raise RuntimeError("Internal coding model returned no completion evidence")
+            return str(response)
 
         if hasattr(self.llm_client, "execute_responses_stream"):
             return await self.llm_client.execute_responses_stream(task, workspace, tool_defs, session)
@@ -802,29 +805,7 @@ class InternalCodingEngine(CodingEngine):
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
 
-        # Emulate a single programmatic turn if no remote LLM client was explicitly configured
-        logger.info("Executing native internal coding task with Programmatic Tool Calling: %s", task.task_id)
-        if cancel_ev.is_set():
-            raise asyncio.CancelledError()
-
-        # Execute registered verification or initial read if allowed files are provided
-        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
-            session.handle_function_call({
-                "call_id": f"call_batch_init_{uuid.uuid4().hex[:8]}",
-                "name": "batch_read_files",
-                "arguments": {"files": list(task.allowed_files)},
-                "caller": {"type": "program", "call_id": "prog_init"},
-            })
-        else:
-            for allowed in task.allowed_files:
-                session.handle_function_call({
-                    "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
-                    "name": "read_file",
-                    "arguments": {"path": allowed},
-                    "caller": {"type": "program", "call_id": "prog_init"},
-                })
-
-        return f"Completed internal coding task: {task.goal}"
+        raise RuntimeError("Internal coding model is unavailable; configure the selected provider and credentials")
 
     async def _run_direct_tool_workflow(
         self,
@@ -837,27 +818,15 @@ class InternalCodingEngine(CodingEngine):
         logger.info("Executing native internal coding task with Direct Tool Calling: %s", task.task_id)
         if callable(self.llm_client):
             response = await asyncio.to_thread(self.llm_client, task, workspace, [], session)
-            return str(response or "Direct tool calling workflow completed successfully.")
+            if not response:
+                raise RuntimeError("Internal coding model returned no completion evidence")
+            return str(response)
 
         llm = self._get_or_create_llm()
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
 
-        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
-            session.handle_function_call({
-                "call_id": f"call_direct_batch_{uuid.uuid4().hex[:8]}",
-                "name": "batch_read_files",
-                "arguments": {"files": list(task.allowed_files)},
-            })
-        else:
-            for allowed in task.allowed_files:
-                session.handle_function_call({
-                    "call_id": f"call_direct_{uuid.uuid4().hex[:8]}",
-                    "name": "read_file",
-                    "arguments": {"path": allowed},
-                })
-
-        return f"Completed internal direct tool coding task: {task.goal}"
+        raise RuntimeError("Internal coding model is unavailable; configure the selected provider and credentials")
 
     async def stream(self, task: CodingTask, workspace: WorkspaceContext) -> AsyncIterator[AgentEvent]:
         events: list[AgentEvent] = []
@@ -933,7 +902,9 @@ class InternalCodingEngine(CodingEngine):
 
         from mana_agent.batch.models import BatchItemRequest
 
-        target_model = model or self.model or "gpt-6-luna"
+        target_model = model or self.model
+        if not target_model:
+            raise ValueError("Batch analysis requires an explicitly selected model")
         raw_root = (
             getattr(workspace, "worktree_path", None)
             or getattr(workspace, "repository_path", None)
@@ -950,7 +921,9 @@ class InternalCodingEngine(CodingEngine):
 
         items: list[BatchItemRequest] = []
         for idx, file_rel in enumerate(files):
-            file_path = repo_root / file_rel
+            file_path = (repo_root / file_rel).resolve()
+            if not file_path.is_relative_to(repo_root.resolve()):
+                raise ValueError("Batch analysis file escapes the assigned workspace")
             content = ""
             file_sha = ""
             if file_path.is_file():
@@ -1001,7 +974,8 @@ class InternalCodingEngine(CodingEngine):
             model=target_model,
             endpoint=self.batch_manager.config.endpoint,
             task_id=task.task_id,
-            idempotency_key=f"analysis-{task.task_id}-{len(files)}",
+            idempotency_key="analysis-" + task.task_id + "-" + hashlib.sha256(json.dumps([it.to_jsonl_row() for it in items], sort_keys=True).encode()).hexdigest(),
+            mode="openai",
             git_commit_sha=current_commit,
         )
 
@@ -1078,11 +1052,15 @@ class InternalCodingEngine(CodingEngine):
                 )
                 continue
 
-            # Extract output text
-            output_text = ""
+            if not res.ok:
+                applied.append({"custom_id": res.custom_id, "file_path": item.file_path,
+                                "status": "failed", "error": res.error, "ok": False})
+                continue
+            from mana_agent.batch.transport import response_message
+            output_text = response_message(res.response_body).get("content") or ""
             if res.response_body:
                 # /v1/responses format
-                output_text = res.response_body.get("output_text") or ""
+                output_text = output_text or res.response_body.get("output_text") or ""
                 # /v1/chat/completions format
                 if not output_text and "choices" in res.response_body:
                     choices = res.response_body.get("choices") or []

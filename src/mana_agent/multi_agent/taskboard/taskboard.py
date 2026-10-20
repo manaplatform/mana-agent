@@ -224,6 +224,7 @@ class TaskBoard:
             task_id=task_id,
             parent_task_id=parent_task_id,
             root_task_id=parent.root_task_id,
+            execution_policy=dict(parent.execution_policy),
             title=title,
             user_request=req_text,
             normalized_goal=req_text,

@@ -318,6 +318,16 @@ class AutonomousExecutionController:
             event_sink=event_sink,
         )
 
+    def advance_batch_task(self, **kwargs: Any) -> dict[str, Any]:
+        """Advance the shared durable Batch loop under this controller's authority."""
+        from mana_agent.execution.batch_loop import BatchTaskLoop
+        if self.batch_manager is None:
+            raise RuntimeError("OpenAI Batch execution is unavailable")
+        attempt_id = kwargs.pop("attempt_id")
+        lease_token = kwargs.pop("lease_token")
+        return BatchTaskLoop(self.batch_manager, supervisor=self.supervisor, config=self.config,
+                             attempt_id=attempt_id, lease_token=lease_token).advance(**kwargs)
+
     def execute_goal(
         self,
         *,
@@ -842,31 +852,9 @@ class AutonomousExecutionController:
 
             # 9. Evaluate Semantic Continuation Decision
             if self.evaluator is None:
-                tb_task = self.taskboard.get_task(task_id) if self.taskboard is not None else None
-                tb_status = getattr(tb_task, "status", None)
-                if tb_status in {TaskStatus.BLOCKED, "blocked"}:
-                    decision = ContinuationDecision(
-                        task_id=task_id,
-                        action=ContinuationAction.BLOCKED,
-                        goal_satisfied=False,
-                        safe_to_continue=False,
-                        reason=getattr(tb_task, "result_summary", "") or "Task marked blocked on TaskBoard",
-                        evidence_summary="Task is blocked",
-                    )
-                elif tb_status in {TaskStatus.DONE, TaskStatus.VERIFYING, "done", "verifying"} or step_result.get("goal_satisfied"):
-                    decision = ContinuationDecision(
-                        task_id=task_id,
-                        action=ContinuationAction.FINALIZE,
-                        goal_satisfied=True,
-                        safe_to_continue=True,
-                        reason="Task execution completed and verified",
-                        evidence_summary=evidence_summary,
-                        user_message=step_answer,
-                    )
-                else:
-                    raise ContinuationDecisionError(
-                        "Model decision failed: continuation_evaluator is required for autonomous execution."
-                    )
+                raise ContinuationDecisionError(
+                    "Model decision failed: continuation_evaluator is required; TaskBoard status cannot select FINALIZE."
+                )
             else:
                 tb_progress = self.taskboard.get_progress(root_task_id=root_task_id) if self.taskboard is not None else None
                 try:

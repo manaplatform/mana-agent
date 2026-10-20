@@ -7,6 +7,8 @@ adapter uses the same evidence contract before publishing a turn result.
 
 from __future__ import annotations
 
+from mana_agent.batch.policy import BatchPending
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,6 +170,8 @@ class FeatureIntegrationDecisionProvider:
                             "files_touched": list(getattr(child, "files_touched", [])),
                         }
                         break
+            except BatchPending:
+                raise
             except Exception:
                 pass
 
@@ -188,6 +192,12 @@ class FeatureIntegrationDecisionProvider:
             HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
         ]
 
+        from mana_agent.batch.decision_model import BatchDecisionModel
+        if isinstance(self.llm, BatchDecisionModel):
+            # A pending or invalid Batch decision cannot trigger another schema
+            # or a synchronous fallback request.
+            return self.llm.with_structured_output(WiringDecision).invoke(messages)
+
         try:
             structured = getattr(self.llm, "with_structured_output", None)
             response = None
@@ -195,12 +205,16 @@ class FeatureIntegrationDecisionProvider:
             if callable(structured):
                 try:
                     response = structured(WiringDecision, method="json_schema", strict=True).invoke(messages)
+                except BatchPending:
+                    raise
                 except Exception as exc:
                     structured_error = exc
             if response is None:
                 response = self.llm.invoke(messages)
             try:
                 decision = _coerce_wiring_decision(response)
+            except BatchPending:
+                raise
             except Exception as coerce_exc:
                 if callable(structured) and structured_error is None:
                     direct_response = self.llm.invoke(messages)
@@ -208,6 +222,8 @@ class FeatureIntegrationDecisionProvider:
                 else:
                     raise coerce_exc
             return decision
+        except BatchPending:
+            raise
         except Exception:
             return None
 
@@ -371,6 +387,8 @@ class MultiAgentVerificationExecutor:
                     self.workspace_root,
                     taskboard=taskboard,
                 )
+            except BatchPending:
+                raise
             except Exception:
                 self.queue_manager = None
         else:
@@ -660,6 +678,8 @@ class FeatureIntegrationCoordinator:
                     parent.wiring_required = False
                     parent.wiring_outcome = "not_required"
                     taskboard.save()
+                except BatchPending:
+                    raise
                 except Exception:
                     pass
             return FeatureIntegrationResult(result=result, status="completed")
@@ -709,6 +729,8 @@ class FeatureIntegrationCoordinator:
                     parent_task_id=taskboard_parent_task_id,
                     workspace_root=workspace_root,
                 )
+            except BatchPending:
+                raise
             except Exception:
                 raw_decision = None
 
@@ -734,6 +756,8 @@ class FeatureIntegrationCoordinator:
                 if "wiring_outcome" in candidate_dict and "outcome" not in candidate_dict:
                     candidate_dict["outcome"] = candidate_dict["wiring_outcome"]
                 validated_decision = WiringDecision.model_validate(candidate_dict)
+            except BatchPending:
+                raise
             except Exception:
                 validated_decision = None
 
@@ -1034,6 +1058,8 @@ class FeatureIntegrationCoordinator:
                             taskboard=taskboard,
                             workspace_root=root_path,
                         )
+                    except BatchPending:
+                        raise
                     except Exception:
                         active_executor = None
 
@@ -1168,6 +1194,8 @@ class FeatureIntegrationCoordinator:
                 parent.wiring_outcome = "completed"
                 parent.wiring_outcome_reason = "Feature integration lifecycle completed successfully."
                 taskboard.save()
+            except BatchPending:
+                raise
             except Exception:
                 pass
             return IntegrationAuthority.from_taskboard(taskboard, parent_task_id), ""
@@ -1308,11 +1336,15 @@ class FeatureIntegrationCoordinator:
             if getattr(completed, "state", None) in {"completed_pending_verification", ExecutionState.COMPLETED_PENDING_VERIFICATION}:
                 try:
                     completed = supervisor.verify_completion(child.task_id)
+                except BatchPending:
+                    raise
                 except Exception:
                     pass
             if completed.result_id and parent_task_id:
                 try:
                     supervisor.acknowledge_result(completed.result_id, parent_task_id=parent_task_id)
+                except BatchPending:
+                    raise
                 except Exception:
                     pass
         else:

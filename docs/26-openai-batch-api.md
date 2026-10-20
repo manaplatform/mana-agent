@@ -1,161 +1,137 @@
-# OpenAI Batch API Integration
+# OpenAI Batch and native parallel execution
 
-## Overview
+## Selection and scope
 
-Mana-Agent integrates the official **OpenAI Batch API** (`/v1/batches` and `/v1/files` with `purpose=batch`) into its model execution runtime. This capability offloads eligible bulk, asynchronous model workloads—such as repository-wide audits, multi-file code reviews, documentation generation, and evaluation suites—to OpenAI's batch infrastructure, achieving a **50% discount on token inference costs** while improving throughput.
+The official OpenAI Batch API is used **only after an explicit user request for
+OpenAI Batch**. The entry model records a typed task execution policy with the
+source message and decision IDs. Related follow-ups inherit that task policy;
+independent requests do not. Coding uses the internal engine for that task without
+changing the configured global coding backend.
 
-Interactive conversational turns, real-time tool loops, and streaming requests remain on the low-latency Realtime API.
+Ordinary batching uses Mana's internal parallel execution. Model support, workload
+size, `mode="auto"`, or the legacy `always_enable_if_supported` configuration field
+do not authorize an OpenAI Batch submission. Those configuration keys remain
+readable for compatibility. Explicit API/tool callers select `mode="openai"`;
+router adapters select `mode_override="batch"`. A selected but unavailable Batch
+transport fails explicitly rather than switching to ordinary inference or another
+provider. Status, routing, and clarification replies remain immediate.
+Tools invoked inside a native task cannot opt that task into paid Batch by
+changing a tool argument; the host-bound task policy must require it.
 
-## Architecture
+The Batch API executes model requests; file edits and shell commands execute in
+Mana through registered local tools after their decisions are returned. Tool
+permissions, transactional approvals, workspace confinement, revision checks,
+resource locks, and execution budgets still apply. Dependent tool interactions are
+successive Batch jobs, not dependent requests in one JSONL file.
 
-```text
-                     Mana-Agent Model Request Group
-                                   │
-                                   ▼
-                        BatchExecutionRouter
-                                   │
-                ┌──────────────────┴──────────────────┐
-                ▼                                     ▼
-        Realtime API                           OpenAI Batch API
-   (Interactive / Streaming)             (Bulk Asynchronous Workloads)
-                │                                     │
-                │                                     ▼
-                │                             JSONL Serialization
-                │                                     │
-                │                                     ▼
-                │                            Upload: POST /v1/files
-                │                                     │
-                │                                     ▼
-                │                           Create: POST /v1/batches
-                │                                     │
-                │                                     ▼
-                │                           Durable SQLite State Store
-                │                                (WAL Persistence)
-                │                                     │
-                │                                     ▼
-                │                              Status Polling &
-                │                            Restart Recovery Loop
-                │                                     │
-                │                                     ▼
-                │                           Download: GET /v1/files/...
-                │                                     │
-                │                                     ▼
-                │                           Revision Fencing Check
-                │                       (Git commit SHA & File SHA-256)
-                │                                     │
-                └──────────────────┬──────────────────┘
-                                   │
-                                   ▼
-                            Autonomous Loop
-                        (TaskBoard & Supervisor)
-```
+## Durable lifecycle
 
-## Routing Rules
+1. Persist an operation ID and payload fingerprint before upload or create.
+2. Upload with `purpose=batch`, then submit the selected endpoint and model.
+3. Save the provider receipt and a resumable model/tool-loop checkpoint.
+4. Return `waiting`, project TaskBoard as waiting for tools, and suspend the
+   Supervisor with `waiting_for_batch`. Release the old execution lease and locks.
+5. A registered `batch.watch` background process polls every 30 seconds, with
+   transient-error backoff capped at five minutes. One process serves a workspace.
+6. Import results transactionally, correlating by `custom_id`. Resume the saved
+   branch under a fresh lease. Completed tool receipts prevent blind replay.
+7. Continue model/tool waves, including structured continuation evaluation, until
+   the model returns a valid terminal decision. Supervisor verification remains
+   required before success is delivered to the original conversation.
 
-The `BatchExecutionRouter` automatically selects between Realtime execution and OpenAI Batch API using deterministic criteria:
+An uncertain create outcome is reconciled using the existing operation metadata;
+it is not permission to create another paid job. Missing, duplicate, unknown,
+malformed, incomplete, refused, or failed model results cannot become success.
+Provider failures, cancellation, and expiry retain their terminal status even if
+partial results can be imported. An interrupted tool with an uncertain outcome
+requires reconciliation before it can run again.
 
-1. **Provider**: Target model provider must be `openai` or `azure_openai`.
-2. **Interactivity**: User-facing interactive turns requiring immediate response route to Realtime.
-3. **Streaming**: Tasks requiring real-time token streaming route to Realtime.
-4. **Dependencies**: Requests with intra-batch dependencies that require immediate intermediate results route to Realtime.
-5. **Threshold**: Workloads contain at least `openai_batch_min_requests` (default: 1) independent items targeting `/v1/responses` or `/v1/chat/completions`.
-6. **Model Eligibility & Auto-Enabling**: When `openai_batch_always_enable_if_supported` is enabled (default: `true`), requests targeting supported model families (`gpt-4o`, `gpt-4o-mini`, `o1`, `o3`, `gpt-4`, `gpt-3.5`, `text-embedding`) automatically route to OpenAI Batch API for a 50% cost discount. Unsupported endpoints (realtime audio, Whisper, TTS, DALL-E) route to Realtime API.
-7. **Cost Optimization**: Eligible batches receive a 50% discount factor applied to input and output token accounting.
+For tasks with a default active-execution deadline, bounded provider waiting does
+not spend the active deadline. Explicit deadlines and active parent deadlines
+remain enforced. Idle polling consumes no model turns or no-progress cycles.
+An app restarted after a wave's window reconciles its provider completion receipt;
+an output completed within that window can still be imported and resumed later.
+Batch completion windows are currently 24 hours per wave; dependent workflows can
+therefore take substantially longer than synchronous execution. See the
+[official Batch guide](https://developers.openai.com/api/docs/guides/batch).
 
-## Durable Lifecycle State Machine
+Required Batch tasks using the separate `multi_task` child scheduler currently
+return `batch_route_unsupported` before starting children. Repository workflows
+with multiple edits or commands use the supported coding route. Routes without
+registered, permission-aware tool bindings also fail explicitly. A frontend exit
+detaches a pending Batch task; an explicit cancellation, session deletion, or
+session replacement still cancels it.
+The direct file-edit shortcut cannot execute required Batch work. Batch coding
+currently binds repository sources; additional source contracts are rejected
+before execution. Immediate status/clarification replies use the conversation
+route, so a response label cannot bypass a deferred executable route.
 
-All batch operations are tracked in a durable SQLite WAL-mode store (`BatchJobStore`), surviving process crashes and restarts:
+## Configuration and tools
 
-| State | Description |
-|---|---|
-| `CREATED` | Batch record initialized and stored with idempotency key. |
-| `UPLOADING` | JSONL request payload uploaded to OpenAI Files API (`purpose=batch`). |
-| `SUBMITTED` | Batch job registered with OpenAI Batch API (`POST /v1/batches`). |
-| `VALIDATING` | OpenAI validating batch input structure and schema. |
-| `IN_PROGRESS` | OpenAI actively executing model requests in batch pool. |
-| `FINALIZING` | OpenAI generating output and error files. |
-| `COMPLETED` | OpenAI execution finished successfully. |
-| `RESULTS_IMPORTED` | Output file downloaded, parsed, correlated by `custom_id`, and stored. |
-| `VERIFIED` | Results verified through revision fencing and applied. |
-| `FAILED` | Batch validation or execution failed on OpenAI. |
-| `EXPIRED` | 24-hour completion window expired. |
-| `CANCELLING` / `CANCELLED` | Batch cancelled via `client.cancel_batch(batch_id)`. |
-
-### Idempotency Deduplication
-
-Every batch submission accepts an `idempotency_key`. If an identical key is submitted while a prior job is non-terminal, the existing `BatchJobRecord` is returned immediately without duplicate file uploads or redundant API calls.
-
-### Startup Crash Recovery
-
-When `openai_batch_auto_resume` is enabled (default: `true`), `AutonomousExecutionController` and `BatchLifecycleManager` inspect the store on startup, query OpenAI for pending batch jobs, update their status, and automatically import completed results.
-
-## Revision Fencing
-
-Because batch workloads execute asynchronously over minutes or hours, target repository files or Git branches may drift concurrently:
-
-- Before submitting a batch request, `InternalCodingEngine` records the target file's SHA-256 hash (`expected_sha256`) and the current repository Git commit SHA (`target_revision`).
-- Upon downloading results, `verify_revision_fencing` recalculates the file's current SHA-256 and inspects HEAD.
-- If concurrent edits modified the target file while the batch was queued, the stale result is safely rejected with `stale_revision_rejected` rather than overwriting fresh work.
-
-## Configuration
-
-Configure the Batch API via environment variables or `~/.mana/config.toml`:
-
-```toml
-[openai.batch]
-enabled = true
-mode = "auto"                    # "auto", "batch", or "realtime"
-endpoint = "/v1/responses"       # "/v1/responses" or "/v1/chat/completions"
-completion_window = "24h"
-min_requests = 1
-always_enable_if_supported = true
-max_requests_per_batch = 50000
-max_file_size_mb = 200
-auto_resume = true
-retry_failed_requests = true
-cost_optimization = true
-```
-
-Corresponding environment variables:
-
-| Environment Variable | Default | Description |
-|---|---|---|
-| `OPENAI_BATCH_ENABLED` | `true` | Enable or disable OpenAI Batch API integration. |
-| `OPENAI_BATCH_MODE` | `auto` | Routing mode (`auto`, `batch`, `realtime`). |
-| `OPENAI_BATCH_ENDPOINT` | `/v1/responses` | Target model endpoint. |
-| `OPENAI_BATCH_COMPLETION_WINDOW` | `24h` | Execution SLA window. |
-| `OPENAI_BATCH_MIN_REQUESTS` | `1` | Minimum independent requests to trigger batch. |
-| `OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED` | `true` | Always route eligible model requests to Batch API for 50% discount. |
-| `OPENAI_BATCH_MAX_REQUESTS_PER_BATCH` | `50000` | Maximum requests per JSONL payload. |
-| `OPENAI_BATCH_MAX_FILE_SIZE_MB` | `200` | Maximum JSONL file size in megabytes. |
-| `OPENAI_BATCH_AUTO_RESUME` | `true` | Resume pending batches upon startup. |
-| `OPENAI_BATCH_RETRY_FAILED_REQUESTS` | `true` | Re-submit failed individual requests. |
-| `OPENAI_BATCH_COST_OPTIMIZATION` | `true` | Apply 50% token cost accounting discount. |
-
-## Internal Coding Engine Integration
-
-The Internal Coding Engine exposes native batch workflows:
+Existing `OPENAI_BATCH_*` settings and `[openai.batch]` configuration keys remain
+supported. `enabled=false` rejects an explicit remote request. Platform credentials
+must resolve to an actual OpenAI API key; missing keys no longer use a dummy key.
+Only registered, explicitly supported model/endpoint capabilities may submit.
 
 ```python
-# Submit multi-file code audit
-batch_job = engine.submit_code_analysis_batch(
-    task=task,
-    workspace=workspace,
-    files=["src/agent.py", "src/models.py", "src/scheduler.py"],
-    prompt="Audit code for unhandled exceptions or resource leaks.",
-)
-
-# Retrieve results with revision fencing
-applied_results = engine.retrieve_and_apply_batch_results(
-    batch_id=batch_job.batch_id,
-    workspace=workspace,
+# Caller has explicitly selected the official OpenAI Batch API.
+job = manager.submit_batch(
+    requests,
+    model=selected_model,
+    mode="openai",
+    task_id=task_id,
+    idempotency_key=operation_id,
 )
 ```
 
-## TUI Activity Box Streaming
+`batch_create_job` / `batch_submit_requests` default to native internal execution;
+pass `mode="openai"` for an explicitly requested official job. `batch_list_jobs`
+reads local state unless `sync_platform=true` is explicitly requested. Existing
+status, cancellation, download tools and aliases remain available. Downloading
+results does not execute returned commands or apply analysis text as a patch.
+`retrieve_and_apply_batch_results` remains a compatibility analysis helper; its
+`verified_and_ready` status describes revision-checked output, not an applied edit.
+Actual edits use the durable native tool loop.
+The standalone native batch helper supports text and conversation inputs. It
+rejects unsupported generation options and tool-bearing raw requests explicitly;
+registered file/command interactions use the native coding tool loop. Failed
+native inference returns failed item receipts, never placeholder success text.
 
-In the terminal user interface, batch jobs are streamed live inside `CodingActivityBox` and `MainActivityBox`:
-- Displayed with dedicated `📦` batch icons.
-- Submissions highlight active batch IDs and total request counts.
-- Token and monetary cost savings reflect the official 50% discount badge (`[50% off]`).
-- Progress meters display completed versus total requests (`batch: 12/20 reqs`).
+Results use native Responses output items or Chat Completions messages. Tool call
+IDs and outputs remain correlated across waves. Cost estimates aggregate item
+usage and use the selected model's prices with the Batch discount. Unknown prices
+remain explicitly unknown and cannot satisfy a spending-limit check.
+Responses waves replay opaque encrypted reasoning receipts with function calls
+and observed tool outputs. Raw reasoning text is excluded from visible history.
+This follows OpenAI's [reasoning continuation contract](https://developers.openai.com/api/docs/guides/reasoning).
+
+## Conversation continuity and recovery
+
+CLI, TUI, dashboard, API, ACP and A2A share durable gateway history. Each incoming
+turn refreshes that history, preserving both user and visible assistant messages.
+Bounded recent exchanges, source IDs and explicit truncation indicators are shared
+with routing and execution. Exact message-ID retrieval reads complete turns in
+the current session. Older context remains available through bounded retrieval;
+private model reasoning is not conversation history.
+When recent history is insufficient, the entry model can request up to two
+bounded history reads before choosing an execution route. Missing or ambiguous
+references require clarification. Explicit console planning questions and answers
+are also recorded in the shared history; unavailable question models return an
+error without selecting substitute questions.
+
+Approvals and clarifications use the durable Human Inbox. A provider wake cannot
+resume a human-waiting branch or grant permission. Resumed final output is delivered
+with a stable message ID after Supervisor verification. A persisted delivery marker
+supports retrying a lost final notification without repeating tools.
+
+## Regression and verification
+
+See [the permanent regression note](regressions/batch-and-followup-context.md).
+These changes are locally authored and unverified until user-owned checks run:
+
+```bash
+./venv/bin/pytest tests/test_openai_batch_runtime.py tests/test_openai_batch_coding_engine.py tests/test_conversation_followup_context.py tests/gateway/test_followup_classifier.py -q
+./venv/bin/pytest tests/test_openai_batch_*.py tests/gateway tests/execution tests/execution_supervisor --ignore=tests/test_openai_batch_live_integration.py -q
+```
+
+Live tests require separate authorization because they create paid platform jobs.

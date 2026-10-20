@@ -4,7 +4,7 @@ import sys
 import os
 import threading
 
-from mana_agent.background.commands import get_registered_command
+from mana_agent.background.commands import get_registered_command, idle_retirement
 from mana_agent.background.models import utc_iso
 from mana_agent.background.store import ProcessStore
 
@@ -34,18 +34,44 @@ def run(process_id: str) -> int:
 
     thread = threading.Thread(target=heartbeat, name="mana-background-heartbeat", daemon=True)
     thread.start()
+    retirement_token = None
+    if record.command_identifier == "batch.watch":
+        from pathlib import Path
+        from mana_agent.batch.watcher import watcher_lifecycle_lock
+        from mana_agent.background.manager import BackgroundProcessManager
+
+        def retire_if_idle(predicate):
+            # Submitters hold this same lock while finding/starting a watcher.
+            # Recheck durable demand before relinquishing singleton ownership.
+            with watcher_lifecycle_lock(Path(record.sanitized_arguments["root"]), store.root):
+                if not predicate():
+                    return False
+                stopped.set()
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    raise RuntimeError("Background heartbeat did not stop at the idle retirement boundary")
+                current = store.get(process_id)
+                current.state = "stopping"
+                store.save(current)
+                BackgroundProcessManager(store)._release_singleton(current)
+                return True
+
+        retirement_token = idle_retirement.set(retire_if_idle)
     try:
         command.runner(record.sanitized_arguments)
     except BaseException as exc:
+        from mana_agent.utils.redaction import redact_secrets
         current = store.get(process_id)
         current.state = "failed"
         current.health = "unhealthy"
-        current.last_error_summary = f"{type(exc).__name__}: {exc}"[:240]
+        current.last_error_summary = f"{type(exc).__name__}: {redact_secrets(str(exc))}"[:240]
         current.stopped_at = utc_iso()
         store.save(current)
         return 1
     finally:
         stopped.set()
+        if retirement_token is not None:
+            idle_retirement.reset(retirement_token)
     current = store.get(process_id)
     current.state = "stopped"
     current.stopped_at = utc_iso()

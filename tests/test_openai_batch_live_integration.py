@@ -69,6 +69,7 @@ def test_live_openai_batch_submission_and_status() -> None:
 
     record = manager.submit_batch(
         items,
+        mode="openai",
         model=model,
         endpoint=endpoint,
         task_id=f"live-task-luna-{int(time.time())}",

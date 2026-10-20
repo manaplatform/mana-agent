@@ -131,10 +131,13 @@ def test_tool_compatibility_resolver() -> None:
     assert report.requires_batch is True
     assert len(report.incompatible_tools) == 0
 
-    # In batch mode, interactive shell tools are restricted
+    # Deferred function calls execute locally after the provider returns.
     report_batch = resolver.resolve("gpt-6-luna", ["shell", "read_file"], execution_mode="batch")
-    assert not report_batch.all_compatible
-    assert "shell" in report_batch.batch_restricted_tools
+    assert report_batch.all_compatible
+    assert not report_batch.batch_restricted_tools
+    native = resolver.resolve("gpt-6-luna", ["batch_read_files", "batch_write_files"])
+    assert native.all_compatible
+    assert not native.requires_batch
 
 
 def test_model_configuration_validator() -> None:
@@ -255,8 +258,8 @@ def test_execution_mode_router() -> None:
         BatchItemRequest(custom_id="1", body={"model": "gpt-6-luna", "input": "prompt"}, url="/v1/responses"),
     ]
 
-    # Auto mode routes supported model to batch
-    dec = router.route(items, model="gpt-6-luna")
+    # Official OpenAI Batch is selected only through an explicit mode override.
+    dec = router.route(items, model="gpt-6-luna", mode_override="batch")
     assert dec.is_batch
     assert dec.selected_mode == ExecutionMode.BATCH
     assert dec.discount_factor == 0.5
@@ -265,7 +268,7 @@ def test_execution_mode_router() -> None:
     dec_latency = router.route(items, model="gpt-6-luna", is_latency_sensitive=True)
     assert not dec_latency.is_batch
     assert dec_latency.selected_mode == ExecutionMode.REALTIME
-    assert dec_latency.is_latency_sensitive
+    assert not dec_latency.is_batch
 
     # Streaming required -> Realtime
     dec_stream = router.route(items, model="gpt-6-luna", requires_streaming=True)
@@ -308,7 +311,7 @@ def test_tool_dispatcher_executes_batch_tools() -> None:
     )
     mock_client.retrieve_batch.return_value = BatchJobRecord(
         batch_id="batch_mock123",
-        status=BatchLifecycleStatus.IN_PROGRESS.value,
+        status=BatchLifecycleStatus.COMPLETED.value,
         input_file_id="file-test123",
         endpoint="/v1/responses",
         model="gpt-6-luna",
@@ -333,7 +336,7 @@ def test_tool_dispatcher_executes_batch_tools() -> None:
             "batch_create_job",
             {
                 "requests": [{"custom_id": "req-1", "body": {"model": "gpt-6-luna", "input": "Hello"}}],
-                "model": "gpt-6-luna",
+                "model": "gpt-6-luna", "mode": "openai",
             },
         )
         assert res_create["ok"]
@@ -508,7 +511,7 @@ def test_batch_create_openai_mode_creates_on_openai_platform() -> None:
                 {"custom_id": "r1", "body": {"input": "Hello"}},
                 {"custom_id": "r2", "body": {"input": "World"}},
             ],
-            model="gpt-4o",
+            model="gpt-4o", mode="openai",
             endpoint="/v1/responses",
         )
         assert res["ok"]
@@ -532,7 +535,7 @@ def test_batch_openai_failure_does_not_silently_fallback() -> None:
     with patch("mana_agent.batch.tools.get_batch_manager", return_value=mgr):
         res = batch_create_job(
             requests=[{"custom_id": "r1", "body": {"input": "Hello"}}],
-            model="gpt-4o",
+            model="gpt-4o", mode="openai",
         )
         assert not res["ok"]
         assert res["error_code"] == "BATCH_SUBMISSION_FAILED"

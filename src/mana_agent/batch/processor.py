@@ -48,14 +48,7 @@ class BatchResultProcessor:
             try:
                 data = json.loads(line)
             except Exception as exc:
-                logger.warning("Failed to parse JSONL line in batch output: %s", exc)
-                continue
-
-            cid = str(data.get("custom_id") or "").strip()
-            resp_dict = data.get("response") or {}
-            status_code = int(resp_dict.get("status_code", 200)) if isinstance(resp_dict, dict) else 200
-            body = resp_dict.get("body") if isinstance(resp_dict, dict) else resp_dict
-            error_data = data.get("error")
+                raise ValueError("Malformed Batch output JSONL") from exc
 
             results.append(BatchItemResult.from_jsonl_row(data))
 
@@ -73,8 +66,8 @@ class BatchResultProcessor:
                 continue
             try:
                 data = json.loads(line)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise ValueError("Malformed Batch error JSONL") from exc
 
             error_results.append(BatchItemResult.from_jsonl_row(data))
 
@@ -94,12 +87,20 @@ class BatchResultProcessor:
 
         results_by_id: dict[str, BatchItemResult] = {}
         for r in outputs:
+            if not r.custom_id or r.custom_id in results_by_id:
+                raise ValueError("Empty or duplicate custom_id in Batch output")
             if r.custom_id:
                 results_by_id[r.custom_id] = r
         for e in errors:
+            if not e.custom_id or e.custom_id in results_by_id:
+                raise ValueError("Empty or duplicate custom_id in Batch errors")
             if e.custom_id:
                 results_by_id[e.custom_id] = e
 
+        if original_items is not None:
+            expected = {item.custom_id for item in original_items}
+            if set(results_by_id) != expected:
+                raise ValueError("Batch output custom_id set does not match original requests")
         successful = [r for r in results_by_id.values() if r.ok]
         failed = [r for r in results_by_id.values() if not r.ok]
 
@@ -146,6 +147,10 @@ class BatchResultProcessor:
         """Verify that workspace state has not drifted since the batch request was created."""
         import hashlib
 
+        if item.expected_sha256 and current_file_content is None:
+            return False
+        if item.target_revision and not current_git_commit:
+            return False
         if item.expected_sha256 and current_file_content is not None:
             actual_sha = hashlib.sha256(current_file_content.encode("utf-8")).hexdigest()
             if actual_sha != item.expected_sha256:

@@ -53,7 +53,7 @@ def test_router_explicit_realtime_mode() -> None:
     ]
     decision = router.route(items)
     assert decision.mode == BatchExecutionMode.REALTIME
-    assert "realtime" in decision.reason.lower()
+    assert decision.mode == BatchExecutionMode.REALTIME
 
 
 def test_router_provider_constraint() -> None:
@@ -64,7 +64,7 @@ def test_router_provider_constraint() -> None:
     ]
     decision = router.route(items, provider="anthropic")
     assert decision.mode == BatchExecutionMode.REALTIME
-    assert "anthropic" in decision.reason.lower()
+    assert "explicit" in decision.reason.lower()
 
 
 def test_router_unsupported_model() -> None:
@@ -74,20 +74,20 @@ def test_router_unsupported_model() -> None:
     ]
     decision = router.route(items, model="gpt-4o-realtime-preview")
     assert decision.mode == BatchExecutionMode.REALTIME
-    assert "not supported" in decision.reason.lower()
+    assert "explicit" in decision.reason.lower()
 
 
 def test_router_always_enable_if_supported() -> None:
     router = BatchExecutionRouter(BatchConfig(always_enable_if_supported=True, min_requests=5))
-    # Even a single request with supported model routes to batch
+    # Capability and legacy auto-enable settings do not authorize a remote Batch.
     items = [
         BatchItemRequest(custom_id="1", body={"model": "gpt-4o-mini", "input": "a"}, url="/v1/responses"),
     ]
     decision = router.route(items, model="gpt-4o-mini")
-    assert decision.mode == BatchExecutionMode.BATCH
-    assert decision.is_batch
-    assert decision.discount_factor == 0.5
-    assert "enabled" in decision.reason.lower()
+    assert decision.mode == BatchExecutionMode.REALTIME
+    assert not decision.is_batch
+    assert decision.discount_factor == 1.0
+    assert "explicit" in decision.reason.lower()
 
 
 def test_router_realtime_constraints() -> None:
@@ -100,12 +100,12 @@ def test_router_realtime_constraints() -> None:
     # Streaming required
     decision_stream = router.route(items, requires_streaming=True)
     assert decision_stream.mode == BatchExecutionMode.REALTIME
-    assert "streaming" in decision_stream.reason.lower()
+    assert "explicit" in decision_stream.reason.lower()
 
     # Dependencies between requests
     decision_deps = router.route(items, has_intra_dependencies=True)
     assert decision_deps.mode == BatchExecutionMode.REALTIME
-    assert "dependencies" in decision_deps.reason.lower()
+    assert "explicit" in decision_deps.reason.lower()
 
 
 def test_router_below_min_requests_threshold_when_always_enable_is_false() -> None:
@@ -116,17 +116,17 @@ def test_router_below_min_requests_threshold_when_always_enable_is_false() -> No
     ]
     decision = router.route(items)
     assert decision.mode == BatchExecutionMode.REALTIME
-    assert "min_requests threshold" in decision.reason
+    assert "explicit" in decision.reason
 
 
 def test_router_eligible_workload_routes_to_batch() -> None:
     router = BatchExecutionRouter(BatchConfig(min_requests=2))
     items = [
-        BatchItemRequest(custom_id="1", body={"input": "a"}, url="/v1/responses"),
-        BatchItemRequest(custom_id="2", body={"input": "b"}, url="/v1/responses"),
-        BatchItemRequest(custom_id="3", body={"input": "c"}, url="/v1/responses"),
+        BatchItemRequest(custom_id="1", body={"model": "gpt-4o", "input": "a"}, url="/v1/responses"),
+        BatchItemRequest(custom_id="2", body={"model": "gpt-4o", "input": "b"}, url="/v1/responses"),
+        BatchItemRequest(custom_id="3", body={"model": "gpt-4o", "input": "c"}, url="/v1/responses"),
     ]
-    decision = router.route(items)
+    decision = router.route(items, mode_override="batch")
     assert decision.mode == BatchExecutionMode.BATCH
     assert decision.is_batch
     assert decision.discount_factor == 0.5
@@ -136,7 +136,7 @@ def test_router_eligible_workload_routes_to_batch() -> None:
 
 def test_router_mode_override_forces_batch() -> None:
     router = BatchExecutionRouter(BatchConfig(always_enable_if_supported=False, min_requests=5))
-    items = [BatchItemRequest(custom_id="1", body={"input": "a"}, url="/v1/responses")]
+    items = [BatchItemRequest(custom_id="1", body={"model": "gpt-4o", "input": "a"}, url="/v1/responses")]
     # Force batch even below min_requests when always_enable is false
     decision = router.route(items, mode_override="batch")
     assert decision.mode == BatchExecutionMode.BATCH
@@ -213,11 +213,13 @@ def test_model_support_check_with_metadata() -> None:
         )
     ]
     dec_ok = router.route(items_ok)
-    assert dec_ok.mode == BatchExecutionMode.BATCH
+    assert dec_ok.mode == BatchExecutionMode.REALTIME
 
     # Request metadata is still considered when the caller also passes model=.
     dec_explicit_model = router.route(items_ok, model="custom-special")
-    assert dec_explicit_model.mode == BatchExecutionMode.BATCH
+    assert dec_explicit_model.mode == BatchExecutionMode.REALTIME
+    with pytest.raises(ValueError, match="unsupported or unknown"):
+        router.route(items_ok, model="custom-special", mode_override="batch")
 
     items_bad = [
         BatchItemRequest(
@@ -228,7 +230,7 @@ def test_model_support_check_with_metadata() -> None:
     ]
     dec_bad = router.route(items_bad)
     assert dec_bad.mode == BatchExecutionMode.REALTIME
-    assert "not supported" in dec_bad.reason.lower()
+    assert "explicit" in dec_bad.reason.lower()
 
     dec_explicit_model_bad = router.route(items_bad, model="custom-special")
     assert dec_explicit_model_bad.mode == BatchExecutionMode.REALTIME

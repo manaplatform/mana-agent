@@ -8,6 +8,7 @@ Responses API continuation lifecycle.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -44,6 +45,7 @@ class ProgrammaticExecutionState:
     commands_run: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     total_tokens: dict[str, int] = field(default_factory=dict)
+    verification_results: list[dict[str, Any]] = field(default_factory=list)
     active: bool = True
 
 
@@ -56,6 +58,7 @@ class ToolExecutionDispatcher:
         *,
         repo_root: str | FilePath | None = None,
         extra_tools: dict[str, Callable[..., Any]] | None = None,
+        task_id: str = "",
     ) -> None:
         if workspace is not None:
             self.workspace = workspace
@@ -69,9 +72,12 @@ class ToolExecutionDispatcher:
             )
             self.repo_root = resolved_path
         self.extra_tools = extra_tools or {}
+        self.task_id = task_id
 
     def is_tool_allowed(self, tool_name: str) -> bool:
+        tool_name = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_name)
         write_tools = {
+            "run_command", "run_script_once", "shell",
             "write_file",
             "create_file",
             "edit_file",
@@ -88,7 +94,7 @@ class ToolExecutionDispatcher:
             return False
         return True
 
-    def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def dispatch(self, tool_name: str, arguments: dict[str, Any], *, call_id: str = "") -> dict[str, Any]:
         """Execute a tool locally and return a JSON-serializable dict."""
         if not self.is_tool_allowed(tool_name):
             return {
@@ -113,7 +119,10 @@ class ToolExecutionDispatcher:
 
         # Native tool implementations
         try:
-            return self._execute_builtin_tool(tool_name, arguments)
+            native_arguments = dict(arguments)
+            if normalized in {"shell", "run_command", "run_script_once"}:
+                native_arguments["_mana_call_id"] = call_id or uuid.uuid4().hex
+            return self._execute_builtin_tool(tool_name, native_arguments)
         except Exception as exc:
             logger.exception("Error executing builtin tool %s", tool_name)
             return {"ok": False, "error": str(exc), "error_code": "TOOL_EXECUTION_ERROR"}
@@ -327,8 +336,42 @@ class ToolExecutionDispatcher:
             cmd = str(args.get("command") or args.get("script") or args.get("cmd") or "")
             cwd = args.get("cwd")
             timeout_s = int(args.get("timeout") or (int(args["timeout_ms"]) // 1000 if args.get("timeout_ms") else 120))
-            res = run_script_once(self.repo_root, script=cmd, cwd=cwd, timeout=timeout_s)
-            return res if isinstance(res, dict) else (json.loads(res) if isinstance(res, str) else {"ok": True, "output": str(res)})
+            from mana_agent.transactional_actions.adapters import ShellActionAdapter
+            from mana_agent.transactional_actions.gateway import ApprovalRequired
+            from mana_agent.transactional_actions.runtime import default_action_gateway
+            from mana_agent.utils.shell_argv import local_shell_argv
+            import subprocess
+            working = (self.repo_root / str(cwd or ".")).resolve()
+            if not working.is_relative_to(self.repo_root) or not working.is_dir():
+                raise ValueError("Command cwd escapes the assigned workspace")
+            action_runtime = default_action_gateway(self.repo_root)
+            approval_id = str(args.get("action_approval_id") or "")
+            operation_key = hashlib.sha256(json.dumps({"task_id": self.task_id,
+                "call_id": args["_mana_call_id"], "command": cmd, "cwd": str(working)}, sort_keys=True).encode()).hexdigest()
+            if approval_id:
+                grant = action_runtime.approvals.get(approval_id)
+                if grant:
+                    approved_action = action_runtime.store.get_action(grant.action_id)
+                    if approved_action.parent_task_id != (self.task_id or "internal-coding"):
+                        raise ValueError("Command approval belongs to a different task")
+                    operation_key = approved_action.idempotency_key
+            adapter = ShellActionAdapter(
+                argv=local_shell_argv(cmd), cwd=working, environment={},
+                parent_task_id=self.task_id or "internal-coding", actor="user",
+                originating_agent="internal_coding", policy_context={"tool": name},
+                idempotency_key=operation_key,
+                timeout_seconds=timeout_s,
+                expected_outputs=list(args.get("expected_outputs") or []),
+                allow_command_result_verification=True,
+                runner=lambda argv, **kwargs: subprocess.run(argv, cwd=working, capture_output=True,
+                    text=True, timeout=timeout_s, check=False),
+            )
+            try:
+                outcome = action_runtime.execute(adapter, approval_id=approval_id)
+            except ApprovalRequired as pending:
+                return {"ok": False, "awaiting_approval": True, "inbox_item_id": pending.inbox_item_id}
+            return {"ok": outcome.action.state.value == "committed", **outcome.result,
+                    "action_id": outcome.action.action_id}
 
 
         elif name == "conversation_context_read":
@@ -517,6 +560,8 @@ class ToolExecutionDispatcher:
                 task_id=str(args.get("task_id") or ""),
                 idempotency_key=str(args.get("idempotency_key") or ""),
                 metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
+                mode=str(args.get("mode") or "auto"),
+                provider=str(args.get("provider") or "openai"),
             )
 
         elif name in {"batch_get_status", "batch_check_status"}:
@@ -529,6 +574,7 @@ class ToolExecutionDispatcher:
                 limit=int(args.get("limit") or 20),
                 status=str(args.get("status") or ""),
                 task_id=str(args.get("task_id") or ""),
+                sync_platform=bool(args.get("sync_platform", False)),
             )
 
         elif name == "batch_cancel_job":
@@ -669,8 +715,13 @@ class ProgrammaticExecutionSession:
         ))
 
         t0 = time.perf_counter()
-        result = self.dispatcher.dispatch(tool_name, arguments)
+        result = self.dispatcher.dispatch(tool_name, arguments, call_id=call_id)
         duration_ms = int((time.perf_counter() - t0) * 1000)
+        if result.get("ok") and tool_name in {"write_file", "create_file", "edit_file", "multi_edit_file", "delete_file",
+                "apply_patch", "apply_patch_batch", "batch_apply_patches", "batch_write_files", "batch_move_files", "batch_delete_files"}:
+            self.state.verification_results.clear()
+        if tool_name in {"verify_project", "run_command", "run_script_once", "shell"}:
+            self.state.verification_results.append({"tool": tool_name, "arguments": arguments, "result": result})
 
         # Track mutations and commands
         if result.get("ok"):

@@ -104,7 +104,9 @@ class OpenAIBatchClient:
             return self._client
         import openai
 
-        kwargs: dict[str, Any] = {"api_key": self._api_key or "mock_key"}
+        if not self._api_key:
+            raise ValueError("OpenAI Batch requires an OpenAI platform API key")
+        kwargs: dict[str, Any] = {"api_key": self._api_key}
         if self._base_url:
             kwargs["base_url"] = self._base_url
         self._client = openai.OpenAI(**kwargs)
@@ -115,7 +117,9 @@ class OpenAIBatchClient:
             return self._async_client
         import openai
 
-        kwargs: dict[str, Any] = {"api_key": self._api_key or "mock_key"}
+        if not self._api_key:
+            raise ValueError("OpenAI Batch requires an OpenAI platform API key")
+        kwargs: dict[str, Any] = {"api_key": self._api_key}
         if self._base_url:
             kwargs["base_url"] = self._base_url
         self._async_client = openai.AsyncOpenAI(**kwargs)
@@ -275,7 +279,7 @@ class OpenAIBatchClient:
                 row = json.loads(clean)
                 results.append(BatchItemResult.from_jsonl_row(row))
             except Exception as exc:
-                logger.warning("Could not parse batch JSONL result row: %s", exc)
+                raise ValueError("Malformed Batch result JSONL") from exc
         return results
 
     def _convert_sdk_batch(self, batch: Any) -> BatchJobRecord:
