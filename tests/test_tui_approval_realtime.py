@@ -335,7 +335,7 @@ def test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses(t
     app._complete_computer_permission falls back to default_human_inbox_service."""
     import anyio
     from mana_agent.human_inbox.service import HumanInboxService
-    from mana_agent.human_inbox.repository import InMemoryHumanInboxRepository
+    from mana_agent.human_inbox.repository import LocalInboxRepository
     from mana_agent.human_inbox.models import (
         InboxRequest,
         InboxRequestType,
@@ -351,7 +351,7 @@ def test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses(t
     app = ManaChatApp(history=history, repo_root=tmp_path)
 
     # Mock gateway with an isolated empty inbox service
-    isolated_repo = InMemoryHumanInboxRepository()
+    isolated_repo = LocalInboxRepository(tmp_path / "isolated_inbox")
     mock_gw = MagicMock()
     mock_gw.human_inbox_service = HumanInboxService(repository=isolated_repo)
     app.gateway = mock_gw

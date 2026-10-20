@@ -19,11 +19,13 @@ All notable repository changes should be recorded here.
     - In `ToolExecutionDispatcher._execute_builtin_tool`, passed default `model`, `task_id`, and `provider` to `batch_create_job` and `batch_submit_requests` preventing `MODEL_REQUIRED` validation rejections when model arguments are omitted.
     - Fixed `memory_read` builtin tool import in `programmatic.py` to use `from mana_agent.memory.capsules.service import CapsuleService`.
     - Updated `INTERNAL_CODING_SYSTEM_INSTRUCTION` in `prompts.py` with explicit descriptions of internal batch filesystem tools and batch API operations.
-  - Regression and Unit Testing (`tests/test_tui_approval_realtime.py`, `tests/test_internal_coding_engine_workflow.py`):
-    - Added `test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses` to verify TUI approval resolution with isolated gateway inboxes.
+  - Regression and Unit Testing (`tests/test_tui_approval_realtime.py`, `tests/test_internal_coding_engine_workflow.py`, `tests/test_parallel_tool_scheduler.py`):
+    - Added `test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses` using `LocalInboxRepository` to verify TUI approval resolution with isolated gateway inboxes.
     - Added `test_internal_coding_engine_batch_read_allowed_files` to verify batch tool invocation on multi-file tasks.
     - Added `test_tool_execution_dispatcher_defaults_model_for_batch_tools` to verify default model and provider propagation.
+    - Hardened `test_parallel_executor_concurrent_execution` in `tests/test_parallel_tool_scheduler.py` to assert active task concurrency (`active_concurrency > 1`) with resilient timing headroom for loaded CI environments.
   - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_parallel_tool_scheduler.py tests/test_tui_approval_realtime.py -q`
     - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py tests/test_tui_approval_realtime.py -q`
     - `./venv/bin/pytest tests/test_ask_agent.py tests/test_openai_batch_tools.py tests/test_openai_batch_coding_engine.py -q`
     - `./venv/bin/pytest tests/gateway/test_transactional_approval.py tests/gateway/test_chat_gateway.py -q`

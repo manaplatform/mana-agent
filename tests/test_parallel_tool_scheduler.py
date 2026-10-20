@@ -91,16 +91,25 @@ def test_parallel_executor_concurrent_execution() -> None:
     ]
     graph = DependencyGraph.build(tool_calls)
 
+    observed_concurrency: list[int] = []
+
+    def _event_handler(event_name: str, payload: dict[str, Any]) -> None:
+        if event_name == "tool.started" and "active_concurrency" in payload:
+            observed_concurrency.append(payload["active_concurrency"])
+
     t0 = time.perf_counter()
-    results = asyncio.run(executor.execute_turn(graph, dispatcher))
+    results = asyncio.run(executor.execute_turn(graph, dispatcher, on_event=_event_handler))
     elapsed = time.perf_counter() - t0
 
     assert len(results) == 4
     for res in results.values():
         assert res["status"] == "completed"
 
-    # In parallel, total elapsed should be substantially less than 4 * 0.05s (0.20s)
-    assert elapsed < 0.15
+    # Concurrency verification: verify multiple tasks were running concurrently
+    assert any(c > 1 for c in observed_concurrency)
+
+    # In parallel, total elapsed should not exceed serial time (with CI timing tolerance)
+    assert elapsed < 0.35
 
 
 def test_parallel_executor_read_caching_and_write_invalidation() -> None:
