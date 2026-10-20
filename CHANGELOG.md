@@ -2903,8 +2903,7 @@ All notable repository changes should be recorded here.
 - Completed the `LaneCoordinator` human-inbox branch-controller interface, including durable store access plus suspension, recovery, and single-claim resume delegation. Transactional computer proposals can now create their linked authoritative inbox item instead of failing before an approval event is emitted.
   - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/human_inbox/test_durable_inbox.py tests/test_computer_control.py`.
 
-- Added GitHub funding metadata for GitHub Sponsors, Open Collective, and Polar.
-  - User verification required: confirm the repository's GitHub funding panel lists the configured links.
+- Removed the repository's GitHub sponsorship metadata configuration.
 
 - Made `mana-agent inbox approve`, `deny`, and `answer` return a clear CLI validation error for recorded terminal notices instead of exposing an internal traceback; rejected response attempts remain audited.
   - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py`.
