@@ -351,13 +351,25 @@ class CodingActivityBox(Vertical):
         """Append or update a coding operation in the box."""
         ev = dict(event)
         event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
+        payload_dict = _safe_dict(ev.get("payload"))
+        call_id = str(payload_dict.get("call_id") or ev.get("call_id") or "").strip()
+        matched = False
         if event_id and event_id in self._event_ids:
             for i, existing in enumerate(self.events):
                 ex_id = str(existing.get("event_id") or existing.get("id") or "").strip()
                 if ex_id == event_id:
                     self.events[i] = {**existing, **ev}
+                    matched = True
                     break
-        else:
+        elif call_id:
+            for i, existing in enumerate(self.events):
+                ex_payload = _safe_dict(existing.get("payload"))
+                ex_cid = str(ex_payload.get("call_id") or existing.get("call_id") or "").strip()
+                if ex_cid == call_id:
+                    self.events[i] = {**existing, **ev}
+                    matched = True
+                    break
+        if not matched:
             if event_id:
                 self._event_ids.add(event_id)
             self.events.append(ev)

@@ -580,17 +580,6 @@ class InternalCodingEngine(CodingEngine):
                             emit_tool_event("start", tname, args=json.dumps(args, ensure_ascii=False, default=str), event_id=cid)
                         except Exception:
                             pass
-                        publish_coding_event(AgentEvent(
-                            event_type="tool.call.started",
-                            task_id=task.task_id,
-                            backend=self.name,
-                            sequence=session._next_sequence(),
-                            title=f"Tool call: {tname}",
-                            tool_name=tname,
-                            visibility="progress",
-                            semantic_kind="tool_execution",
-                            payload={"call_id": cid, "arguments": args, "active_concurrency": data.get("active_concurrency", 1)},
-                        ))
                     elif event_name == "tool.completed":
                         cid = data["call_id"]
                         tname = data["tool_name"]
@@ -618,19 +607,6 @@ class InternalCodingEngine(CodingEngine):
                             emit_tool_event("end", tname, duration=dur / 1000.0, event_id=cid)
                         except Exception:
                             pass
-                        publish_coding_event(AgentEvent(
-                            event_type="tool.call.completed",
-                            task_id=task.task_id,
-                            backend=self.name,
-                            sequence=session._next_sequence(),
-                            status="success",
-                            title=f"Tool call: {tname} (success)",
-                            tool_name=tname,
-                            duration_ms=dur,
-                            visibility="progress",
-                            semantic_kind="tool_execution",
-                            payload={"call_id": cid, "result": res},
-                        ))
                     elif event_name in {"tool.failed", "tool.skipped"}:
                         cid = data["call_id"]
                         tname = data["tool_name"]
@@ -642,20 +618,6 @@ class InternalCodingEngine(CodingEngine):
                             emit_tool_event("error", tname, duration=dur / 1000.0, error=err, event_id=cid)
                         except Exception:
                             pass
-                        publish_coding_event(AgentEvent(
-                            event_type="tool.call.failed",
-                            task_id=task.task_id,
-                            backend=self.name,
-                            sequence=session._next_sequence(),
-                            status="failed",
-                            title=f"Tool call: {tname} (failed)",
-                            tool_name=tname,
-                            duration_ms=dur,
-                            error=err,
-                            visibility="progress",
-                            semantic_kind="tool_execution",
-                            payload={"call_id": cid, "error": err},
-                        ))
                         if self.global_memory is not None:
                             try:
                                 self.global_memory.record_failure(

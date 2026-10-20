@@ -709,18 +709,6 @@ class ProgrammaticExecutionSession:
 
         logger.info("› Tool call [%s]: %s (args=%s)", call_id, tool_name, arguments)
 
-        publish_coding_event(AgentEvent(
-            event_type="tool.call.started",
-            task_id=self.task_id,
-            backend=self.backend_name,
-            sequence=self._next_sequence(),
-            title=f"Tool call: {tool_name}",
-            tool_name=tool_name,
-            visibility="progress",
-            semantic_kind="tool_execution",
-            payload={"call_id": call_id, "arguments": arguments, "caller": caller},
-        ))
-
         t0 = time.perf_counter()
         result = self.dispatcher.dispatch(tool_name, arguments, call_id=call_id)
         duration_ms = int((time.perf_counter() - t0) * 1000)
@@ -769,22 +757,6 @@ class ProgrammaticExecutionSession:
             status,
             duration_ms,
         )
-
-        publish_coding_event(AgentEvent(
-            event_type="tool.call.completed" if status == "success" else "tool.call.failed",
-            task_id=self.task_id,
-            backend=self.backend_name,
-            sequence=self._next_sequence(),
-            status="success" if status == "success" else "failed",
-            title=f"Tool call: {tool_name} ({status})",
-            tool_name=tool_name,
-            duration_ms=duration_ms,
-            visibility="progress",
-            semantic_kind="tool_execution",
-            error=str(result.get("error") or ""),
-            output_preview=str(result.get("content") or result.get("stdout") or result)[:500],
-            payload={"call_id": call_id, "result": result},
-        ))
 
         output_json = json.dumps(result, ensure_ascii=False)
         return {

@@ -520,3 +520,92 @@ def test_activity_box_stays_open_on_new_activity_and_scrolls_to_latest() -> None
     assert "calculator" in panel.main_box.activity_log.text
 
 
+def test_lifecycle_events_do_not_create_duplicate_steps() -> None:
+    """Backend selection and turn start events must not appear as task execution steps."""
+    trace = ExecutionTrace("turn-lifecycle")
+
+    step1 = trace.apply_event({
+        "event_id": "ev-backend",
+        "event_type": "backend.selected",
+        "backend": "internal",
+        "title": "Internal backend selected",
+        "summary": "Executing coding task via Mana-Agent Native Coding Engine",
+    })
+    assert step1 is None
+    assert len(trace.steps) == 0
+
+    step2 = trace.apply_event({
+        "event_id": "ev-turn-start",
+        "event_type": "turn.started",
+        "backend": "internal",
+        "title": "Internal coding turn started",
+    })
+    assert step2 is None
+    assert len(trace.steps) == 0
+
+
+def test_tool_execution_start_and_finish_update_step_in_place() -> None:
+    """Tool start and completion events correlate by call_id and update the step in place."""
+    trace = ExecutionTrace("turn-tool-update")
+
+    # Start git_status
+    step_start = trace.apply_event({
+        "event_id": "internal-1-started",
+        "event_type": "tool.call.started",
+        "tool_name": "git_status",
+        "title": "git_status",
+        "status": "running",
+        "summary": '{"repo_path": "/workspace", "short": true}',
+        "payload": {"call_id": "internal-1"},
+    })
+    assert step_start is not None
+    assert len(trace.steps) == 1
+    assert step_start.status == "running"
+    assert step_start.title == "git_status"
+
+    # Finish git_status
+    step_done = trace.apply_event({
+        "event_id": "internal-1-completed",
+        "event_type": "tool.call.completed",
+        "tool_name": "git_status",
+        "title": "git_status",
+        "status": "success",
+        "duration_ms": 114,
+        "payload": {"call_id": "internal-1"},
+    })
+    assert len(trace.steps) == 1
+    assert step_done is step_start
+    assert step_done.status == "completed"
+    assert step_done.duration_ms == 114
+
+    # Start git_create_branch
+    step_b_start = trace.apply_event({
+        "event_id": "internal-2-started",
+        "event_type": "tool.call.started",
+        "tool_name": "git_create_branch",
+        "title": "git_create_branch",
+        "status": "running",
+        "payload": {"call_id": "internal-2"},
+    })
+    assert len(trace.steps) == 2
+    assert step_b_start.status == "running"
+
+    # Fail git_create_branch (approval required)
+    step_b_fail = trace.apply_event({
+        "event_id": "internal-2-failed",
+        "event_type": "tool.call.failed",
+        "tool_name": "git_create_branch",
+        "title": "git_create_branch",
+        "status": "failed",
+        "duration_ms": 777,
+        "detail": "The action requires approval bound to its exact preview and policy decision.",
+        "payload": {"call_id": "internal-2"},
+    })
+    assert len(trace.steps) == 2
+    assert step_b_fail is step_b_start
+    assert step_b_fail.status == "failed"
+    assert step_b_fail.duration_ms == 777
+    assert "approval bound" in step_b_fail.detail
+
+
+

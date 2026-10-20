@@ -4,6 +4,22 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-20
 
+- Fixed duplicate internal coding engine timeline steps and lifecycle noise in TUI Execution Panel:
+  - Deduplicated Internal Tool Calling Events (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/coding/live_events.py`):
+    - Removed redundant `publish_coding_event` calls with `title=f"Tool call: {tname}"` from parallel and programmatic tool execution paths, standardizing on canonical `emit_tool_event` / `publish_internal_tool_event`.
+    - Added `payload={"call_id": cid}` to internal tool event emissions for reliable lifecycle tracking across UI components.
+  - Lifecycle Phase Separation and In-Place Step Correlation (`src/mana_agent/chat/execution_trace.py`, `src/mana_agent/tui/widgets/activity_boxes.py`):
+    - Classified engine lifecycle markers (`backend.selected`, `turn.starting`, `turn.started`, `turn.finalizing`) as `phase="lifecycle"`, preventing spurious backend/turn steps from cluttering the execution timeline.
+    - Normalized `tool_call_id` across started, completed, and failed phases (including stripping status suffixes and checking `call_id`), enabling running tool execution steps to update in-place to completed/failed without ghost entries.
+    - Updated `CodingActivityBox.update_event` to match and correlate events by `call_id` in addition to `event_id`.
+  - Regression and Unit Testing (`tests/test_execution_trace.py`):
+    - Added `test_lifecycle_events_do_not_create_duplicate_steps` asserting that backend selection and turn start events do not create task execution steps.
+    - Added `test_tool_execution_start_and_finish_update_step_in_place` asserting tool execution steps transition in-place from running to success or failed with duration and detail preserved.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_execution_trace.py -q`
+    - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py -q`
+
+
 - Fixed NVIDIA provider testing in the configuration TUI when model selectors are empty:
   - `ConfigurationDraft.set_models()` now records provider changes without qualifying or overwriting model settings until both required model selectors are populated.
   - Added regression coverage for empty, partial, and fully selected model configurations in `tests/test_configuration_session.py`.
