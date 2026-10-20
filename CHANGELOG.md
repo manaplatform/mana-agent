@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-20
 
+- Bumped the package version to `0.5.1` and updated the README version badge.
+  - User-owned verification: `python -m pytest tests/test_package_version.py -q`.
+
 - Fixed duplicate internal coding engine timeline steps and lifecycle noise in TUI Execution Panel:
   - Deduplicated Internal Tool Calling Events (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/coding/live_events.py`):
     - Removed redundant `publish_coding_event` calls with `title=f"Tool call: {tname}"` from parallel and programmatic tool execution paths, standardizing on canonical `emit_tool_event` / `publish_internal_tool_event`.
