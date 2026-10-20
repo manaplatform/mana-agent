@@ -93,8 +93,9 @@ def publish_internal_tool_event(
     failed = "fail" in kind_l or "error" in kind_l
     completed = kind_l in {"end", "finished", "done", "success"} or kind_l.endswith("_end")
     phase = "failed" if failed else "completed" if completed else "started"
+    cid = str(event_id or f"internal-{uuid.uuid4().hex}").strip()
     publish_coding_event(AgentEvent(
-        event_id=f"{str(event_id or f'internal-{uuid.uuid4().hex}')}-{phase}",
+        event_id=f"{cid}-{phase}",
         event_type=f"tool.call.{phase}",
         task_id=str(state["task_id"]),
         backend="internal",
@@ -106,6 +107,7 @@ def publish_internal_tool_event(
         duration_ms=int(float(duration) * 1000) if duration is not None else None,
         error=str(error or ""),
         model=str(state.get("model") or ""),
+        payload={"call_id": cid},
     ))
 
 

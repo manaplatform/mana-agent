@@ -219,6 +219,15 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
             return "completion", "Execution completed"
         return "loop", "Autonomous Loop"
 
+    # Lifecycle / Engine selection markers (handled as metadata, not separate user task steps)
+    if et in {
+        "backend.selected",
+        "turn.starting",
+        "turn.started",
+        "turn.finalizing",
+    }:
+        return "lifecycle", ""
+
     # Routing
     if et in {
         "routing_started",
@@ -410,6 +419,9 @@ class ExecutionTrace:
         event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
 
         phase, default_title = classify_runtime_phase(event_type, meta)
+        if phase == "lifecycle":
+            # Lifecycle events update turn-level metadata without creating spurious steps
+            return None
         step_title = title or default_title
 
         # Track categorized events and changed files for persistent activity boxes
@@ -454,7 +466,14 @@ class ExecutionTrace:
             appr_id = str(meta.get("inbox_item_id") or meta.get("permission_request_id") or meta.get("action_id") or event_id or "").strip()
             step_id = f"{self.turn_id}:approval:{appr_id}" if appr_id else f"{self.turn_id}:approval"
         elif phase == "tool":
-            tool_call_id = str(ev.get("tool_call_id") or meta.get("tool_call_id") or meta.get("call_id") or event_id or "").strip()
+            tool_call_id = str(ev.get("tool_call_id") or meta.get("tool_call_id") or meta.get("call_id") or "").strip()
+            if not tool_call_id:
+                raw_id = event_id or event_type
+                for suffix in ("-started", "-completed", "-failed", "-success", "-running"):
+                    if raw_id.endswith(suffix):
+                        raw_id = raw_id[:-len(suffix)]
+                        break
+                tool_call_id = raw_id
             step_id = f"{self.turn_id}:tool:{tool_call_id}" if tool_call_id else f"{self.turn_id}:tool:{event_type}"
         elif phase in {"routing", "context", "coding", "model", "completion", "failure"}:
             step_id = f"{self.turn_id}:{phase}"

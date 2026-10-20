@@ -23,6 +23,7 @@ from mana_agent.config.model_catalog import (
     maintained_token_limits,
     normalize_capabilities,
 )
+from mana_agent._version import get_version
 
 logger = logging.getLogger(__name__)
 
@@ -510,7 +511,7 @@ class ModelDiscoveryService:
             url,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "User-Agent": "Mana-Agent/0.5.0",
+                "User-Agent": f"Mana-Agent/{get_version()}",
                 "Accept": "application/json",
             },
         )
@@ -563,7 +564,7 @@ class ModelDiscoveryService:
                 url,
                 headers={
                     "Authorization": f"Bearer {api_key}",
-                    "User-Agent": "Mana-Agent/0.5.0",
+                    "User-Agent": f"Mana-Agent/{get_version()}",
                     "Accept": "application/json",
                 },
             )

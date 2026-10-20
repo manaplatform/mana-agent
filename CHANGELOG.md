@@ -4,6 +4,39 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-20
 
+- Bumped the package version to `0.5.1` and updated the README version badge.
+  - User-owned verification: `python -m pytest tests/test_package_version.py -q`.
+
+- Fixed duplicate internal coding engine timeline steps and lifecycle noise in TUI Execution Panel:
+  - Hidden Duplicate Raw Steps Timeline (`src/mana_agent/tui/widgets/execution_panel.py`, `src/mana_agent/tui/app.tcss`):
+    - Set `steps_view.display = False` and `.execution-steps { display: none; }` in `ExecutionPanel` and Textual application CSS so the duplicate raw steps dump is hidden by default while the consolidated `MainActivityBox` and `CodingActivityBox` remain visible.
+  - Chat Viewport End Pinning (`src/mana_agent/tui/widgets/chat_log.py`):
+    - Updated `_scroll_to_latest` and `_pin_to_tool` to pin viewport smoothly at the end of chats (`scroll_end`) rather than snapping/aligning the screen to the top of tool cards or execution panels with `scroll_to_widget`.
+  - Deduplicated Internal Tool Calling Events (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/coding/live_events.py`):
+    - Removed redundant `publish_coding_event` calls with `title=f"Tool call: {tname}"` from parallel and programmatic tool execution paths, standardizing on canonical `emit_tool_event` / `publish_internal_tool_event`.
+    - Added `payload={"call_id": cid}` to internal tool event emissions for reliable lifecycle tracking across UI components.
+  - Lifecycle Phase Separation and In-Place Step Correlation (`src/mana_agent/chat/execution_trace.py`, `src/mana_agent/tui/widgets/activity_boxes.py`):
+    - Classified engine lifecycle markers (`backend.selected`, `turn.starting`, `turn.started`, `turn.finalizing`) as `phase="lifecycle"`, preventing spurious backend/turn steps from cluttering the execution timeline.
+    - Normalized `tool_call_id` across started, completed, and failed phases (including stripping status suffixes and checking `call_id`), enabling running tool execution steps to update in-place to completed/failed without ghost entries.
+    - Updated `CodingActivityBox.update_event` to match and correlate events by `call_id` in addition to `event_id`.
+  - Regression and Unit Testing (`tests/test_execution_trace.py`, `tests/test_tui_live_tools_scroll.py`):
+    - Added `test_execution_panel_steps_view_is_hidden_by_default` asserting `steps_view` is hidden by default.
+    - Added `test_chat_log_pins_to_end_of_chats_without_scroll_to_widget` asserting that pinning keeps the viewport at the end of chats without forcing `scroll_to_widget`.
+    - Added `test_lifecycle_events_do_not_create_duplicate_steps` asserting that backend selection and turn start events do not create task execution steps.
+    - Added `test_tool_execution_start_and_finish_update_step_in_place` asserting tool execution steps transition in-place from running to success or failed with duration and detail preserved.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_execution_trace.py -q`
+    - `./venv/bin/pytest tests/test_tui_live_tools_scroll.py -q`
+    - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py -q`
+
+
+- Fixed NVIDIA provider testing in the configuration TUI when model selectors are empty:
+  - `ConfigurationDraft.set_models()` now records provider changes without qualifying or overwriting model settings until both required model selectors are populated.
+  - Added regression coverage for empty, partial, and fully selected model configurations in `tests/test_configuration_session.py`.
+  - Documented the reproduction, root cause, permanent fix, and **Do not reintroduce** invariant in `docs/regressions/config-tui-provider-test-empty-models.md`.
+  - User-owned verification command: `./venv/bin/pytest tests/test_configuration_session.py -q`
+
+
 - Fixed **Approval Flow, Undefined Logger, and Internal Coding Engine Batch Tool Dispatch**:
   - Undefined Logger Elimination (`src/mana_agent/tui/app.py`, `src/mana_agent/execution_supervisor/supervisor.py`, `src/mana_agent/api_manager/executor.py`, `src/mana_agent/commands/main_cli.py`):
     - Added missing `import logging` and `logger = logging.getLogger(__name__)` across all affected modules.
@@ -2870,8 +2903,7 @@ All notable repository changes should be recorded here.
 - Completed the `LaneCoordinator` human-inbox branch-controller interface, including durable store access plus suspension, recovery, and single-claim resume delegation. Transactional computer proposals can now create their linked authoritative inbox item instead of failing before an approval event is emitted.
   - User verification required: `python -m pytest tests/gateway/test_lane_coordinator.py tests/human_inbox/test_durable_inbox.py tests/test_computer_control.py`.
 
-- Added GitHub funding metadata for GitHub Sponsors, Open Collective, and Polar.
-  - User verification required: confirm the repository's GitHub funding panel lists the configured links.
+- Removed the repository's GitHub sponsorship metadata configuration.
 
 - Made `mana-agent inbox approve`, `deny`, and `answer` return a clear CLI validation error for recorded terminal notices instead of exposing an internal traceback; rejected response attempts remain audited.
   - User verification required: `python -m pytest tests/human_inbox/test_durable_inbox.py`.
