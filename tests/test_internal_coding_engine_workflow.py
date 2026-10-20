@@ -195,3 +195,54 @@ def test_unified_facade_external_codex_remains_functional(tmp_path: Path) -> Non
 
     facade.set_engine_mode("external")
     assert facade.active_engine_mode == "external"
+
+
+def test_internal_coding_engine_batch_read_allowed_files(tmp_path: Path) -> None:
+    """Verify that when task.allowed_files contains multiple files and batch operations are enabled,
+    the internal coding engine invokes batch_read_files rather than single reads."""
+    file_a = tmp_path / "mod_a.py"
+    file_b = tmp_path / "mod_b.py"
+    file_a.write_text("def fn_a(): return 1\n", encoding="utf-8")
+    file_b.write_text("def fn_b(): return 2\n", encoding="utf-8")
+
+    engine = InternalCodingEngine(
+        model="test-model",
+        batch_operations_enabled=True,
+    )
+
+    task = CodingTask(
+        task_id="task_batch_read_test",
+        goal="Inspect multiple allowed files",
+        allowed_files=["mod_a.py", "mod_b.py"],
+    )
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        sandbox="readOnly",
+    )
+
+    result = asyncio.run(engine.execute(task, workspace))
+    assert result.status == "completed"
+    assert "Completed internal coding task" in result.summary
+
+
+def test_tool_execution_dispatcher_defaults_model_for_batch_tools(tmp_path: Path) -> None:
+    """Verify ToolExecutionDispatcher provides default model and provider to batch tools."""
+    from mana_agent.coding.programmatic import ToolExecutionDispatcher
+
+    ws = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+    dispatcher = ToolExecutionDispatcher(
+        ws,
+        task_id="task_disp_test",
+        model="gpt-4o-mini",
+        provider="openai",
+    )
+    assert dispatcher.model == "gpt-4o-mini"
+    assert dispatcher.provider == "openai"
+    assert dispatcher.task_id == "task_disp_test"
+

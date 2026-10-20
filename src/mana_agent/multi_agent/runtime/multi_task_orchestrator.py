@@ -321,6 +321,22 @@ class MultiTaskOrchestrator:
                         pending.remove(local_id)
                         made_progress = True
                         continue
+                    failed_deps = [
+                        dep for dep in item.depends_on
+                        if dep in results and results[dep].status in {"failed", "blocked"}
+                    ]
+                    if failed_deps:
+                        reason = "blocked by prerequisite failure(s): " + ", ".join(failed_deps)
+                        task_id = mapping[local_id]
+                        self.taskboard.update_status(task_id, TaskStatus.BLOCKED, reason=reason)
+                        results[local_id] = MultiTaskChildResult(
+                            local_id, task_id, item.title, "", "blocked", blocker=reason
+                        )
+                        pending.remove(local_id)
+                        made_progress = True
+                        continue
+                    if any(results[dep].status not in {"completed", "skipped"} for dep in item.depends_on):
+                        continue
                     if len(running) >= self.maximum_concurrency:
                         break
                     # ThreadPoolExecutor workers do not inherit ContextVars.

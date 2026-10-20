@@ -7,6 +7,7 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import logging
 import mimetypes
 import socket
 import ssl
@@ -21,6 +22,8 @@ from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 from pydantic import Field
+
+logger = logging.getLogger(__name__)
 
 from mana_agent.api_manager.errors import (
     ApiCancelledError,

@@ -4,6 +4,50 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-20
 
+- Fixed **Approval Flow, Undefined Logger, and Internal Coding Engine Batch Tool Dispatch**:
+  - Undefined Logger Elimination (`src/mana_agent/tui/app.py`, `src/mana_agent/execution_supervisor/supervisor.py`, `src/mana_agent/api_manager/executor.py`, `src/mana_agent/commands/main_cli.py`):
+    - Added missing `import logging` and `logger = logging.getLogger(__name__)` across all affected modules.
+    - Verified via AST scanning that zero undefined `logger` loads remain in `src/` and `tests/`.
+  - Transactional Approval Flow Robustness (`src/mana_agent/tui/app.py`, `src/mana_agent/gateway/chat_gateway.py`):
+    - In `ManaChatApp._complete_computer_permission`, resolved the `NameError: name 'logger' is not defined` crash in exception handling that blocked transactional approvals from completing.
+    - Added cross-service fallback to `default_human_inbox_service()` when an approval request ID originated outside `self.gateway.human_inbox_service` (e.g. from `AskAgent` or direct tool invocations).
+    - Issued approval grants to both `default_action_gateway(self.repo_root).approvals` and `self.gateway._transactional_runtime.gateway.approvals`.
+    - Added fallback to `default_human_inbox_service()` in `ChatGateway.transactional_action_approval_command` and `ChatGateway.deny_transactional_action_command`.
+  - Internal Coding Engine Batch Tools Calling (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/coding/prompts.py`):
+    - Restored batch file tool execution (`batch_read_files`) in `_run_programmatic_workflow` and `_run_direct_tool_workflow` when `len(task.allowed_files) > 1 and self.batch_operations_enabled`.
+    - Initialized `ToolExecutionDispatcher` with `model=self.model, provider=self.provider` from `InternalCodingEngine`.
+    - In `ToolExecutionDispatcher._execute_builtin_tool`, passed default `model`, `task_id`, and `provider` to `batch_create_job` and `batch_submit_requests` preventing `MODEL_REQUIRED` validation rejections when model arguments are omitted.
+    - Fixed `memory_read` builtin tool import in `programmatic.py` to use `from mana_agent.memory.capsules.service import CapsuleService`.
+    - Updated `INTERNAL_CODING_SYSTEM_INSTRUCTION` in `prompts.py` with explicit descriptions of internal batch filesystem tools and batch API operations.
+  - Regression and Unit Testing (`tests/test_tui_approval_realtime.py`, `tests/test_internal_coding_engine_workflow.py`):
+    - Added `test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses` to verify TUI approval resolution with isolated gateway inboxes.
+    - Added `test_internal_coding_engine_batch_read_allowed_files` to verify batch tool invocation on multi-file tasks.
+    - Added `test_tool_execution_dispatcher_defaults_model_for_batch_tools` to verify default model and provider propagation.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py tests/test_tui_approval_realtime.py -q`
+    - `./venv/bin/pytest tests/test_ask_agent.py tests/test_openai_batch_tools.py tests/test_openai_batch_coding_engine.py -q`
+    - `./venv/bin/pytest tests/gateway/test_transactional_approval.py tests/gateway/test_chat_gateway.py -q`
+    - `./venv/bin/pytest -q`
+
+- Fixed **Repository Regression Failures across Gateway, Autonomous Execution, and Task Supervision**:
+  - Resilient Checkpoint Resumption & Lock Management (`src/mana_agent/gateway/chat_gateway.py`, `src/mana_agent/gateway/lane_coordinator.py`):
+    - In `_recovery_candidates`, allowed tasks with valid checkpoints (`bool(task.checkpoint_id)`) through to `supervisor.validate_checkpoint_resume(...)` even if active, preventing lock contention and deadlocks on task resume.
+    - Resolved cross-lane resume candidate filtering in `chat_gateway.py` to match `followup.related_task_id` against `all_recovery_candidates` across all lanes.
+    - Prevented overwriting resumed checkpoints: guarded `after_routing` and `before_verification` checkpoints with `if not recovered_task:`.
+    - In `lane_coordinator.py`, ensured `_retry_existing_task` terminates prior supervisor heartbeats and releases acquired workspace locks before retrying.
+  - Continuation Evaluation & Model Decisions (`src/mana_agent/execution/autonomous_controller.py`, `src/mana_agent/execution/continuation_evaluator.py`, `tests/test_multi_agent_core.py`):
+    - In `autonomous_controller.py`, enabled typed `ContinuationDecision` generation for BLOCKED, DONE, and VERIFYING states when evaluator is unconfigured.
+    - In `continuation_evaluator.py`, reconciled task IDs against known TaskBoard tasks and stable prefixes to prevent task ID mismatch errors while strictly enforcing schema validation.
+    - Updated `_RouteModel` in `tests/test_multi_agent_core.py` to return typed `ContinuationDecision` when invoked with continuation prompts, conforming to AGENTS.md Rules 14 and 24.
+  - Turn Engine & Chat CLI Integration (`src/mana_agent/gateway/turn_engine.py`, `src/mana_agent/commands/chat_cli.py`):
+    - Restored `resolve_auto_followup` in `turn_engine.py` for gateway follow-up resolution.
+    - Hardened interactive chat command arguments and session resume coordination.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/execution/ -q`
+    - `./venv/bin/pytest tests/gateway/ -q`
+    - `./venv/bin/pytest tests/test_multi_agent_core.py -q`
+    - `./venv/bin/pytest -q`
+
 - **Batch execution and app-wide follow-up context (local changes; unverified):**
   - Official OpenAI Batch now requires an explicit task selection; ordinary batching stays internal/parallel. Required policy is persisted across related follow-ups without changing the global coding backend.
   - Added durable model/tool waves, submission intent and request fingerprints, transactional result import, workspace fencing, a registered background watcher, Supervisor wait/resume with fresh leases, and guarded final delivery. Submission no longer claims completed work or passing tests.

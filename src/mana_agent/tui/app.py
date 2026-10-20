@@ -44,9 +44,12 @@ from __future__ import annotations
 import asyncio
 import getpass
 import json
+import logging
 from pathlib import Path
 import threading
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -332,12 +335,20 @@ class ManaChatApp(App):
             self._unsubscribe_session_events = None
         self._unsubscribe_api_approval_events = None
 
+        sid = str(session_id or self._gateway_session_id or "").strip()
         try:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
 
-            unsub = get_execution_event_hub().subscribe_all(
-                self._handle_hub_session_event,
-            )
+            hub = get_execution_event_hub()
+            if sid:
+                unsub = hub.subscribe(
+                    sid,
+                    self._handle_hub_session_event,
+                )
+            else:
+                unsub = hub.subscribe_all(
+                    self._handle_hub_session_event,
+                )
             self._unsubscribe_session_events = unsub
             self._unsubscribe_api_approval_events = unsub
         except Exception:
@@ -809,6 +820,21 @@ class ManaChatApp(App):
                                     item = matches[0]
                             except Exception:
                                 pass
+                        if item is None and service is not default_human_inbox_service():
+                            try:
+                                fallback_svc = default_human_inbox_service()
+                                item = fallback_svc.repository.get(choice.request_id)
+                                if item is not None:
+                                    service = fallback_svc
+                            except Exception:
+                                try:
+                                    fallback_svc = default_human_inbox_service()
+                                    matches = fallback_svc.repository.find_for_action(choice.request_id)
+                                    if matches:
+                                        item = matches[0]
+                                        service = fallback_svc
+                                except Exception:
+                                    pass
 
                         actor_id = (
                             getattr(item, "assigned_reviewer_id", "")
@@ -832,6 +858,14 @@ class ManaChatApp(App):
                             action = act_gw.store.get_action(act_id) if act_id else None
                             if action is not None:
                                 act_gw.approvals.issue(action, approved_by=actor_id, ttl_seconds=300)
+                            if self.gateway is not None and hasattr(self.gateway, "_transactional_runtime"):
+                                try:
+                                    gw_runtime = self.gateway._transactional_runtime
+                                    gw_act = gw_runtime.store.get_action(act_id) if act_id else None
+                                    if gw_act is not None:
+                                        gw_runtime.gateway.approvals.issue(gw_act, approved_by=actor_id, ttl_seconds=300)
+                                except Exception as gw_appr_exc:
+                                    logger.debug("Could not issue approval on gateway runtime: %s", gw_appr_exc)
 
                         msg = f"Transactional action {'approved' if is_approve else 'denied'}."
                         handled = True

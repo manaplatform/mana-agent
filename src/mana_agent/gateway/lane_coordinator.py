@@ -1364,6 +1364,7 @@ class LaneCoordinator:
                     reason=reason if mapped_status in {TaskStatus.FAILED, TaskStatus.BLOCKED} else None,
                 )
             self._persist_locked()
+        self._stop_supervisor_heartbeats(task_id)
         self.lock_manager.release_task(task_id)
         if state is LaneTaskState.PENDING_BUDGET_DECISION:
             # The result is durable and valid, but requires its separate
@@ -1779,6 +1780,7 @@ class LaneCoordinator:
         self.execution_supervisor.suspend_for_batch(task_id, operation_id=operation_id, expires_at=expires_at,
             attempt_id=active.supervisor_attempt_id, lease_token=active.supervisor_lease_token)
         execution = self.transition(task_id, LaneTaskState.WAITING, reason="waiting_for_batch")
+        self._stop_supervisor_heartbeats(task_id)
         self.lock_manager.release_task(task_id)
         with self._condition:
             execution.supervisor_attempt_id = execution.supervisor_lease_token = ""
@@ -1859,6 +1861,7 @@ class LaneCoordinator:
                 )
             self._persist_locked()
         if state in _CONTROL_TERMINAL_STATES or state in {LaneTaskState.PAUSED, LaneTaskState.BLOCKED}:
+            self._stop_supervisor_heartbeats(task_id)
             self.lock_manager.release_task(task_id)
         self.emit(
             f"task.{state.value}",
@@ -2307,6 +2310,8 @@ class LaneCoordinator:
             raise LaneCoordinatorError(
                 f"checkpoint retry could not be released: {exc}"
             ) from exc
+        self._stop_supervisor_heartbeats(task_id)
+        self.lock_manager.release_task(task_id)
         with self._condition:
             execution.state = LaneTaskState.QUEUED
             execution.session_id = session_id
@@ -2655,6 +2660,7 @@ class LaneCoordinator:
                     )
             self._persist_locked()
         for task_id in interrupted_task_ids:
+            self._stop_supervisor_heartbeats(task_id)
             self.lock_manager.release_task(task_id)
 
     def _recover_stale_locked(self) -> None:

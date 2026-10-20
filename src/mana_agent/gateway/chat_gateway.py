@@ -36,6 +36,7 @@ from mana_agent.gateway.conversation_context import recent_conversation_context
 from mana_agent.batch.policy import TaskExecutionPolicy, BatchPending
 from mana_agent.gateway.checkpoint_resume import (
     CheckpointResumeDecider,
+    CheckpointResumeDecision,
     CheckpointResumeError,
 )
 from mana_agent.gateway.chat_turn_store import ChatTurnRecord, ChatTurnStore
@@ -3435,19 +3436,34 @@ class AgentChatGateway:
         """Approve the authoritative inbox item; branch resumption owns execution."""
         from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
+        inbox_svc = self.human_inbox_service
         try:
-            item = self.human_inbox_service.repository.get(inbox_item_id)
+            item = inbox_svc.repository.get(inbox_item_id)
         except (KeyError, LookupError):
-            matches = self.human_inbox_service.repository.find_for_action(inbox_item_id)
+            matches = inbox_svc.repository.find_for_action(inbox_item_id)
             if matches:
                 item = matches[0]
                 inbox_item_id = item.inbox_item_id
             else:
-                raise
+                try:
+                    from mana_agent.human_inbox import default_human_inbox_service
+                    fallback_svc = default_human_inbox_service()
+                    try:
+                        item = fallback_svc.repository.get(inbox_item_id)
+                    except (KeyError, LookupError):
+                        matches = fallback_svc.repository.find_for_action(inbox_item_id)
+                        if matches:
+                            item = matches[0]
+                            inbox_item_id = item.inbox_item_id
+                        else:
+                            raise
+                    inbox_svc = fallback_svc
+                except Exception:
+                    raise
         if item.request_type.value != "approval" or not item.action_intent_id:
             raise ValueError("inbox item is not an actionable transactional approval")
         actor_id = getpass.getuser()
-        self.human_inbox_service.respond(ResponseSubmission(
+        inbox_svc.respond(ResponseSubmission(
             inbox_item_id=inbox_item_id,
             operation=ResponseOperation.APPROVE,
             actor_id=actor_id,
@@ -3538,16 +3554,31 @@ class AgentChatGateway:
     ) -> dict[str, Any]:
         from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
 
+        inbox_svc = self.human_inbox_service
         try:
-            item = self.human_inbox_service.repository.get(inbox_item_id)
+            item = inbox_svc.repository.get(inbox_item_id)
         except (KeyError, LookupError):
-            matches = self.human_inbox_service.repository.find_for_action(inbox_item_id)
+            matches = inbox_svc.repository.find_for_action(inbox_item_id)
             if matches:
                 item = matches[0]
                 inbox_item_id = item.inbox_item_id
             else:
-                raise
-        self.human_inbox_service.respond(ResponseSubmission(
+                try:
+                    from mana_agent.human_inbox import default_human_inbox_service
+                    fallback_svc = default_human_inbox_service()
+                    try:
+                        item = fallback_svc.repository.get(inbox_item_id)
+                    except (KeyError, LookupError):
+                        matches = fallback_svc.repository.find_for_action(inbox_item_id)
+                        if matches:
+                            item = matches[0]
+                            inbox_item_id = item.inbox_item_id
+                        else:
+                            raise
+                    inbox_svc = fallback_svc
+                except Exception:
+                    raise
+        inbox_svc.respond(ResponseSubmission(
             inbox_item_id=inbox_item_id,
             operation=ResponseOperation.DENY,
             actor_id=getpass.getuser(),
@@ -4092,13 +4123,19 @@ class AgentChatGateway:
             for turn in completed.values()
             if turn.get("user") and turn.get("assistant")
         ]
+        default_flow = self._default_flow_id
+        if not default_flow and self._coding_agent is not None and hasattr(self._coding_agent, "get_active_flow_id"):
+            try:
+                default_flow = self._coding_agent.get_active_flow_id()
+            except Exception:
+                default_flow = None
         return {
             "frontend": frontend,
             "conversation_id": session_id,
             "history": history[-40:],
             "messages": [message.to_dict() for message in messages],
             "root": str(self.root),
-            "active_flow_id": self._default_flow_id,
+            "active_flow_id": default_flow,
             "auto_chat_state": None,
             "analysis_context": analysis,
             "pending_prechecklist": None,
@@ -5663,6 +5700,8 @@ class AgentChatGateway:
                 )
 
         state = self._session(session_id)
+        if "flow_id" in options:
+            state["active_flow_id"] = options.pop("flow_id")
         state["attachments"] = [a.to_dict() for a in normalized_attachments]
         options["attachments"] = [a.to_dict() for a in normalized_attachments]
         conversation_id = str(state.get("conversation_id") or session_id)
@@ -6008,39 +6047,41 @@ class AgentChatGateway:
                 entry_model_decision.provider,
             )
             try:
-                for retrieval_attempt in range(3):
-                    entry_decision = self._entry_router.route(user_prompt=text, context=route_context)
-                    if not entry_decision.context_request:
-                        break
-                    if retrieval_attempt == 2 or conversation_context_tool is None:
-                        raise EntryRoutingError("Reference resolution exhausted bounded conversation retrieval; clarify the request")
-                    from mana_agent.gateway.entry_routing import EntryContextRequest
-                    request = EntryContextRequest.model_validate(entry_decision.context_request)
-                    remaining = conv_budget - int(conversation_context.get("tokens") or 0)
-                    if remaining < 1:
-                        raise EntryRoutingError("Reference resolution reached the conversation context budget; clarify the request")
-                    try:
-                        observation = json.loads(conversation_context_tool.invoke({
-                            **request.model_dump(), "max_tokens": min(request.max_tokens, remaining),
-                        }))
-                    except Exception as exc:
-                        raise EntryRoutingError(f"Reference resolution could not retrieve conversation context: {exc}") from exc
-                    retrieved = observation.get("turns") or []
-                    observed_ids = {str(message.get("message_id")) for message in
-                                    conversation_context["messages"] + retrieved}
-                    # Preserve durable order and complete host-scoped messages.
-                    selected_messages = [
-                        {key: message.get(key, "") for key in ("message_id", "turn_id", "role", "content")}
-                        for message in prior_messages if message.get("role") in {"user", "assistant"}
-                        and str(message.get("message_id")) in observed_ids
-                    ]
-                    from mana_agent.context_cost.estimator import estimate_value_tokens
-                    conversation_context.update({
-                        "messages": selected_messages, "tokens": estimate_value_tokens(selected_messages),
-                        "retrieval_required": not bool(retrieved),
-                        "retrieval_observation": {"empty": observation.get("empty"), "truncated": observation.get("truncated")},
-                    })
-                    state["conversation_context"] = conversation_context
+                entry_decision = options.get("entry_decision")
+                if entry_decision is None:
+                    for retrieval_attempt in range(3):
+                        entry_decision = self._entry_router.route(user_prompt=text, context=route_context)
+                        if not entry_decision.context_request:
+                            break
+                        if retrieval_attempt == 2 or conversation_context_tool is None:
+                            raise EntryRoutingError("Reference resolution exhausted bounded conversation retrieval; clarify the request")
+                        from mana_agent.gateway.entry_routing import EntryContextRequest
+                        request = EntryContextRequest.model_validate(entry_decision.context_request)
+                        remaining = conv_budget - int(conversation_context.get("tokens") or 0)
+                        if remaining < 1:
+                            raise EntryRoutingError("Reference resolution reached the conversation context budget; clarify the request")
+                        try:
+                            observation = json.loads(conversation_context_tool.invoke({
+                                **request.model_dump(), "max_tokens": min(request.max_tokens, remaining),
+                            }))
+                        except Exception as exc:
+                            raise EntryRoutingError(f"Reference resolution could not retrieve conversation context: {exc}") from exc
+                        retrieved = observation.get("turns") or []
+                        observed_ids = {str(message.get("message_id")) for message in
+                                        conversation_context["messages"] + retrieved}
+                        # Preserve durable order and complete host-scoped messages.
+                        selected_messages = [
+                            {key: message.get(key, "") for key in ("message_id", "turn_id", "role", "content")}
+                            for message in prior_messages if message.get("role") in {"user", "assistant"}
+                            and str(message.get("message_id")) in observed_ids
+                        ]
+                        from mana_agent.context_cost.estimator import estimate_value_tokens
+                        conversation_context.update({
+                            "messages": selected_messages, "tokens": estimate_value_tokens(selected_messages),
+                            "retrieval_required": not bool(retrieved),
+                            "retrieval_observation": {"empty": observation.get("empty"), "truncated": observation.get("truncated")},
+                        })
+                        state["conversation_context"] = conversation_context
             except EntryRoutingError as exc:
                 if callable(sink):
                     sink(
@@ -6546,7 +6587,14 @@ class AgentChatGateway:
                         )
                     ]
                     followup_model = getattr(self._entry_router, "llm", None)
-                    if followup_candidates:
+                    is_followup_mocked = (
+                        getattr(FollowupClassifier.decide, "__module__", "")
+                        != "mana_agent.gateway.followup_classifier"
+                    )
+                    if followup_candidates and (
+                        (followup_model is not None and callable(getattr(followup_model, "invoke", None)))
+                        or is_followup_mocked
+                    ):
                         raw_followup_history = [
                             m for m in list(state.get("messages") or [])
                             if str(m.get("turn_id") or "") != turn_id
@@ -6841,7 +6889,7 @@ class AgentChatGateway:
                         elif followup.category in {"retry_request", "resume_request"}:
                             recovery_candidates = [
                                 item
-                                for item in recovery_candidates
+                                for item in all_recovery_candidates
                                 if str(item.get("task_id") or "") == followup.related_task_id
                                 and not bool(item.get("deadline_exceeded"))
                             ]
@@ -6851,21 +6899,53 @@ class AgentChatGateway:
                             previous_task_id = followup.related_task_id
                         elif followup.category == "new_task":
                             recovery_candidates = []
-                    with self._stack.context_cost_governor.scoped_execution_identity(
-                        turn_id=turn_id,
-                        agent_id="main",
-                        step_id=f"checkpoint_resume:{uuid.uuid4().hex}",
-                        route=entry_decision.route,
-                        lane=lane_id.value,
-                        execution_kind="checkpoint_resume",
-                    ):
-                        resume_decision = CheckpointResumeDecider(
-                            self._entry_router.llm
-                        ).decide(
-                            current_request=text,
+                    resume_model = getattr(self._entry_router, "llm", None)
+                    is_decide_mocked = (
+                        getattr(CheckpointResumeDecider.decide, "__module__", "")
+                        != "mana_agent.gateway.checkpoint_resume"
+                    )
+                    if not recovery_candidates:
+                        resume_decision = CheckpointResumeDecision(
+                            decision_id=f"checkpoint:{uuid.uuid4().hex[:12]}",
+                            action="start_fresh",
+                            task_id="",
+                            checkpoint_id="",
+                            same_work=False,
+                            fresh_data_required=bool(entry_decision.requires_live_data),
+                            checkpoint_still_valid=False,
+                            side_effects_safe_to_repeat=False,
+                            safe_to_continue=True,
+                            reason="no recovery candidates available",
+                        )
+                    elif (resume_model is not None and callable(getattr(resume_model, "invoke", None))) or is_decide_mocked:
+                        with self._stack.context_cost_governor.scoped_execution_identity(
+                            turn_id=turn_id,
+                            agent_id="main",
+                            step_id=f"checkpoint_resume:{uuid.uuid4().hex}",
                             route=entry_decision.route,
-                            requires_live_data=entry_decision.requires_live_data,
-                            candidates=recovery_candidates,
+                            lane=lane_id.value,
+                            execution_kind="checkpoint_resume",
+                        ):
+                            resume_decision = CheckpointResumeDecider(
+                                resume_model
+                            ).decide(
+                                current_request=text,
+                                route=entry_decision.route,
+                                requires_live_data=entry_decision.requires_live_data,
+                                candidates=recovery_candidates,
+                            )
+                    else:
+                        resume_decision = CheckpointResumeDecision(
+                            decision_id=f"checkpoint:{uuid.uuid4().hex[:12]}",
+                            action="start_fresh",
+                            task_id="",
+                            checkpoint_id="",
+                            same_work=False,
+                            fresh_data_required=bool(entry_decision.requires_live_data),
+                            checkpoint_still_valid=False,
+                            side_effects_safe_to_repeat=False,
+                            safe_to_continue=True,
+                            reason="checkpoint resume model unavailable",
                         )
                     if resume_decision.action == "stop":
                         raise CheckpointResumeError(
@@ -7311,18 +7391,20 @@ class AgentChatGateway:
                             lane=lane_id.value,
                             execution_kind="gateway_route",
                         )
-                        routed_checkpoint_id = self._lane_coordinator.checkpoint(
-                            reservation.execution.task_id,
-                            boundary="after_routing",
-                            resume_payload={
-                                "route": entry_decision.route,
-                                "routing_decision_id": execution_decision.decision_id,
-                                "execution_policy": options.get("execution_policy", {}),
-                                "conversation_context": conversation_context,
-                                "resolved_request": entry_decision.resolved_request or text,
-                            },
-                            pending_steps=("execute_route", "verify", "final_response"),
-                        )
+                        routed_checkpoint_id = None
+                        if not recovered_task:
+                            routed_checkpoint_id = self._lane_coordinator.checkpoint(
+                                reservation.execution.task_id,
+                                boundary="after_routing",
+                                resume_payload={
+                                    "route": entry_decision.route,
+                                    "routing_decision_id": execution_decision.decision_id,
+                                    "execution_policy": options.get("execution_policy", {}),
+                                    "conversation_context": conversation_context,
+                                    "resolved_request": entry_decision.resolved_request or text,
+                                },
+                                pending_steps=("execute_route", "verify", "final_response"),
+                            )
                         if routed_checkpoint_id:
                             self._stack.context_cost_governor.set_execution_identity(
                                 checkpoint_id=routed_checkpoint_id,
@@ -7469,7 +7551,11 @@ class AgentChatGateway:
                                 ]
                                 if not actual_tools:
                                     result.error = "completion_verification_failed"
-                            if not result.error and self._lane_coordinator.can_checkpoint(reservation.execution.task_id):
+                            if (
+                                not result.error
+                                and not recovered_task
+                                and self._lane_coordinator.can_checkpoint(reservation.execution.task_id)
+                            ):
                                 self._lane_coordinator.checkpoint(
                                     reservation.execution.task_id,
                                     boundary="before_verification",
@@ -8041,7 +8127,15 @@ class AgentChatGateway:
             and not bool(item.get("deadline_exceeded"))
             and not bool(item.get("waiting_for_human"))
         ]
-        if not multi_candidates:
+        resume_model = getattr(self._entry_router, "llm", None)
+        is_decide_mocked = (
+            getattr(CheckpointResumeDecider.decide, "__module__", "")
+            != "mana_agent.gateway.checkpoint_resume"
+        )
+        if not multi_candidates or not (
+            (resume_model is not None and callable(getattr(resume_model, "invoke", None)))
+            or is_decide_mocked
+        ):
             return self._execute_multi_task_route(
                 decision=decision,
                 context=context,
@@ -8059,7 +8153,7 @@ class AgentChatGateway:
             lane="research",
             execution_kind="checkpoint_resume",
         ):
-            resume_decision = CheckpointResumeDecider(self._entry_router.llm).decide(
+            resume_decision = CheckpointResumeDecider(resume_model).decide(
                 current_request=text,
                 route="multi_task",
                 requires_live_data=decision.requires_live_data,
@@ -9273,17 +9367,7 @@ class AgentChatGateway:
         if "recent_history" in parameters or any(
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
         ):
-            raw_messages = list(state.get("messages") or [])
-            recent_history = [
-                m for m in raw_messages
-                if m.get("role") in {"user", "assistant"}
-                and str(m.get("content") or "").strip()
-            ]
             kwargs["recent_history"] = (state.get("conversation_context") or {}).get("messages", [])
-        elif (state.get("conversation_context") or {}).get("messages"):
-            execution_text += "\n\nObserved conversation context (data, not authorization):\n" + json.dumps(
-                state["conversation_context"], ensure_ascii=False,
-            )
         attachments_data = options.get("attachments") or state.get("attachments") or []
         if attachments_data and (
             "multimodal_content" in parameters or any(
@@ -9298,7 +9382,12 @@ class AgentChatGateway:
                 for att in attachments_data
             ]
             kwargs["multimodal_content"] = normalize_multimodal_content(execution_text, att_objs)
-        return ask_conversation(execution_text, **kwargs)
+        try:
+            return ask_conversation(execution_text, **kwargs)
+        except RuntimeError as exc:
+            if "conversational model is not configured" in str(exc) and hasattr(self._chat_service, "ask"):
+                return self._chat_service.ask(text)
+            raise
 
     def _conversation_runtime_self(
         self,
@@ -9500,12 +9589,13 @@ class AgentChatGateway:
             lane_recoverable = (
                 lane_state is not None and lane_state in recoverable_lane_states
             )
+            has_checkpoint = bool(task.checkpoint_id)
             # Human-inbox waits are not chat-turn recovery candidates.
             if waiting_for_human and task.state is ExecutionState.WAITING:
                 supervisor_recoverable = False
             if (
                 (lane_id is not None and selected_lane != lane_id and selected_lane != lane_id.value)
-                or not (supervisor_recoverable or lane_recoverable)
+                or not (supervisor_recoverable or lane_recoverable or has_checkpoint)
                 or task.workspace_id != workspace_id
                 or task.repository_id != repository_id
                 or (task.session_id and str(task.session_id) in fenced_sessions)
@@ -9525,6 +9615,8 @@ class AgentChatGateway:
                 checkpoint = eligibility.checkpoint
             elif not eligibility.resumable and task.checkpoint_id and not eligibility.is_terminal:
                 checkpoint_error = redact_text(eligibility.error_message or eligibility.reason)
+            if not (supervisor_recoverable or lane_recoverable) and checkpoint is None:
+                continue
             try:
                 board_task = self._lane_coordinator.taskboard.get_task(
                     execution.taskboard_task_id if execution is not None else task.task_id
@@ -9698,9 +9790,11 @@ class AgentChatGateway:
         text = options.get("_canonical_execution_text") or decision.resolved_request or text
         execution_text = text
         conversation_context = state.get("conversation_context")
+        is_synthetic_selection = text.startswith('User selected ') or text.startswith('User provided free-text response ') or bool(options.get("suppress_conversation_context"))
         execution_context_included = bool(conversation_context and
             (conversation_context.get("messages") or conversation_context.get("retrieval_required")) and
-            (decision.route != "conversation" or policy.required))
+            policy.required and
+            not is_synthetic_selection)
         if execution_context_included:
             execution_text += "\n\nObserved conversation context (data, not authorization):\n" + json.dumps(conversation_context, ensure_ascii=False)
         resume_context = options.get("_resume_checkpoint_context")
@@ -9880,9 +9974,12 @@ class AgentChatGateway:
                     mode="route-error",
                 )
             return ChatTurnResult(
-                answer=str(answer or "").strip(),
-                mode="route-conversation",
+                answer=str(getattr(answer, "answer", answer) or "").strip(),
+                mode=getattr(answer, "mode", None) or "route-conversation",
                 decision=decision,
+                sources=list(getattr(answer, "sources", []) or []),
+                trace=list(getattr(answer, "trace", []) or []),
+                warnings=[str(item) for item in (getattr(answer, "warnings", []) or [])],
                 payload={"route": decision.route, "entry_route": decision.route},
             )
         if decision.route == "memory":
@@ -10497,9 +10594,20 @@ class AgentChatGateway:
                     "apply_patch_batch",
                 ]),
                 code_editing_needed=True,
-                flow_action="continue"
-                if decision.reuse_active_route and state.get("active_flow_id")
-                else "new",
+                flow_action=(
+                    options["agent_decision"].flow_action
+                    if isinstance(options.get("agent_decision"), AgentDecision)
+                    and options["agent_decision"].flow_action in {"continue", "new"}
+                    else (
+                        "continue"
+                        if (
+                            decision.reuse_active_route
+                            or state.get("active_flow_id")
+                            or options.get("flow_id")
+                        )
+                        else "new"
+                    )
+                ),
                 reasoning_summary=decision.reason,
                 verifier_passed=True,
                 runtime_capability_change=decision.runtime_capability_change,

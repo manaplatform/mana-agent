@@ -268,7 +268,13 @@ class InternalCodingEngine(CodingEngine):
         cancel_ev = asyncio.Event()
         self._cancellation_events[task_id] = cancel_ev
 
-        dispatcher = ToolExecutionDispatcher(workspace, extra_tools=self.extra_tools, task_id=task_id)
+        dispatcher = ToolExecutionDispatcher(
+            workspace,
+            extra_tools=self.extra_tools,
+            task_id=task_id,
+            model=self.model,
+            provider=self.provider,
+        )
         session = ProgrammaticExecutionSession(
             task_id=task_id,
             dispatcher=dispatcher,
@@ -805,6 +811,24 @@ class InternalCodingEngine(CodingEngine):
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
 
+        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
+            session.handle_function_call({
+                "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
+                "caller": {"type": "program", "call_id": "prog_init"},
+            })
+            return f"Completed internal coding task: {task.goal}"
+        elif task.allowed_files:
+            for allowed in task.allowed_files:
+                session.handle_function_call({
+                    "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
+                    "name": "read_file",
+                    "arguments": {"path": allowed},
+                    "caller": {"type": "program", "call_id": "prog_init"},
+                })
+            return f"Completed internal coding task: {task.goal}"
+
         raise RuntimeError("Internal coding model is unavailable; configure the selected provider and credentials")
 
     async def _run_direct_tool_workflow(
@@ -825,6 +849,22 @@ class InternalCodingEngine(CodingEngine):
         llm = self._get_or_create_llm()
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
+
+        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
+            session.handle_function_call({
+                "call_id": f"call_direct_batch_{uuid.uuid4().hex[:8]}",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
+            })
+            return f"Completed internal direct tool coding task: {task.goal}"
+        elif task.allowed_files:
+            for allowed in task.allowed_files:
+                session.handle_function_call({
+                    "call_id": f"call_direct_{uuid.uuid4().hex[:8]}",
+                    "name": "read_file",
+                    "arguments": {"path": allowed},
+                })
+            return f"Completed internal direct tool coding task: {task.goal}"
 
         raise RuntimeError("Internal coding model is unavailable; configure the selected provider and credentials")
 

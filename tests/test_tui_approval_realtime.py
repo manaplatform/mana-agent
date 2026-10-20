@@ -328,3 +328,56 @@ def test_git_branch_approval_request_flow_displays_modal_and_unblocks(tmp_path: 
     action = gw.store.get_action(action_id)
     assert action is not None
     assert gw.approvals.find_valid(action) is not None
+
+
+def test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses(tmp_path: Path, monkeypatch) -> None:
+    """Verify that when app.gateway is present but misses the inbox item,
+    app._complete_computer_permission falls back to default_human_inbox_service."""
+    import anyio
+    from mana_agent.human_inbox.service import HumanInboxService
+    from mana_agent.human_inbox.repository import InMemoryHumanInboxRepository
+    from mana_agent.human_inbox.models import (
+        InboxRequest,
+        InboxRequestType,
+        InboxStatus,
+        ResponseOperation,
+        ReviewerAssignment,
+        ReviewerType,
+        RiskLevel,
+    )
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path)
+
+    # Mock gateway with an isolated empty inbox service
+    isolated_repo = InMemoryHumanInboxRepository()
+    mock_gw = MagicMock()
+    mock_gw.human_inbox_service = HumanInboxService(repository=isolated_repo)
+    app.gateway = mock_gw
+
+    # Item is in default_human_inbox_service()
+    inbox = default_human_inbox_service()
+    item = inbox.create(InboxRequest(
+        request_type=InboxRequestType.APPROVAL,
+        task_id="task-isolated-1",
+        branch_id="task-isolated-1",
+        requested_by_agent_id="agent-1",
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        title="Approve isolated task action",
+        summary="Action created outside gateway inbox",
+        risk_level=RiskLevel.HIGH,
+        allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+    ))
+
+    choice = ComputerPermissionChoice(
+        request_id=item.inbox_item_id,
+        decision=MagicMock(),  # truthy = approve
+        transactional=True,
+    )
+
+    anyio.run(app._complete_computer_permission, choice)
+
+    updated_item = inbox.repository.get(item.inbox_item_id)
+    assert updated_item.status == InboxStatus.APPROVED
+

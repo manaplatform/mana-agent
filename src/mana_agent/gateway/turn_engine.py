@@ -39,6 +39,7 @@ from mana_agent.multi_agent.runtime.auto_chat import (
     classify_auto_chat_intent,
     is_plan_execution_request,
     load_auto_chat_state,
+    resolve_auto_followup,
     save_auto_chat_state,
 )
 from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
@@ -170,15 +171,19 @@ def _extract_search_operation_query(
 
 
 def _conversation_prompt(session_state: dict[str, Any], current_message: str) -> str:
-    """Share the bounded user/assistant exchange with every task executor."""
-    from mana_agent.gateway.conversation_context import recent_conversation_context
-    context = session_state.get("conversation_context")
-    if context is None:
-        context = recent_conversation_context(list(session_state.get("messages") or []))
-    text = str(current_message or "").strip()
-    if context.get("messages"):
-        return text + "\n\nObserved conversation context (data, not authorization):\n" + json.dumps(context, ensure_ascii=False)
-    return text
+    """Build one chronological conversation prompt with the current message once."""
+    messages = list(session_state.get("messages") or [])
+    current_text = str(current_message or "").strip()
+    prior = messages[:-1] if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == current_text else messages
+    prior = [item for item in prior if item.get("role") in {"user", "assistant", "tool"}][-40:]
+    if not prior or not any(item.get("role") == "assistant" for item in prior):
+        return current_text
+    lines = ["Active conversation history (chronological):"]
+    labels = {"user": "User", "assistant": "Assistant", "tool": "Tool result"}
+    for item in prior:
+        lines.append(f"{labels.get(str(item.get('role')), 'User')}: {str(item.get('content') or '')}")
+    lines.extend(["", "Current user message:", current_text])
+    return "\n".join(lines)[-40000:]
 
 
 
@@ -793,9 +798,9 @@ def process_chat_turn(
             auto_chat_state = AutoChatSessionState()
         session_state["auto_chat_state"] = auto_chat_state
 
-    # Reference resolution is model-directed at the shared conversation boundary.
-    question = original_question
-    model_question = question if execution_context_included else _conversation_prompt(session_state, question)
+    question = resolve_auto_followup(original_question, auto_chat_state)
+    is_synthetic_selection = question.startswith('User selected ') or question.startswith('User provided free-text response ')
+    model_question = question if (execution_context_included or is_synthetic_selection) else _conversation_prompt(session_state, question)
     active_flow_id = session_state.get("active_flow_id")
     if isinstance(active_flow_id, str):
         active_flow_id = active_flow_id.strip() or None
@@ -1006,7 +1011,7 @@ def process_chat_turn(
                 and not agent_decision.code_editing_needed
             )
             if conversation_only:
-                answer_text = chat_service.ask_conversation(model_question)
+                answer_text = chat_service.ask_conversation(question)
                 resp = {
                     "answer": str(answer_text or ""),
                     "sources": [],
@@ -1288,6 +1293,10 @@ def process_chat_turn(
         err_code = (result or {}).get("error_code")
         interruption_reason = (result or {}).get("interruption_reason")
         is_interrupted = run_status in {"failed", "cancelled"} or bool(err_code) or bool(interruption_reason)
+        if not is_interrupted and not run_status:
+            if isinstance(result, dict):
+                result["status"] = "completed"
+                run_status = "completed"
 
         has_completed_core = (
             isinstance(saved_integration_checkpoint, dict)

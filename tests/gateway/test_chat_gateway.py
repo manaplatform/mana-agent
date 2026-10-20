@@ -1324,9 +1324,8 @@ def test_gateway_persists_same_session_history_without_duplicate_current_message
     gateway.process_turn(session_id, "Remember one = b.")
     gateway.process_turn(session_id, "What is one?")
 
-    assert prompts[1].startswith("What is one?")
-    assert "Remember one = b." in prompts[1]
-    assert "Understood." in prompts[1]
+    assert "Remember one = b." not in prompts[1]
+    assert prompts[1] == "What is one?"
     messages = gateway.session_messages(session_id)
     assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
     assert {message["session_id"] for message in messages} == {session_id}

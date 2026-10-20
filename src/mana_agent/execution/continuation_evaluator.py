@@ -171,7 +171,19 @@ class ContinuationEvaluator:
                     raise coerce_exc
 
             if decision.task_id != task_id:
-                raise ValueError("continuation decision selected a different task")
+                reconciled = False
+                if decision.task_id in {"task_id", ""}:
+                    reconciled = True
+                elif taskboard_progress:
+                    tasks = taskboard_progress.get("tasks") or []
+                    known = {str(t.get("task_id")) for t in tasks} | {str(t.get("title")) for t in tasks}
+                    known.add(str(taskboard_progress.get("root_task_id")))
+                    if decision.task_id in known or "task-tb" in decision.task_id:
+                        reconciled = True
+                if reconciled:
+                    object.__setattr__(decision, "task_id", task_id)
+                else:
+                    raise ValueError("continuation decision selected a different task")
             return decision
 
         except Exception as exc:

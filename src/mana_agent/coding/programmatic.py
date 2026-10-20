@@ -59,6 +59,8 @@ class ToolExecutionDispatcher:
         repo_root: str | FilePath | None = None,
         extra_tools: dict[str, Callable[..., Any]] | None = None,
         task_id: str = "",
+        model: str = "",
+        provider: str = "openai",
     ) -> None:
         if workspace is not None:
             self.workspace = workspace
@@ -73,6 +75,8 @@ class ToolExecutionDispatcher:
             self.repo_root = resolved_path
         self.extra_tools = extra_tools or {}
         self.task_id = task_id
+        self.model = model
+        self.provider = provider
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         tool_name = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_name)
@@ -358,7 +362,7 @@ class ToolExecutionDispatcher:
             adapter = ShellActionAdapter(
                 argv=local_shell_argv(cmd), cwd=working, environment={},
                 parent_task_id=self.task_id or "internal-coding", actor="user",
-                originating_agent="internal_coding", policy_context={"tool": name},
+                originating_agent="internal_coding", policy_context={"tool": "shell"},
                 idempotency_key=operation_key,
                 timeout_seconds=timeout_s,
                 expected_outputs=list(args.get("expected_outputs") or []),
@@ -398,7 +402,7 @@ class ToolExecutionDispatcher:
                 return {"ok": False, "error": str(exc), "error_code": "CONTEXT_READ_FAILED"}
 
         elif name == "memory_read":
-            from mana_agent.memory.capsules.service import default_capsule_service
+            from mana_agent.memory.capsules.service import CapsuleService
             from mana_agent.tools.context_retrieval import execute_memory_read
             query = str(args.get("query") or "")
             max_capsules = int(args.get("max_capsules") or 3)
@@ -406,7 +410,7 @@ class ToolExecutionDispatcher:
             tags = list(args.get("tags") or [])
             try:
                 res = execute_memory_read(
-                    capsule_service=default_capsule_service(self.repo_root),
+                    capsule_service=CapsuleService(self.repo_root),
                     authenticated_user_id="default_user",
                     session_id="default_session",
                     repository_id=str(self.repo_root),
@@ -552,16 +556,19 @@ class ToolExecutionDispatcher:
             reqs = args.get("requests")
             if reqs is None:
                 reqs = [args]
+            target_model = str(args.get("model") or self.model or "").strip()
+            target_task_id = str(args.get("task_id") or self.task_id or "").strip()
+            target_provider = str(args.get("provider") or self.provider or "openai").strip()
             return batch_create_job(
                 requests=reqs,
                 endpoint=str(args.get("endpoint") or "/v1/responses"),
                 completion_window=str(args.get("completion_window") or "24h"),
-                model=str(args.get("model") or ""),
-                task_id=str(args.get("task_id") or ""),
+                model=target_model,
+                task_id=target_task_id,
                 idempotency_key=str(args.get("idempotency_key") or ""),
                 metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
                 mode=str(args.get("mode") or "auto"),
-                provider=str(args.get("provider") or "openai"),
+                provider=target_provider,
             )
 
         elif name in {"batch_get_status", "batch_check_status"}:
