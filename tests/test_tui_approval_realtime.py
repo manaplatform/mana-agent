@@ -334,8 +334,6 @@ def test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses(t
     """Verify that when app.gateway is present but misses the inbox item,
     app._complete_computer_permission falls back to default_human_inbox_service."""
     import anyio
-    from mana_agent.human_inbox.service import HumanInboxService
-    from mana_agent.human_inbox.repository import LocalInboxRepository
     from mana_agent.human_inbox.models import (
         InboxRequest,
         InboxRequestType,
@@ -350,10 +348,13 @@ def test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses(t
     history = ChatHistory()
     app = ManaChatApp(history=history, repo_root=tmp_path)
 
-    # Mock gateway with an isolated empty inbox service
-    isolated_repo = LocalInboxRepository(tmp_path / "isolated_inbox")
+    # Mock gateway with an inbox service that does not contain the item
     mock_gw = MagicMock()
-    mock_gw.human_inbox_service = HumanInboxService(repository=isolated_repo)
+    mock_gw.transactional_action_approval_command.side_effect = LookupError("Not in gateway inbox")
+    mock_inbox = MagicMock()
+    mock_inbox.repository.get.side_effect = LookupError("Not in gateway inbox")
+    mock_inbox.repository.find_for_action.return_value = []
+    mock_gw.human_inbox_service = mock_inbox
     app.gateway = mock_gw
 
     # Item is in default_human_inbox_service()

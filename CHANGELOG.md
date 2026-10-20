@@ -20,7 +20,7 @@ All notable repository changes should be recorded here.
     - Fixed `memory_read` builtin tool import in `programmatic.py` to use `from mana_agent.memory.capsules.service import CapsuleService`.
     - Updated `INTERNAL_CODING_SYSTEM_INSTRUCTION` in `prompts.py` with explicit descriptions of internal batch filesystem tools and batch API operations.
   - Regression and Unit Testing (`tests/test_tui_approval_realtime.py`, `tests/test_internal_coding_engine_workflow.py`, `tests/test_parallel_tool_scheduler.py`):
-    - Added `test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses` using `LocalInboxRepository` to verify TUI approval resolution with isolated gateway inboxes.
+    - Added `test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses` to verify TUI approval resolution when gateway inbox misses the item.
     - Added `test_internal_coding_engine_batch_read_allowed_files` to verify batch tool invocation on multi-file tasks.
     - Added `test_tool_execution_dispatcher_defaults_model_for_batch_tools` to verify default model and provider propagation.
     - Hardened `test_parallel_executor_concurrent_execution` in `tests/test_parallel_tool_scheduler.py` to assert active task concurrency (`active_concurrency > 1`) with resilient timing headroom for loaded CI environments.
