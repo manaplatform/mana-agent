@@ -51,22 +51,29 @@ class ConfigurationDraft:
         configured = self.values.get("MANA_CONFIGURED_PROVIDERS", [])
         if not isinstance(configured, list):
             configured = [str(configured)] if str(configured).strip() else []
-        self.values.update(
-            {
-                "MANA_AI_PROVIDER": provider,
-                "MANA_CONFIGURED_PROVIDERS": sorted(set([provider, *configured])),
-                "MANA_PRIMARY_MODEL": qualify_model_id(provider, high),
-                "MANA_EMBEDDING_MODEL": qualify_model_id(provider, embedding),
-                "OPENAI_CHAT_MODEL": high,
-                "LLM_MODEL": high,
-                "OPENAI_CODING_PLANNER_MODEL": coding,
-                "OPENAI_TOOL_WORKER_MODEL": fast,
-                "OPENAI_EMBED_MODEL": embedding,
-                "MODEL_LEVEL_3_HIGH_REASONING": high,
-                "MODEL_LEVEL_2_CODING": coding,
-                "MODEL_LEVEL_1_FAST_TOOL": fast,
-            }
-        )
+        updates: dict[str, Any] = {
+            "MANA_AI_PROVIDER": provider,
+            "MANA_CONFIGURED_PROVIDERS": sorted(set([provider, *configured])),
+        }
+        # Model selectors are empty until a provider catalog has been tested.
+        # Keep the last valid model configuration untouched in that transient
+        # state instead of passing empty IDs to qualify_model_id().
+        if str(high or "").strip() and str(embedding or "").strip():
+            updates.update(
+                {
+                    "MANA_PRIMARY_MODEL": qualify_model_id(provider, high),
+                    "MANA_EMBEDDING_MODEL": qualify_model_id(provider, embedding),
+                    "OPENAI_CHAT_MODEL": high,
+                    "LLM_MODEL": high,
+                    "OPENAI_CODING_PLANNER_MODEL": coding,
+                    "OPENAI_TOOL_WORKER_MODEL": fast,
+                    "OPENAI_EMBED_MODEL": embedding,
+                    "MODEL_LEVEL_3_HIGH_REASONING": high,
+                    "MODEL_LEVEL_2_CODING": coding,
+                    "MODEL_LEVEL_1_FAST_TOOL": fast,
+                }
+            )
+        self.values.update(updates)
 
     def save(self) -> None:
         def provider_identity(values: dict[str, Any]) -> tuple[Any, Any, Any]:

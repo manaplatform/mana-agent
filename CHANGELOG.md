@@ -4,6 +4,13 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-20
 
+- Fixed NVIDIA provider testing in the configuration TUI when model selectors are empty:
+  - `ConfigurationDraft.set_models()` now records provider changes without qualifying or overwriting model settings until both required model selectors are populated.
+  - Added regression coverage for empty, partial, and fully selected model configurations in `tests/test_configuration_session.py`.
+  - Documented the reproduction, root cause, permanent fix, and **Do not reintroduce** invariant in `docs/regressions/config-tui-provider-test-empty-models.md`.
+  - User-owned verification command: `./venv/bin/pytest tests/test_configuration_session.py -q`
+
+
 - Fixed **Approval Flow, Undefined Logger, and Internal Coding Engine Batch Tool Dispatch**:
   - Undefined Logger Elimination (`src/mana_agent/tui/app.py`, `src/mana_agent/execution_supervisor/supervisor.py`, `src/mana_agent/api_manager/executor.py`, `src/mana_agent/commands/main_cli.py`):
     - Added missing `import logging` and `logger = logging.getLogger(__name__)` across all affected modules.
