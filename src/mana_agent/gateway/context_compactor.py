@@ -204,6 +204,8 @@ class ContextCompactor:
             "turn_id": getattr(context, "turn_id", ""),
             "previous_route": getattr(context, "previous_route", ""),
             "conversation_summary": getattr(context, "conversation_summary", ""),
+            "conversation_context": getattr(context, "conversation_context", {}),
+            "task_execution_policies": getattr(context, "task_execution_policies", {}),
             "authenticated_user_id": getattr(context, "authenticated_user_id", ""),
             "routing_constraints": {
                 "atomic_child": getattr(context, "atomic_child", False),
@@ -456,6 +458,8 @@ class ContextCompactor:
             else ()
         ) or ()
         conv_summary = getattr(context, "conversation_summary", "")
+        dialogue = dict(getattr(context, "conversation_context", {}) or {})
+        task_policies = dict(getattr(context, "task_execution_policies", {}) or {})
         prev_turn_pointers = getattr(eff_envelope, "previous_turn_pointers", None) if eff_envelope else None
 
         def _build_bounded(
@@ -521,6 +525,8 @@ class ContextCompactor:
                 turn_id=getattr(context, "turn_id", ""),
                 previous_route=getattr(context, "previous_route", ""),
                 conversation_summary=summary,
+                conversation_context=dialogue,
+                task_execution_policies=task_policies,
                 artifact_evidence=art,
                 memory_task_candidates=tuple(mem),
                 memory_capsules_enabled=getattr(context, "memory_capsules_enabled", False),
@@ -554,6 +560,11 @@ class ContextCompactor:
 
         # Pass 2: Stale tool traces and tool schema trimming (if still exceeds budget)
         if breakdown.total_tokens > resolved_window:
+            # Preserve paired turns, source IDs and the explicit truncation
+            # marker. A prefix of an assistant offer cannot resolve "yes".
+            dialogue["messages"] = []
+            dialogue["truncated"] = True
+            dialogue["retrieval_required"] = bool(dialogue.get("latest_turn_id"))
             cur_tools = [
                 {"name": str(t.get("name") or ""), "description": str(t.get("description") or "")[:60]}
                 for t in cur_tools

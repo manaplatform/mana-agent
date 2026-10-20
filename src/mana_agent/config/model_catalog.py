@@ -117,9 +117,14 @@ _MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
     "gpt-5.6-terra": (400_000, 128_000),
     "gpt-6": (1_050_000, 128_000),
     "gpt-6-astra": (1_050_000, 128_000),
+    "gpt-6-luna": (1_050_000, 128_000),
+    "luna": (1_050_000, 128_000),
     "astra": (1_050_000, 128_000),
     "openai/gpt-6": (1_050_000, 128_000),
     "openai/gpt-6-astra": (1_050_000, 128_000),
+    "openai/gpt-6-luna": (1_050_000, 128_000),
+    "openai/gpt-5.6-luna": (400_000, 128_000),
+    "openai/luna": (1_050_000, 128_000),
     "openai/astra": (1_050_000, 128_000),
     "o3": (200_000, 100_000),
     "o3-mini": (200_000, 100_000),
@@ -203,7 +208,16 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "o3": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "gpt-6": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "gpt-6-astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "gpt-6-luna": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "gpt-5.6-luna": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "luna": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "openai/gpt-6": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "openai/gpt-6-luna": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "openai/gpt-6-astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "openai/gpt-5.6-luna": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "openai/luna": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
+    "openai/astra": frozenset({ModelCapability.TEXT_GENERATION, ModelCapability.REASONING, ModelCapability.TOOL_CALLING, ModelCapability.STRUCTURED_OUTPUT, ModelCapability.CODE, ModelCapability.IMAGE_INPUT}),
     "text-embedding-3-small": frozenset({ModelCapability.EMBEDDING}),
     "text-embedding-3-large": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/nv-embedqa-e5-v5": frozenset({ModelCapability.EMBEDDING}),
@@ -462,7 +476,12 @@ def normalize_capabilities(
     # or reasoning capability solely because a model is an LLM; unknown models
     # remain unclassified and stay usable via Advanced/manual entry.
     text_family = (
-        provider_id == "openai" and lowered.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-"))
+        provider_id == "openai"
+        and (
+            lowered.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-"))
+            or "luna" in lowered
+            or "astra" in lowered
+        )
     ) or (
         provider_id == "groq" and ("llama" in lowered or "mixtral" in lowered or "gemma" in lowered)
     ) or (

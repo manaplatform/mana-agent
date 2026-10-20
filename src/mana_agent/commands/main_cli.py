@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 
 from .cli_internal import *
@@ -7,6 +8,8 @@ from .output import build_output_sink
 from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup, run_setup_wizard
 from mana_agent.ui.banner import render_banner
+
+logger = logging.getLogger(__name__)
 
 
 def _is_interactive_terminal() -> bool:

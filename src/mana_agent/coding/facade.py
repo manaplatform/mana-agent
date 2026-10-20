@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from mana_agent.coding.internal_engine import InternalCodingEngine
+from mana_agent.batch.policy import TaskExecutionPolicy
 from mana_agent.coding.models import (
     CodingEngineMode,
     CodingTask,
@@ -132,7 +133,8 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             self._active_task_id = task_id
 
         try:
-            if self._active_mode == "external":
+            policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})
+            if self._active_mode == "external" and not policy.required:
                 func = getattr(super(), method)
                 result = func(request, **kwargs)
                 if isinstance(result, dict):
@@ -147,6 +149,20 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
                 self._active_task_id = None
 
     def _execute_internal(self, task_id: str, request: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        import copy
+        engine = copy.copy(self._internal_engine)
+        engine.extra_tools = dict(self._internal_engine.extra_tools)
+        runtime = kwargs.get("batch_runtime") or {}
+        for name in ("execution_supervisor", "taskboard", "batch_manager", "batch_authorize",
+                     "batch_authority", "batch_autonomous_config", "model", "provider"):
+            if name in runtime:
+                setattr(engine, name, runtime[name])
+        for tool in runtime.get("context_tools", []):
+            def invoke_context(_tool=tool, **arguments):
+                return _tool.invoke(arguments)
+            invoke_context.args_schema = tool.args_schema
+            engine.extra_tools[tool.name] = invoke_context
+        policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})
         allowed_files: list[str] = []
         prechecklist = kwargs.get("prechecklist_payload")
         if isinstance(prechecklist, dict):
@@ -159,6 +175,11 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             goal=request,
             allowed_files=allowed_files,
             requires_repository_write=True,
+            execution_policy=policy,
+            execution_mode="batch" if policy.required else "auto",
+            relevant_context=str(kwargs.get("relevant_context") or ""),
+            context={"batch_resume": kwargs.get("batch_resume") or {},
+                     "conversation_context_in_request": bool(kwargs.get("conversation_context_in_request"))},
         )
         workspace = WorkspaceContext(
             repository_path=self.repo_root,
@@ -168,17 +189,30 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             allow_in_place_write=True,
         )
 
-        if not self._internal_engine.model and self.codex_settings.model:
-            self._internal_engine.model = self.codex_settings.model
-        if not self._internal_engine.api_key and getattr(self.codex_settings, "api_key", None):
-            self._internal_engine.api_key = self.codex_settings.api_key
-        if not self._internal_engine.base_url and getattr(self.codex_settings, "base_url", None):
-            self._internal_engine.base_url = self.codex_settings.base_url
-        if not self._internal_engine.provider and getattr(self.codex_settings, "provider", None):
-            self._internal_engine.provider = self.codex_settings.provider
+        if not engine.model and self.codex_settings.model:
+            engine.model = self.codex_settings.model
+        if not engine.api_key and getattr(self.codex_settings, "api_key", None):
+            engine.api_key = self.codex_settings.api_key
+        if not engine.base_url and getattr(self.codex_settings, "base_url", None):
+            engine.base_url = self.codex_settings.base_url
+        if not engine.provider and getattr(self.codex_settings, "provider", None):
+            engine.provider = self.codex_settings.provider
 
         try:
-            res: CodingTaskResult = asyncio.run(self._internal_engine.execute(coding_task, workspace))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                from contextvars import copy_context
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    res: CodingTaskResult = pool.submit(
+                        copy_context().run, asyncio.run, engine.execute(coding_task, workspace)
+                    ).result()
+            else:
+                res: CodingTaskResult = asyncio.run(engine.execute(coding_task, workspace))
         except Exception as exc:
             return {
                 "answer": f"Internal coding execution failed: {exc}",
@@ -193,8 +227,14 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
         return {
             "answer": res.summary,
             "status": res.status,
+            "pending_operation": res.pending_operation.model_dump(mode="json") if res.pending_operation else None,
+            "human_input": res.human_input,
+            "goal_satisfied": False if res.status == "waiting" else None,
             "changed_files": res.changed_files,
             "commands_run": res.commands_run,
+            "tests_run": res.tests_run,
+            "tests_passed": res.tests_passed,
+            "error_code": "INTERNAL_EXECUTION_FAILED" if res.status in {"failed", "cancelled"} else None,
             "warnings": res.warnings,
             "errors": res.errors,
             "backend": "internal",

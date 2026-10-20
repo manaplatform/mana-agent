@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol, runtime_checkable
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
 from mana_agent.execution_supervisor.errors import (
@@ -572,6 +575,7 @@ class ExecutionSupervisor:
             assigned_agent=assigned_agent,
             assigned_model=assigned_model,
             runtime_provider=runtime_provider,
+            execution_policy=parent.execution_policy if parent else {},
             retry_budget=budget,
             idempotency_key=idempotency_hash,
             compensation_strategy=compensation_strategy,
@@ -587,6 +591,7 @@ class ExecutionSupervisor:
             token_estimate_source=estimate_source,
             monetary_budget=monetary_budget,
             deadline_at=selected_deadline,
+            deadline_is_explicit=bool(deadline_at or (parent and parent.state is not ExecutionState.COMPLETED and parent.deadline_is_explicit)),
             wait_policy=wait_policy,
             minimum_success_count=minimum_success_count,
             max_child_depth=self.config.max_child_depth,
@@ -1423,6 +1428,7 @@ class ExecutionSupervisor:
                 external_action_receipts=list(external_action_receipts),
                 resume_cursor=resume_cursor,
                 provider_metadata=_provider_metadata(provider_metadata or task.provider_metadata),
+                execution_policy=task.execution_policy,
             )
             task.provider_metadata = _provider_metadata(provider_metadata or task.provider_metadata)
             task.checkpoint_id = checkpoint.checkpoint_id
@@ -1685,6 +1691,85 @@ class ExecutionSupervisor:
             checkpoint_id=checkpoint_id,
             request_type=request_type,
         )
+
+    def suspend_for_batch(self, task_id: str, *, operation_id: str, expires_at: datetime,
+                          attempt_id: str, lease_token: str) -> TaskRecord:
+        """Release execution authority while a bounded provider request is pending."""
+        now = self.clock()
+
+        def suspend(task: TaskRecord) -> None:
+            if task.state is ExecutionState.WAITING and task.wake_up_reference == operation_id:
+                return
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.waiting_inbox_item_id or task.state not in {ExecutionState.RUNNING, ExecutionState.CHECKPOINTING}:
+                raise LeaseConflictError("Only the active execution may enter a Batch wait")
+            if expires_at <= now:
+                raise BudgetExceededError("Batch wait window has expired")
+            parent = self.store.get_task(task.parent_task_id) if task.parent_task_id else None
+            if not task.deadline_is_explicit and (parent is None or parent.state is ExecutionState.COMPLETED or parent.deadline_at is None):
+                if task.deadline_at:
+                    task.batch_active_seconds_remaining = max(0.0, (task.deadline_at - now).total_seconds())
+                    if task.batch_active_seconds_remaining <= 0:
+                        raise BudgetExceededError("Active execution deadline exceeded before Batch wait")
+                task.deadline_at = None
+            task.state = ExecutionState.WAITING
+            task.waiting_reason = "waiting_for_batch"
+            task.waiting_kind = "external_dependency"
+            task.wake_up_source = "openai_batch"
+            task.wake_up_reference = operation_id
+            task.resume_checkpoint_id = task.checkpoint_id
+            task.resume_operation = "resume_batch_operation"
+            task.batch_wait_started_at = now
+            task.batch_wait_expires_at = expires_at
+            task.provider_metadata.pop("batch_ready_operation", None)
+            task.lease_owner = task.lease_token = ""
+            task.lease_expires_at = None
+            task.updated_at = now
+
+        task, _ = self.store.update_task(task_id, suspend)
+        self._emit("batch_wait_started", task, operation_id=operation_id)
+        return task
+
+    def resume_from_batch(self, task_id: str, *, operation_id: str,
+                          provider_completed_at: datetime | None = None) -> TaskRecord:
+        """Consume a provider wakeup once; the caller must obtain a fresh lease."""
+        now = self.clock()
+
+        def resume(task: TaskRecord) -> None:
+            if task.state is not ExecutionState.WAITING or task.waiting_reason != "waiting_for_batch" or task.wake_up_reference != operation_id:
+                raise LeaseConflictError("Task is not waiting for this Batch operation")
+            if task.waiting_inbox_item_id or task.cancellation_status is not None:
+                raise LeaseConflictError("Batch completion cannot override a human wait or cancellation")
+            if task.batch_wait_expires_at and now > task.batch_wait_expires_at:
+                if provider_completed_at is None or provider_completed_at > task.batch_wait_expires_at:
+                    raise BudgetExceededError("Batch wait expired without provider completion within its window")
+            if task.deadline_at and task.deadline_at <= now:
+                raise BudgetExceededError("Explicit task deadline exceeded")
+            if task.token_budget is not None and task.token_usage >= task.token_budget:
+                raise BudgetExceededError("Task token budget exhausted while waiting")
+            if task.monetary_budget is not None and task.actual_cost >= task.monetary_budget:
+                raise BudgetExceededError("Task spending budget exhausted while waiting")
+            ancestor_id = task.parent_task_id
+            while ancestor_id:
+                ancestor = self.store.get_task(ancestor_id)
+                if ((ancestor.state in TERMINAL_STATES and ancestor.state is not ExecutionState.COMPLETED)
+                        or (ancestor.state is not ExecutionState.COMPLETED and ancestor.wall_clock_deadline_exceeded(now))):
+                    raise LeaseConflictError("Batch branch has a non-runnable ancestor")
+                ancestor_id = ancestor.parent_task_id
+            if task.batch_active_seconds_remaining is not None:
+                task.deadline_at = now + timedelta(seconds=task.batch_active_seconds_remaining)
+            task.state = ExecutionState.QUEUED
+            task.provider_metadata["batch_ready_operation"] = operation_id
+            task.waiting_reason = task.waiting_kind = task.wake_up_source = task.wake_up_reference = ""
+            task.resume_operation = task.resume_checkpoint_id = ""
+            task.batch_wait_started_at = task.batch_wait_expires_at = None
+            task.batch_active_seconds_remaining = None
+            task.assigned_worker = ""
+            task.updated_at = now
+
+        task, _ = self.store.update_task(task_id, resume)
+        self._emit("batch_operation_ready", task, operation_id=operation_id)
+        return task
 
     def record_external_wait(
         self,
@@ -3801,6 +3886,15 @@ class ExecutionSupervisor:
                 continue
             if task.state == ExecutionState.WAITING and task.waiting_inbox_item_id:
                 summary.unchanged.append(task.task_id)
+                continue
+            if task.state is ExecutionState.WAITING and task.waiting_reason == "waiting_for_batch":
+                # Provider execution expiry is not a result-import deadline.
+                # Reconcile the receipt before deciding whether the wave expired.
+                if task.deadline_at and task.deadline_at <= now:
+                    self.transition(task.task_id, ExecutionState.FAILED, reason="Batch wait deadline exceeded")
+                    summary.intervention_required.append(task.task_id)
+                else:
+                    summary.unchanged.append(task.task_id)
                 continue
             human_wait_in_tree = any(
                 candidate.root_task_id == task.root_task_id

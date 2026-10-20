@@ -15,6 +15,7 @@ from mana_agent.evals.ids import stable_hash
 from mana_agent.evals.recorder import record_current
 from mana_agent.media.models import MediaOperationDecision
 from mana_agent.server.models import ServerActionKind
+from mana_agent.batch.policy import TaskExecutionPolicy
 
 
 EntryRouteName = Literal[
@@ -85,6 +86,8 @@ class EntryRouteContext:
     user_message_id: str = ""
     previous_route: str = ""
     conversation_summary: str = ""
+    conversation_context: dict[str, Any] = field(default_factory=dict)
+    task_execution_policies: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_evidence: dict[str, Any] = field(default_factory=dict)
     memory_task_candidates: tuple[dict[str, str], ...] = ()
     memory_capsules_enabled: bool = False
@@ -101,6 +104,8 @@ class EntryRouteContext:
             "user_message_id": self.user_message_id,
             "previous_route": self.previous_route,
             "conversation_summary": self.conversation_summary,
+            "conversation_context": dict(self.conversation_context),
+            "task_execution_policies": dict(self.task_execution_policies),
             "artifact_evidence": dict(self.artifact_evidence),
             "memory_task_candidates": [dict(c) for c in self.memory_task_candidates] if self.memory_capsules_enabled else [],
             "memory_capsules_enabled": self.memory_capsules_enabled,
@@ -136,13 +141,28 @@ class EntryRoutingDecision:
     automation_operation: AutomationOperation | str = ""
     source: str = "model"
     runtime_capability_change: bool = False
+    execution_policy: TaskExecutionPolicy = field(default_factory=TaskExecutionPolicy)
+    resolved_request: str = ""
+    source_message_ids: tuple[str, ...] = ()
+    related_task_id: str = ""
+    clarification_question: str = ""
+    response_kind: Literal["task", "status", "clarification"] = "task"
+    context_request: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "execution_policy": self.execution_policy.model_dump(mode="json")}
+
 
 
 class _StrictRoutingOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class EntryContextRequest(_StrictRoutingOutput):
+    query: str = ""
+    message_ids: list[str] = Field(default_factory=list)
+    max_turns: int = Field(default=1, ge=1, le=5)
+    max_tokens: int = Field(default=2000, ge=1, le=12000)
 
 
 class EntryRoutingSSHTarget(_StrictRoutingOutput):
@@ -228,6 +248,13 @@ class EntryRoutingOutput(_StrictRoutingOutput):
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
     runtime_capability_change: bool
+    execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
+    resolved_request: str = ""
+    source_message_ids: list[str] = Field(default_factory=list)
+    related_task_id: str = ""
+    clarification_question: str = ""
+    response_kind: Literal["task", "status", "clarification"] = "task"
+    context_request: EntryContextRequest | None = None
 
 
 class EntryRoutingError(RuntimeError):
@@ -428,6 +455,24 @@ availability fallback for a cloud calendar or isolated public-browser request.
 
 Use previous_route and conversation_summary only for continuity. Reuse the active route for a true
 follow-up; reroute when the user's intent changes. Do not route by isolated keywords alone.
+Read conversation_context.messages including assistant replies before resolving references such as
+"yes, I want it" or "do that". Return resolved_request containing the user's intended action and
+source_message_ids naming the visible messages that support it. Never treat an assistant offer as
+permission to bypass an approval gate. If a referent is missing or marked retrieval_required,
+return conversation with context_request selecting a bounded conversation_context_read query
+or observed message_ids. That provisional route performs retrieval only; choose the actual route
+after observing the retrieved messages. If retrieval cannot resolve the ambiguity, return
+conversation with clarification_question; never invent an action.
+Select execution_policy.mode="batch", required=true ONLY when the user explicitly requests
+OpenAI Batch, or when related_task_id selects a supplied task_execution_policies entry requiring it.
+For an independent task use mode="auto", required=false. Batch selects the internal coding engine
+for this task only. Routing, status and clarification responses stay immediate. Do not substitute
+internal parallel batching or synchronous inference for the official OpenAI Batch API.
+Set response_kind=status for status-only requests, clarification for questions needed before work,
+and task for substantive execution or answer generation. Immediate status and clarification replies
+select conversation; executable routes must select task. An explicitly requested Batch answer is
+a task even when it needs no tools. Multiple file edits and commands in one repository workflow
+belong to coding; multi_task is for distinct child lifecycles.
 When routing_constraints.atomic_child is true, the request is a validated atomic child of an
 existing compound plan. Select its exact executable, capability-error, or unsupported route and
 never select multi_task. The parent conversation summary provides continuity only; it must not
@@ -1157,6 +1202,30 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: command_arguments must be a list of strings."
             )
+        execution_policy = TaskExecutionPolicy.model_validate(payload.get("execution_policy") or {})
+        context_request = payload.get("context_request") or {}
+        if context_request:
+            if route != "conversation":
+                raise EntryRoutingError("Context retrieval requires a provisional conversation route")
+            context_request = EntryContextRequest.model_validate(context_request).model_dump()
+        source_message_ids = tuple(payload.get("source_message_ids") or [])
+        related_task_id = str(payload.get("related_task_id") or "")
+        if context is not None:
+            visible_ids = {str(m.get("message_id")) for m in context.conversation_context.get("messages", [])}
+            visible_ids.add(context.user_message_id)
+            if any(identifier not in visible_ids for identifier in source_message_ids):
+                raise EntryRoutingError("Reference resolution selected an unobserved message")
+            if related_task_id and related_task_id not in context.task_execution_policies:
+                raise EntryRoutingError("Execution policy selected an unoffered task")
+            if related_task_id and execution_policy.mode == "auto":
+                execution_policy = TaskExecutionPolicy.model_validate(context.task_execution_policies[related_task_id])
+            if related_task_id and context.task_execution_policies[related_task_id].get("required") and not execution_policy.required:
+                raise EntryRoutingError("A related follow-up cannot discard its required OpenAI Batch policy")
+            if execution_policy.required and not execution_policy.source_message_id:
+                execution_policy = execution_policy.model_copy(update={"source_message_id": context.user_message_id})
+            inherited_source = context.task_execution_policies.get(related_task_id, {}).get("source_message_id")
+            if execution_policy.required and execution_policy.source_message_id not in visible_ids | {inherited_source}:
+                raise EntryRoutingError("Execution policy selected an unobserved source message")
         return EntryRoutingDecision(
             route=route,  # type: ignore[arg-type]
             confidence=confidence,
@@ -1182,6 +1251,13 @@ class EntryRouter:
             media_request=dict(media_request) if isinstance(media_request, dict) else {},
             automation_operation=automation_operation,
             runtime_capability_change=bool(payload.get("runtime_capability_change")),
+            execution_policy=execution_policy,
+            resolved_request=str(payload.get("resolved_request") or ""),
+            source_message_ids=source_message_ids,
+            related_task_id=related_task_id,
+            clarification_question=str(payload.get("clarification_question") or ""),
+            response_kind=payload.get("response_kind", "task"),
+            context_request=context_request,
         )
 
 

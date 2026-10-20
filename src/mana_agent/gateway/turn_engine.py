@@ -6,6 +6,8 @@ model-driven routing exist once in the gateway for every frontend.
 
 from __future__ import annotations
 
+from mana_agent.batch.policy import BatchPending
+
 import asyncio
 import json
 import logging
@@ -169,8 +171,19 @@ def _extract_search_operation_query(
 
 
 def _conversation_prompt(session_state: dict[str, Any], current_message: str) -> str:
-    """Return current turn message without automatic history or memory transcript injection."""
-    return str(current_message or "").strip()
+    """Build one chronological conversation prompt with the current message once."""
+    messages = list(session_state.get("messages") or [])
+    current_text = str(current_message or "").strip()
+    prior = messages[:-1] if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == current_text else messages
+    prior = [item for item in prior if item.get("role") in {"user", "assistant", "tool"}][-40:]
+    if not prior or not any(item.get("role") == "assistant" for item in prior):
+        return current_text
+    lines = ["Active conversation history (chronological):"]
+    labels = {"user": "User", "assistant": "Assistant", "tool": "Tool result"}
+    for item in prior:
+        lines.append(f"{labels.get(str(item.get('role')), 'User')}: {str(item.get('content') or '')}")
+    lines.extend(["", "Current user message:", current_text])
+    return "\n".join(lines)[-40000:]
 
 
 
@@ -274,6 +287,8 @@ def decide_search_operation(
         )
         data = _extract_json_object(_message_text(response))
     except SearchOperationDecisionError:
+        raise
+    except BatchPending:
         raise
     except Exception as exc:
         raise SearchOperationDecisionError(
@@ -481,6 +496,8 @@ def load_analysis_context(root: Path | str) -> str | None:
 
     try:
         from mana_agent.workspaces.paths import repository_analysis_dir, repository_id_for_path
+    except BatchPending:
+        raise
     except Exception:
         return None
 
@@ -490,6 +507,8 @@ def load_analysis_context(root: Path | str) -> str | None:
         return None
     try:
         context = _json.loads(ctx_path.read_text(encoding="utf-8"))
+    except BatchPending:
+        raise
     except Exception:
         return None
     if not isinstance(context, dict):
@@ -660,6 +679,8 @@ def _save_auto_chat_turn_state(
     )
     try:
         save_auto_chat_state(root, state)
+    except BatchPending:
+        raise
     except Exception as exc:
         logger.debug("Failed to save auto-chat state: %s", exc)
     return state
@@ -681,6 +702,8 @@ def _serialize_tool_traces(resp: Any) -> list[dict[str, Any]]:
         if hasattr(item, "to_dict"):
             try:
                 payload = item.to_dict()
+            except BatchPending:
+                raise
             except Exception:
                 payload = None
             if isinstance(payload, dict):
@@ -743,6 +766,7 @@ def process_chat_turn(
     dispatch_source: str = "",
     autonomous_controller: Any | None = None,
     continuation_evaluator: Any | None = None,
+    execution_context_included: bool = False,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -758,6 +782,8 @@ def process_chat_turn(
         if callable(event_sink):
             try:
                 event_sink(event_type, title, **kwargs)
+            except BatchPending:
+                raise
             except Exception:
                 pass
 
@@ -766,12 +792,15 @@ def process_chat_turn(
     if not isinstance(auto_chat_state, AutoChatSessionState):
         try:
             auto_chat_state = load_auto_chat_state(root)
+        except BatchPending:
+            raise
         except Exception:
             auto_chat_state = AutoChatSessionState()
         session_state["auto_chat_state"] = auto_chat_state
 
     question = resolve_auto_followup(original_question, auto_chat_state)
-    model_question = _conversation_prompt(session_state, question)
+    is_synthetic_selection = question.startswith('User selected ') or question.startswith('User provided free-text response ')
+    model_question = question if (execution_context_included or is_synthetic_selection) else _conversation_prompt(session_state, question)
     active_flow_id = session_state.get("active_flow_id")
     if isinstance(active_flow_id, str):
         active_flow_id = active_flow_id.strip() or None
@@ -794,6 +823,8 @@ def process_chat_turn(
                     "Active coding flow (decide flow_action explicitly):\n"
                     + json.dumps(flow_summary, ensure_ascii=False, sort_keys=True, default=str)[:4000]
                 )
+        except BatchPending:
+            raise
         except Exception:
             pass
 
@@ -813,6 +844,8 @@ def process_chat_turn(
                     part for part in (flow_routing_context, _conversation_prompt(session_state, question)) if part
                 ),
             )
+        except BatchPending:
+            raise
         except Exception as exc:
             logger.exception("gateway process_turn decision failed")
             return ChatTurnResult(
@@ -850,6 +883,8 @@ def process_chat_turn(
         if coding_agent is not None and hasattr(coding_agent, "reset_flow"):
             try:
                 coding_agent.reset_flow(active_flow_id)
+            except BatchPending:
+                raise
             except Exception:
                 pass
         active_flow_id = None
@@ -863,8 +898,10 @@ def process_chat_turn(
         auto_chat_mode = AutoChatMode.EDIT
 
     # Small direct edit (docs-only)
-    small = handle_small_direct_edit(root, question)
-    if small.handled:
+    small = None
+    if not (session_state.get("execution_policy") or {}).get("required"):
+        small = handle_small_direct_edit(root, question)
+    if small is not None and small.handled:
         _save_auto_chat_turn_state(
             root,
             mode=auto_chat_mode,
@@ -914,6 +951,8 @@ def process_chat_turn(
                 auto_chat_mode=auto_chat_mode.value,
                 trace=trace,
             )
+        except BatchPending:
+            raise
         except Exception as exc:
             logger.debug("web research path failed: %s", exc)
             return ChatTurnResult(
@@ -972,7 +1011,7 @@ def process_chat_turn(
                 and not agent_decision.code_editing_needed
             )
             if conversation_only:
-                answer_text = chat_service.ask_conversation(model_question)
+                answer_text = chat_service.ask_conversation(question)
                 resp = {
                     "answer": str(answer_text or ""),
                     "sources": [],
@@ -989,6 +1028,8 @@ def process_chat_turn(
                 resp = chat_service.ask(model_question, callbacks=ask_callbacks) if ask_callbacks else chat_service.ask(model_question)
             except TypeError:
                 resp = chat_service.ask(model_question)
+        except BatchPending:
+            raise
         except Exception as exc:
             return ChatTurnResult(
                 answer="",
@@ -1077,6 +1118,11 @@ def process_chat_turn(
             "turn_id": resolved_turn_id,
             "user_message_id": user_message_id,
             "dispatch_source": dispatch_source or "process_chat_turn",
+            "execution_policy": session_state.get("execution_policy", {}),
+            "relevant_context": json.dumps(session_state.get("conversation_context", {}), ensure_ascii=False),
+            "conversation_context_in_request": bool(execution_context_included or session_state.get("conversation_context", {}).get("messages")),
+            "batch_resume": session_state.get("batch_resume", {}),
+            "batch_runtime": session_state.get("_batch_coding_runtime", {}) if session_state.get("execution_policy", {}).get("required") else {},
         }
         if (gateway_task_id or resolved_turn_id)
         and bool(getattr(coding_agent, "supports_gateway_task_identity", False))
@@ -1188,6 +1234,13 @@ def process_chat_turn(
                 resume_core_result = None
             else:
                 result = _call() or {}
+            if result.get("status") == "waiting" and (result.get("pending_operation") or result.get("human_input")):
+                return ChatTurnResult(
+                    answer=str(result.get("answer") or "Waiting for OpenAI Batch"),
+                    mode="batch-waiting", used_coding_agent=True,
+                    changed_files=list(result.get("changed_files") or []),
+                    payload={**result, "goal_satisfied": False, "pending_required_work": True},
+                )
             if not (auto_continue and execute_plan_now and isinstance(result, dict)):
                 break
             terminal_reason = str(
@@ -1212,6 +1265,8 @@ def process_chat_turn(
                         break
                     elif cont_decision.action in {ContinuationAction.WAIT_FOR_USER, ContinuationAction.BLOCKED}:
                         break
+                except BatchPending:
+                    raise
                 except Exception as cont_exc:
                     logger.warning("Continuation evaluator error in coding turn loop: %s", cont_exc)
 
@@ -1238,6 +1293,10 @@ def process_chat_turn(
         err_code = (result or {}).get("error_code")
         interruption_reason = (result or {}).get("interruption_reason")
         is_interrupted = run_status in {"failed", "cancelled"} or bool(err_code) or bool(interruption_reason)
+        if not is_interrupted and not run_status:
+            if isinstance(result, dict):
+                result["status"] = "completed"
+                run_status = "completed"
 
         has_completed_core = (
             isinstance(saved_integration_checkpoint, dict)
@@ -1371,6 +1430,8 @@ def process_chat_turn(
             used_coding_agent=True,
             execution_id=gateway_task_id,
         )
+    except BatchPending:
+        raise
     except Exception as exc:
         logger.exception("gateway coding agent turn failed")
         exc_text = str(exc)

@@ -65,6 +65,7 @@ Potential capabilities include:
 - Create, rename, and remove files.
 - Apply structured patches.
 - Inspect repository changes and metadata.
+- Internal batch filesystem tools: prefer `batch_read_files` (or `repo_batch_read`) for multi-file reads, `batch_write_files` for multi-file atomic writes, `batch_apply_patches` (or `apply_patch_batch`) for multi-file patches, `batch_search_files` (or `repo_batch_search`) for multi-query searches, `batch_delete_files`, and `batch_move_files`.
 
 **Execution tools**
 - Shell and terminal execution.
@@ -101,6 +102,7 @@ Potential capabilities include:
 - Browser automation.
 - Computer-use tools.
 - Programmatic Tool Calling.
+- OpenAI and internal Batch operations (`batch_create_job`, `batch_submit_requests`, `batch_get_status`, `batch_check_status`, `batch_list_jobs`, `batch_cancel_job`, `batch_download_results`, `batch_retrieve_results`) providing cost discounts and parallel batch execution for eligible bulk asynchronous workloads.
 - Dynamic tool discovery.
 - Custom application functions.
 

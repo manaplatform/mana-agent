@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from mana_agent.batch.policy import PendingBatchOperation, TaskExecutionPolicy
+
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -42,7 +44,7 @@ def redact_event_value(value: Any, *, key: str = "") -> Any:
 
 
 class CodingTask(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="allow")
 
     task_id: str
     goal: str
@@ -53,6 +55,9 @@ class CodingTask(BaseModel):
     relevant_context: str = ""
     requires_repository_write: bool = True
     task_created_at: datetime | None = None
+    execution_mode: str = "auto"
+    execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
+    context: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("task_id", "goal")
     @classmethod
@@ -115,7 +120,7 @@ class AgentEvent(BaseModel):
     parent_event_id: str | None = None
     backend: str = "codex"
     sequence: int = Field(default=0, ge=0)
-    status: Literal["queued", "running", "success", "failed", "cancelled"] = "running"
+    status: Literal["queued", "running", "waiting", "success", "failed", "cancelled"] = "running"
     title: str = ""
     summary: str = ""
     thread_id: str = ""
@@ -149,7 +154,9 @@ class CodingTaskResult(BaseModel):
     task_id: str
     worker_id: str
     backend: str
-    status: Literal["completed", "failed", "cancelled"]
+    status: Literal["completed", "failed", "cancelled", "waiting"]
+    pending_operation: PendingBatchOperation | None = None
+    human_input: dict[str, str] = Field(default_factory=dict)
     summary: str = ""
     changed_files: list[str] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
@@ -263,6 +270,16 @@ class InternalCodingEngineConfig(BaseModel):
     program_timeout_seconds: int = Field(default=300, ge=1)
     max_parallel_tool_calls: int = Field(default=10, ge=1)
 
+    # Parallel scheduling and batch execution configuration
+    batch_operations_enabled: bool = True
+    max_batch_size: int = Field(default=50, ge=1)
+    max_batch_bytes: int = Field(default=2_000_000, ge=1000)
+    max_concurrency: int = Field(default=10, ge=1)
+    parallel_scheduling_enabled: bool = True
+    cache_enabled: bool = True
+    cache_ttl_seconds: int = Field(default=300, ge=0)
+    rollback_on_batch_failure: bool = True
+
     @property
     def max_tool_calls(self) -> int:
         return self.max_tool_calls_per_program
@@ -287,7 +304,7 @@ class CodingStatus(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     task_id: str
-    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    status: Literal["queued", "running", "waiting", "completed", "failed", "cancelled"]
     backend: str
     duration_ms: int | None = None
     changed_files: list[str] = Field(default_factory=list)

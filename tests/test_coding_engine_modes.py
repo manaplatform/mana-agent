@@ -83,6 +83,7 @@ def test_internal_engine_initialization_and_coding_execution(tmp_path: Path) -> 
         model="gpt-4o",
         supports_responses_api=True,
         programmatic_tool_calling_enabled=True,
+        llm_client=lambda task, workspace, tools, session: "Observed hello.py structure",
     )
     assert engine.mode == "internal"
     assert engine.name == "internal"

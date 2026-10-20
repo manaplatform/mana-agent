@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-3776AB?logo=python&logoColor=white" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-22A06B" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/Version-v0.4.0-8B5CF6" />
+  <img alt="Version" src="https://img.shields.io/badge/Version-v0.5.0-8B5CF6" />
   <a href="https://github.com/manaplatform/mana-agent"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Mana--Agent-181717?logo=github" /></a>
 </p>
 
@@ -26,6 +26,12 @@
 </p>
 
 ---
+
+OpenAI Batch is used only when explicitly requested. Other batching uses Mana's
+internal parallel execution. Required Batch tasks pause durably and resume with
+results; conversation follow-ups retain both user and assistant context across
+frontends. See [Batch execution and recovery](docs/26-openai-batch-api.md).
+
 
 ## What if your AI could do more than answer?
 

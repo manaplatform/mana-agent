@@ -355,6 +355,8 @@ class InboxRequest(StrictModel):
                 data["deduplication_key"] = data["idempotency_key"]
             if not data.get("expires_at"):
                 data["expires_at"] = datetime.now(timezone.utc) + timedelta(days=7)
+            if data.get("request_type") in {InboxRequestType.APPROVAL, "approval"} and not data.get("allowed_responses"):
+                data["allowed_responses"] = [ResponseOperation.APPROVE, ResponseOperation.DENY]
         return data
 
 

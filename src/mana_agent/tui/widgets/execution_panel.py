@@ -113,7 +113,9 @@ class ExecutionPanel(Vertical):
         for step in self.trace.steps:
             duration_str = f" ({step.duration_ms}ms)" if step.duration_ms is not None and step.status != "running" else ""
             detail_str = f" — {step.detail}" if step.detail else ""
-            if step.status == "running":
+            if step.status in {"waiting_approval", "pending_approval"}:
+                lines.append(f"[bold #f59e0b]⚠️ {step.title.lower()} · waiting for approval{detail_str}[/]")
+            elif step.status == "running":
                 lines.append(f"[dim]◌ {step.title.lower()} · running{detail_str}[/dim]")
             elif step.status in {"completed", "success"}:
                 lines.append(f"[bold $success]✓[/] {step.title.lower()}{detail_str}{duration_str}")
@@ -145,13 +147,19 @@ class ExecutionPanel(Vertical):
             current_title = str(event.get("title") or event_type.replace(".", " ").replace("_", " ").title())
             current_status = status
 
-        icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(current_status, "◌")
+        if current_status in {"waiting_approval", "pending_approval"}:
+            icon = "⚠️"
+            approval_suffix = " · waiting for approval"
+        else:
+            icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(current_status, "◌")
+            approval_suffix = ""
+
         if self.header:
             model = f" · {self.model}" if self.model else ""
             if self.backend and self.backend.lower() not in {"coding", "local"}:
-                self.header.update(f"{icon} {self.backend}{model} · {current_title.lower()}")
+                self.header.update(f"{icon} {self.backend}{model} · {current_title.lower()}{approval_suffix}")
             else:
-                self.header.update(f"{icon} {current_title.lower()}{model}")
+                self.header.update(f"{icon} {current_title.lower()}{model}{approval_suffix}")
 
         self._render_steps()
 

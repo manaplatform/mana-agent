@@ -1332,6 +1332,62 @@ def test_gateway_persists_same_session_history_without_duplicate_current_message
     assert {message["conversation_id"] for message in messages} == {session_id}
 
 
+@pytest.mark.parametrize("frontend", ["cli", "tui", "dashboard", "api", "acp", "a2a"])
+def test_frontends_refresh_assistant_context_after_external_append(tmp_path, frontend):
+    histories = []
+
+    class Conversation:
+        _ask_service = _DummyAskService()
+
+        def ask_conversation(self, question, *, recent_history=None, **kwargs):
+            histories.append(recent_history)
+            return "The offer was to add CSV export."
+
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=Conversation())
+    session_id = gateway.create_session(frontend=frontend)
+    # Cache the session before a different frontend/background worker appends.
+    gateway._session(session_id)
+    gateway._history_store.append(session_id, role="user", content="Explain export options", turn_id="prior")
+    offer = "Background. " * 60 + "I can add CSV export. Would you like that?"
+    gateway._history_store.append(session_id, role="assistant", content=offer, turn_id="prior")
+    result = gateway.process_turn(session_id, "yes, I want it")
+    assert not result.error
+    assert histories[-1][-1]["role"] == "assistant"
+    assert histories[-1][-1]["content"] == offer
+    assert all(message["content"] != "yes, I want it" for message in histories[-1])
+
+
+def test_reference_retrieval_precedes_routing_without_task_candidates(tmp_path, monkeypatch):
+    from mana_agent.gateway.entry_routing import EntryRoutingDecision
+    contexts = []
+    histories = []
+    class Conversation:
+        _ask_service = _DummyAskService()
+        def ask_conversation(self, question, *, recent_history=None, **kwargs):
+            histories.append(recent_history)
+            return "The earlier offer was CSV export."
+    gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=Conversation())
+    session_id = gateway.create_session(frontend="cli")
+    gateway._history_store.append(session_id, role="user", content="Discuss export", turn_id="offer")
+    gateway._history_store.append(session_id, role="assistant", content="I can add CSV export.", turn_id="offer")
+    for index in range(4):
+        gateway._history_store.append(session_id, role="user", content=f"Other topic {index}", turn_id=f"other-{index}")
+        gateway._history_store.append(session_id, role="assistant", content="Other answer", turn_id=f"other-{index}")
+    def route(*, user_prompt, context):
+        contexts.append(list(context.conversation_context["messages"]))
+        if len(contexts) == 1:
+            return EntryRoutingDecision(route="conversation", confidence=1, reason="Retrieve older offer",
+                required_sources=("none",), context_request={"query": "CSV export", "max_turns": 1})
+        assert any(message["content"] == "I can add CSV export." for message in contexts[-1])
+        return EntryRoutingDecision(route="conversation", confidence=1, reason="Explain the visible offer",
+                                    required_sources=("none",), resolved_request="Explain the earlier CSV offer")
+    monkeypatch.setattr(gateway._entry_router, "route", route)
+    result = gateway.process_turn(session_id, "What was that earlier offer?")
+    assert not result.error
+    assert len(contexts) == 2
+    assert any(message["content"] == "I can add CSV export." for message in histories[-1])
+
+
 def test_gateway_followup_uses_stack_owned_shared_memory(tmp_path: Path, monkeypatch) -> None:
     prompts: list[str] = []
 

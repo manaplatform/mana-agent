@@ -46,6 +46,15 @@ def __getattr__(name: str) -> Any:
 
         return InternalCodingEngine
     if name in {
+        "DependencyGraph",
+        "ParallelToolExecutor",
+        "OperationKind",
+        "ToolOperationNode",
+    }:
+        import mana_agent.coding.scheduler as sched
+
+        return getattr(sched, name)
+    if name in {
         "ProgrammaticExecutionSession",
         "ProgrammaticExecutionState",
         "ProgrammaticToolCall",
@@ -78,15 +87,19 @@ __all__ = [
     "CodingStatus",
     "CodingTask",
     "CodingTaskResult",
+    "DependencyGraph",
     "ExternalCodingEngine",
     "ExternalCodingEngineConfig",
     "INTERNAL_CODING_SYSTEM_INSTRUCTION",
     "InternalCodingEngine",
     "InternalCodingEngineConfig",
+    "OperationKind",
+    "ParallelToolExecutor",
     "ProgrammaticExecutionSession",
     "ProgrammaticExecutionState",
     "ProgrammaticToolCall",
     "ToolExecutionDispatcher",
+    "ToolOperationNode",
     "UnifiedCodingAgentFacade",
     "WorkspaceContext",
     "build_programmatic_tool_definitions",

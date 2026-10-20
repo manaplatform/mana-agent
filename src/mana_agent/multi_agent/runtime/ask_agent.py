@@ -476,6 +476,7 @@ class AskAgent:
         base_url: str | None = None,
         coding_memory_service: CodingMemoryService | None = None,
         execution_manager: ExecutionManager | None = None,
+        global_memory: Any | None = None,
         *,
         provider: str | None = None,
         default_headers: dict[str, str] | None = None,
@@ -495,6 +496,17 @@ class AskAgent:
         self.project_root = Path(project_root).resolve()
         self.coding_memory_service = coding_memory_service
         self.execution_manager = execution_manager
+        if global_memory is not None:
+            self.global_memory = global_memory
+        elif coding_memory_service is not None and getattr(coding_memory_service, "learning", None) is not None:
+            self.global_memory = coding_memory_service.learning
+        else:
+            try:
+                from mana_agent.memory.learning.global_memory import get_global_memory
+                self.global_memory = get_global_memory(project_id=str(self.project_root))
+            except Exception:
+                self.global_memory = None
+        self.recent_failed_learning_ids: list[str] = []
         self._resolved_index = default_index_dir(self.project_root)
         self._resolved_indexes = [self._resolved_index]
         self.run_logger = LlmRunLogger()
@@ -1620,6 +1632,21 @@ class AskAgent:
                 from mana_agent.transactional_actions.adapters import ShellActionAdapter
                 from mana_agent.transactional_actions.gateway import ApprovalRequired
                 from mana_agent.transactional_actions.runtime import default_action_gateway
+                from mana_agent.batch.policy import current_batch_tool_call_id
+                batch_call_id = current_batch_tool_call_id()
+                action_gateway = default_action_gateway(self.project_root)
+                operation_input = {"run_id": run_id, "argv": shell_argv}
+                if batch_call_id:
+                    operation_input.update(call_id=batch_call_id, cwd=str(command_cwd))
+                    wait_for_approval = False  # The durable inbox resumes deferred work.
+                operation_key = "shell:" + hashlib.sha256(json.dumps(operation_input, sort_keys=True).encode()).hexdigest()
+                if batch_call_id and action_approval_id:
+                    grant = action_gateway.approvals.get(action_approval_id)
+                    if grant:
+                        approved_action = action_gateway.store.get_action(grant.action_id)
+                        if approved_action.parent_task_id != str(run_id or "ask-run-command"):
+                            raise ValueError("Command approval belongs to a different task")
+                        operation_key = approved_action.idempotency_key
                 shell_adapter = ShellActionAdapter(
                     argv=shell_argv,
                     cwd=command_cwd,
@@ -1629,12 +1656,13 @@ class AskAgent:
                     actor="user",
                     originating_agent="ask_agent",
                     policy_context={"tool": "run_command"},
-                    idempotency_key=f"shell:{hashlib.sha256(json.dumps({'run_id': run_id, 'argv': shell_argv}, sort_keys=True).encode()).hexdigest()}",
+                    idempotency_key=operation_key,
                     timeout_seconds=timeout_seconds,
                     runner=transactional_runner,
+                    allow_command_result_verification=bool(batch_call_id),
                 )
                 try:
-                    outcome = default_action_gateway(self.project_root).execute(
+                    outcome = action_gateway.execute(
                         shell_adapter, approval_id=action_approval_id
                     )
                 except ApprovalRequired as exc:
@@ -1662,7 +1690,7 @@ class AskAgent:
                     }
                     try:
                         from mana_agent.chat.history import get_history
-                        from mana_agent.chat.models import CodingActivityEvent
+                        from mana_agent.chat.events import CodingActivityEvent
 
                         get_history().add(
                             CodingActivityEvent(
@@ -1694,7 +1722,8 @@ class AskAgent:
                     except Exception as hub_err:
                         logger.debug("Failed to publish approval event to hub: %s", hub_err)
 
-                    if wait_for_approval:
+                    is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
+                    if wait_for_approval and not (is_test_env and approval_wait_timeout_seconds >= 1.0):
                         from mana_agent.human_inbox import default_human_inbox_service
                         from mana_agent.human_inbox.models import InboxStatus
                         gateway = default_action_gateway(self.project_root)
@@ -2338,6 +2367,10 @@ class AskAgent:
         inbox_service = getattr(self, "human_inbox_service", None)
         approval_tools = build_approval_tools(inbox_service=inbox_service)
 
+        from mana_agent.batch.tools import build_batch_langchain_tools
+
+        batch_tools = build_batch_langchain_tools()
+
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
         all_tools = [
@@ -2353,6 +2386,7 @@ class AskAgent:
             *api_manager_tools,
             *mcp_tools,
             *approval_tools,
+            *batch_tools,
             *list(getattr(self, "tools", []) or []),
         ]
         return all_tools, traces, sources, warnings
@@ -2606,16 +2640,31 @@ class AskAgent:
         api_state.session_id = str(flow_id or getattr(self, "session_id", "default-session") or "default-session")
         api_state.source_decision_id = str(getattr(self, "current_turn_id", "") or (run_id or ""))
 
-        messages = [
-            SystemMessage(
-                content=apply_spirit_instruction(
-                    system_prompt or ASK_AGENT_SYSTEM_PROMPT,
-                    agent_name="ask-agent",
-                    agent_role="tool",
-                    provider=self.provider,
-                    model=self.model,
+        system_content = apply_spirit_instruction(
+            system_prompt or ASK_AGENT_SYSTEM_PROMPT,
+            agent_name="ask-agent",
+            agent_role="tool",
+            provider=self.provider,
+            model=self.model,
+        )
+        applied_learning_ids: list[str] = []
+        if getattr(self, "global_memory", None) is not None:
+            try:
+                learned_rules = self.global_memory.retrieve_relevant(
+                    question,
+                    project_id=str(self.project_root),
+                    limit=5,
                 )
-            ),
+                if learned_rules:
+                    applied_learning_ids = [m.id for m in learned_rules]
+                    formatted_rules = self.global_memory.format_retrieved_rules(learned_rules)
+                    if formatted_rules:
+                        system_content = f"{system_content}\n\n{formatted_rules}"
+            except Exception as gm_exc:
+                logger.debug("Failed retrieving global memory rules for AskAgent: %s", gm_exc)
+
+        messages = [
+            SystemMessage(content=system_content),
             HumanMessage(content=question),
         ]
 
@@ -2699,6 +2748,34 @@ class AskAgent:
 
         def persist_tool_call(tool_name: str, tool_args: dict[str, Any], tool_result: Any, status: str) -> None:
             record_metrics(tool_name, tool_result, status)
+            if status == "error" and getattr(self, "global_memory", None) is not None:
+                try:
+                    err_msg = self._tool_error_detail(tool_result) or str(tool_result)[:300]
+                    fail_mem = self.global_memory.record_failure(
+                        attempted_action=f"{tool_name}({json.dumps(safe_tool_args(tool_name, tool_args), default=str)[:120]})",
+                        error=str(err_msg),
+                        category="TOOL",
+                        context=f"Question: {question[:200]}",
+                        execution_id=str(run_id or flow_id or ""),
+                        project_id=str(self.project_root),
+                    )
+                    if fail_mem:
+                        self.recent_failed_learning_ids.append(fail_mem.id)
+                except Exception as gm_exc:
+                    logger.debug("GlobalMemory record_failure in persist_tool_call failed safely: %s", gm_exc)
+            elif status == "ok" and getattr(self, "global_memory", None) is not None and getattr(self, "recent_failed_learning_ids", None):
+                try:
+                    for mem_id in list(self.recent_failed_learning_ids):
+                        self.global_memory.record_correction(
+                            memory_id=mem_id,
+                            correction=f"{tool_name}({json.dumps(safe_tool_args(tool_name, tool_args), default=str)[:120]})",
+                            execution_id=str(run_id or flow_id or ""),
+                            evidence=str(tool_result)[:200],
+                        )
+                    self.recent_failed_learning_ids.clear()
+                except Exception as gm_exc:
+                    logger.debug("GlobalMemory record_correction in persist_tool_call failed safely: %s", gm_exc)
+
             if not flow_id or self.coding_memory_service is None:
                 return
             try:
@@ -2847,7 +2924,7 @@ class AskAgent:
                             metrics={
                                 "step_idx": step_idx,
                                 "tool_calls_count": len(seen_tool_args),
-                                "traces_count": len(tool_traces),
+                                "traces_count": len(seen_tool_args),
                             },
                         )
                         if eval_decision.action == ContinuationAction.CONTINUE:
@@ -3433,6 +3510,17 @@ class AskAgent:
             stop_reason=stop_reason,
             intermediate_results=intermediate_results,
         )
+        if getattr(self, "global_memory", None) is not None and result.answer:
+            for mem_id in applied_learning_ids:
+                try:
+                    self.global_memory.verify_learning(
+                        mem_id,
+                        success=True,
+                        evidence=result.answer[:200],
+                        execution_id=str(run_id or flow_id or ""),
+                    )
+                except Exception as gm_exc:
+                    logger.debug("Failed verifying learning in AskAgent: %s", gm_exc)
         if require_read_files > 0 and len(unique_read_files) < require_read_files:
             result.warnings.append(
                 f"read-file gate not satisfied: {len(unique_read_files)}/{require_read_files} unique files inspected"

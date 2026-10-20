@@ -496,6 +496,7 @@ def build_chat_stack(
                 api_key=inference_connection.api_key,
                 base_url=effective_base_url,
             )
+            internal_engine.enabled = bool(getattr(settings, "mana_internal_coding_enabled", True))
             coding_agent_instance = facade_cls(
                 repo_root=coding_repository_root,
                 working_directory=coding_working_directory,
@@ -649,6 +650,8 @@ def build_chat_stack(
             continue
         if hasattr(component, "context_cost_governor"):
             component.context_cost_governor = context_cost_governor
+        if hasattr(component, "global_memory") and getattr(component, "global_memory", None) is None:
+            component.global_memory = getattr(memory_service, "learning", None)
         for attribute in ("llm", "planner_llm", "model_client"):
             model_client = getattr(component, attribute, None)
             if model_client is not None and hasattr(model_client, "context_cost_governor"):

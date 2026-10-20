@@ -197,7 +197,9 @@ class MainAgent:
             config=AutonomousExecutionConfig(),
             supervisor=self.execution_supervisor,
             taskboard=self.taskboard,
+            router=self.router,
             evaluator=ContinuationEvaluator(llm=routing_llm) if routing_llm is not None else None,
+            global_memory=getattr(self.memory_service, "learning", None),
         )
 
     def run_user_request(
@@ -350,172 +352,189 @@ class MainAgent:
                 scope.repository_ids,
                 worker_ids[0] if worker_ids else self.queue_manager.default_worker_agent_id,
             )
-        head = self._agent(AgentRole.HEAD_DECISION, HeadDecisionAgent)
-        head.decide(task.task_id, route, self.decision_room)
-        self.memory.remember_agent(
-            head.agent_id,
-            f"Decided route {route.route_name} for task {task.task_id}: {route.reason_summary}",
-        )
-        planner = self._agent(AgentRole.PLANNER, PlannerAgent)
-        plan = planner.plan(
-            task.task_id,
-            request,
-            route.route_name,
-            runtime_capability_change=route.runtime_capability_change,
-        )
-        self.memory.remember_agent(
-            planner.agent_id,
-            f"Created plan for task {task.task_id}; verification commands: "
-            f"{', '.join(getattr(plan, 'verification_commands', []) or [])}",
-        )
-        self.memory.remember_task(
-            f"Plan created for task {task.task_id}; verification commands: "
-            f"{', '.join(getattr(plan, 'verification_commands', []) or [])}"
-        )
-        self.taskboard.update_status(task.task_id, TaskStatus.IN_PROGRESS, reason="Specialist agents are handling the routed workflow.")
-        managed_workspace = None
-        if (
-            self.managed_worktrees_enabled
-            and self.workspace_manager is not None
-            and coding_route_requires_worktree(route.route_name)
-            and git_intent is None
-        ):
-            # Git intent workflows operate on the user's primary checkout with the existing safety model.
-            # Mutation-oriented coding/tool routes get an isolated managed worktree.
-            managed_workspace = self._allocate_managed_workspace(
-                task.task_id,
-                title=title,
-                assigned_agent_id=self.registry.find_by_role(AgentRole.CODING).agent_id,
+        def specialist_runner(step_idx: int, ctx: dict[str, Any]) -> dict[str, Any]:
+            head = self._agent(AgentRole.HEAD_DECISION, HeadDecisionAgent)
+            head.decide(task.task_id, route, self.decision_room)
+            self.memory.remember_agent(
+                head.agent_id,
+                f"Decided route {route.route_name} for task {task.task_id}: {route.reason_summary}",
             )
-        if route.route_name == "analyze":
-            self._agent(AgentRole.RESEARCH, ResearchAgent).collect_evidence(task.task_id, "Analyze flow delegated to existing analyzer after multi-agent route creation.")
-        if route.route_name in {"coding", "tool", "high_risk_tool"}:
-            self.taskboard.add_evidence(task.task_id, "QueueManager is the only approved tool execution path.")
-            if managed_workspace is not None and self.workspace_manager is not None:
-                try:
-                    self.workspace_manager.mark_running(
-                        task.task_id,
-                        agent_id=self.registry.find_by_role(AgentRole.CODING).agent_id,
-                    )
-                    self._sync_task_workspace_fields(task.task_id)
-                except WorkspaceError as exc:
-                    self.taskboard.add_blocker(task.task_id, f"Managed workspace failed to enter running: {exc}")
-            if git_intent is not None:
-                self._delegate_git_intent_work(task.task_id, git_intent)
-            else:
-                self._delegate_initial_tool_work(task.task_id, request, route.route_name)
-        if route.risk_level.value in {"medium", "high"} or len(route.required_agents) > 4:
-            self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")
-        verification_passed: bool | None = None
-        if route.requires_verification:
-            if managed_workspace is not None and self.workspace_manager is not None:
-                try:
-                    self.workspace_manager.mark_verifying(
-                        task.task_id,
-                        agent_id=self.registry.find_by_role(AgentRole.VERIFIER).agent_id,
-                    )
-                    self._sync_task_workspace_fields(task.task_id)
-                except WorkspaceError:
-                    pass
-            verifier = self._agent(AgentRole.VERIFIER, VerifierAgent)
-            verification_commands = self._verification_commands(plan.verification_commands)
-            if git_intent is not None:
-                verification = verifier.execute_git_verification(task.task_id, wants_push=git_intent.wants_push, target_branch=git_intent.target_branch)
-            else:
-                verification = verifier.execute_verification(task.task_id, verification_commands)
-            verification_passed = bool(verification.passed)
-            # VERIFYING is an evidence-bearing state. The verifier must first
-            # persist its result; planned commands alone are not execution.
-            self.taskboard.update_status(
+            planner = self._agent(AgentRole.PLANNER, PlannerAgent)
+            plan = planner.plan(
                 task.task_id,
-                TaskStatus.VERIFYING,
-                reason="VerifierAgent recorded executed verification evidence.",
+                request,
+                route.route_name,
+                runtime_capability_change=route.runtime_capability_change,
             )
             self.memory.remember_agent(
-                verifier.agent_id,
-                f"Recorded verification for task {task.task_id}: passed={verification.passed}; {verification.summary}",
+                planner.agent_id,
+                f"Created plan for task {task.task_id}; verification commands: "
+                f"{', '.join(getattr(plan, 'verification_commands', []) or [])}",
             )
             self.memory.remember_task(
-                f"Verification recorded: passed={verification.passed}; summary={verification.summary}"
+                f"Plan created for task {task.task_id}; verification commands: "
+                f"{', '.join(getattr(plan, 'verification_commands', []) or [])}"
             )
-            if not verification.passed:
-                self._agent(AgentRole.REVIEWER, ReviewerAgent).reject_weak_evidence(task.task_id, verification.summary)
+            self.taskboard.update_status(task.task_id, TaskStatus.IN_PROGRESS, reason="Specialist agents are handling the routed workflow.")
+            managed_workspace = None
+            if (
+                self.managed_worktrees_enabled
+                and self.workspace_manager is not None
+                and coding_route_requires_worktree(route.route_name)
+                and git_intent is None
+            ):
+                # Git intent workflows operate on the user's primary checkout with the existing safety model.
+                # Mutation-oriented coding/tool routes get an isolated managed worktree.
+                managed_workspace = self._allocate_managed_workspace(
+                    task.task_id,
+                    title=title,
+                    assigned_agent_id=self.registry.find_by_role(AgentRole.CODING).agent_id,
+                )
+            if route.route_name == "analyze":
+                self._agent(AgentRole.RESEARCH, ResearchAgent).collect_evidence(task.task_id, "Analyze flow delegated to existing analyzer after multi-agent route creation.")
+            if route.route_name in {"coding", "tool", "high_risk_tool"}:
+                self.taskboard.add_evidence(task.task_id, "QueueManager is the only approved tool execution path.")
                 if managed_workspace is not None and self.workspace_manager is not None:
                     try:
-                        self.workspace_manager.mark_failed(task.task_id, error=verification.summary, retain=True)
+                        self.workspace_manager.mark_running(
+                            task.task_id,
+                            agent_id=self.registry.find_by_role(AgentRole.CODING).agent_id,
+                        )
+                        self._sync_task_workspace_fields(task.task_id)
+                    except WorkspaceError as exc:
+                        self.taskboard.add_blocker(task.task_id, f"Managed workspace failed to enter running: {exc}")
+                if git_intent is not None:
+                    self._delegate_git_intent_work(task.task_id, git_intent)
+                else:
+                    self._delegate_initial_tool_work(task.task_id, request, route.route_name)
+            if route.risk_level.value in {"medium", "high"} or len(route.required_agents) > 4:
+                self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")
+            verification_passed: bool | None = None
+            if route.requires_verification:
+                if managed_workspace is not None and self.workspace_manager is not None:
+                    try:
+                        self.workspace_manager.mark_verifying(
+                            task.task_id,
+                            agent_id=self.registry.find_by_role(AgentRole.VERIFIER).agent_id,
+                        )
                         self._sync_task_workspace_fields(task.task_id)
                     except WorkspaceError:
                         pass
-        if verification_passed:
-            self._record_wiring_reachability(task.task_id, verification)
-        reviewer = self._agent(AgentRole.REVIEWER, ReviewerAgent)
-        approved = reviewer.review_evidence(task.task_id, route_name=route.route_name, requires_verification=route.requires_verification)
-        if approved and managed_workspace is not None and self.workspace_manager is not None:
-            try:
-                branch_review = review_task_branch(
-                    self.workspace_manager,
-                    task.task_id,
-                    reviewer_agent_id=reviewer.agent_id,
-                    verification_passed=verification_passed if route.requires_verification else True,
-                    hierarchy_ok=not bool(self.taskboard.get_task(task.task_id).hierarchy_violations),
-                    extra_blockers=list(self.taskboard.get_task(task.task_id).blockers),
-                )
-                self.taskboard.add_evidence(task.task_id, branch_review.get("summary") or "Managed branch review completed.")
-                if not branch_review.get("approved"):
-                    approved = False
-                    self.taskboard.add_blocker(
-                        task.task_id,
-                        f"Managed workspace review rejected: {branch_review.get('summary') or 'not approved'}",
-                    )
+                verifier = self._agent(AgentRole.VERIFIER, VerifierAgent)
+                verification_commands = self._verification_commands(plan.verification_commands)
+                if git_intent is not None:
+                    verification = verifier.execute_git_verification(task.task_id, wants_push=git_intent.wants_push, target_branch=git_intent.target_branch)
                 else:
-                    self.taskboard.add_evidence(
-                        task.task_id,
-                        f"Merge candidate ready on {branch_review.get('branch')} "
-                        f"(base {str(branch_review.get('base_revision') or '')[:12]}). "
-                        "No automatic merge into the default branch was performed.",
-                    )
-                self._sync_task_workspace_fields(task.task_id)
-            except WorkspaceError as exc:
-                approved = False
-                self.taskboard.add_blocker(task.task_id, f"Managed workspace review failed: {exc}")
-        self._deactivate_subagents(task.task_id, subagent_ids + worker_ids)
-        task_after_review = self.taskboard.get_task(task.task_id)
-        if git_intent is not None and task_after_review.blockers:
-            approved = False
-        if approved:
-            done_reason = "Multi-agent hierarchy completed and reviewer approved evidence."
-            if managed_workspace is not None:
-                done_reason += " Managed worktree is a merge candidate; explicit merge intent is still required."
-            supervisor_task = self.execution_supervisor.store.get_task_or_none(task.task_id)
-            if supervisor_task is not None:
+                    verification = verifier.execute_verification(task.task_id, verification_commands)
+                verification_passed = bool(verification.passed)
+                # VERIFYING is an evidence-bearing state. The verifier must first
+                # persist its result; planned commands alone are not execution.
                 self.taskboard.update_status(
                     task.task_id,
                     TaskStatus.VERIFYING,
-                    reason=f"{done_reason} Awaiting authoritative supervisor completion projection.",
+                    reason="VerifierAgent recorded executed verification evidence.",
                 )
-            answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
-        else:
-            self.taskboard.update_status(task.task_id, TaskStatus.BLOCKED, reason="Reviewer rejected weak or incomplete hierarchy evidence.")
-            answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
-            if managed_workspace is not None and self.workspace_manager is not None:
+                self.memory.remember_agent(
+                    verifier.agent_id,
+                    f"Recorded verification for task {task.task_id}: passed={verification.passed}; {verification.summary}",
+                )
+                self.memory.remember_task(
+                    f"Verification recorded: passed={verification.passed}; summary={verification.summary}"
+                )
+                if not verification.passed:
+                    self._agent(AgentRole.REVIEWER, ReviewerAgent).reject_weak_evidence(task.task_id, verification.summary)
+                    if managed_workspace is not None and self.workspace_manager is not None:
+                        try:
+                            self.workspace_manager.mark_failed(task.task_id, error=verification.summary, retain=True)
+                            self._sync_task_workspace_fields(task.task_id)
+                        except WorkspaceError:
+                            pass
+            if verification_passed:
+                self._record_wiring_reachability(task.task_id, verification)
+            reviewer = self._agent(AgentRole.REVIEWER, ReviewerAgent)
+            approved = reviewer.review_evidence(task.task_id, route_name=route.route_name, requires_verification=route.requires_verification)
+            if approved and managed_workspace is not None and self.workspace_manager is not None:
                 try:
-                    current = self.workspace_manager.get_for_task(task.task_id)
-                    if current.status.value not in {"retained", "failed", "merge_candidate", "merged"}:
-                        self.workspace_manager.mark_interrupted(task.task_id, error="review rejected or blocked")
+                    branch_review = review_task_branch(
+                        self.workspace_manager,
+                        task.task_id,
+                        reviewer_agent_id=reviewer.agent_id,
+                        verification_passed=verification_passed if route.requires_verification else True,
+                        hierarchy_ok=not bool(self.taskboard.get_task(task.task_id).hierarchy_violations),
+                        extra_blockers=list(self.taskboard.get_task(task.task_id).blockers),
+                    )
+                    self.taskboard.add_evidence(task.task_id, branch_review.get("summary") or "Managed branch review completed.")
+                    if not branch_review.get("approved"):
+                        approved = False
+                        self.taskboard.add_blocker(
+                            task.task_id,
+                            f"Managed workspace review rejected: {branch_review.get('summary') or 'not approved'}",
+                        )
+                    else:
+                        self.taskboard.add_evidence(
+                            task.task_id,
+                            f"Merge candidate ready on {branch_review.get('branch')} "
+                            f"(base {str(branch_review.get('base_revision') or '')[:12]}). "
+                            "No automatic merge into the default branch was performed.",
+                        )
                     self._sync_task_workspace_fields(task.task_id)
-                except WorkspaceError:
-                    pass
-        self.memory.remember_task(f"Final summary produced for task {task.task_id}: {answer[:500]}")
-        workshop = self._run_experience_workshop(task.task_id, answer, approved=approved)
-        if workshop and workshop.proposal_result and workshop.proposal_result.proposal:
-            proposal = workshop.proposal_result.proposal
-            answer += (
-                "\n\nExperience candidate detected\n"
-                f"Reusable workflow: {proposal.display_name}\n"
-                f"Confidence: {proposal.confidence:.2f}\n"
-                f"Proposal: {proposal.proposal_id}\n"
-                "Review with `mana-agent skill proposal review " + proposal.proposal_id + "`."
-            )
+                except WorkspaceError as exc:
+                    approved = False
+                    self.taskboard.add_blocker(task.task_id, f"Managed workspace review failed: {exc}")
+            self._deactivate_subagents(task.task_id, subagent_ids + worker_ids)
+            task_after_review = self.taskboard.get_task(task.task_id)
+            if git_intent is not None and task_after_review.blockers:
+                approved = False
+            if approved:
+                done_reason = "Multi-agent hierarchy completed and reviewer approved evidence."
+                if managed_workspace is not None:
+                    done_reason += " Managed worktree is a merge candidate; explicit merge intent is still required."
+                supervisor_task = self.execution_supervisor.store.get_task_or_none(task.task_id)
+                if supervisor_task is not None and task.status != TaskStatus.VERIFYING:
+                    self.taskboard.update_status(
+                        task.task_id,
+                        TaskStatus.VERIFYING,
+                        reason=f"{done_reason} Awaiting authoritative supervisor completion projection.",
+                    )
+                step_answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
+            else:
+                self.taskboard.update_status(task.task_id, TaskStatus.BLOCKED, reason="Reviewer rejected weak or incomplete hierarchy evidence.")
+                step_answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
+                if managed_workspace is not None and self.workspace_manager is not None:
+                    try:
+                        current = self.workspace_manager.get_for_task(task.task_id)
+                        if current.status.value not in {"retained", "failed", "merge_candidate", "merged"}:
+                            self.workspace_manager.mark_interrupted(task.task_id, error="review rejected or blocked")
+                        self._sync_task_workspace_fields(task.task_id)
+                    except WorkspaceError:
+                        pass
+            self.memory.remember_task(f"Final summary produced for task {task.task_id}: {step_answer[:500]}")
+            workshop = self._run_experience_workshop(task.task_id, step_answer, approved=approved)
+            if workshop and workshop.proposal_result and workshop.proposal_result.proposal:
+                proposal = workshop.proposal_result.proposal
+                step_answer += (
+                    "\n\nExperience candidate detected\n"
+                    f"Reusable workflow: {proposal.display_name}\n"
+                    f"Confidence: {proposal.confidence:.2f}\n"
+                    f"Proposal: {proposal.proposal_id}\n"
+                    "Review with `mana-agent skill proposal review " + proposal.proposal_id + "`."
+                )
+            return {
+                "answer": step_answer,
+                "summary": step_answer,
+                "verification_passed": verification_passed if verification_passed is not None else True,
+                "goal_satisfied": approved,
+                "output": step_answer,
+            }
+
+        runner = step_runner or specialist_runner
+        exec_res = self.autonomous_controller.execute_goal(
+            task_id=task.task_id,
+            user_goal=request,
+            step_runner=runner,
+            strategy_hint=route.route_name,
+        )
+        answer = exec_res.final_response or f"Execution completed with status {exec_res.status}."
         return MainAgentResult(
             task.task_id,
             route.route_name,

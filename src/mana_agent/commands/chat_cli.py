@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 import sys
@@ -11,7 +10,13 @@ from .cli_internal import _build_project_llm_analyzer
 import logging
 
 logger = logging.getLogger(__name__)
-from .ui_helpers import log_worker_event
+from .ui_helpers import (
+    log_worker_event,
+    _render_coding_sections,
+    _render_answer_sections,
+    _render_selection_block,
+    _resolve_ui_selection_input,
+)
 from .chat_analyze_command import (
     analyze_command_args,
     handle_analyze_command,
@@ -22,17 +27,13 @@ from mana_agent.multi_agent.runtime.auto_chat import (
     AutoChatMode,
     AutoChatSessionState,
     apply_auto_chat_tool_policy,
-    classify_auto_chat_intent,
-    is_plan_execution_request,
     load_auto_chat_state,
-    resolve_auto_followup,
     save_auto_chat_state,
 )
 from mana_agent.multi_agent.runtime.agent_session import route_for_turn
 from mana_agent.model_routing.models import RoutingFailure
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
-from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
 from mana_agent.multi_agent.runtime.tools_executor import build_tools_executor_with_fallback
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision, AgentDecisionEngine
 from mana_agent.search.config import SearchConfig
@@ -413,6 +414,16 @@ def _build_planning_instruction(
         lines.append(f"Q{idx}: {question}")
         lines.append(f"A{idx}: {answer}")
     return "\n".join(lines)
+
+
+def _auto_select_ui_option(block: dict[str, Any]) -> dict[str, Any] | None:
+    options = block.get("options")
+    if not isinstance(options, list):
+        return None
+    normalized: list[dict[str, Any]] = [item for item in options if isinstance(item, dict)]
+    if not normalized:
+        return None
+    return normalized[0]
 
 
 def _render_auto_execute_pass_status(
@@ -821,6 +832,7 @@ def chat(
         workspace_service.finalize_stale_sessions(root)
         gateway_session_id = workspace_service.open_chat_session(root).session_id
     if prompt:
+        from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
         direct_edit_result = handle_small_direct_edit(root, prompt)
         if direct_edit_result.handled:
             console.print(f"[bold cyan]mana ❯[/bold cyan] {prompt}")
@@ -828,7 +840,6 @@ def chat(
             console.print(Markdown(direct_edit_result.answer))
             workspace_service.close_session(gateway_session_id)
             return
-
     logger.debug("Resolved chat root", extra={"root": str(root)})
     run_logger_cls = _public_symbol("LlmRunLogger", LlmRunLogger)
     run_logger = run_logger_cls(
@@ -1343,6 +1354,9 @@ def chat(
                     else:
                         reset_id = target_flow.strip()
             active_flow_id = None
+            state = getattr(gateway, "_sessions", {}).get(chat_ui_state.session_id)
+            if isinstance(state, dict):
+                state["active_flow_id"] = None
             return reset_id
 
         def _base_auto_execute_tool_policy(user_question: str, *, auto_chat_mode: AutoChatMode | None = None) -> dict[str, Any]:
@@ -1438,6 +1452,7 @@ def chat(
             render_progress: bool = True,
             run_id: str | None = None,
             auto_chat_mode: AutoChatMode | None = None,
+            activity: LiveToolActivity | None = None,
         ) -> tuple[dict[str, Any], str]:
             # We may adopt the flow id the preview attached to, so this name is
             # rebound here rather than only read from the enclosing scope.
@@ -1447,6 +1462,7 @@ def chat(
                     user_question,
                     auto_chat_mode=(auto_chat_mode.value if auto_chat_mode is not None else "edit"),
                     flow_id=active_flow_id,
+                    pass_cap=auto_execute_max_passes,
                 )
                 terminal_reason = str(
                     payload.get("auto_execute_terminal_reason", "") or ""
@@ -1627,6 +1643,8 @@ def chat(
                 fn=_call,
                 callbacks=[],
                 show_all_logs=_cli_verbose_enabled(),
+                activity=activity,
+                manage_live=(activity is None),
             )
             if hasattr(result_obj, "model_dump"):
                 payload = result_obj.model_dump()
@@ -1777,37 +1795,56 @@ def chat(
             resume_run_id: str | None = None
             last_debug_tail = ""
 
-            while True:
-                payload, debug_tail = _run_auto_execute_pipeline(
-                    effective_question,
-                    render_progress=(render_progress and resume_cycles == 0),
-                    run_id=resume_run_id,
-                    auto_chat_mode=auto_chat_mode,
-                )
-                last_debug_tail = debug_tail
-                payload_run_id = str(payload.get("run_id", "") or "").strip()
-                if payload_run_id:
-                    resume_run_id = payload_run_id
-                if run_full_auto:
-                    turn_passes_total += _ingest_full_auto_pass_payload(payload)
-                terminal_reason = str(payload.get("terminal_reason", "") or "").strip().lower()
-                run_status = str(payload.get("run_status", "") or "").strip().lower()
-                if chat_auto_continue and (terminal_reason == "pass_cap_reached" or run_status == "needs_resume"):
-                    resumed_from_pass_cap = True
-                    resume_cycles += 1
-                    turn_checkpoints_emitted += _emit_full_auto_pass_checkpoints(resume_cycles=resume_cycles)
-                    effective_question = _build_full_auto_resume_request(
-                        original_question=user_question,
-                        resume_cycle=resume_cycles,
-                        terminal_reason=terminal_reason,
-                    )
-                    continue
+            activity = LiveToolActivity(
+                spinner_text="Auto-executing…",
+                show_all_logs=_cli_verbose_enabled(),
+            )
+            set_active_tool_activity(activity)
 
-                payload["full_auto_resume_cycles"] = int(resume_cycles)
-                payload["full_auto_passes_total"] = int(turn_passes_total)
-                payload["full_auto_pass_checkpoints_emitted"] = int(turn_checkpoints_emitted)
-                payload["resumed_from_pass_cap"] = bool(resumed_from_pass_cap)
-                return payload, last_debug_tail
+            try:
+                while True:
+                    payload, debug_tail = _run_auto_execute_pipeline(
+                        effective_question,
+                        render_progress=(render_progress and resume_cycles == 0),
+                        run_id=resume_run_id,
+                        auto_chat_mode=auto_chat_mode,
+                        activity=activity,
+                    )
+                    last_debug_tail = debug_tail
+                    payload_run_id = str(payload.get("run_id", "") or "").strip()
+                    if payload_run_id:
+                        resume_run_id = payload_run_id
+                    if run_full_auto:
+                        turn_passes_total += _ingest_full_auto_pass_payload(payload)
+                    terminal_reason = str(payload.get("terminal_reason", "") or "").strip().lower()
+                    run_status = str(payload.get("run_status", "") or "").strip().lower()
+                    if chat_auto_continue and (terminal_reason == "pass_cap_reached" or run_status == "needs_resume"):
+                        resumed_from_pass_cap = True
+                        resume_cycles += 1
+                        turn_checkpoints_emitted += _emit_full_auto_pass_checkpoints(resume_cycles=resume_cycles)
+                        effective_question = _build_full_auto_resume_request(
+                            original_question=user_question,
+                            resume_cycle=resume_cycles,
+                            terminal_reason=terminal_reason,
+                        )
+                        continue
+
+                    payload["full_auto_resume_cycles"] = int(resume_cycles)
+                    payload["full_auto_passes_total"] = int(turn_passes_total)
+                    payload["full_auto_pass_checkpoints_emitted"] = int(turn_checkpoints_emitted)
+                    payload["resumed_from_pass_cap"] = bool(resumed_from_pass_cap)
+                    return payload, last_debug_tail
+            finally:
+                set_active_tool_activity(None)
+                if render_progress and (activity.log.entries or activity.events):
+                    console.print(activity)
+                    try:
+                        turn_id = chat_ui_state.tracker.current_turn_id or current_turn_id
+                        for ev in list(chat_ui_state.tool_runs)[-30:]:
+                            if ev.turn_id == turn_id and normalize_event_status(ev.status) in {"success", "failed"}:
+                                inline_renderer.render_event(ev)
+                    except Exception:
+                        pass
 
         def _emit_auto_execute_terminal(
             *,
@@ -2093,6 +2130,58 @@ def chat(
                 logger.info("Chat session ended by user command", extra={"command": question.lower()})
                 gateway.request_shutdown(source="exit", session_id=chat_ui_state.session_id)
                 break
+
+            synthetic_selection_followup = False
+            if pending_ui_selection is not None:
+                if execution_profile == "full-auto":
+                    option = _auto_select_ui_option(pending_ui_selection)
+                    selection_id = str(pending_ui_selection.get("id", "selection") or "selection")
+                    if option is not None:
+                        option_id = str(option.get("id", "") or "").replace('"', '\\"')
+                        value = str(option.get("value", option_id) or "").replace('"', '\\"')
+                        question = (
+                            f'User selected "{option_id}" for selection "{selection_id}" '
+                            f'(value="{value}") in full-auto mode. Continue accordingly.'
+                        )
+                        synthetic_selection_followup = True
+                        logger.info(
+                            "Full-auto selection resolution",
+                            extra={"selection_id": selection_id, "option_id": option_id},
+                        )
+                        pending_ui_selection = None
+                    else:
+                        logger.info(
+                            "Full-auto selection dropped (no options)",
+                            extra={"selection_id": selection_id},
+                        )
+                        pending_ui_selection = None
+                if pending_ui_selection is not None:
+                    selection_kind, selection_payload = _resolve_ui_selection_input(pending_ui_selection, question)
+                    selection_id = str(pending_ui_selection.get("id", "selection") or "selection")
+
+                    if selection_kind == "invalid":
+                        console.print("[yellow]Invalid selection. Choose by number, option id, or label.[/yellow]")
+                        _render_selection_block(console, pending_ui_selection)
+                        continue
+
+                    if selection_kind == "free_text":
+                        raw_text = str((selection_payload or {}).get("text", "") or "").replace('"', '\\"')
+                        question = (
+                            f'User provided free-text response "{raw_text}" '
+                            f'for selection "{selection_id}". Continue accordingly.'
+                        )
+                        synthetic_selection_followup = True
+                        pending_ui_selection = None
+                    else:
+                        option = selection_payload or {}
+                        option_id = str(option.get("id", "") or "").replace('"', '\\"')
+                        value = str(option.get("value", option_id) or "").replace('"', '\\"')
+                        question = (
+                            f'User selected "{option_id}" for selection "{selection_id}" '
+                            f'(value="{value}"). Continue accordingly.'
+                        )
+                        synthetic_selection_followup = True
+                        pending_ui_selection = None
 
             if question.lower() == "/clear":
                 console.clear()
@@ -2409,536 +2498,6 @@ def chat(
                 )
                 continue
 
-            original_auto_question = question
-            question = resolve_auto_followup(question, auto_chat_state)
-            flow_routing_context = ""
-            if (
-                active_flow_id
-                and coding_agent_instance is not None
-                and hasattr(coding_agent_instance, "flow_summary")
-            ):
-                flow_summary = coding_agent_instance.flow_summary(active_flow_id)
-                if flow_summary:
-                    flow_routing_context = (
-                        "Active coding flow (decide flow_action explicitly):\n"
-                        + json.dumps(flow_summary, ensure_ascii=False, sort_keys=True, default=str)[:4000]
-                    )
-            agent_decision = _run_chat_event_step(
-                "Decision routing...",
-                lambda: _decide_chat_route(
-                    ask_service=ask_service,
-                    question=question,
-                    root=root,
-                    memory_context=flow_routing_context,
-                ),
-                event_type="RoutingStarted",
-            )
-            if not agent_decision.verifier_passed:
-                console.print(
-                    "[red]Model decision failed: routing verification.[/red] "
-                    "No route or tool action was executed. Reason: "
-                    + agent_decision.verifier_summary
-                )
-                _finish_ui_turn(current_turn_id)
-                continue
-            if (
-                active_flow_id
-                and (agent_decision.intent == "edit" or agent_decision.code_editing_needed)
-                and agent_decision.flow_action == "none"
-            ):
-                console.print(
-                    "[red]Model decision failed: flow_action.[/red] "
-                    "No repository action was executed. The active coding flow requires "
-                    "a validated continue or new decision."
-                )
-                continue
-            if active_flow_id and agent_decision.flow_action == "new":
-                prior_flow_id = active_flow_id
-                _start_new_topic()
-                logger.info(
-                    "Model started a new coding flow for a distinct request",
-                    extra={"prior_flow_id": prior_flow_id, "question": question},
-                )
-            selected_skill_text = ""
-            if chat_skill_context.enabled and chat_skill_context.available_skills:
-                try:
-                    chat_ui_state.record_event(
-                        make_event(
-                            "chat.skill.selection.started",
-                            title="Skill selection",
-                            message="Evaluating relevant procedures.",
-                            status="running",
-                            session_id=chat_ui_state.session_id,
-                            turn_id=current_turn_id,
-                        )
-                    )
-                    selected_ids = _model_selected_skill_ids(
-                        ask_service=ask_service,
-                        question=question,
-                        compact_index=skill_coordinator.compact_index(chat_skill_context),
-                    )
-                    decisions = skill_coordinator.select_for_task(
-                        chat_skill_context,
-                        selected_ids=selected_ids,
-                        available_tools=agent_decision.selected_tools,
-                    )
-                    selected_skill_text = skill_coordinator.load_selected(chat_skill_context)
-                    chat_ui_state.record_event(
-                        make_event(
-                            "chat.skill.selection.completed",
-                            title="Skill selection",
-                            message=f"{len(chat_skill_context.selected_skills)} selected.",
-                            status="success",
-                            session_id=chat_ui_state.session_id,
-                            turn_id=current_turn_id,
-                            metadata={
-                                "decisions": [
-                                    {"skill_id": item.skill_id, "selected": item.selected, "reason": item.reason, "policy_result": item.policy_result}
-                                    for item in decisions
-                                ]
-                            },
-                        ).finish()
-                    )
-                    for selected in chat_skill_context.selected_skills:
-                        chat_ui_state.record_event(
-                            make_event(
-                                "chat.skill.loaded",
-                                title="Skill selected",
-                                message=f"{selected.name} v{selected.version}",
-                                status="success",
-                                session_id=chat_ui_state.session_id,
-                                turn_id=current_turn_id,
-                                metadata={"skill_id": selected.id, "version": selected.version},
-                            ).finish()
-                        )
-                except Exception as exc:
-                    # A bad model selection or unavailable optional subsystem must
-                    # never reuse a stale selection or interrupt the main task.
-                    chat_skill_context.selected_skills.clear()
-                    chat_skill_context.loaded_versions.clear()
-                    chat_ui_state.record_event(
-                        make_event("chat.skills.failed", title="Skill selection unavailable", message=str(exc), status="failed", session_id=chat_ui_state.session_id, turn_id=current_turn_id).finish(status="failed")
-                    )
-            auto_chat_mode = _auto_chat_mode_from_agent_decision(
-                agent_decision,
-                classify_auto_chat_intent(question),
-            )
-            required_mcp_server = _explicit_mcp_server_request(
-                ask_service=ask_service,
-                question=question,
-            )
-            if is_plan_execution_request(question):
-                auto_chat_mode = AutoChatMode.EDIT
-
-            small_direct_edit_result = _run_chat_event_step(
-                "Checking direct edit...",
-                lambda: handle_small_direct_edit(root, question),
-                event_type="ReasoningStarted",
-            )
-            if small_direct_edit_result.handled:
-                answer_text = small_direct_edit_result.answer
-                _render_answer_header(console)
-                console.print(Markdown(answer_text))
-                turn_record = ChatTurnTelemetry(
-                    turn_index=len(session_turns) + 1,
-                    timestamp=_now_iso(),
-                    question=question,
-                    answer_text=answer_text,
-                    sources=[{"path": path} for path in small_direct_edit_result.changed_files],
-                    warnings=[] if small_direct_edit_result.ok else [small_direct_edit_result.error],
-                    trace=_coerce_trace_items(small_direct_edit_result.trace),
-                    tool_steps_total=len(small_direct_edit_result.trace),
-                    decisions=[],
-                    changed_files=list(small_direct_edit_result.changed_files),
-                    has_diff=bool(small_direct_edit_result.changed_files),
-                    coding_state={
-                        "flow_id": active_flow_id,
-                        "small_direct_edit": True,
-                        "verification": "skipped_docs_only" if small_direct_edit_result.ok else "minimal_check_failed",
-                    },
-                )
-                session_turns.append(turn_record)
-                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
-                _log_chat_turn(
-                    run_logger,
-                    turn=turn_record,
-                    mode="small-direct-edit",
-                    dir_mode=dir_mode,
-                    coding_agent=False,
-                    flow_id=active_flow_id,
-                    multiline_input=multiline_input,
-                    multiline_terminator=multiline_terminator,
-                )
-                _save_auto_chat_turn_state(
-                    mode=auto_chat_mode,
-                    task=original_auto_question,
-                    answer_text=answer_text,
-                    sources=[{"path": path} for path in small_direct_edit_result.changed_files],
-                    changed_files=small_direct_edit_result.changed_files,
-                    verification="Verification skipped: docs-only one-line edit.",
-                )
-                chat_ui_state.record_event(
-                    make_event(
-                        "verification.finished",
-                        title="Verification",
-                        message="Skipped docs-only one-line edit." if small_direct_edit_result.ok else "Minimal edit check failed.",
-                        status="success" if small_direct_edit_result.ok else "failed",
-                        session_id=chat_ui_state.session_id,
-                        turn_id=current_turn_id,
-                        step_id="09",
-                    ).finish(status="success" if small_direct_edit_result.ok else "failed")
-                )
-                _finish_ui_turn(current_turn_id)
-                continue
-
-            # -----------------------------
-            # Model-selected immediate tools for read-only research/search turns.
-            # -----------------------------
-            selected_browser_tools = [
-                tool for tool in agent_decision.selected_tools if str(tool).startswith("browser_")
-            ]
-            if selected_browser_tools and not required_mcp_server:
-                from mana_agent.connectors.browser.contracts import browser_tool_contracts
-                from mana_agent.multi_agent.runtime.prompts import BROWSER_AGENT_SYSTEM_PROMPT
-
-                available_browser_tools = [contract.name for contract in browser_tool_contracts()]
-                browser_status = (
-                    BrowserSessionManager.status()
-                    if agent_decision.verifier_passed
-                    else {
-                        "ok": False,
-                        "error": (
-                            "Model browser decision failed validation. No browser or repository action was executed. "
-                            + agent_decision.verifier_summary
-                        ),
-                    }
-                )
-                if not browser_status.get("ok"):
-                    answer_text = (
-                        "Browser execution is unavailable. "
-                        + str(browser_status.get("error") or "Chromium is not installed; run `python -m playwright install chromium`.")
-                    )
-                    response = None
-                    sources = []
-                    warnings = [answer_text]
-                    trace = []
-                else:
-                    browser_agent = getattr(ask_service, "ask_agent", None)
-                    if browser_agent is None:
-                        answer_text = "Browser execution is unavailable because the chat tool agent is not configured."
-                        response = None
-                        sources = []
-                        warnings = [answer_text]
-                        trace = []
-                    else:
-                        selected_index = resolved_index_dir or default_index_dir(root)
-                        browser_activity = LiveToolActivity(
-                            spinner_text="Browser…",
-                            show_all_logs=_cli_verbose_enabled(),
-                        )
-                        response, _browser_debug_tail = _run_with_live_buffer(
-                            console,
-                            spinner_text="Browser…",
-                            fn=lambda callbacks: browser_agent.run(
-                                question=question,
-                                index_dir=selected_index,
-                                k=resolved_k,
-                                max_steps=max(12, len(available_browser_tools) + 4),
-                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
-                                tool_policy={
-                                    "allowed_tools": available_browser_tools,
-                                    "disable_external_search": True,
-                                    "require_initial_tool_call": True,
-                                },
-                                callbacks=callbacks,
-                                system_prompt=BROWSER_AGENT_SYSTEM_PROMPT,
-                                run_id=current_turn_id,
-                            ),
-                            callbacks=[RichToolCallbackHandler(show_inputs=True)],
-                            activity=browser_activity,
-                        )
-                        answer_text = str(getattr(response, "answer", "") or "")
-                        sources = list(getattr(response, "sources", []) or [])
-                        warnings = [str(item) for item in (getattr(response, "warnings", []) or [])]
-                        trace = _coerce_trace_items(list(getattr(response, "trace", []) or []))
-                _render_answer_header(console, title="Browser")
-                console.print(Markdown(answer_text))
-                chat_ui_state.record_event(
-                    make_event(
-                        "agent.decision",
-                        title="Agent decision",
-                        message=agent_decision.reasoning_summary,
-                        status="success" if agent_decision.verifier_passed else "failed",
-                        session_id=chat_ui_state.session_id,
-                        turn_id=current_turn_id,
-                        step_id="05",
-                        metadata={
-                            "intent": agent_decision.intent,
-                            "selected_tools": selected_browser_tools,
-                            "available_browser_tools": available_browser_tools,
-                        },
-                    ).finish(status="success" if agent_decision.verifier_passed else "failed")
-                )
-                turn_record = ChatTurnTelemetry(
-                    turn_index=len(session_turns) + 1,
-                    timestamp=_now_iso(),
-                    question=question,
-                    answer_text=answer_text,
-                    sources=sources,
-                    warnings=warnings,
-                    trace=trace,
-                    tool_steps_total=len(trace),
-                    decisions=[
-                        {
-                            "decision": (
-                                f"{agent_decision.intent}: "
-                                + ", ".join(selected_browser_tools)
-                            ),
-                            "rationale": agent_decision.reasoning_summary,
-                        }
-                    ],
-                    changed_files=[],
-                    has_diff=False,
-                    coding_state={"flow_id": active_flow_id},
-                )
-                session_turns.append(turn_record)
-                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
-                # Answer already rendered above; keep telemetry, skip diagnostic panels.
-                _finish_ui_turn(current_turn_id)
-                continue
-
-            if (
-                any(tool in agent_decision.selected_tools for tool in ("web_search", "github_search"))
-                and agent_decision.web_search_needed
-                and not agent_decision.code_editing_needed
-                and not required_mcp_server
-            ):
-                answer_text, sources, trace = _run_chat_event_step(
-                    "Web search...",
-                    lambda: _run_web_research_answer(
-                        ask_service=ask_service,
-                        question=question,
-                        root=root,
-                        decision=agent_decision,
-                    ),
-                    event_type="ToolStarted",
-                    tool_name="web_search",
-                )
-                _render_answer_header(console, title="Web search")
-                console.print(Markdown(answer_text))
-                chat_ui_state.record_event(
-                    make_event(
-                        "agent.decision",
-                        title="Agent decision",
-                        message=agent_decision.reasoning_summary,
-                        status="success" if agent_decision.verifier_passed else "failed",
-                        session_id=chat_ui_state.session_id,
-                        turn_id=current_turn_id,
-                        step_id="05",
-                        metadata={
-                            "intent": agent_decision.intent,
-                            "selected_tools": agent_decision.selected_tools,
-                            "verifier": agent_decision.verifier_summary,
-                        },
-                    ).finish(status="success" if agent_decision.verifier_passed else "failed")
-                )
-                turn_record = ChatTurnTelemetry(
-                    turn_index=len(session_turns) + 1,
-                    timestamp=_now_iso(),
-                    question=question,
-                    answer_text=answer_text,
-                    sources=sources,
-                    warnings=[] if agent_decision.verifier_passed else [agent_decision.verifier_summary],
-                    trace=_coerce_trace_items(trace),
-                    tool_steps_total=len(trace),
-                    decisions=[agent_decision.to_dict()],
-                    changed_files=[],
-                    has_diff=False,
-                    coding_state={"flow_id": active_flow_id},
-                )
-                session_turns.append(turn_record)
-                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
-                _finish_ui_turn(current_turn_id)
-                _log_chat_turn(
-                    run_logger,
-                    turn=turn_record,
-                    mode="web-search",
-                    dir_mode=dir_mode,
-                    coding_agent=False,
-                    flow_id=active_flow_id,
-                    multiline_input=multiline_input,
-                    multiline_terminator=multiline_terminator,
-                )
-                _save_auto_chat_turn_state(
-                    mode=auto_chat_mode,
-                    task=original_auto_question,
-                    answer_text=answer_text,
-                    sources=sources,
-                    changed_files=[],
-                )
-                continue
-
-            if (
-                "repo_search" in agent_decision.selected_tools
-                and agent_decision.repo_context_needed
-                and not agent_decision.code_editing_needed
-                and coding_agent_instance is None
-                and not required_mcp_server
-            ):
-                tool_query = str((agent_decision.tool_inputs.get("repo_search") or {}).get("query") or question).strip()
-                search_result = _run_chat_event_step(
-                    "Repository search...",
-                    lambda: project_search(tool_query, root),
-                    event_type="ToolStarted",
-                    tool_name="repo_search",
-                )
-                if search_result.matches:
-                    body = search_result.format(root)
-                    if search_result.truncated:
-                        body += "\n… (results truncated)"
-                    answer_text = (
-                        f"Found {len(search_result.matches)} match(es) "
-                        f"for '{tool_query}' via {search_result.backend}:\n\n{body}"
-                    )
-                else:
-                    answer_text = f"No matches for '{tool_query}' in {root}."
-                console.print("\n[bold]Search results[/bold]")
-                console.print(answer_text)
-                tool_ev_id = f"{current_turn_id}-project-search"
-                chat_ui_state.record_event(
-                    make_event(
-                        "tool.started",
-                        title="project_search",
-                        message=f"Exact search for '{tool_query}'",
-                        status="running",
-                        session_id=chat_ui_state.session_id,
-                        turn_id=current_turn_id,
-                        step_id="08",
-                        event_id=tool_ev_id,
-                        metadata={
-                            "tool_name": "project_search",
-                            "args_summary": tool_query,
-                        },
-                    )
-                )
-                chat_ui_state.record_event(
-                    make_event(
-                        "tool.finished",
-                        title="project_search",
-                        message=f"Exact search completed via {search_result.backend}.",
-                        status="success",
-                        session_id=chat_ui_state.session_id,
-                        turn_id=current_turn_id,
-                        step_id="08",
-                        event_id=tool_ev_id,
-                        token_usage=chat_ui_state.tracker.record_tool_result(
-                            tool_ev_id,
-                            answer_text,
-                            step_id="08",
-                            turn_id=current_turn_id,
-                        ),
-                        metadata={
-                            "tool_name": "project_search",
-                            "args_summary": tool_query,
-                            "result_summary": f"{len(search_result.matches)} match(es)",
-                            "agent_decision": agent_decision.to_dict(),
-                        },
-                    ).finish(status="success")
-                )
-                turn_record = ChatTurnTelemetry(
-                    turn_index=len(session_turns) + 1,
-                    timestamp=_now_iso(),
-                    question=question,
-                    answer_text=answer_text,
-                    sources=[],
-                    warnings=[],
-                    trace=[],
-                    tool_steps_total=0,
-                    decisions=[agent_decision.to_dict()],
-                    changed_files=[],
-                    has_diff=False,
-                    coding_state={"flow_id": active_flow_id},
-                )
-                session_turns.append(turn_record)
-                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
-                _finish_ui_turn(current_turn_id)
-                _log_chat_turn(
-                    run_logger,
-                    turn=turn_record,
-                    mode=f"repo-search:{search_result.backend}",
-                    dir_mode=dir_mode,
-                    coding_agent=False,
-                    flow_id=active_flow_id,
-                    multiline_input=multiline_input,
-                    multiline_terminator=multiline_terminator,
-                )
-                _save_auto_chat_turn_state(
-                    mode=auto_chat_mode,
-                    task=original_auto_question,
-                    answer_text=answer_text,
-                    sources=[
-                        {"path": item.file_path}
-                        for item in search_result.matches[:12]
-                        if getattr(item, "file_path", None)
-                    ],
-                    changed_files=[],
-                )
-                continue
-
-            synthetic_selection_followup = False
-            if pending_ui_selection is not None:
-                if execution_profile == "full-auto":
-                    option = _auto_select_ui_option(pending_ui_selection)
-                    selection_id = str(pending_ui_selection.get("id", "selection") or "selection")
-                    if option is not None:
-                        option_id = str(option.get("id", "") or "").replace('"', '\\"')
-                        value = str(option.get("value", option_id) or "").replace('"', '\\"')
-                        question = (
-                            f'User selected "{option_id}" for selection "{selection_id}" '
-                            f'(value="{value}") in full-auto mode. Continue accordingly.'
-                        )
-                        synthetic_selection_followup = True
-                        logger.info(
-                            "Full-auto selection resolution",
-                            extra={"selection_id": selection_id, "option_id": option_id},
-                        )
-                        pending_ui_selection = None
-                    else:
-                        logger.info(
-                            "Full-auto selection dropped (no options)",
-                            extra={"selection_id": selection_id},
-                        )
-                        pending_ui_selection = None
-                if pending_ui_selection is None:
-                    pass
-                else:
-                    selection_kind, selection_payload = _resolve_ui_selection_input(pending_ui_selection, question)
-                    selection_id = str(pending_ui_selection.get("id", "selection") or "selection")
-
-                    if selection_kind == "invalid":
-                        console.print("[yellow]Invalid selection. Choose by number, option id, or label.[/yellow]")
-                        _render_selection_block(console, pending_ui_selection)
-                        continue
-
-                    if selection_kind == "free_text":
-                        raw_text = str((selection_payload or {}).get("text", "") or "").replace('"', '\\"')
-                        question = (
-                            f'User provided free-text response "{raw_text}" '
-                            f'for selection "{selection_id}". Continue accordingly.'
-                        )
-                        synthetic_selection_followup = True
-                        pending_ui_selection = None
-                    else:
-                        option = selection_payload or {}
-                        option_id = str(option.get("id", "") or "").replace('"', '\\"')
-                        value = str(option.get("value", option_id) or "").replace('"', '\\"')
-                        question = (
-                            f'User selected "{option_id}" for selection "{selection_id}" '
-                            f'(value="{value}"). Continue accordingly.'
-                        )
-                        synthetic_selection_followup = True
-                        pending_ui_selection = None
-
             if coding_agent_instance is not None and question.startswith("/flow"):
                 parts = question.strip().split()
                 action = parts[1].lower() if len(parts) > 1 else "show"
@@ -2984,179 +2543,127 @@ def chat(
                 )
                 continue
 
-            plan_execution_request = is_plan_execution_request(question)
-            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or plan_execution_request)
-            edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
-            auto_planning_turn = bool(
-                planning_request is not None
-                or planning_mode
-                or (plan_trigger_request and not agent_tools_explicit)
-            )
-            force_plan_only_response = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY)
-            force_auto_execute_edit = bool(
-                coding_agent_instance is not None
-                and auto_execute_plan
-                and edit_request
-            )
-
-            if (
-                coding_agent_instance is not None
-                and auto_execute_plan
-                and hasattr(coding_agent_instance, "generate_auto_execute")
-                and not auto_planning_turn
-                and force_auto_execute_edit
-            ):
-                pending_prechecklist = None
-                pending_prechecklist_source = ""
-                pending_prechecklist_warning = ""
-                if hasattr(coding_agent_instance, "preview_execution_checklist"):
-                    try:
-                        preview_payload = coding_agent_instance.preview_execution_checklist(
-                            question,
-                            flow_id=active_flow_id,
-                        )
-                    except Exception as exc:
-                        _log_exception("coding_agent.preview_execution_checklist", exc)
-                        preview_payload = {}
-                    if isinstance(preview_payload, dict):
-                        flow_id_from_preview = preview_payload.get("flow_id")
-                        if isinstance(flow_id_from_preview, str) and flow_id_from_preview.strip():
-                            active_flow_id = flow_id_from_preview.strip()
-                        preview = preview_payload.get("prechecklist")
-                        if isinstance(preview, dict):
-                            pending_prechecklist = preview
-                            pending_prechecklist_source = str(preview_payload.get("prechecklist_source", "") or "")
-                            pending_prechecklist_warning = str(preview_payload.get("prechecklist_warning", "") or "")
-                target_flow = active_flow_id or coding_agent_instance.get_active_flow_id()
-                if isinstance(target_flow, str) and target_flow.strip():
-                    active_flow_id = target_flow.strip()
-
-            if auto_planning_turn:
+            if planning_mode or planning_request is not None:
                 if planning_request is None:
                     planning_request = question
-                    planning_answers = []
-                    planning_questions = []
-                    planning_questions_asked_count = 0
-                    if not planning_question_llm_disabled:
-                        try:
-                            llm_question = _generate_planning_question_llm(
-                                ask_service=ask_service,
-                                planning_request=planning_request,
-                                prior_questions=planning_questions,
-                                prior_answers=planning_answers,
-                                asked_count=0,
-                                max_questions=planning_question_limit,
-                            )
-                            planning_question_source = "llm"
-                        except Exception as exc:
-                            if _is_planning_question_auth_failure(exc):
-                                planning_question_llm_disabled = True
-                            if not planning_question_failure_logged:
-                                logger.warning("Planning question generation failed; using static fallback: %s", exc)
-                                planning_question_failure_logged = True
-                            llm_question = _planning_questions(planning_question_limit)[0]
-                            planning_question_source = "fallback_static"
-                    else:
-                        llm_question = _planning_questions(planning_question_limit)[0]
-                        planning_question_source = "fallback_static"
-                    planning_questions.append(llm_question)
-                    console.print(
-                        f"[cyan]Planning request:[/cyan] {planning_request}\n"
-                        f"[bold]Planning question 1/{planning_question_limit}[/bold]\n"
-                        f"{llm_question}"
-                    )
-                    continue
-
-                planning_answers.append(question)
+                    planning_answers, planning_questions = [], []
+                else:
+                    planning_answers.append(question)
                 if len(planning_answers) < planning_question_limit:
-                    asked_count = len(planning_answers)
-                    if not planning_question_llm_disabled:
-                        try:
-                            llm_question = _generate_planning_question_llm(
-                                ask_service=ask_service,
-                                planning_request=planning_request,
-                                prior_questions=planning_questions,
-                                prior_answers=planning_answers,
-                                asked_count=asked_count,
-                                max_questions=planning_question_limit,
-                            )
-                            planning_question_source = "llm"
-                        except Exception as exc:
-                            if _is_planning_question_auth_failure(exc):
-                                planning_question_llm_disabled = True
-                            if not planning_question_failure_logged:
-                                logger.warning("Planning question generation failed; using static fallback: %s", exc)
-                                planning_question_failure_logged = True
-                            llm_question = _planning_questions(planning_question_limit)[asked_count]
-                            planning_question_source = "fallback_static"
-                    else:
-                        llm_question = _planning_questions(planning_question_limit)[asked_count]
-                        planning_question_source = "fallback_static"
-                    planning_questions.append(llm_question)
-                    console.print(
-                        f"[cyan]Planning request:[/cyan] {planning_request}\n"
-                        f"[bold]Planning question {asked_count + 1}/{planning_question_limit}[/bold]\n"
-                        f"{llm_question}"
-                    )
+                    try:
+                        if planning_question_llm_disabled:
+                            raise RuntimeError("Planning question model is unavailable; correct its configuration or credentials")
+                        next_question = _generate_planning_question_llm(
+                            ask_service=ask_service, planning_request=planning_request,
+                            prior_questions=planning_questions, prior_answers=planning_answers,
+                            asked_count=len(planning_answers), max_questions=planning_question_limit,
+                        )
+                    except Exception as exc:
+                        if _is_planning_question_auth_failure(exc):
+                            planning_question_llm_disabled = True
+                        from mana_agent.utils.redaction import redact_secrets
+                        answer = f"Planning question generation failed: {redact_secrets(str(exc))}"
+                        console.print(f"[red]{answer}[/red]")
+                        gateway._append_session_message(chat_ui_state.session_id, role="user", content=question, turn_id=current_turn_id)
+                        gateway._append_session_message(chat_ui_state.session_id, role="assistant", content=answer, turn_id=current_turn_id)
+                        planning_request = None
+                        planning_answers, planning_questions = [], []
+                        _finish_ui_turn(current_turn_id, message="Planning requires a valid model response.")
+                        continue
+                    planning_questions.append(next_question)
+                    planning_questions_asked_count = len(planning_answers)
+                    console.print(f"[cyan]Planning request:[/cyan] {planning_request}\n"
+                        f"[bold]Planning question {len(planning_answers) + 1}/{planning_question_limit}[/bold]\n{next_question}")
+                    gateway._append_session_message(chat_ui_state.session_id, role="user", content=question, turn_id=current_turn_id)
+                    gateway._append_session_message(chat_ui_state.session_id, role="assistant", content=next_question, turn_id=current_turn_id)
+                    _finish_ui_turn(current_turn_id, message="Waiting for planning input.")
                     continue
-
-                question = _build_planning_instruction(
-                    planning_request,
-                    planning_answers,
-                    planning_question_limit,
-                    questions=planning_questions,
-                )
-                logger.info(
-                    "Planning Q&A complete; generating plan response",
-                    extra={
-                        "planning_request": planning_request,
-                        "answers_count": len(planning_answers),
-                        "question_source": planning_question_source,
-                    },
-                )
+                question = _build_planning_instruction(planning_request, planning_answers,
+                    planning_question_limit, questions=planning_questions)
                 planning_questions_asked_count = len(planning_answers)
                 planning_request = None
-                planning_answers = []
-                planning_questions = []
-                if agent_tools and legacy_auto_execute_plan_requested:
+                planning_answers, planning_questions = [], []
+                if agent_tools and auto_execute_plan:
                     auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
                         question,
-                        auto_chat_mode=auto_chat_mode,
+                        auto_chat_mode=AutoChatMode.EDIT,
                     )
                     _emit_auto_execute_terminal(
                         user_question=question,
                         payload=auto_payload,
                         debug_tail=auto_debug_tail,
-                        auto_chat_mode=auto_chat_mode,
+                        auto_chat_mode=AutoChatMode.EDIT,
                     )
                     continue
-                force_plan_only_response = True
                 console.print("[cyan]Generating decision-complete plan...[/cyan]")
 
-            logger.info("Chat question received", extra={"question": question, "dir_mode": dir_mode, "agent_tools": agent_tools})
-
+            flow_routing_context = ""
             if (
-                edit_request
-                and coding_agent_instance is None
-                and not (agent_tools and auto_execute_plan and tool_worker_process and plan_trigger_request)
+                active_flow_id
+                and coding_agent_instance is not None
+                and hasattr(coding_agent_instance, "flow_summary")
             ):
+                flow_summary = coding_agent_instance.flow_summary(active_flow_id)
+                if flow_summary:
+                    flow_routing_context = (
+                        "Active coding flow (decide flow_action explicitly):\n"
+                        + json.dumps(flow_summary, ensure_ascii=False, sort_keys=True, default=str)[:4000]
+                    )
+            agent_decision = _run_chat_event_step(
+                "Decision routing...",
+                lambda: _decide_chat_route(
+                    ask_service=ask_service,
+                    question=question,
+                    root=root,
+                    memory_context=flow_routing_context,
+                ),
+                event_type="RoutingStarted",
+            )
+            if not agent_decision.verifier_passed:
                 console.print(
-                    "[yellow]This chat session is read-only for file edits.[/yellow] "
-                    "Re-run with [bold]--agent-tools --coding-agent[/bold] to allow create_file/write_file/apply_patch/delete_file."
+                    "[red]Model decision failed: routing verification.[/red] "
+                    "No route or tool action was executed. Reason: "
+                    + agent_decision.verifier_summary
                 )
+                _finish_ui_turn(current_turn_id)
                 continue
 
+            if (
+                active_flow_id
+                and (agent_decision.intent == "edit" or agent_decision.code_editing_needed)
+                and agent_decision.flow_action == "none"
+            ):
+                console.print(
+                    "[red]Model decision failed: flow_action.[/red] "
+                    "No repository action was executed. The active coding flow requires "
+                    "a validated continue or new decision."
+                )
+                continue
+            if active_flow_id and agent_decision.flow_action == "new":
+                prior_flow_id = active_flow_id
+                _start_new_topic()
+                logger.info(
+                    "Model started a new coding flow for a distinct request",
+                    extra={"prior_flow_id": prior_flow_id, "question": question},
+                )
+
+            from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent, is_plan_execution_request
+            auto_chat_mode = _auto_chat_mode_from_agent_decision(
+                agent_decision,
+                classify_auto_chat_intent(question),
+            )
+            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or is_plan_execution_request(question))
+            edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
             if (
                 coding_agent_instance is None
                 and agent_tools
                 and auto_execute_plan
                 and (
                     edit_request
-                    or plan_execution_request
-                    or legacy_auto_execute_plan_requested
+                    or is_plan_execution_request(question)
                     or execution_profile == "full-auto"
                 )
-                and (plan_trigger_request or edit_request)
+                and plan_trigger_request
             ):
                 auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
                     question,
@@ -3171,649 +2678,168 @@ def chat(
                 )
                 continue
 
+            if (
+                coding_agent_instance is not None
+                and auto_execute_plan
+                and hasattr(coding_agent_instance, "generate_auto_execute")
+                and (
+                    execution_profile == "full-auto"
+                    or (plan_trigger_request and auto_chat_mode != AutoChatMode.PLAN_ONLY)
+                )
+            ):
+                auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
+                    question,
+                    render_progress=True,
+                    auto_chat_mode=auto_chat_mode,
+                )
+                _emit_auto_execute_terminal(
+                    user_question=question,
+                    payload=auto_payload,
+                    debug_tail=auto_debug_tail,
+                    auto_chat_mode=auto_chat_mode,
+                )
+                continue
+
+            if (
+                edit_request
+                and coding_agent_instance is None
+            ):
+                console.print(
+                    "[yellow]This chat session is read-only for file edits.[/yellow] "
+                    "Re-run with [bold]--agent-tools --coding-agent[/bold] to allow create_file/write_file/apply_patch/delete_file."
+                )
+                continue
+
             use_coding_agent_turn = _should_use_coding_agent_turn(
                 coding_agent_available=coding_agent_instance is not None,
                 agent_tools=bool(agent_tools),
                 edit_request=edit_request,
                 plan_trigger_request=plan_trigger_request,
-                force_plan_only_response=force_plan_only_response,
-                has_pending_prechecklist=pending_prechecklist is not None,
+                force_plan_only_response=bool(auto_chat_mode == AutoChatMode.PLAN_ONLY),
+                has_pending_prechecklist=False,
                 coding_agent_is_custom=coding_agent_is_custom,
-                # Use effective value (defaults to True) so "old chat cli" plain loop gets full
-                # rich model-driven routing + planning + agent turns by default, matching TUI.
                 general_coding_agent_turns=bool(coding_agent or coding_agent_is_custom),
             )
+            from mana_agent.gateway.entry_routing import EntryRoutingDecision
+            if use_coding_agent_turn:
+                routed_name = "coding"
+            elif agent_decision.intent == "repo_search" or agent_decision.repo_context_needed:
+                routed_name = "repository"
+            elif any(t.startswith("shell") or t == "run_command" for t in agent_decision.selected_tools):
+                routed_name = "shell"
+            elif any(t.startswith("browser_") for t in agent_decision.selected_tools):
+                routed_name = "browser"
+            else:
+                routed_name = "conversation"
 
-            if not use_coding_agent_turn:
-                try:
-                    response = chat_service.ask(
-                        question if synthetic_selection_followup else chat_ui_state.conversation_prompt(question)
-                    )
-                except Exception as exc:
-                    _log_exception("chat_service.ask", exc)
-                    console.print("[red]Chat request failed.[/red]")
-                    continue
-                if response is None:
-                    continue
+            entry_decision = EntryRoutingDecision(
+                route=routed_name,
+                confidence=agent_decision.confidence,
+                reason=agent_decision.reasoning_summary or "Route from model decision",
+                required_sources=("repository",) if routed_name in {"coding", "repository"} else (),
+            )
 
-                answer_raw = str(getattr(response, "answer", "") or "")
-                answer_text, parsed_payload = _extract_structured_answer(answer_raw)
-                sources = list(getattr(response, "sources", []) or [])
-                warnings = [str(item).strip() for item in getattr(response, "warnings", []) or [] if str(item).strip()]
-                trace = _coerce_trace_items(list(getattr(response, "trace", []) or []))
-                if isinstance(parsed_payload, dict):
-                    warnings = _merge_warnings(warnings, parsed_payload)
-                    if isinstance(parsed_payload.get("sources"), list) and not sources:
-                        sources = list(parsed_payload.get("sources") or [])
-                    if isinstance(parsed_payload.get("trace"), list) and not trace:
-                        trace = _coerce_trace_items(parsed_payload.get("trace"))
-                try:
-                    ui_blocks = _effective_ui_blocks(answer_text, parsed_payload if isinstance(parsed_payload, dict) else None)
-                except Exception as exc:
-                    _log_exception("chat.effective_ui_blocks.normal", exc)
-                    ui_blocks = []
-                    warnings.append("ui_blocks_render_fallback: failed to process ui_blocks payload")
-                _render_dynamic_blocks(
-                    console,
-                    ui_blocks,
-                    diagram_render_images=diagram_render_images,
-                    diagram_output_dir=resolved_diagram_output_dir,
-                    diagram_format=diagram_format,
-                    diagram_open_artifact=diagram_open,
-                    diagram_timeout_seconds=diagram_timeout_seconds,
-                    project_root=root,
-                )
-                selection_block = _pending_ui_selection_from_blocks(ui_blocks)
-                if selection_block is not None:
-                    pending_ui_selection = selection_block
-                mode_name = str(getattr(response, "mode", "") or "").strip()
-                if not mode_name:
-                    mode_name = "agent-tools" if (agent_tools_explicit and agent_tools) else "classic"
-                turn_record = ChatTurnTelemetry(
-                    turn_index=len(session_turns) + 1,
-                    timestamp=_now_iso(),
-                    question=question,
-                    answer_text=answer_text,
-                    sources=sources,
-                    warnings=warnings,
-                    trace=trace,
-                    tool_steps_total=len(trace),
-                    decisions=_extract_decisions(answer_text=answer_text, warnings=warnings),
-                    changed_files=[],
-                    has_diff=False,
-                    coding_state={"flow_id": active_flow_id},
-                )
-                session_turns.append(turn_record)
-                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
-                _render_turn_transparency(console, turn=turn_record, history=session_turns)
-                _log_chat_turn(
-                    run_logger,
-                    turn=turn_record,
-                    mode=mode_name,
-                    dir_mode=dir_mode,
-                    coding_agent=False,
-                    flow_id=active_flow_id,
-                    planning_mode=planning_mode,
-                    planning_question_source=planning_question_source,
-                    planning_question_index=planning_questions_asked_count,
-                    multiline_input=multiline_input,
-                    multiline_terminator=multiline_terminator,
-                )
-                _save_auto_chat_turn_state(
-                    mode=auto_chat_mode,
-                    task=original_auto_question,
-                    answer_text=answer_text,
-                    sources=sources,
-                    changed_files=[],
-                )
-                chat_ui_state.record_event(
-                    make_event(
-                        "agent.decision",
-                        title="Agent decision",
-                        message="Answered through the standard chat service path.",
-                        status="success",
-                        session_id=chat_ui_state.session_id,
-                        turn_id=current_turn_id,
-                        step_id="05",
-                        metadata={
-                            "next_action": "final response",
-                            "verification_target": "answer rendered without diagnostic panels",
-                        },
-                    ).finish(status="success")
-                )
-                _finish_ui_turn(current_turn_id)
+            # Every ordinary console turn uses the same durable gateway as
+            # TUI, dashboard and protocol clients. Keep frontend rendering here.
+            gateway_activity = LiveToolActivity(spinner_text="Working...", show_all_logs=_cli_verbose_enabled())
+            def console_gateway_event(event_type: str, title: str = "", **event_kwargs: Any) -> None:
+                metadata = dict(event_kwargs.get("metadata") or {})
+                status = str(event_kwargs.get("status") or metadata.get("status") or "running")
+                event = make_event(event_type, title=title or event_type, message=title or event_type,
+                    status=status, session_id=chat_ui_state.session_id, turn_id=current_turn_id,
+                    metadata=metadata)
+                chat_ui_state.record_event(event)
+                if title:
+                    gateway_activity.spinner_text = title
+
+            try:
+                response, _debug_tail = _run_with_live_buffer(console, spinner_text="Working...",
+                    activity=gateway_activity, fn=lambda callbacks: gateway.process_turn(
+                        chat_ui_state.session_id, question, event_sink=console_gateway_event,
+                        callbacks=callbacks, turn_id=current_turn_id,
+                        index_dir=resolved_index_dir, index_dirs=dir_mode_index_dirs or None,
+                        entry_decision=entry_decision, agent_decision=agent_decision,
+                        flow_id=active_flow_id,
+                    ))
+            except Exception as exc:
+                logger.exception("Shared console gateway turn failed")
+                console.print(f"[red]Execution failed: {exc}[/red]")
+                _finish_ui_turn(current_turn_id, message="Execution failed.")
+                if single_shot_noninteractive:
+                    single_shot_exit_code = 1
                 continue
 
-            # ==========================================================
-            # ✅ CODING AGENT PATH (classic + dir-mode supported)
-            # ==========================================================
-            if coding_agent_instance is not None:
-                cb = RichToolCallbackHandler(show_inputs=True)
-                execute_plan_now = bool(
-                    auto_execute_plan
-                    and not force_plan_only_response
-                    and (plan_trigger_request or force_auto_execute_edit)
-                )
-                auto_execute_available = bool(execute_plan_now and hasattr(coding_agent_instance, "generate_auto_execute"))
-                request_for_generation = (
-                    question if synthetic_selection_followup else chat_ui_state.conversation_prompt(question)
-                )
-                if selected_skill_text:
-                    request_for_generation = f"{request_for_generation}\n\nSelected adaptive procedures (advisory; existing policy still applies):\n{selected_skill_text}"
-                turn_full_auto_resume_cycles = 0
-                turn_full_auto_passes_total = 0
-                turn_full_auto_pass_checkpoints_emitted = 0
-                turn_resumed_from_pass_cap = False
-                turn_resume_run_id: str | None = None
+            answer_raw = str(response.answer or response.error or "")
+            answer_text, parsed_payload = _extract_structured_answer(answer_raw)
+            sources = list(response.sources or [])
+            warnings = list(response.warnings or [])
+            trace = _coerce_trace_items(list(response.trace or []))
+            try:
+                ui_blocks = _effective_ui_blocks(answer_text, parsed_payload if isinstance(parsed_payload, dict) else None)
+            except Exception as exc:
+                _log_exception("chat.effective_ui_blocks", exc)
+                ui_blocks = []
+                warnings.append("ui_blocks_render_fallback: failed to process ui_blocks payload")
 
-                try:
-                    if dir_mode:
-                        index_dirs = dir_mode_index_dirs
-                        if not index_dirs:
-                            console.print("[red]No indexes available in dir-mode.[/red]")
-                            continue
-
-                        def _call(callbacks: list[BaseCallbackHandler]):
-                            if auto_execute_available:
-                                return coding_agent_instance.generate_auto_execute(
-                                    request_for_generation,
-                                    index_dirs=index_dirs,
-                                    k=resolved_k,
-                                    max_steps=coding_agent_max_steps,
-                                    timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
-                                    pass_cap=auto_execute_max_passes,
-                                    callbacks=callbacks,
-                                    flow_id=active_flow_id,
-                                    run_id=turn_resume_run_id,
-                                    auto_chat_mode=auto_chat_mode.value,
-                                    prechecklist_payload=(
-                                        {
-                                            "flow_id": active_flow_id,
-                                            "prechecklist": pending_prechecklist,
-                                            "prechecklist_source": pending_prechecklist_source,
-                                            "prechecklist_warning": pending_prechecklist_warning,
-                                        }
-                                        if isinstance(pending_prechecklist, dict)
-                                        else None
-                                    ),
-                                )
-                            return coding_agent_instance.generate_dir_mode(
-                                request_for_generation,
-                                index_dirs=index_dirs,
-                                k=resolved_k,
-                                max_steps=coding_agent_max_steps,
-                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
-                                callbacks=callbacks,
-                                flow_id=active_flow_id,
-                                auto_chat_mode=auto_chat_mode.value,
-                            )
-                    else:
-                        assert resolved_index_dir is not None
-
-                        def _call(callbacks: list[BaseCallbackHandler]):
-                            if auto_execute_available:
-                                return coding_agent_instance.generate_auto_execute(
-                                    request_for_generation,
-                                    index_dir=resolved_index_dir,
-                                    k=resolved_k,
-                                    max_steps=coding_agent_max_steps,
-                                    timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
-                                    pass_cap=auto_execute_max_passes,
-                                    callbacks=callbacks,
-                                    flow_id=active_flow_id,
-                                    run_id=turn_resume_run_id,
-                                    auto_chat_mode=auto_chat_mode.value,
-                                    prechecklist_payload=(
-                                        {
-                                            "flow_id": active_flow_id,
-                                            "prechecklist": pending_prechecklist,
-                                            "prechecklist_source": pending_prechecklist_source,
-                                            "prechecklist_warning": pending_prechecklist_warning,
-                                        }
-                                        if isinstance(pending_prechecklist, dict)
-                                        else None
-                                    ),
-                                )
-                            return coding_agent_instance.generate(
-                                request_for_generation,
-                                index_dir=resolved_index_dir,
-                                k=resolved_k,
-                                max_steps=coding_agent_max_steps,
-                                timeout_seconds=_normalize_chat_timeout(agent_timeout_seconds),
-                                callbacks=callbacks,
-                                flow_id=active_flow_id,
-                                auto_chat_mode=auto_chat_mode.value,
-                            )
-
-                    activity = LiveToolActivity(
-                        spinner_text="Coding…",
-                        show_all_logs=_cli_verbose_enabled(),
-                    )
-                    set_active_tool_activity(activity)
-                    use_live_activity = bool(_use_live_tool_activity(console))
-                    cycle_result: dict[str, object] = {}
-
-                    def _run_generation_cycles() -> None:
-                        nonlocal active_flow_id
-                        nonlocal request_for_generation
-                        nonlocal turn_resumed_from_pass_cap
-                        nonlocal turn_full_auto_resume_cycles
-                        nonlocal turn_full_auto_pass_checkpoints_emitted
-                        nonlocal turn_full_auto_passes_total
-                        nonlocal turn_resume_run_id
-
-                        while True:
-                            cycle_payload, cycle_debug_tail = _run_with_live_buffer(
-                                console,
-                                spinner_text="Coding…",
-                                fn=_call,
-                                callbacks=[cb],
-                                show_all_logs=_cli_verbose_enabled(),
-                                activity=activity,
-                                manage_live=False,
-                            )
-                            cycle_result["result"] = cycle_payload
-                            cycle_result["debug_tail"] = cycle_debug_tail
-                            if not (
-                                chat_auto_continue
-                                and execute_plan_now
-                                and isinstance(cycle_payload, dict)
-                            ):
-                                break
-                            turn_full_auto_passes_total += _ingest_full_auto_pass_payload(cycle_payload)
-                            terminal_reason = str((cycle_payload or {}).get("auto_execute_terminal_reason", "") or "").strip().lower()
-                            flow_from_cycle = (cycle_payload or {}).get("flow_id")
-                            if isinstance(flow_from_cycle, str) and flow_from_cycle.strip():
-                                active_flow_id = flow_from_cycle.strip()
-                            run_from_cycle = (cycle_payload or {}).get("run_id")
-                            if isinstance(run_from_cycle, str) and run_from_cycle.strip():
-                                turn_resume_run_id = run_from_cycle.strip()
-                            run_status = str((cycle_payload or {}).get("run_status", "") or "").strip().lower()
-                            if terminal_reason != "pass_cap_reached" and run_status != "needs_resume":
-                                break
-                            turn_resumed_from_pass_cap = True
-                            turn_full_auto_resume_cycles += 1
-                            turn_full_auto_pass_checkpoints_emitted += _emit_full_auto_pass_checkpoints(
-                                resume_cycles=turn_full_auto_resume_cycles
-                            )
-                            request_for_generation = _build_full_auto_resume_request(
-                                original_question=question,
-                                resume_cycle=turn_full_auto_resume_cycles,
-                                terminal_reason=terminal_reason,
-                            )
-                            continue
-
-                    try:
-                        live_context = (
-                            Live(activity, console=console, refresh_per_second=12, transient=True)
-                            if use_live_activity
-                            else nullcontext()
-                        )
-                        with live_context:
-                            _run_generation_cycles()
-                        result = cycle_result.get("result")
-                        debug_tail = str(cycle_result.get("debug_tail", "") or "")
-                    finally:
-                        set_active_tool_activity(None)
-                        console.print(activity)
-                        # Emit compact terminal tool lines (if any) into the main conversation
-                        # transcript. InlineChatRenderer now suppresses running states and uses
-                        # event_id to avoid re-duplicating the same tool activity.
-                        try:
-                            for ev in list(chat_ui_state.tool_runs)[-30:]:
-                                if ev.turn_id == current_turn_id and normalize_event_status(ev.status) in {"success", "failed"}:
-                                    inline_renderer.render_event(ev)
-                        except Exception:
-                            pass  # non-fatal transcript decoration
-
-                except ToolWorkerProcessError as exc:
-                    _log_exception("coding_agent.generate.worker", exc)
-                    if exc.code == "tools_only_violation":
-                        console.print(
-                            "[yellow]Tools-only policy blocked this request:[/yellow] "
-                            "no successful tool calls were executed. "
-                            "Ask for specific file/tool actions and retry."
-                        )
-                        continue
-                    console.print(
-                        "[red]Coding agent worker failed.[/red] "
-                        "Retrying this turn read-only is recommended."
-                    )
-                    continue
-                except Exception as exc:
-                    _log_exception("coding_agent.generate", exc)
-                    console.print("[red]Coding agent failed.[/red]")
-                    continue
-
-                # result schema expected from CodingAgent
-                answer = str((result or {}).get("answer", "") or "")
-                changed = (result or {}).get("changed_files", []) or []
-                diff = str((result or {}).get("diff", "") or "")
-                warns = (result or {}).get("warnings", []) or []
-                result_flow_id = (result or {}).get("flow_id")
-                if isinstance(result_flow_id, str) and result_flow_id.strip():
-                    active_flow_id = result_flow_id.strip()
-                if execute_plan_now and isinstance(result, dict):
-                    if isinstance(pending_prechecklist, dict) and not isinstance(result.get("prechecklist"), dict):
-                        result["prechecklist"] = pending_prechecklist
-                    if pending_prechecklist_source and not str(result.get("prechecklist_source", "")).strip():
-                        result["prechecklist_source"] = pending_prechecklist_source
-                    if pending_prechecklist_warning and not str(result.get("prechecklist_warning", "")).strip():
-                        result["prechecklist_warning"] = pending_prechecklist_warning
-                    result["full_auto_resume_cycles"] = int(turn_full_auto_resume_cycles)
-                    result["full_auto_passes_total"] = int(turn_full_auto_passes_total)
-                    result["full_auto_pass_checkpoints_emitted"] = int(turn_full_auto_pass_checkpoints_emitted)
-                    result["resumed_from_pass_cap"] = bool(turn_resumed_from_pass_cap)
-                answer_text, parsed_payload = _extract_structured_answer(answer)
-                if execution_profile == "full-auto" and execute_plan_now:
-                    answer_text = _sanitize_full_auto_answer_text(
-                        answer_text,
-                        changed_files_count=len([str(item) for item in changed if str(item).strip()]),
-                        terminal_reason=(
-                            str((result or {}).get("auto_execute_terminal_reason", "") or "")
-                            if isinstance(result, dict)
-                            else ""
-                        ),
-                    )
-                payload_sources = []
-                payload_warnings = []
-                payload_trace = []
-                payload_ui_blocks: list[dict[str, Any]] = []
-                if isinstance(parsed_payload, dict):
-                    if isinstance(parsed_payload.get("sources"), list):
-                        payload_sources = parsed_payload["sources"]
-                    if isinstance(parsed_payload.get("warnings"), list):
-                        payload_warnings = [str(w).strip() for w in parsed_payload["warnings"] if str(w).strip()]
-                    if isinstance(parsed_payload.get("trace"), list):
-                        payload_trace = parsed_payload["trace"]
-                try:
-                    payload_ui_blocks = _effective_ui_blocks(answer_text, parsed_payload if isinstance(parsed_payload, dict) else None)
-                except Exception as exc:
-                    _log_exception("chat.effective_ui_blocks", exc)
-                    payload_ui_blocks = []
-                    payload_warnings.append("ui_blocks_render_fallback: failed to process ui_blocks payload")
-                merged_warns = list(warns)
-                for warning in payload_warnings:
-                    if warning not in merged_warns:
-                        merged_warns.append(warning)
-                # CodingAgent outputs actions_taken, not trace
-                result_actions = (result or {}).get("actions_taken", []) or []
-                result_trace = (result or {}).get("trace", []) or []  # legacy/compat
-                effective_trace = result_actions or result_trace or payload_trace
-                raw_actions_total = (result or {}).get("actions_taken_total")
-                if isinstance(raw_actions_total, int):
-                    actions_total = raw_actions_total
-                else:
-                    actions_total = len(effective_trace)
-                if isinstance(result, dict):
-                    existing_actions = result.get("actions_taken")
-                    if effective_trace:
-                        result["actions_taken"] = effective_trace
-                    elif isinstance(existing_actions, list):
-                        result["actions_taken"] = existing_actions
-                    else:
-                        result["actions_taken"] = []
-                    result["actions_taken_total"] = actions_total
-                    result["actions_taken_truncated"] = actions_total > len(result.get("actions_taken", []))
-                    result["warnings"] = merged_warns
-                render_mode = (
-                    str((result or {}).get("render_mode", "")).strip().lower()
-                    if isinstance(result, dict)
-                    else ""
-                )
-                fallback_reason = (
-                    str((result or {}).get("fallback_reason", "")).strip().lower()
-                    if isinstance(result, dict)
-                    else ""
-                )
+            _render_answer_header(console)
+            rendered_dynamic = _render_dynamic_blocks(console, ui_blocks, diagram_render_images=diagram_render_images,
+                diagram_output_dir=resolved_diagram_output_dir, diagram_format=diagram_format,
+                diagram_open_artifact=diagram_open, diagram_timeout_seconds=diagram_timeout_seconds,
+                project_root=root)
+            if response.used_coding_agent and isinstance(response.payload, dict):
+                render_mode = str(response.payload.get("render_mode", "")).strip().lower()
+                fallback_reason = str(response.payload.get("fallback_reason", "")).strip().lower()
                 answer_only_fallback = render_mode == "answer_only" and fallback_reason == "tools_only_violation"
-                answer_only_auto_execute = bool(auto_execute_available)
-                edit_completed = bool(changed) or bool(diff.strip())
-                answer_only_no_edit = (not answer_only_fallback) and (not edit_completed) and (not answer_only_auto_execute)
-
-                rendered_dynamic: dict[str, bool] = {}
-                if not answer_only_fallback:
-                    rendered_dynamic = _render_dynamic_blocks(
-                        console,
-                        payload_ui_blocks,
-                        diagram_render_images=diagram_render_images,
-                        diagram_output_dir=resolved_diagram_output_dir,
-                        diagram_format=diagram_format,
-                        diagram_open_artifact=diagram_open,
-                        diagram_timeout_seconds=diagram_timeout_seconds,
-                        project_root=root,
-                    )
-                selection_block = _pending_ui_selection_from_blocks(payload_ui_blocks)
-                if selection_block is not None:
-                    pending_ui_selection = selection_block
-                turn_record = ChatTurnTelemetry(
-                    turn_index=len(session_turns) + 1,
-                    timestamp=_now_iso(),
-                    question=question,
-                    answer_text=answer_text,
-                    sources=list(payload_sources),
-                    warnings=list(merged_warns),
-                    trace=_coerce_trace_items(effective_trace),
-                    tool_steps_total=actions_total,
-                    decisions=_extract_decisions(
-                        answer_text=answer_text,
-                        warnings=merged_warns,
-                        payload=parsed_payload if isinstance(parsed_payload, dict) else None,
-                        result_payload=result if isinstance(result, dict) else None,
-                    ),
-                    changed_files=[str(item) for item in changed if str(item).strip()],
-                    has_diff=bool(diff.strip()),
-                    coding_state={
-                        "plan": (result or {}).get("plan") if isinstance(result, dict) else None,
-                        "progress": (result or {}).get("progress") if isinstance(result, dict) else None,
-                        "checklist": (result or {}).get("checklist") if isinstance(result, dict) else None,
-                        "next_step": (result or {}).get("next_step") if isinstance(result, dict) else None,
-                        "flow_id": active_flow_id,
-                        "duplicate_request_skips": (
-                            int((result or {}).get("duplicate_request_skips", 0) or 0)
-                            if isinstance(result, dict)
-                            else 0
-                        ),
-                        "duplicate_semantic_search_skips": (
-                            int((result or {}).get("duplicate_semantic_search_skips", 0) or 0)
-                            if isinstance(result, dict)
-                            else 0
-                        ),
-                        "request_retry_attempts": (
-                            int((result or {}).get("request_retry_attempts", 0) or 0)
-                            if isinstance(result, dict)
-                            else 0
-                        ),
-                        "request_retry_exhausted": (
-                            int((result or {}).get("request_retry_exhausted", 0) or 0)
-                            if isinstance(result, dict)
-                            else 0
-                        ),
-                        "edit_retry_mode_activations": (
-                            int((result or {}).get("edit_retry_mode_activations", 0) or 0)
-                            if isinstance(result, dict)
-                            else 0
-                        ),
-                        "persisted_fingerprint_counts": (
-                            dict((result or {}).get("persisted_fingerprint_counts", {}))
-                            if isinstance(result, dict)
-                            and isinstance((result or {}).get("persisted_fingerprint_counts"), dict)
-                            else {}
-                        ),
-                    },
-                )
-                session_turns.append(turn_record)
-                chat_ui_state.add_conversation_turn(turn_record.question, turn_record.answer_text)
-                if answer_only_fallback or answer_only_no_edit or answer_only_auto_execute:
-                    _render_answer_header(console)
-                    if answer_text:
-                        console.print(Markdown(answer_text))
-                    else:
-                        console.print("[dim](no answer text)[/dim]")
-                else:
-                    _render_turn_transparency(
-                        console,
-                        turn=turn_record,
-                        history=session_turns,
-                    )
-                _log_chat_turn(
-                    run_logger,
-                    turn=turn_record,
-                    mode="coding-agent",
-                    dir_mode=dir_mode,
-                    coding_agent=True,
-                    flow_id=active_flow_id,
-                    render_mode=render_mode,
-                    fallback_reason=fallback_reason,
-                    planning_mode=planning_mode,
-                    planning_question_source=planning_question_source,
-                    planning_question_index=planning_questions_asked_count,
-                    auto_execute_plan=execute_plan_now,
-                    auto_execute_passes=int((result or {}).get("auto_execute_passes", 0) or 0) if isinstance(result, dict) else 0,
-                    auto_execute_terminal_reason=str((result or {}).get("auto_execute_terminal_reason", "") or "") if isinstance(result, dict) else "",
-                    toolsmanager_requests_count=int((result or {}).get("toolsmanager_requests_count", 0) or 0) if isinstance(result, dict) else 0,
-                    auto_execute_pass_logs=(result or {}).get("pass_logs", []) if isinstance(result, dict) else [],
-                    planner_decisions=(result or {}).get("planner_decisions", []) if isinstance(result, dict) else [],
-                    prechecklist_source=(
-                        str((result or {}).get("prechecklist_source", "") or "")
-                        if isinstance(result, dict)
-                        else pending_prechecklist_source
-                    ),
-                    prechecklist_steps_count=(
-                        len((result or {}).get("prechecklist", {}).get("steps", []))
-                        if isinstance(result, dict)
-                        and isinstance((result or {}).get("prechecklist"), dict)
-                        and isinstance((result or {}).get("prechecklist", {}).get("steps"), list)
-                        else (len(pending_prechecklist.get("steps", [])) if isinstance(pending_prechecklist, dict) and isinstance(pending_prechecklist.get("steps"), list) else 0)
-                    ),
-                    prechecklist_warning=(
-                        str((result or {}).get("prechecklist_warning", "") or "")
-                        if isinstance(result, dict)
-                        else pending_prechecklist_warning
-                    ),
-                    tool_execution_backend=(
-                        str((result or {}).get("tool_execution_backend", "") or "")
-                        if isinstance(result, dict)
-                        else ""
-                    ),
-                    tool_execution_run_id=(
-                        str((result or {}).get("tool_execution_run_id", "") or "")
-                        if isinstance(result, dict)
-                        else ""
-                    ),
-                    tool_execution_duration_ms=(
-                        float((result or {}).get("tool_execution_duration_ms", 0.0) or 0.0)
-                        if isinstance(result, dict)
-                        else 0.0
-                    ),
-                    tool_execution_requests_ok=(
-                        int((result or {}).get("tool_execution_requests_ok", 0) or 0)
-                        if isinstance(result, dict)
-                        else 0
-                    ),
-                    tool_execution_requests_failed=(
-                        int((result or {}).get("tool_execution_requests_failed", 0) or 0)
-                        if isinstance(result, dict)
-                        else 0
-                    ),
-                    full_auto_resume_cycles=(
-                        int((result or {}).get("full_auto_resume_cycles", 0) or 0)
-                        if isinstance(result, dict)
-                        else 0
-                    ),
-                    full_auto_passes_total=(
-                        int((result or {}).get("full_auto_passes_total", 0) or 0)
-                        if isinstance(result, dict)
-                        else 0
-                    ),
-                    full_auto_pass_checkpoints_emitted=(
-                        int((result or {}).get("full_auto_pass_checkpoints_emitted", 0) or 0)
-                        if isinstance(result, dict)
-                        else 0
-                    ),
-                    resumed_from_pass_cap=(
-                        bool((result or {}).get("resumed_from_pass_cap", False))
-                        if isinstance(result, dict)
-                        else False
-                    ),
-                    multiline_input=multiline_input,
-                    multiline_terminator=multiline_terminator,
-                )
-                _save_auto_chat_turn_state(
-                    mode=auto_chat_mode,
-                    task=original_auto_question,
-                    answer_text=answer_text,
-                    sources=list(payload_sources),
-                    changed_files=[str(item) for item in changed if str(item).strip()],
-                    verification=str((result or {}).get("auto_execute_terminal_reason", "") or ""),
-                )
-                pending_prechecklist = None
-                pending_prechecklist_source = ""
-                pending_prechecklist_warning = ""
-                if not (answer_only_fallback or answer_only_no_edit or answer_only_auto_execute):
+                changed_files = list(response.changed_files or response.payload.get("changed_files") or [])
+                diff = str(response.payload.get("diff", "") or "")
+                edit_completed = bool(changed_files) or bool(diff.strip())
+                answer_only_no_edit = (not answer_only_fallback) and (not edit_completed)
+                if not (answer_only_fallback or answer_only_no_edit):
                     _render_coding_sections(
                         console,
-                        result if isinstance(result, dict) else {},
+                        response.payload,
                         rendered_dynamic=rendered_dynamic,
                         show_actions=False,
-                        # Warnings already printed with the answer above.
                         show_warnings=False,
                     )
-                    if payload_sources:
-                        _render_answer_sections(
-                            console,
-                            answer="",
-                            title="Sources",
-                            sources=payload_sources,
-                            warnings=[],
-                            trace=[],
-                            show_trace=False,
-                        )
-                    if _cli_verbose_enabled() and debug_tail:
-                        console.print("\n[bold]Debug tail[/bold]\n" + debug_tail)
-
-                # Optional: if you want quick diff visibility without full diff spam:
-                # console.print("\n[dim]Tip: run with your own :diff command if you add history later.[/dim]")
-
-                terminal_for_exit = (
-                    str((result or {}).get("auto_execute_terminal_reason", "") or "").strip().lower()
-                    if isinstance(result, dict)
-                    else ""
-                )
-                run_status_for_exit = (
-                    str(
-                        (result or {}).get("run_status")
-                        or (result or {}).get("status")
-                        or ""
+                if response.payload.get("sources"):
+                    _render_answer_sections(
+                        console,
+                        answer="",
+                        title="Sources",
+                        sources=list(response.payload.get("sources") or []),
+                        warnings=[],
+                        trace=[],
+                        show_trace=False,
                     )
-                    .strip()
-                    .lower()
-                    if isinstance(result, dict)
-                    else ""
-                )
-                if single_shot_noninteractive and (
-                    terminal_for_exit.startswith("mutation_required_but_")
-                    or run_status_for_exit in {"failed", "blocked", "error"}
-                    or terminal_for_exit in {"codex_failed", "codex_cancelled"}
-                ):
-                    single_shot_exit_code = 1
-                chat_ui_state.record_event(
-                    make_event(
-                        "agent.decision",
-                        title="Agent decision",
-                        message="Coding-agent turn completed and rendered the final response.",
-                        status="success",
-                        session_id=chat_ui_state.session_id,
-                        turn_id=current_turn_id,
-                        step_id="05",
-                        metadata={
-                            "next_action": "final response",
-                            "verification_target": str((result or {}).get("auto_execute_terminal_reason", "") or ""),
-                        },
-                    ).finish(status="success")
-                )
-                _finish_ui_turn(current_turn_id)
-                continue
+            if output_file:
+                _emit_text(answer_text, output_file=output_file)
+            selection_block = _pending_ui_selection_from_blocks(ui_blocks)
+            if selection_block is not None:
+                pending_ui_selection = selection_block
+            active_flow_id = response.flow_id or active_flow_id
+            raw_actions_total = (response.payload or {}).get("actions_taken_total") if isinstance(response.payload, dict) else None
+            actions_total = int(raw_actions_total) if raw_actions_total is not None else len(trace)
+            turn_record = ChatTurnTelemetry(
+                turn_index=len(session_turns) + 1, timestamp=_now_iso(), question=question,
+                answer_text=answer_text, sources=sources, warnings=warnings, trace=trace,
+                tool_steps_total=actions_total, decisions=_extract_decisions(answer_text=answer_text, warnings=warnings),
+                changed_files=list(response.changed_files or []), has_diff=bool(response.changed_files),
+                coding_state={"flow_id": active_flow_id},
+            )
+            session_turns.append(turn_record)
+            chat_ui_state.add_conversation_turn(question, answer_text)
+            _render_turn_transparency(console, turn=turn_record, history=session_turns)
+            mode_name = str(response.mode or "").strip()
+            if not mode_name or mode_name.startswith("route-"):
+                mode_name = "agent-tools" if agent_tools else "classic"
+            _log_chat_turn(run_logger, turn=turn_record, mode=mode_name, dir_mode=dir_mode,
+                coding_agent=response.used_coding_agent, flow_id=active_flow_id,
+                multiline_input=multiline_input, multiline_terminator=multiline_terminator)
+            _finish_ui_turn(current_turn_id, message="Waiting for background execution." if response.payload.get("status") == "waiting" else "Response rendered.")
+            if single_shot_noninteractive and response.error:
+                single_shot_exit_code = 1
+            continue
     finally:
         set_active_chat_ui_state(None)
         if "shutdown_coordinator" in locals() and shutdown_coordinator is not None:

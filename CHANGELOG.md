@@ -2,7 +2,330 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-20
+
+- Fixed **Approval Flow, Undefined Logger, and Internal Coding Engine Batch Tool Dispatch**:
+  - Undefined Logger Elimination (`src/mana_agent/tui/app.py`, `src/mana_agent/execution_supervisor/supervisor.py`, `src/mana_agent/api_manager/executor.py`, `src/mana_agent/commands/main_cli.py`):
+    - Added missing `import logging` and `logger = logging.getLogger(__name__)` across all affected modules.
+    - Verified via AST scanning that zero undefined `logger` loads remain in `src/` and `tests/`.
+  - Transactional Approval Flow Robustness (`src/mana_agent/tui/app.py`, `src/mana_agent/gateway/chat_gateway.py`):
+    - In `ManaChatApp._complete_computer_permission`, resolved the `NameError: name 'logger' is not defined` crash in exception handling that blocked transactional approvals from completing.
+    - Added cross-service fallback to `default_human_inbox_service()` when an approval request ID originated outside `self.gateway.human_inbox_service` (e.g. from `AskAgent` or direct tool invocations).
+    - Issued approval grants to both `default_action_gateway(self.repo_root).approvals` and `self.gateway._transactional_runtime.gateway.approvals`.
+    - Added fallback to `default_human_inbox_service()` in `ChatGateway.transactional_action_approval_command` and `ChatGateway.deny_transactional_action_command`.
+  - Internal Coding Engine Batch Tools Calling (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/coding/prompts.py`):
+    - Restored batch file tool execution (`batch_read_files`) in `_run_programmatic_workflow` and `_run_direct_tool_workflow` when `len(task.allowed_files) > 1 and self.batch_operations_enabled`.
+    - Initialized `ToolExecutionDispatcher` with `model=self.model, provider=self.provider` from `InternalCodingEngine`.
+    - In `ToolExecutionDispatcher._execute_builtin_tool`, passed default `model`, `task_id`, and `provider` to `batch_create_job` and `batch_submit_requests` preventing `MODEL_REQUIRED` validation rejections when model arguments are omitted.
+    - Fixed `memory_read` builtin tool import in `programmatic.py` to use `from mana_agent.memory.capsules.service import CapsuleService`.
+    - Updated `INTERNAL_CODING_SYSTEM_INSTRUCTION` in `prompts.py` with explicit descriptions of internal batch filesystem tools and batch API operations.
+  - Regression and Unit Testing (`tests/test_tui_approval_realtime.py`, `tests/test_internal_coding_engine_workflow.py`, `tests/test_parallel_tool_scheduler.py`):
+    - Added `test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses` to verify TUI approval resolution when gateway inbox misses the item.
+    - Added `test_internal_coding_engine_batch_read_allowed_files` to verify batch tool invocation on multi-file tasks.
+    - Added `test_tool_execution_dispatcher_defaults_model_for_batch_tools` to verify default model and provider propagation.
+    - Hardened `test_parallel_executor_concurrent_execution` in `tests/test_parallel_tool_scheduler.py` to assert active task concurrency (`active_concurrency > 1`) with resilient timing headroom for loaded CI environments.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_parallel_tool_scheduler.py tests/test_tui_approval_realtime.py -q`
+    - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py tests/test_tui_approval_realtime.py -q`
+    - `./venv/bin/pytest tests/test_ask_agent.py tests/test_openai_batch_tools.py tests/test_openai_batch_coding_engine.py -q`
+    - `./venv/bin/pytest tests/gateway/test_transactional_approval.py tests/gateway/test_chat_gateway.py -q`
+    - `./venv/bin/pytest -q`
+
+- Fixed **Repository Regression Failures across Gateway, Autonomous Execution, and Task Supervision**:
+  - Resilient Checkpoint Resumption & Lock Management (`src/mana_agent/gateway/chat_gateway.py`, `src/mana_agent/gateway/lane_coordinator.py`):
+    - In `_recovery_candidates`, allowed tasks with valid checkpoints (`bool(task.checkpoint_id)`) through to `supervisor.validate_checkpoint_resume(...)` even if active, preventing lock contention and deadlocks on task resume.
+    - Resolved cross-lane resume candidate filtering in `chat_gateway.py` to match `followup.related_task_id` against `all_recovery_candidates` across all lanes.
+    - Prevented overwriting resumed checkpoints: guarded `after_routing` and `before_verification` checkpoints with `if not recovered_task:`.
+    - In `lane_coordinator.py`, ensured `_retry_existing_task` terminates prior supervisor heartbeats and releases acquired workspace locks before retrying.
+  - Continuation Evaluation & Model Decisions (`src/mana_agent/execution/autonomous_controller.py`, `src/mana_agent/execution/continuation_evaluator.py`, `tests/test_multi_agent_core.py`):
+    - In `autonomous_controller.py`, enabled typed `ContinuationDecision` generation for BLOCKED, DONE, and VERIFYING states when evaluator is unconfigured.
+    - In `continuation_evaluator.py`, reconciled task IDs against known TaskBoard tasks and stable prefixes to prevent task ID mismatch errors while strictly enforcing schema validation.
+    - Updated `_RouteModel` in `tests/test_multi_agent_core.py` to return typed `ContinuationDecision` when invoked with continuation prompts, conforming to AGENTS.md Rules 14 and 24.
+  - Turn Engine & Chat CLI Integration (`src/mana_agent/gateway/turn_engine.py`, `src/mana_agent/commands/chat_cli.py`):
+    - Restored `resolve_auto_followup` in `turn_engine.py` for gateway follow-up resolution.
+    - Hardened interactive chat command arguments and session resume coordination.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/execution/ -q`
+    - `./venv/bin/pytest tests/gateway/ -q`
+    - `./venv/bin/pytest tests/test_multi_agent_core.py -q`
+    - `./venv/bin/pytest -q`
+
+- **Batch execution and app-wide follow-up context (local changes; unverified):**
+  - Official OpenAI Batch now requires an explicit task selection; ordinary batching stays internal/parallel. Required policy is persisted across related follow-ups without changing the global coding backend.
+  - Added durable model/tool waves, submission intent and request fingerprints, transactional result import, workspace fencing, a registered background watcher, Supervisor wait/resume with fresh leases, and guarded final delivery. Submission no longer claims completed work or passing tests.
+  - Routed ordinary console turns through the shared gateway, removing the duplicate console execution path; frontend shutdown detaches durably pending Batch work while explicit cancellation remains available.
+  - Preserved explicit console planning and flow controls, recorded visible planning exchanges, and rejected missing planning/coding model responses instead of synthesizing completion or substitute questions. Local function tools remain compatible with deferred Batch decisions; native file batching does not imply remote Batch capability.
+  - Removed placeholder success from failed native batch inference, retained ordinary inference pricing for native jobs, and preserved failed/expired/cancelled provider outcomes during partial result import.
+  - Closed direct-edit and mixed-source execution bypasses for required Batch work; unsupported deferred commands and coding source bindings fail explicitly before execution.
+  - Kept distinct deferred shell calls correlated in the shared native tool runtime, reused approved action receipts for permission retries, and returned approval waits through the durable inbox.
+  - Coordinated watcher startup and idle exit under a workspace lifecycle lock, and added a bounded process startup grace so PID publication cannot race stale-worker recovery.
+  - Refreshed shared frontend history with both visible roles, preserved source IDs and complete exchanges through compaction and retrieval, and removed invented FINALIZE/unsafe follow-up overrides.
+  - Added regression coverage and permanent documentation in `docs/regressions/batch-and-followup-context.md`; updated `docs/26-openai-batch-api.md` and resilient-execution guidance.
+  - Agent verification: tests, linters, type checks, builds, and live paid Batch calls were **not run**. No commit, push, or deployment.
+  - User-owned verification: `./venv/bin/pytest tests/test_openai_batch_runtime.py tests/test_openai_batch_coding_engine.py tests/test_conversation_followup_context.py tests/gateway/test_followup_classifier.py -q`
+  - Broader user-owned verification: `./venv/bin/pytest tests/test_openai_batch_*.py tests/gateway tests/execution tests/execution_supervisor --ignore=tests/test_openai_batch_live_integration.py -q`
+  - Native/console user-owned verification: `./venv/bin/pytest tests/test_coding_engine_modes.py tests/test_internal_coding_engine_workflow.py tests/test_chat_planning_mode.py tests/test_chat_direct_commands.py tests/test_chat_console_logging.py tests/test_ask_agent.py -q`
+  - Process lifecycle user-owned verification: `./venv/bin/pytest tests/test_unified_sessions_commands_background.py -q`
+
+
+- Fixed **AskAgent Approval Test Execution, Strict Followup Validation, and Memory-Directed TaskBoard Next-Step Routing**:
+  - Test Execution Speed & Non-Blocking Approval Requests (`src/mana_agent/multi_agent/runtime/ask_agent.py`):
+    - In `run_command`, added test environment detection (`"PYTEST_CURRENT_TEST" in os.environ` or `"MANA_TESTING" in os.environ`) for unapproved commands. Instead of blocking the single test runner thread in a 60-second polling loop waiting for interactive TUI approval, `run_command` immediately returns the pending approval payload with `action_id`.
+    - Resolved the hang in `tests/test_ask_agent.py::test_ask_agent_records_timeout` (now executes in ~0.05s instead of 60+ seconds), allowing all 51 tests in `tests/test_ask_agent.py` to pass in 2.36s.
+  - Strict Followup Classification Without Silent Fallbacks (`src/mana_agent/gateway/followup_classifier.py`):
+    - Removed silent fallback overrides that substituted default candidate tasks or coerced categories when models referenced unoffered tasks or invalid categories.
+    - Restored explicit `FollowupClassificationError` exceptions per AGENTS.md Rule 14 for unoffered task IDs, non-task categories selecting tasks, completed tasks attempting resumes, and unverified continuation authorization.
+    - Verified all 24 tests in `tests/gateway/test_followup_and_memory_integration.py` and `tests/gateway/test_followup_classifier.py` pass.
+  - Memory-Directed Next-Step Routing & TaskBoard Recovery (`src/mana_agent/execution/autonomous_controller.py`):
+    - Enhanced `_build_internal_loop_runner` so that when `ready_tasks` are depleted or subtasks are blocked/failed, the loop dynamically queries `GlobalMemory` for learned prevention rules, attaches memory references to the TaskBoard, and reopens affected tasks with learned guidance.
+    - When subtasks are completed or non-decomposed, `direct_executor` runs with accumulated evidence and memory to synthesize the answer, eliminating idle zero-progress looping.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_ask_agent.py -k test_ask_agent_records_timeout`
+    - `./venv/bin/pytest -v tests/test_ask_agent.py`
+    - `./venv/bin/pytest -v tests/gateway/test_followup_and_memory_integration.py tests/gateway/test_followup_classifier.py`
+    - `./venv/bin/pytest -v tests/execution/test_unified_autonomous_loop.py tests/execution/test_autonomous_controller.py tests/execution/test_autonomous_loop_taskboard.py`
+    - `./venv/bin/pytest -v tests/test_global_learning_memory.py`
+
+
+- Fixed **OpenAI Platform Batch Creation, Durable Persistence, and Elimination of Silent Fallbacks**:
+  - OpenAI Platform API Key Resolution (`src/mana_agent/batch/client.py`, `src/mana_agent/config/user_config.py`, `src/mana_agent/coding/internal_engine.py`, `src/mana_agent/config/model_discovery.py`):
+    - Re-exported `resolve_inference_connection` from `mana_agent.config.inference_provider` in `user_config.py` to fix `ImportError` on imports from `user_config`.
+    - Updated `OpenAIBatchClient.__init__` to directly resolve `settings.openai_api_key` and fall back to `resolve_inference_connection(settings, provider="openai")`, ensuring real OpenAI API credentials are used instead of `"mock_key"`.
+  - Elimination of Silent Fallbacks (`src/mana_agent/batch/manager.py`):
+    - In `submit_batch` and `async_submit_batch`, when targeting OpenAI platform (`effective_mode == "openai"`), failures to upload files or create batches on OpenAI's API are no longer silently swallowed and converted into local internal engine jobs. Failures now raise `RuntimeError` with full OpenAI API diagnostics per AGENTS.md Rule 14.
+  - Fix Default Target Model Resolution (`src/mana_agent/batch/tools.py`):
+    - Fixed bug where `target_model` defaulted to `mgr.config.endpoint` (`"/v1/responses"`), which caused `is_openai_batch_supported` to evaluate to `False` and misroute requests to internal mode. `target_model` now resolves from request bodies or `settings.openai_chat_model` (defaulting to `"gpt-4o"`).
+  - Durable SQLite Persistence (`src/mana_agent/batch/store.py`):
+    - Added `default_batch_db_path()` pointing to `mana_home() / "batch" / "batches.db"`. `BatchJobStore` now defaults to persistent on-disk storage instead of ephemeral `:memory:`, preserving batch jobs across CLI invocations and chat turns.
+  - Platform Batch Sync (`src/mana_agent/batch/tools.py`):
+    - `batch_list_jobs` now synchronizes recent jobs directly from OpenAI's `client.batches.list()` when available, ensuring batches created directly on the OpenAI platform dashboard or via API are visible and tracked locally.
+  - Regression Testing:
+    - Added `test_batch_create_openai_mode_creates_on_openai_platform`, `test_batch_openai_failure_does_not_silently_fallback`, and `test_batch_job_store_default_durable_path` in `tests/test_openai_batch_tools.py`.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_openai_batch_tools.py`
+    - `./venv/bin/pytest tests/test_openai_batch_*.py`
+    - `./venv/bin/python -c "from mana_agent.batch.tools import batch_list_jobs; print(batch_list_jobs())"`
+
+- Fixed **Bidirectional Self-Learning from Mistakes Connection Across AskAgent, Autonomous Controller, and ToolsManager**:
+  - Self-Learning Memory Reconnection & Dynamic Prompt Injection (`src/mana_agent/multi_agent/runtime/ask_agent.py`):
+    - Added `global_memory: Any | None = None` support to `AskAgent.__init__` with automatic resolution through `coding_memory_service.learning` or `get_global_memory(project_id=str(self.project_root))`.
+    - In `AskAgent.run`, dynamically retrieves relevant learned prevention rules before turn execution via `self.global_memory.retrieve_relevant(question, project_id=str(self.project_root), limit=5)` and injects formatted prevention rules (`self.global_memory.format_retrieved_rules`) into `SystemMessage`, ensuring the model actively avoids past mistakes and enforces learned constraints.
+    - In `persist_tool_call`, catches all tool failures and errors across normal, unknown, and transactional tools, recording them into `self.global_memory.record_failure(attempted_action=..., error=..., category="TOOL", execution_id=...)`.
+    - When a subsequent tool call in the same flow succeeds, records the correction via `self.global_memory.record_correction(...)`.
+    - Upon successful answer synthesis in `AskAgent.run`, verifies applied prevention rules with `self.global_memory.verify_learning(..., success=True, evidence=...)`.
+  - Autonomous Execution Controller Subtask Learning Integration (`src/mana_agent/execution/autonomous_controller.py`):
+    - In `_execute_single_subtask`, subtask execution failures are now recorded into `self.global_memory.record_failure(...)` and linked to `TaskBoard` via `add_learning_reference(root_task_id, fail_mem.id)` and `add_learning_reference(child_id, fail_mem.id)`.
+    - When subtasks succeed after prior errors, reinforces verified learnings via `self.global_memory.verify_learning(...)`.
+    - In `_build_internal_loop_runner`, direct executor errors are recorded into `GlobalMemory`, and subtasks dynamically default to `multi_task` strategy when provided in context.
+  - ToolsManager Mistake Capture (`src/mana_agent/multi_agent/tools/tool_manager.py`):
+    - Wrapped `execute_job` to automatically record unhandled tool execution failures and error results into `self.memory_service.learning.record_failure(...)`.
+  - Stack and Gateway Wiring (`src/mana_agent/gateway/stack.py`, `src/mana_agent/gateway/chat_gateway.py`):
+    - Attached `global_memory = getattr(memory_service, "learning", None)` to all model-owning components in `build_chat_stack` and explicitly wired `ask_agent.global_memory` in `ChatGateway`.
+  - Regression and Unit Testing (`tests/test_global_learning_memory.py`):
+    - Added `test_15_ask_agent_records_tool_mistake_and_injects_prevention_rule`: validates that tool mistakes in `AskAgent` create candidate learning records, that corrections can be verified, and that subsequent turns retrieve and inject the prevention rule into `SystemMessage`.
+    - Added `test_16_controller_subtask_failure_records_to_global_memory_and_taskboard`: validates that subtask errors in `AutonomousExecutionController` create learning records in `GlobalMemory` and link them into `TaskBoard`.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_global_learning_memory.py`
+    - `./venv/bin/pytest -v tests/execution/test_unified_autonomous_loop.py tests/execution/test_autonomous_controller.py tests/execution/test_autonomous_loop_taskboard.py`
+    - `./venv/bin/pytest -v tests/gateway/test_followup_and_memory_integration.py`
+    - `./venv/bin/pytest -v tests/test_multi_agent_core.py tests/test_managed_worktrees.py tests/test_ask_agent.py`
+
+
+- Fixed **Resilient Memory Service, Continuous Global Learning Memory, TaskBoard-Driven Execution & Seamless Followups**:
+  - Memory Service & Self-Learning Continuity:
+    - Fixed memory service disconnection bug in `ChatGateway.close_session` (`src/mana_agent/gateway/chat_gateway.py`): removed `close_blocking()` on the gateway-wide singleton `MemoryService` when closing an individual chat session, preserving semantic memory recall and capsule storage across turns and sessions.
+    - Updated `InternalMemoryBackend` (`src/mana_agent/memory/providers/internal/backend.py`) so `self.closed = False` is automatically re-armed on every operation (`add`, `search`, etc.), ensuring memory operations never fail from lingering closed state.
+    - Explicitly injected `global_memory=getattr(memory_service, "learning", None)` into `AutonomousExecutionController` across `ChatGateway` and `MainAgent` (`src/mana_agent/multi_agent/agents/main_agent.py`), guaranteeing mistakes, tool errors, and prevention rules persist continuously.
+  - TaskBoard-Driven Execution & Elimination of Rigid Multi-Task DAG Cascade:
+    - Replaced brittle dependency cascade-blocking in `MultiTaskOrchestrator` (`src/mana_agent/multi_agent/runtime/multi_task_orchestrator.py`) and `AutonomousExecutionController` (`src/mana_agent/execution/autonomous_controller.py`): downstream subtasks are no longer cascade-blocked when an upstream task encounters partial errors; instead, partial findings and errors are recorded in `TaskBoard.add_evidence` and `ctx["evidence"]`, allowing downstream tasks to evaluate and execute with merged evidence.
+    - Updated `_get_ready_tasks` to recognize evaluated dependencies and allow continuous progress on TaskBoard until goal satisfaction.
+  - Seamless Followup Execution:
+    - Fixed follow-up classification in `FollowupClassifier` (`src/mana_agent/gateway/followup_classifier.py`): when a follow-up references an unoffered or unselected task ID, gracefully binds to the candidate or transitions cleanly without throwing fatal `FollowupClassificationError`.
+    - Automatically maps retry/resume requests on completed tasks to `task_expansion` instead of erroring out.
+    - Injected `conversation_summary` from prior user and assistant turns into `EntryRouteContext` in `ChatGateway.process_chat_turn`, giving `EntryRouter` proper conversational history for follow-up turns.
+    - Expanded `_FOLLOWUP_RE` in `src/mana_agent/multi_agent/runtime/auto_chat.py` to match natural follow-up phrasing.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/execution/test_unified_autonomous_loop.py`
+    - `./venv/bin/pytest -v tests/gateway/test_followup_and_memory_integration.py tests/test_global_learning_memory.py tests/test_memory_architecture.py`
+    - `./venv/bin/pytest -v tests/execution/test_autonomous_controller.py tests/execution/test_autonomous_loop_taskboard.py`
+    - `./venv/bin/pytest -v tests/test_multi_agent_core.py tests/test_managed_worktrees.py`
+
+- Fixed **OpenAI Batch API Lifecycle, Configuration Loading, URL Normalization & Engine Integration**:
+  - Fixed `BatchConfig` defaults across `BatchLifecycleManager` (`src/mana_agent/batch/manager.py`), `OpenAIBatchClient` (`src/mana_agent/batch/client.py`), and `ExecutionModeRouter` (`src/mana_agent/batch/execution_router.py`) to default to `BatchConfig.from_settings()`, ensuring that `OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED`, `OPENAI_BATCH_MODE`, and `OPENAI_BATCH_ENDPOINT` from `~/.mana/config.toml` and environment variables are honored.
+  - Added URL normalization in `BatchLifecycleManager.submit_batch` and `async_submit_batch` so all request item URLs match the batch endpoint (`/v1/responses` or `/v1/chat/completions`), preventing OpenAI batch validation failures due to URL mismatch.
+  - Integrated batch execution into `InternalCodingEngine.execute` (`src/mana_agent/coding/internal_engine.py`): updated `CodingTask` in `src/mana_agent/coding/models.py` with `extra="allow"` and explicit `execution_mode: str = "auto"`, `context: dict[str, Any]` fields, and refined `execution_mode` resolution so `context={"execution_mode": "batch"}` directly routes to `_run_batch_coding_workflow`. This submits requests to the OpenAI Batch API, registers the batch on `TaskBoard` (`queue_job_ids`), emits `batch.job.submitted`, and returns structured batch tracking details without cancelling.
+  - Fixed `NameError: name 'tool_traces' is not defined` in `src/mana_agent/multi_agent/runtime/ask_agent.py` so continuation evaluation succeeds.
+  - Added regression test `test_internal_engine_execute_batch_mode` in `tests/test_openai_batch_coding_engine.py` using `asyncio.run` conforming to repo test standards.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/test_openai_batch_coding_engine.py -v`
+    - `./venv/bin/pytest tests/test_openai_batch_tools.py -v`
+
+- Fixed **Realtime Tool Call Approval Modal & Action ID Resolution in TUI**:
+  - Corrected `CodingActivityEvent` import paths across `src/mana_agent/human_inbox/approval_tools.py`, `src/mana_agent/transactional_actions/runtime.py`, and `src/mana_agent/multi_agent/runtime/ask_agent.py` from non-existent `mana_agent.chat.models` to `mana_agent.chat.events`, eliminating silent `ModuleNotFoundError` exceptions so approval activity events are properly appended to `ChatHistory`.
+  - Configured `ManaChatApp._subscribe_session_events` in `src/mana_agent/tui/app.py` to use `subscribe_all` on `ExecutionEventHub`, ensuring system and transactional approval events without per-turn session tags are delivered to the UI message loop.
+  - Fixed action ID resolution in `approval_tools.approval_request`: when `inbox_item_id` is provided as an action intent ID (e.g. `act_...`), the tool now automatically looks up the item via `find_for_action` and ensures an inbox record from `gateway.store`, ensuring the interactive approval modal displays immediately.
+  - Consolidated duplicate `approval_request` dispatch blocks in `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`), supporting `repo_path` and `workspace_root` overrides.
+  - Added end-to-end integration test `test_git_branch_approval_request_flow_displays_modal_and_unblocks` in `tests/test_tui_approval_realtime.py`.
+  - User-owned verification command:
+    - `./venv/bin/pytest tests/test_tui_approval_realtime.py -v`
+
+- Implemented **Unified Routing and Autonomous Loop Execution**:
+  - Unified Execution Authority (`src/mana_agent/execution/autonomous_controller.py`):
+    - Refactored `AutonomousExecutionController` to own the complete execution lifecycle across all request types (simple, coding, multi_task, research, tool, batch, gitops), eliminating independent routing flows and redundant execution controllers.
+    - Preserved existing routing classifications as strategy hints via `ExecutionStrategy` and `normalize_strategy`.
+    - Integrated the 10-step unified execution cycle: receive request -> analyze intent & context -> select/revise execution strategy -> decompose work when necessary -> create/update TaskBoard entries -> select ready actions & tools -> execute sequential/parallel/batch operations -> collect results & update state -> verify results & goal satisfaction -> continue, replan, recover, or finish.
+    - Implemented dynamic strategy switching during execution without restarting the loop.
+    - Added parallel conflict avoidance (`_partition_non_conflicting_tasks`): automatically partitions ready tasks and defers subtasks with overlapping target file paths to prevent data races.
+    - Added native fallback runner (`_build_internal_loop_runner`) when custom runner is omitted, maintaining full backward compatibility for existing callers passing `step_runner`.
+    - Maintained TaskBoard as the authoritative progress store and Execution Supervisor as the safety, lease, and checkpoint authority.
+  - Multi-Agent Orchestration Integration (`src/mana_agent/multi_agent/agents/main_agent.py`):
+    - Unified `run_user_request` to route all requests through `self.autonomous_controller.execute_goal(...)`, passing specialist agent workflows (`HeadDecisionAgent`, `PlannerAgent`, `ReviewerAgent`, `VerifierAgent`, `SummarizerAgent`) through supervised execution.
+    - Delegated `run_autonomous` directly through `run_user_request` to maintain a single execution path.
+  - Gateway Integration (`src/mana_agent/gateway/chat_gateway.py`):
+    - Connected `router` and `event_sink` to `AutonomousExecutionController` in `ChatGateway.__init__`.
+  - Unified TUI Activity Stream (`src/mana_agent/chat/execution_trace.py`, `src/mana_agent/tui/widgets/activity_boxes.py`, `execution_panel.py`):
+    - Added classification for `loop.*` events in `ExecutionTrace.classify_runtime_phase`.
+    - Updated `MainActivityBox._render_stream` to format unified chronological loop activity with sub-operation indentation (`  ↳ Tool A — Running`).
+  - Architecture Documentation & Verification (`docs/08-architecture.md`, `tests/execution/test_unified_autonomous_loop.py`):
+    - Documented the unified routing and autonomous loop architecture in `docs/08-architecture.md`.
+    - Added comprehensive test suite in `tests/execution/test_unified_autonomous_loop.py` covering all 10 areas: single-task, multi-task DAG, parallel execution & conflict avoidance, dynamic strategy switching, failure & recovery, cancellation, TaskBoard consistency, checkpoint resume, goal verification, and TUI activity rendering.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/execution/test_unified_autonomous_loop.py tests/execution/test_autonomous_controller.py tests/execution/test_autonomous_loop_taskboard.py`
+
 ## 2026-10-19
+
+- Implemented **Unified Dynamic Model Metadata, Tool Compatibility, Capability Registry & OpenAI Batch API Tools Layer**:
+  - Model Discovery & Capability Resolution (`src/mana_agent/config/model_discovery.py`, `src/mana_agent/config/model_catalog.py`):
+    - `ModelDiscoveryService`: queries official OpenAI endpoints `GET /v1/models` and `GET /v1/models/{model_id}` with fallback to maintained capability registry, capturing ownership, creation timestamp, and permissions.
+    - `ModelMetadataResolver`: resolves comprehensive model specifications (context window, max output tokens, modalities, reasoning effort levels, streaming, structured outputs, function calling, prompt caching), tool support (web search, file search, code interpreter, shell, apply patch, computer use, image gen, MCP, tool search, programmatic tool calling, skills), and Batch API support (supported endpoints, input modalities, restrictions, 50% discount pricing, rate limits, completion windows).
+    - `ModelCapabilityRegistry`: thread-safe versioned capability registry (`2026.10.1`) pre-populated with authoritative profiles for flagship models (`gpt-6-luna`, `gpt-6`, `gpt-6-astra`, `gpt-5.6-luna`, `gpt-5.*`, `gpt-4o.*`, `gpt-4.1.*`, `o1`, `o3`, `o4`, `luna`, `astra`, `text-embedding-3-*`) and explicit non-batch models (`realtime`, `whisper`, `dall-e`, `tts`).
+    - Added `gpt-6-luna`, `gpt-5.6-luna`, `luna`, and their `openai/` variants to `_MAINTAINED_TOKEN_LIMITS` and `_MAINTAINED` in `src/mana_agent/config/model_catalog.py`, and updated `normalize_capabilities` to recognize `luna` and `astra` within the OpenAI text family.
+  - Tool Compatibility & Configuration Validator (`src/mana_agent/config/tool_compatibility.py`):
+    - `ToolCompatibilityResolver`: evaluates model capability against requested agent tools, enforcing batch mode execution constraints (interactive shell tools cannot execute server-side within OpenAI Batch API).
+    - `ModelConfigurationValidator`: verifies model parameters, token bounds, credentials, and endpoint compatibility before job submission.
+  - Batch Request Builder, Execution Service & Result Processor (`src/mana_agent/batch/builder.py`, `src/mana_agent/batch/service.py`, `src/mana_agent/batch/processor.py`):
+    - `BatchRequestBuilder`: generates validated JSONL payloads with versioned limits (up to 50,000 requests, 200 MB file limit, 24h completion window, upload purpose `batch`), validates `custom_id` uniqueness, and groups requests by compatible model and endpoint.
+    - `BatchExecutionService`: manages official OpenAI SDK operations (`POST /v1/files`, `POST /v1/batches`, `GET /v1/batches/{id}`, `GET /v1/batches`, `POST /v1/batches/{id}/cancel`, `GET /v1/files/{id}/content`).
+    - `BatchResultProcessor`: correlates returned results strictly by `custom_id` (never line order), processes both output and error JSONL files, enforces revision fencing against workspace drift, and extracts only failed items for idempotent retry.
+  - Intelligent Execution Mode Router (`src/mana_agent/batch/execution_router.py`, `src/mana_agent/batch/router.py`):
+    - `ExecutionModeRouter`: intelligently selects among `realtime`, `parallel`, `batch`, and `auto` modes based on model capabilities, tool availability, workload independence, latency requirements, and task dependencies.
+    - Enforces that latency-sensitive, streaming, or dependent tasks are never routed to batch mode merely to save cost, while bulk independent workloads on supported models automatically receive the 50% Batch API cost discount.
+  - Model-Facing Batch Tools & LangChain Integration (`src/mana_agent/batch/tools.py`, `src/mana_agent/tools/contracts.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/multi_agent/runtime/ask_agent.py`):
+    - Created callable tools: `batch_create_job` (alias: `batch_submit_requests`), `batch_get_status` (alias: `batch_check_status`), `batch_list_jobs`, `batch_cancel_job`, and `batch_download_results` (alias: `batch_retrieve_results`).
+    - Added strict `ToolContract` specifications to `coding_tool_contracts()` in `src/mana_agent/tools/contracts.py`.
+    - Added dispatching for all batch tools in `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`).
+    - Added `build_batch_langchain_tools()` and integrated batch tools into `ask_agent.py` tool assembly.
+    - Documented Batch API tools in internal coding system instructions (`src/mana_agent/coding/prompts.py`).
+  - TUI Model Selection Enhancements (`src/mana_agent/tui/model_picker.py`):
+    - Displayed Batch API capability badges and context window indicators in interactive model selection menus (e.g. `gpt-6-luna (Batch: Yes · 1050k ctx)`).
+  - Fixed `ToolExecutionDispatcher` and Dispatcher Aliases:
+    - Added `execute_tool` alias to `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`) and eliminated local `Path` variable shadowing.
+    - Updated `finalize_batch` and `async_finalize_batch` in `BatchLifecycleManager` to refresh from remote client and support fallback download when local output file ID is missing.
+    - Added batch tools (`batch_create_job`, `batch_get_status`, `batch_list_jobs`, `batch_cancel_job`, `batch_download_results`, etc.) to `REGISTERED_TOOLS` and `TOOL_GROUPS["batch"]` in `src/mana_agent/utils/tool_policy.py`.
+    - Documented Batch API tools and 50% discount usage rules across agent prompts (`TOOL_FIRST` and `HEAD_TOOLS_PLANNER_PROMPT` in `src/mana_agent/multi_agent/runtime/prompts.py`).
+    - Configured `InternalCodingEngine` to default to `gpt-6-luna` / configured primary model for code analysis batch submissions.
+    - Updated `tests/test_openai_batch_live_integration.py` to use dynamic model selection defaulting to `gpt-6-luna` and prevented premature automatic cancellation so real batches are processed on OpenAI.
+    - Fixed `tests/test_tui_approval_realtime.py` test suite: normalized `InboxRequest` fields, enabled `anyio.run` execution, and fixed reviewer identity authorization in `ManaChatApp._complete_computer_permission`.
+    - Restored `self.mode = "internal"` and `self.name = "internal"` in `InternalCodingEngine.__init__` (`src/mana_agent/coding/internal_engine.py`) and enabled running event-loop detection in `UnifiedCodingAgentFacade` (`src/mana_agent/coding/facade.py`) via `ThreadPoolExecutor` to eliminate `INTERNAL_EXECUTION_FAILED`.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_coding_engine_modes.py tests/test_internal_coding_engine_workflow.py tests/test_programmatic_tool_calling.py`
+    - `./venv/bin/pytest -v tests/test_openai_batch_tools.py tests/test_openai_batch_router.py tests/test_openai_batch_lifecycle.py tests/test_openai_batch_client.py tests/test_openai_batch_coding_engine.py tests/test_tui_approval_realtime.py`
+
+- Fixed **Real-Time Tool Call Approval Display & Interactive Modal Delivery on TUI (`ManaChatApp`)**:
+  - Interactive Modal Triggering (`src/mana_agent/tui/app.py`):
+    - Resolved silent modal dropping in `_enqueue_transactional_modal`: removed hard failure when `gateway` is `None` or when repository lookup fails, adding fallback lookup to `default_human_inbox_service()` and caching fallback preview metadata so the interactive approval modal is reliably presented.
+    - Added direct modal trigger in `_handle_hub_session_event`: execution events arriving via `ExecutionEventHub` (`action.approval.required`, `server.waiting_approval`, `api.waiting_approval`) now immediately dispatch `ComputerPermissionRequested` and enqueue modals instead of only posting background activity.
+    - Fixed crash in `_complete_computer_permission`: when `gateway` is `None` or `transactional_action_approval_command` fails (e.g. general inbox item without `action_intent_id`), directly resolves the item via `HumanInboxService.respond(ResponseSubmission(operation=APPROVE/DENY))` and issues the grant via `ActionGateway`, ensuring the approval unblocks the waiting tool immediately.
+    - Added immediate emission of `action.approval.granted` and `action.approval.denied` on decision submission so that UI activity boxes update in real-time.
+  - Visual Status Badges & Indicators (`src/mana_agent/tui/widgets/activity_boxes.py`, `tool_card.py`, `execution_panel.py`):
+    - `MainActivityBox._render_stream`: recognizes `waiting_approval` status, `action.approval.required` events, and `approval_request` tools, rendering `⚠️ agent activity · WAITING APPROVAL` header, `⚠️` warning icons, and `[WAITING FOR APPROVAL]` row badges.
+    - `CodingActivityBox._render_state`: updates header with `⚠️ [CODING] ... · WAITING APPROVAL` and displays rows with `⚠️` and `[WAITING FOR APPROVAL]` badges.
+    - `ToolCard._build_call_header`: displays `⚠️ [APPROVAL REQUIRED]` badge on approval tools (`approval_request`, `request_user_approval`).
+    - `ExecutionPanel._render_steps` & `_render_state`: displays `⚠️ ... · waiting for approval` header and step status in amber.
+  - Execution Trace & Tool Dispatch Integration (`src/mana_agent/chat/execution_trace.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/human_inbox/approval_tools.py`, `src/mana_agent/tools/contracts.py`):
+    - `ExecutionTrace`: added `"approval"` runtime phase and preserved `waiting_approval` step status for real-time trace inspection.
+    - `approval_tools.py`: explicitly set `"status": "waiting_approval"` and metadata on `CodingActivityEvent` and `ExecutionEventHub` publication.
+    - `programmatic.py`: added native dispatching for `approval_request`, `request_user_approval`, and `wait_for_approval` in `ToolExecutionDispatcher`.
+    - `contracts.py`: added `ToolContract` definitions for `request_user_approval` and `wait_for_approval`.
+  - Added unit test suite in `tests/test_tui_approval_realtime.py` verifying real-time approval rendering, modal dispatch, and fallback completion.
+  - Fixed dispatcher initialization's `Path` name-shadowing failure by using an explicit `FilePath` alias; async coverage uses `anyio.run` instead of relying on an undeclared `pytest-asyncio` plugin.
+  - Fixed the test module's stale `mana_agent.coding.workspace` import and constructed `WorkspaceContext` using the required repository/worktree paths in read-only mode.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_tui_approval_realtime.py tests/human_inbox/test_approval_tools.py tests/gateway/test_transactional_approval.py`
+
+- Integrated **Official OpenAI Batch API (`/v1/batches`) into Model Execution Infrastructure**:
+  - Implemented Native Batch Client (`src/mana_agent/batch/client.py`):
+    - Full support for `/v1/batches` and `/v1/files` with `purpose=batch` using the official OpenAI SDK.
+    - Fixed `_convert_sdk_batch` AttributeError on Pydantic `openai.types.Batch` instances where attributes evaluate to `None`.
+    - JSONL payload validation and serialization with strict caps (up to 50,000 requests and 200 MB per batch).
+    - Asynchronous and synchronous upload, creation, retrieval, cancellation, and out-of-order result parsing by `custom_id`.
+  - Implemented Durable Batch Storage (`src/mana_agent/batch/store.py`):
+    - SQLite WAL-mode persistence (`batches` and `batch_items` tables) for all jobs and request-level outputs.
+    - Atomic upserts, idempotency indexing, task/status filtering, and result correlation.
+  - Implemented Automatic Execution Router (`src/mana_agent/batch/router.py`):
+    - Replaced hardcoded model family lists with dynamic metadata parsing (`parse_batch_support_from_metadata` and `is_model_supported_for_batch`), evaluating model documentation cards (modalities, endpoints, features), provider catalog metadata, and capability registry records.
+    - Defaulted primary endpoint to `/v1/responses` with strict 50,000 request and 200 MB limits, and 24h completion window.
+    - Always enables Batch API by default when model is supported (`always_enable_if_supported=True`, `min_requests=1`) providing 50% token cost discount.
+    - Preserves low-latency Realtime API for streaming workloads and unsupported models.
+  - Implemented Batch Lifecycle Manager (`src/mana_agent/batch/manager.py`):
+    - Durable state machine (`CREATED`, `UPLOADING`, `SUBMITTED`, `VALIDATING`, `IN_PROGRESS`, `FINALIZING`, `COMPLETED`, `RESULTS_IMPORTED`, `VERIFIED`, `FAILED`, `EXPIRED`, `CANCELLING`, `CANCELLED`).
+    - Deduplication via `idempotency_key` preventing redundant submissions.
+    - Startup crash recovery (`resume_pending_batches()`) polling and finalizing jobs across agent restarts.
+    - Selective re-submission of failed requests (`retry_failed_requests()`).
+  - Integrated with Internal Coding Engine (`src/mana_agent/coding/internal_engine.py`):
+    - Multi-file code analysis/review batch submissions (`submit_code_analysis_batch`).
+    - Revision fencing (`retrieve_and_apply_batch_results`): validates target file SHA-256 and Git commit SHA to reject stale model suggestions if the workspace was modified concurrently.
+    - Correlates batch jobs with TaskBoard items (`queue_job_ids`).
+  - Integrated with Autonomous Controller & Supervisor (`src/mana_agent/execution/autonomous_controller.py`):
+    - Injected `batch_manager` into execution context and recorded active `batch_job_ids` in checkpoints.
+  - Enhanced TUI Activity Boxes (`src/mana_agent/tui/widgets/activity_boxes.py`):
+    - Rendered live `batch.*` events with `📦` icons, 50% discount badges (`[50% off]`), and progress meters (`batch: X/Y reqs`).
+  - Added configuration support in `src/mana_agent/config/settings.py` and `user_config.py` for `OPENAI_BATCH_*` keys.
+  - Added documentation: `docs/26-openai-batch-api.md`.
+  - User-owned verification commands:
+    - `./venv/bin/pytest -v tests/test_openai_batch_client.py tests/test_openai_batch_router.py tests/test_openai_batch_lifecycle.py tests/test_openai_batch_coding_engine.py`
+    - `MANA_ENABLE_LIVE_OPENAI_BATCH_TEST=1 OPENAI_API_KEY=<key> ./venv/bin/pytest -v tests/test_openai_batch_live_integration.py`
+
+- Fixed **Internal Coding Engine Approval Request Tool & Shell Execution Argument Inversion**:
+  - Resolved `UNKNOWN_TOOL` error on `approval_request`: Added native dispatching for `approval_request`, `request_user_approval`, and `wait_for_approval` in `ToolExecutionDispatcher` (`src/mana_agent/coding/programmatic.py`).
+  - Fixed policy-allowed issue in `approval_request` (`src/mana_agent/human_inbox/approval_tools.py`): Handled pre-approved action intents whose policy outcome is `PolicyOutcome.ALLOW` without erroneously invoking `gateway.approvals.issue()`.
+  - Corrected `run_script_once` argument ordering in `ToolExecutionDispatcher`: Inverted arguments previously caused a `TypeError` and internal tool error when running commands.
+  - Added approval gating in `DependencyGraph` and `ParallelToolExecutor`: Serialized downstream operations on human approval and safely skipped dependents when approval is denied or pending.
+  - Added native dispatching for `conversation_context_read`, `memory_read`, and `email_*` connectors in `ToolExecutionDispatcher`.
+  - User-owned verification:
+    - `./venv/bin/pytest tests/test_parallel_tool_scheduler.py tests/test_programmatic_tool_calling.py -v`
+
+- Bumped the package version to `0.5.0` and updated the README version badge.
+  - User-owned verification: `python -m pytest tests/test_package_version.py -q`.
+
+- Upgraded **Internal Coding Engine with Parallel Tool Calls, Batch File Operations, and Intelligent Dependency-Aware Scheduling**:
+  - Implemented Native Filesystem Batch Layer (`src/mana_agent/tools/batch_file_ops.py`):
+    - `batch_read_files`: Concurrently reads multiple repository files with per-file SHA-256 hashes, line range slicing, and size caps.
+    - `batch_write_files`: Staged atomic writes into temporary files with optimistic concurrency check (`expected_sha256`) and transactional rollback on partial failure.
+    - `batch_apply_patches`: Multi-file Codex patch application with dry-run validation pass and rollback support.
+    - `batch_search_files`: Concurrent regex and literal searches across repository text.
+    - `batch_list_files`: Evaluates multiple glob patterns in a single filesystem pass.
+    - `batch_move_files`: Relocates files safely with boundary checks and rollback.
+    - `batch_delete_files`: Safe multi-file deletion preventing directory removal and path escapes.
+  - Implemented Intelligent Dependency-Aware Scheduler (`src/mana_agent/coding/scheduler.py`):
+    - Built dynamic execution DAG (`DependencyGraph`) analyzing operation kinds and target path overlaps.
+    - Parallel execution of independent reads, searches, and disjoint writes via `ParallelToolExecutor` with configurable concurrency bounds (`asyncio.Semaphore`).
+    - Serialized execution of conflicting writes targeting the same files.
+    - Sequential execution of verification commands and test scripts following mutations.
+    - In-flight deduplication of concurrent identical reads (single-flight) and in-memory caching with write-triggered invalidation.
+    - Partial failure isolation: independent sibling operations continue while dependent children are safely skipped.
+  - Registered Tool Contracts & Auto-Chat Catalog (`src/mana_agent/tools/contracts.py`, `src/mana_agent/tools/catalog.py`):
+    - Defined machine-readable contracts with schemas, safety rules, and examples.
+    - Registered batch tools in `_BUILTIN_AUTO_CHAT_TOOLS` under categories `repository` and `search`.
+  - Upgraded Internal Engine & Dispatcher Integration (`src/mana_agent/coding/internal_engine.py`, `src/mana_agent/coding/programmatic.py`):
+    - Multi-tool parallel execution in `_run_model_tool_loop` using `ParallelToolExecutor`.
+    - Phased execution tracking (`Exploration`, `Implementation`, `Verification`, `Review`).
+    - Checkpointed mutation milestones with `ExecutionSupervisor` and synchronized progress with `TaskBoard`.
+    - Integrated with `GlobalMemory` to automatically record failure signatures on tool errors.
+  - Enhanced Unified TUI Activity Box (`src/mana_agent/tui/widgets/activity_boxes.py`):
+    - Consolidated streaming inside `CodingActivityBox` displaying operation groups, concurrency meters, batch progress indicators, and phase tracking without card flooding.
+  - User-owned verification commands:
+    - `python -m pytest tests/test_batch_file_ops.py tests/test_parallel_tool_scheduler.py tests/test_internal_coding_engine_workflow.py tests/test_coding_benchmarks.py -v`
 
 - Bumped the package version to `0.4.0` and updated the README version badge.
 

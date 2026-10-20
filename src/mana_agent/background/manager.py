@@ -8,6 +8,7 @@ import sys
 import time
 import hashlib
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 from mana_agent.background.commands import get_registered_command
@@ -183,6 +184,12 @@ class BackgroundProcessManager:
         changed: list[ProcessRecord] = []
         rows = [self.store.get(process_id)] if process_id else self.store.list()
         for row in rows:
+            if row.state == "starting" and not row.process_identity:
+                try:
+                    if (datetime.now(timezone.utc) - datetime.fromisoformat(row.created_at.replace("Z", "+00:00"))).total_seconds() < 30:
+                        continue  # The spawning parent has not published PID identity yet.
+                except ValueError:
+                    pass
             if row.state in {"starting", "running", "stopping"} and not self._matches(row):
                 row.state = "stale"
                 row.health = "unhealthy"

@@ -303,13 +303,30 @@ class MultiTaskOrchestrator:
                 made_progress = False
                 for local_id in list(pending):
                     item = by_id[local_id]
-                    failed_dependencies = [
-                        dependency for dependency in item.depends_on
-                        if dependency in results
-                        and results[dependency].status in {"failed", "blocked", "cancelled"}
+                    # If any dependency is still in flight or not yet evaluated, wait
+                    if any(dependency not in results for dependency in item.depends_on):
+                        continue
+                    # If an explicit cancellation occurred, mark cancelled
+                    cancelled_deps = [
+                        dep for dep in item.depends_on
+                        if dep in results and results[dep].status == "cancelled"
                     ]
-                    if failed_dependencies:
-                        reason = "blocked by prerequisite(s): " + ", ".join(failed_dependencies)
+                    if cancelled_deps:
+                        reason = "cancelled by prerequisite(s): " + ", ".join(cancelled_deps)
+                        task_id = mapping[local_id]
+                        self.taskboard.update_status(task_id, TaskStatus.CANCELLED, reason=reason)
+                        results[local_id] = MultiTaskChildResult(
+                            local_id, task_id, item.title, "", "cancelled", blocker=reason
+                        )
+                        pending.remove(local_id)
+                        made_progress = True
+                        continue
+                    failed_deps = [
+                        dep for dep in item.depends_on
+                        if dep in results and results[dep].status in {"failed", "blocked"}
+                    ]
+                    if failed_deps:
+                        reason = "blocked by prerequisite failure(s): " + ", ".join(failed_deps)
                         task_id = mapping[local_id]
                         self.taskboard.update_status(task_id, TaskStatus.BLOCKED, reason=reason)
                         results[local_id] = MultiTaskChildResult(
@@ -318,11 +335,7 @@ class MultiTaskOrchestrator:
                         pending.remove(local_id)
                         made_progress = True
                         continue
-                    if any(
-                        dependency not in results
-                        or results[dependency].status not in {"completed", "skipped"}
-                        for dependency in item.depends_on
-                    ):
+                    if any(results[dep].status not in {"completed", "skipped"} for dep in item.depends_on):
                         continue
                     if len(running) >= self.maximum_concurrency:
                         break

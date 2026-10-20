@@ -762,6 +762,32 @@ def test_ask_agent_mcp_provider_only_policy_binds_only_selected_provider_tools(
     assert all(names == ["mcp__kaggle__submit_to_competition"] for names in bound_tool_names)
 
 
+def test_deferred_shell_calls_keep_distinct_receipts_and_reuse_approved_action(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import MagicMock
+    from mana_agent.batch.policy import batch_tool_call_context, current_batch_tool_call_id
+    agent = _build_agent(tmp_path)
+    gateway = MagicMock()
+    gateway.execute.return_value = SimpleNamespace(
+        action=SimpleNamespace(state=SimpleNamespace(value="committed"), action_id="action", verification=None),
+        result={"returncode": 0})
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+    tools, _, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="batch-task", enable_run_evidence=False)
+    command = next(tool for tool in tools if tool.name == "run_command")
+    with batch_tool_call_context("first"):
+        assert json.loads(command.invoke({"cmd": "rg demo"}))["ok"]
+    first_key = gateway.execute.call_args.args[0].idempotency_key
+    assert gateway.execute.call_args.args[0].allow_command_result_verification
+    with batch_tool_call_context("second"):
+        assert json.loads(command.invoke({"cmd": "rg demo"}))["ok"]
+    assert gateway.execute.call_args.args[0].idempotency_key != first_key
+    gateway.approvals.get.return_value = SimpleNamespace(action_id="approved")
+    gateway.store.get_action.return_value = SimpleNamespace(parent_task_id="batch-task", idempotency_key=first_key)
+    with batch_tool_call_context("approval-retry"):
+        assert json.loads(command.invoke({"cmd": "rg demo", "action_approval_id": "grant"}))["ok"]
+    assert gateway.execute.call_args.args[0].idempotency_key == first_key
+    assert not current_batch_tool_call_id()
+
+
 def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:
     agent = _build_agent(tmp_path)
     tools, traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1)

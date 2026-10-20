@@ -174,20 +174,35 @@ class MainActivityBox(Vertical):
         if total_count == 0:
             return
 
+        has_waiting_approval = any(
+            (
+                str(e.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}
+                or str(e.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                or str(e.get("tool_name") or "") in {"approval_request", "request_user_approval"}
+            )
+            and str(e.get("status") or "").lower() not in {"success", "completed", "done", "failed", "error", "cancelled"}
+            for e in self.events
+        )
         has_failed = any(str(e.get("status") or "").lower() in {"failed", "error"} for e in self.events)
         all_completed = all(str(e.get("status") or "").lower() in {"success", "completed", "done"} for e in self.events)
 
-        if has_failed:
+        if has_waiting_approval:
+            self._active_status = "waiting_approval"
+            icon = "⚠️"
+            status_label = "WAITING APPROVAL"
+        elif has_failed:
             self._active_status = "failed"
             icon = "✗"
+            status_label = "failed"
         elif all_completed and len(self.events) > 0:
             self._active_status = "success"
             icon = "✓"
+            status_label = "completed"
         else:
             self._active_status = "running"
             icon = "◌"
+            status_label = "running"
 
-        status_label = "completed" if self._active_status == "success" else self._active_status
         self.header.update(f"{icon} agent activity · {status_label} ({total_count} operations)")
 
         # Render rows with bounded rendering (display up to 40 recent rows, full history preserved in self.events)
@@ -218,12 +233,31 @@ class MainActivityBox(Vertical):
 
         for item in grouped:
             st = item["status"]
-            st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌")
+            is_item_approval = (
+                st in {"waiting_approval", "pending_approval", "approval_required"}
+                or item["tool_name"] in {"approval_request", "request_user_approval"}
+                or "approval.required" in item["tool_name"]
+            ) and st not in {"success", "completed", "done", "failed", "error", "cancelled"}
+
+            is_sub = bool(item["latest_ev"].get("sub_operation") or item["latest_ev"].get("indent"))
+            prefix = "  ↳ " if is_sub else ""
+
+            if is_item_approval:
+                st_icon = "⚠️ "
+            elif is_sub:
+                st_icon = ""
+            else:
+                st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌") + " "
+
             count_suffix = f" (x{item['count']})" if item["count"] > 1 else ""
             dur = item["latest_ev"].get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
-            summary_part = f" — {item['summary']}" if item["summary"] else ""
-            lines.append(f"{st_icon} {item['tool_name']}{count_suffix}{dur_str}{summary_part}")
+            summary_part = f" — {item['summary']}" if item["summary"] and item["summary"] != item["tool_name"] else ""
+
+            if is_item_approval:
+                lines.append(f"{prefix}{st_icon}{item['tool_name']}{count_suffix} [WAITING FOR APPROVAL]{summary_part}")
+            else:
+                lines.append(f"{prefix}{st_icon}{item['tool_name']}{count_suffix}{dur_str}{summary_part}")
 
             err = item["latest_ev"].get("error")
             if err:
@@ -286,6 +320,9 @@ class CodingActivityBox(Vertical):
         self.backend = ""
         self.model = ""
         self.phase = "queued"
+        self.active_group = ""
+        self.active_concurrency = 0
+        self.batch_progress = ""
         self.events: list[dict[str, Any]] = []
         self.changed_files: list[str] = []
         self._event_ids: set[str] = set()
@@ -325,9 +362,33 @@ class CodingActivityBox(Vertical):
                 self._event_ids.add(event_id)
             self.events.append(ev)
 
-        # Track changed files
-        meta = dict(ev.get("metadata") or ev.get("details") or ev.get("payload") or {})
+        # Track phase and concurrency metadata
         payload_dict = _safe_dict(ev.get("payload"))
+        meta = dict(ev.get("metadata") or ev.get("details") or payload_dict)
+        if meta.get("phase"):
+            self.phase = str(meta["phase"])
+        if "active_concurrency" in meta or "active_concurrency" in payload_dict:
+            self.active_concurrency = int(meta.get("active_concurrency") or payload_dict.get("active_concurrency") or 0)
+        if meta.get("group") or meta.get("operation_group"):
+            self.active_group = str(meta.get("group") or meta.get("operation_group"))
+
+        ev_type = str(ev.get("event_type") or ev.get("type") or "")
+        if ev_type.startswith("parallel.group"):
+            count = payload_dict.get("count") or payload_dict.get("total_operations") or ""
+            self.active_group = f"parallel group ({count} ops)" if count else "parallel group"
+        elif ev_type.startswith("batch."):
+            b_id = str(payload_dict.get("batch_id") or meta.get("batch_id") or ev.get("batch_id") or "")
+            b_status = str(payload_dict.get("status") or meta.get("status") or ev.get("status") or "")
+            tot = payload_dict.get("total_requests") or meta.get("total_requests") or ev.get("total_requests") or ""
+            comp = payload_dict.get("completed_requests") or meta.get("completed_requests") or ev.get("completed_requests") or ""
+            if comp and tot:
+                self.batch_progress = f"{comp}/{tot} reqs"
+            elif tot:
+                self.batch_progress = f"{tot} reqs"
+            if b_id:
+                self.active_group = f"batch {b_id[:12]} ({b_status or 'active'})"
+
+        # Track changed files
         args_dict = _safe_dict(payload_dict.get("args")) or _safe_dict(meta.get("args"))
         raw_path = (
             ev.get("path")
@@ -343,14 +404,13 @@ class CodingActivityBox(Vertical):
         )
         if raw_path and str(raw_path).strip() and str(raw_path).strip() not in self.changed_files:
             self.changed_files.append(str(raw_path).strip())
-        for cf in (ev.get("changed_files") or meta.get("changed_files") or []):
+        for cf in (ev.get("changed_files") or meta.get("changed_files") or payload_dict.get("changed_files") or []):
             cf_s = str(cf).strip()
             if cf_s and cf_s not in self.changed_files:
                 self.changed_files.append(cf_s)
 
         # Context meter
-        event_type = str(ev.get("event_type") or ev.get("type") or "")
-        if event_type.startswith(("context.", "cost.", "budget.")):
+        if ev_type.startswith(("context.", "cost.", "budget.")):
             self.context_meter.update(ev.get("payload") or ev.get("metadata") or {})
 
         backend_val = ev.get("backend")
@@ -364,11 +424,34 @@ class CodingActivityBox(Vertical):
     def _render_state(self, event: dict[str, Any]) -> None:
         status = str(event.get("status") or "running").lower()
         title = str(event.get("title") or event.get("event_type") or event.get("type") or "Coding")
+        has_waiting_approval = (
+            status in {"waiting_approval", "pending_approval", "approval_required"}
+            or str(event.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+            or str(event.get("tool_name") or "") in {"approval_request", "request_user_approval"}
+        ) and status not in {"success", "completed", "done", "failed", "error", "cancelled"}
 
-        icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(status, "◌")
+        if not has_waiting_approval:
+            has_waiting_approval = any(
+                (
+                    str(e.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}
+                    or str(e.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                    or str(e.get("tool_name") or "") in {"approval_request", "request_user_approval"}
+                )
+                and str(e.get("status") or "").lower() not in {"success", "completed", "done", "failed", "error", "cancelled"}
+                for e in self.events
+            )
+
+        if has_waiting_approval:
+            icon = "⚠️"
+            approval_suffix = " · WAITING APPROVAL"
+        else:
+            icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(status, "◌")
+            approval_suffix = ""
+
         backend_tag = f"[{self.backend.upper()}] " if self.backend and self.backend.lower() != "coding" else ""
+        phase_tag = f" · Phase: {self.phase.capitalize()}" if self.phase and self.phase != "queued" else ""
         model_tag = f" · {self.model}" if self.model else ""
-        self.header.update(f"{icon} {backend_tag}{title}{model_tag}")
+        self.header.update(f"{icon} {backend_tag}{title}{phase_tag}{model_tag}{approval_suffix}")
 
         # Update changed files list
         if self.changed_files:
@@ -379,18 +462,40 @@ class CodingActivityBox(Vertical):
         else:
             self.changed_files_view.update("")
 
-        # Activity log (terminal commands, patches, outputs)
+        # Activity log (terminal commands, patches, outputs, parallel events)
         lines: list[str] = []
-        for row in self.events[-20:]:
+        for row in self.events[-30:]:
             row_status = str(row.get("status") or "running").lower()
-            row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
-            r_title = str(row.get("title") or row.get("event_type") or row.get("type") or "code")
+            row_type = str(row.get("event_type") or row.get("type") or "")
+            row_tool = str(row.get("tool_name") or "")
+            row_is_approval = (
+                row_status in {"waiting_approval", "pending_approval", "approval_required"}
+                or row_type.startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                or row_tool in {"approval_request", "request_user_approval"}
+            ) and row_status not in {"success", "completed", "done", "failed", "error", "cancelled"}
+
+            if row_is_approval:
+                row_icon = "⚠️"
+            else:
+                row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
+            r_title = str(row.get("title") or row_type or "code")
+            dur = row.get("duration_ms")
+            dur_str = f" ({dur}ms)" if dur is not None else ""
             detail = str(row.get("output_preview") or row.get("summary") or row.get("error") or row.get("message") or "")
             cmd = str(row.get("command") or (row.get("payload") or {}).get("command") or "").strip()
-            if cmd:
-                lines.append(f"{row_icon} $ {cmd}")
+
+            if row_type.startswith("parallel.group"):
+                lines.append(f"⚡ {r_title}" + (f" — {detail}" if detail else ""))
+            elif row_type.startswith("batch."):
+                b_badge = " [50% off]" if "discount" in row or "50%" in str(detail) or "50%" in str(row) else ""
+                lines.append(f"📦 {r_title}{b_badge}" + (f" — {detail}" if detail else ""))
+            elif row_is_approval:
+                lines.append(f"⚠️ {r_title} [WAITING FOR APPROVAL]" + (f" — {detail}" if detail else ""))
+            elif cmd:
+                lines.append(f"{row_icon} $ {cmd}{dur_str}")
             else:
-                lines.append(f"{row_icon} {r_title}" + (f" — {detail}" if detail else ""))
+                lines.append(f"{row_icon} {r_title}{dur_str}" + (f" — {detail}" if detail else ""))
+
             if row.get("error"):
                 lines.append(f"  Error: {str(row.get('error'))[:180]}")
 
@@ -402,6 +507,10 @@ class CodingActivityBox(Vertical):
         tokens = usage.get("total_tokens") or usage.get("totalTokens")
         duration = event.get("duration_ms")
         stats = [f"{len(self.events)} events"]
+        if self.active_concurrency > 0:
+            stats.append(f"{self.active_concurrency} concurrent")
+        if self.batch_progress:
+            stats.append(f"batch: {self.batch_progress}")
         if tokens is not None:
             stats.append(f"{tokens} tokens")
         if duration is not None:

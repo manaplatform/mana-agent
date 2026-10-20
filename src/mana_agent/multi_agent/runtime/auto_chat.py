@@ -122,7 +122,7 @@ _ANSWER_RE = re.compile(
 )
 # Match already-stripped input; avoid surrounding \s* quantifiers (ReDoS).
 _FOLLOWUP_RE = re.compile(
-    r"^(?:continue|do it|now implement|verify|fix it|proceed|go ahead)[.!]?$",
+    r"^(?:continue|do it|now implement|verify|fix it|proceed|go ahead|resume|and\s+|also\s+|next|what about|how about|why|fix|status)[.!]?",
     re.IGNORECASE,
 )
 _MAX_CLASSIFY_CHARS = 4000

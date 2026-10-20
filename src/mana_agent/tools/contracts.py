@@ -467,6 +467,164 @@ def coding_tool_contracts() -> list[ToolContract]:
             examples=[{"input": {"patterns": [{"query": "Skill", "glob": "**/*.py", "regex": False, "limit": 20}]}}],
         ),
         ToolContract(
+            name="batch_read_files",
+            description="Read multiple repository files concurrently in a single batch with per-file SHA-256 hashes, line slicing, and size bounding.",
+            input_schema=_schema(
+                {
+                    "files": {"type": "array", "description": "Array of file paths or spec objects with optional start_line/end_line"},
+                    "max_bytes": {"type": "integer", "description": "Maximum total bytes across all files"},
+                    "max_bytes_per_file": {"type": "integer", "description": "Maximum bytes read per file"},
+                    "concurrency": {"type": "integer", "description": "Concurrency limit for parallel reading"},
+                },
+                ["files"],
+            ),
+            output_schema=_schema({"ok": {"type": "boolean"}, "files": {"type": "array"}, "errors": {"type": "array"}, "total_files": {"type": "integer"}}),
+            error_format=common_error,
+            safety_rules=[
+                "Reject paths outside project root, symlink escapes, and directory traversal.",
+                "Skip binary files safely.",
+                "Return structured per-file results even on partial failure.",
+            ],
+            examples=[{"input": {"files": ["src/agent.py", "src/loop.py", {"path": "src/tools.py", "start_line": 1, "end_line": 50}]}}],
+        ),
+        ToolContract(
+            name="batch_write_files",
+            description="Write multiple repository files atomically with optimistic concurrency verification, conflict detection, and transactional rollback.",
+            input_schema=_schema(
+                {
+                    "writes": {
+                        "type": "array",
+                        "description": "List of write specifications: path, content, optional expected_sha256, force",
+                    },
+                    "rollback_on_failure": {"type": "boolean", "description": "Roll back all modifications if any write fails"},
+                    "check_only": {"type": "boolean", "description": "Validate and check for conflicts without writing"},
+                },
+                ["writes"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "changed_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                    "error": {"type": "string"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Verify expected_sha256 against existing content to prevent silent overwrites.",
+                "Stage writes into temporary files and replace atomically.",
+                "Restore snapshot state if rollback_on_failure is enabled and a failure occurs.",
+            ],
+            examples=[{"input": {"writes": [{"path": "a.py", "content": "x = 1\n", "expected_sha256": "abc..."}, {"path": "b.py", "content": "y = 2\n"}]}}],
+        ),
+        ToolContract(
+            name="batch_apply_patches",
+            description="Validate and apply multiple Codex patches in one batch with dry-run verification and transactional rollback.",
+            input_schema=_schema(
+                {
+                    "patches": {"type": "array", "description": "List of patch items with patch text and optional approval ID"},
+                    "rollback_on_failure": {"type": "boolean", "description": "Roll back touched files if any patch application fails"},
+                    "check_only": {"type": "boolean", "description": "Dry-run validate all patches without mutating workspace"},
+                },
+                ["patches"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "changed_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Dry run validate all patches prior to application.",
+                "Capture snapshots and restore on partial failure when rollback_on_failure=True.",
+            ],
+            examples=[{"input": {"patches": [{"patch": "*** Begin Patch\n..."}, {"patch": "*** Begin Patch\n..."}]}}],
+        ),
+        ToolContract(
+            name="batch_search_files",
+            description="Run multiple regex or literal text searches concurrently across repository files and return grouped results.",
+            input_schema=_schema(
+                {
+                    "patterns": {"type": "array", "description": "List of search specifications: query, glob, regex, limit"},
+                    "concurrency": {"type": "integer", "description": "Search worker concurrency limit"},
+                },
+                ["patterns"],
+            ),
+            output_schema=_schema({"ok": {"type": "boolean"}, "results": {"type": "array"}, "errors": {"type": "array"}}),
+            error_format=common_error,
+            safety_rules=["Read-only.", "Respect per-pattern search limits.", "Skip ignored directories and binary files."],
+            examples=[{"input": {"patterns": [{"query": "class InternalCodingEngine", "glob": "*.py"}, {"query": "batch_read_files"}]}}],
+        ),
+        ToolContract(
+            name="batch_list_files",
+            description="List repository files matching multiple glob patterns in a single filesystem traversal.",
+            input_schema=_schema(
+                {
+                    "queries": {"type": "array", "description": "List of glob pattern strings or query spec objects"},
+                    "limit": {"type": "integer", "description": "Maximum files returned per pattern"},
+                },
+                ["queries"],
+            ),
+            output_schema=_schema({"ok": {"type": "boolean"}, "results": {"type": "array"}, "total_patterns": {"type": "integer"}}),
+            error_format=common_error,
+            safety_rules=["Read-only.", "Traverses repository files once to avoid redundant filesystem scans."],
+            examples=[{"input": {"queries": ["src/**/*.py", "tests/**/test_*.py"]}}],
+        ),
+        ToolContract(
+            name="batch_move_files",
+            description="Move or rename multiple repository files safely with boundary checks and transactional recovery.",
+            input_schema=_schema(
+                {
+                    "moves": {"type": "array", "description": "List of move objects with source, destination, and overwrite flag"},
+                    "rollback_on_failure": {"type": "boolean", "description": "Restore moved files if an operation fails"},
+                },
+                ["moves"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "changed_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Reject source and destination outside the repository.",
+                "Prevent accidental destination overwrites unless overwrite=True.",
+            ],
+            examples=[{"input": {"moves": [{"source": "old_dir/a.py", "destination": "new_dir/a.py"}]}}],
+        ),
+        ToolContract(
+            name="batch_delete_files",
+            description="Delete multiple existing repository files safely with rollback support and directory traversal protection.",
+            input_schema=_schema(
+                {
+                    "paths": {"type": "array", "description": "List of file paths to delete"},
+                    "rollback_on_failure": {"type": "boolean", "description": "Restore deleted files if an error occurs"},
+                },
+                ["paths"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "results": {"type": "array"},
+                    "deleted_files": {"type": "array"},
+                    "rollback_performed": {"type": "boolean"},
+                }
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Reject paths outside root.",
+                "Only delete regular files; refuse directory deletion.",
+            ],
+            examples=[{"input": {"paths": ["temp_1.txt", "temp_2.txt"]}}],
+        ),
+        ToolContract(
             name="apply_patch",
             description=(
                 "Apply a Codex-style text patch inside the repository. "
@@ -930,6 +1088,248 @@ def coding_tool_contracts() -> list[ToolContract]:
                     }
                 }
             ],
+        ),
+        ToolContract(
+            name="request_user_approval",
+            description="Create a pending human approval request in the durable inbox and return inbox_item_id.",
+            input_schema=_schema(
+                {
+                    "source_decision_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "risk_level": {"type": "string"},
+                },
+                ["source_decision_id", "task_id", "agent_id"],
+            ),
+            output_schema=_schema({"inbox_item_id": {"type": "string"}}),
+            error_format=common_error,
+            safety_rules=["Require explicit source_decision_id, task_id, and agent_id."],
+            examples=[{"input": {"source_decision_id": "dec-1", "task_id": "task-1", "agent_id": "agent-1"}}],
+        ),
+        ToolContract(
+            name="wait_for_approval",
+            description="Wait for a user or reviewer to resolve a pending inbox approval request.",
+            input_schema=_schema(
+                {
+                    "inbox_item_id": {"type": "string"},
+                    "timeout_seconds": {"type": "number"},
+                    "poll_interval_seconds": {"type": "number"},
+                },
+                ["inbox_item_id"],
+            ),
+            output_schema=_schema({"verdict": {"type": "string"}, "may_continue": {"type": "boolean"}}),
+            error_format=common_error,
+            safety_rules=["Never poll indefinitely without timeout."],
+            examples=[{"input": {"inbox_item_id": "inbox-123", "timeout_seconds": 60}}],
+        ),
+        ToolContract(
+            name="batch_create_job",
+            description=(
+                "Submit a batch of independent model requests to the OpenAI Batch API for asynchronous execution. "
+                "Provides a 50% cost discount compared to realtime API. Ideal for bulk code review, analysis, and evaluations."
+            ),
+            input_schema=_schema(
+                {
+                    "requests": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "custom_id": {"type": "string"},
+                                "body": {"type": "object"},
+                                "url": {"type": "string"},
+                                "method": {"type": "string"},
+                            },
+                            "required": ["custom_id", "body"],
+                        },
+                    },
+                    "endpoint": {"type": "string"},
+                    "completion_window": {"type": "string"},
+                    "model": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "metadata": {"type": "object"},
+                    "mode": {"type": "string", "enum": ["auto", "openai", "internal"]},
+                },
+                ["requests"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "total_requests": {"type": "integer"},
+                    "input_file_id": {"type": "string"},
+                    "created_at": {"type": "number"},
+                    "discount": {"type": "string"},
+                    "discount_factor": {"type": "number"},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=[
+                "Every request item must include a unique custom_id.",
+                "Target model must support OpenAI Batch API or fallback to internal batch.",
+                "Do not submit interactive operations requiring immediate human response.",
+            ],
+            examples=[
+                {
+                    "input": {
+                        "requests": [
+                            {"custom_id": "req-1", "body": {"model": "gpt-6-luna", "input": "Analyze file A."}},
+                            {"custom_id": "req-2", "body": {"model": "gpt-6-luna", "input": "Analyze file B."}},
+                        ],
+                        "endpoint": "/v1/responses",
+                    }
+                }
+            ],
+        ),
+        ToolContract(
+            name="batch_get_status",
+            description="Retrieve execution status, request counters, and output file IDs for a batch job.",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "total_requests": {"type": "integer"},
+                    "completed_requests": {"type": "integer"},
+                    "failed_requests": {"type": "integer"},
+                    "output_file_id": {"type": ["string", "null"]},
+                    "error_file_id": {"type": ["string", "null"]},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Never poll continuously in a tight loop without timeout or backoff."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_list_jobs",
+            description="List recent OpenAI batch jobs and their current execution statuses.",
+            input_schema=_schema(
+                {
+                    "limit": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+                [],
+            ),
+            output_schema=_schema(
+                {"ok": {"type": "boolean"}, "total": {"type": "integer"}, "jobs": {"type": "array"}},
+                ["ok", "jobs"],
+            ),
+            error_format=common_error,
+            safety_rules=["Use pagination or bounded limit."],
+            examples=[{"input": {"limit": 10}}],
+        ),
+        ToolContract(
+            name="batch_cancel_job",
+            description="Cancel an active or queued OpenAI batch job.",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {"ok": {"type": "boolean"}, "batch_id": {"type": "string"}, "status": {"type": "string"}},
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Only cancel batches that belong to the active or authorized task."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_download_results",
+            description="Download and parse results (outputs and errors) for a completed batch job.",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "total_results": {"type": "integer"},
+                    "results": {"type": "array"},
+                },
+                ["ok", "batch_id", "results"],
+            ),
+            error_format=common_error,
+            safety_rules=["Match results by custom_id, never JSONL line order."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_submit_requests",
+            description="Submit a batch of requests for asynchronous execution (alias for batch_create_job).",
+            input_schema=_schema(
+                {
+                    "requests": {"type": "array"},
+                    "endpoint": {"type": "string"},
+                    "completion_window": {"type": "string"},
+                    "model": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "metadata": {"type": "object"},
+                    "mode": {"type": "string", "enum": ["auto", "openai", "internal"]},
+                },
+                ["requests"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Every request item must include a unique custom_id."],
+            examples=[{"input": {"requests": [{"custom_id": "req-1", "body": {"input": "Analyze"}}]}}],
+        ),
+        ToolContract(
+            name="batch_check_status",
+            description="Retrieve execution status and counters for a batch job (alias for batch_get_status).",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                ["ok", "batch_id", "status"],
+            ),
+            error_format=common_error,
+            safety_rules=["Never poll continuously without backoff."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
+        ),
+        ToolContract(
+            name="batch_retrieve_results",
+            description="Retrieve and parse results for a completed batch job (alias for batch_download_results).",
+            input_schema=_schema(
+                {"batch_id": {"type": "string"}},
+                ["batch_id"],
+            ),
+            output_schema=_schema(
+                {
+                    "ok": {"type": "boolean"},
+                    "batch_id": {"type": "string"},
+                    "results": {"type": "array"},
+                },
+                ["ok", "batch_id", "results"],
+            ),
+            error_format=common_error,
+            safety_rules=["Match results by custom_id, never JSONL line order."],
+            examples=[{"input": {"batch_id": "batch_abc123"}}],
         ),
     ]
 

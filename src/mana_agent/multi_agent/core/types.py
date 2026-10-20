@@ -226,6 +226,7 @@ class TaskBoardItem:
     entry_route: str = ""
     owning_lane: str = ""
     routing_evidence: dict[str, Any] = field(default_factory=dict)
+    execution_policy: dict[str, Any] = field(default_factory=dict)
     result_summary: str = ""
     verification_status: str = ""
     supervisor_execution_id: str = ""

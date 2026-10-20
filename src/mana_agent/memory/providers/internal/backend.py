@@ -53,6 +53,7 @@ class InternalMemoryBackend:
         )
 
     async def add(self, request: MemoryWriteRequest) -> MemoryRecord:
+        self.closed = False
         try:
             rows = self.repository.load()
             now = utc_now().isoformat()
@@ -71,6 +72,7 @@ class InternalMemoryBackend:
             raise MemoryStorageError("Internal memory write failed.") from exc
 
     async def search(self, request: MemorySearchRequest) -> list[MemoryRecord]:
+        self.closed = False
         terms = set(request.query.lower().split())
         rows = [
             row

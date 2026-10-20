@@ -29,6 +29,29 @@ so repository changes can be validated with confidence.
 - Run the narrowest useful verification first, then expand if needed.
 - Report any skipped checks and why they were skipped.
 
+## Coding workspace fixtures
+
+Coding backend tests should import `WorkspaceContext` from
+`mana_agent.coding.models` and provide both `repository_path` and
+`worktree_path`. Tests that intentionally use the same temporary directory for
+both paths must opt into `sandbox="readOnly"` (or explicitly authorize the
+in-place write workflow); do not rely on a nonexistent `mana_agent.coding.workspace`
+module or omit the repository path. This preserves the workspace isolation
+contract while keeping fixtures aligned with the production model.
+
+## Async tests and dispatcher path handling
+
+The approval/TUI regression tests keep async coverage independent of an optional
+pytest async plugin: async application methods are invoked from ordinary test
+functions with `anyio.run`. Do not mark a test with `pytest.mark.asyncio` unless
+`pytest-asyncio` is declared and installed for the test environment. The
+`ToolExecutionDispatcher` also uses the explicit `FilePath` alias for path
+construction so a function-local `Path` import cannot shadow the filesystem
+path type and trigger `UnboundLocalError` during initialization.
+
+**Do not reintroduce:** keep dispatcher path references unshadowable and keep
+async tests compatible with the dependencies declared by the project.
+
 ## Browser Integration
 
 Browser integration coverage runs against a deterministic local HTTP server,

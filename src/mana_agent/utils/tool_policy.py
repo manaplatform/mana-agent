@@ -34,6 +34,16 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "git_diff",
     ],
     "verify": ["verify_project", "run_command", "run_script_once"],
+    "batch": [
+        "batch_create_job",
+        "batch_get_status",
+        "batch_list_jobs",
+        "batch_cancel_job",
+        "batch_download_results",
+        "batch_submit_requests",
+        "batch_check_status",
+        "batch_retrieve_results",
+    ],
 }
 
 # The full set of real tool names the AskAgent worker registers. Kept here so
@@ -85,6 +95,14 @@ REGISTERED_TOOLS: frozenset[str] = frozenset(
         "api_operations_search",
         "api_request_preview",
         "api_request_execute",
+        "batch_create_job",
+        "batch_get_status",
+        "batch_list_jobs",
+        "batch_cancel_job",
+        "batch_download_results",
+        "batch_submit_requests",
+        "batch_check_status",
+        "batch_retrieve_results",
     }
 )
 

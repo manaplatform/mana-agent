@@ -83,7 +83,22 @@ class _RouteModel:
         self.payloads = payloads
 
     def invoke(self, messages):  # noqa: ANN001
-        body = json.loads(messages[-1].content)
+        content = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
+        all_text = str(messages)
+        if "ContinuationDecision" in all_text or "step_output" in content or "taskboard_summary" in content:
+            return SimpleNamespace(
+                content=json.dumps({
+                    "task_id": "task_id",
+                    "action": "FINALIZE",
+                    "goal_satisfied": True,
+                    "progress_detected": True,
+                    "evidence_summary": "Subagents completed work and verified",
+                    "user_message": "Execution finished",
+                    "safe_to_continue": True,
+                    "reason": "Task goal satisfied",
+                })
+            )
+        body = json.loads(content)
         request = body["user_request"]
         payload = self.payloads[request]
         return SimpleNamespace(content=json.dumps(payload))

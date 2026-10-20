@@ -8,6 +8,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from mana_agent.batch.policy import TaskExecutionPolicy
 
 
 def utc_now() -> datetime:
@@ -356,6 +357,7 @@ class CheckpointRecord(StrictModel):
     external_action_receipts: list[str] = Field(default_factory=list)
     resume_cursor: str = ""
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
 
 class CheckpointResumeEligibility(StrictModel):
@@ -547,6 +549,14 @@ class RecoveryInterventionRecord(StrictModel):
 class TaskRecord(StrictModel):
     schema_version: int = Field(default=8, ge=1)
     state_version: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_unmarked_deadline(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "deadline_is_explicit" not in data and data.get("deadline_at") is not None:
+            return {**data, "deadline_is_explicit": True}
+        return data
+
     task_id: str = Field(default_factory=lambda: stable_id("task"))
     parent_task_id: str | None = None
     root_task_id: str = ""
@@ -561,6 +571,7 @@ class TaskRecord(StrictModel):
     assigned_model: str = ""
     assigned_worker: str = ""
     runtime_provider: str = ""
+    execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None
@@ -610,6 +621,10 @@ class TaskRecord(StrictModel):
     budget_overrun: dict[str, Any] = Field(default_factory=dict)
     budget_finalization_decision_id: str = ""
     deadline_at: datetime | None = None
+    deadline_is_explicit: bool = False
+    batch_wait_started_at: datetime | None = None
+    batch_wait_expires_at: datetime | None = None
+    batch_active_seconds_remaining: float | None = None
     wait_policy: WaitPolicy = WaitPolicy.WAIT_ALL
     minimum_success_count: int | None = Field(default=None, ge=1)
     max_child_depth: int = Field(default=5, ge=0)
@@ -653,6 +668,7 @@ class TaskRecord(StrictModel):
         "waiting_for_approval",
         "waiting_for_clarification",
         "waiting_for_connector",
+        "waiting_for_batch",
         "ambiguous_lost_lease",
     ] = ""
     waiting_connector_id: str = ""
@@ -720,6 +736,7 @@ class TaskRecord(StrictModel):
             "provider_started_at", "provider_completed_at", "task_completed_at",
             "heartbeat_at", "lease_expires_at", "retry_not_before", "deadline_at",
             "human_wait_started_at",
+            "batch_wait_started_at", "batch_wait_expires_at",
         ):
             value = getattr(self, field_name)
             if value is None:

@@ -74,6 +74,7 @@ class ConversationContextReadInput(BaseModel):
         default=None,
         description="Optional semantic query to filter relevant turns in conversation history.",
     )
+    message_ids: list[str] = Field(default_factory=list, description="Exact observed message IDs in this session; includes their complete turns.")
     max_turns: int = Field(
         default=5,
         ge=1,
@@ -127,6 +128,7 @@ def execute_conversation_context_read(
     history_store: Any,
     current_turn_id: str = "",
     query: str | None = None,
+    message_ids: list[str] | None = None,
     max_turns: int = 5,
     max_tokens: int = 2000,
     before_turn_id: str | None = None,
@@ -155,6 +157,7 @@ def execute_conversation_context_read(
         bounded_max_turns,
         int(max_tokens or 2000),
         norm_before,
+        tuple(message_ids or []),
     )
     if turn_retrieval_cache is not None and cache_key in turn_retrieval_cache:
         cached = turn_retrieval_cache[cache_key]
@@ -211,6 +214,7 @@ def execute_conversation_context_read(
         turns_by_id[t_id].append(
             {
                 "turn_id": t_id,
+                "message_id": str(msg_dict.get("message_id") or ""),
                 "role": str(msg_dict.get("role") or ""),
                 "content": str(msg_dict.get("content") or ""),
                 "timestamp": str(msg_dict.get("timestamp") or ""),
@@ -219,7 +223,12 @@ def execute_conversation_context_read(
 
     # Filter turns by query if present
     matching_turn_ids: list[str] = []
-    if norm_query:
+    if message_ids:
+        available_ids = {m["message_id"] for turn in turns_by_id.values() for m in turn}
+        if not set(message_ids).issubset(available_ids):
+            raise PermissionError("Conversation retrieval selected a message outside this session or turn scope")
+        matching_turn_ids = [t_id for t_id in turn_order if any(m["message_id"] in message_ids for m in turns_by_id[t_id])]
+    elif norm_query:
         query_words = set(norm_query.split())
         for t_id in turn_order:
             turn_text = " ".join(m["content"].lower() for m in turns_by_id[t_id])
@@ -240,7 +249,8 @@ def execute_conversation_context_read(
     if used_tokens > bounded_max_tokens and projected_turns:
         truncated = True
         while projected_turns and estimate_value_tokens(projected_turns) > bounded_max_tokens:
-            projected_turns.pop(0)
+            oldest_turn = projected_turns[0]["turn_id"]
+            projected_turns = [m for m in projected_turns if m["turn_id"] != oldest_turn]
         used_tokens = estimate_value_tokens(projected_turns)
 
     payload = {
@@ -654,6 +664,7 @@ def build_context_retrieval_tools(
         max_turns: int = 5,
         max_tokens: int = 2000,
         before_turn_id: str | None = None,
+        message_ids: list[str] | None = None,
         **_extra: Any,
     ) -> str:
         return execute_conversation_context_read(
@@ -666,6 +677,7 @@ def build_context_retrieval_tools(
             max_turns=max_turns,
             max_tokens=max_tokens,
             before_turn_id=before_turn_id,
+            message_ids=message_ids,
             governor=governor,
             turn_retrieval_cache=turn_retrieval_cache,
             event_sink=event_sink,

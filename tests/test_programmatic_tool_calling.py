@@ -205,3 +205,27 @@ def test_direct_tool_calling_fallback_for_unsupported_models(tmp_path: Path) -> 
     assert res.status == "completed"
     assert res.backend == "internal"
     assert "direct tool" in res.summary.lower()
+
+
+def test_tool_execution_dispatcher_approval_request_and_shell(tmp_path: Path) -> None:
+    ws = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+    dispatcher = ToolExecutionDispatcher(workspace=ws)
+
+    # Shell execution with echo command
+    res_shell = dispatcher.dispatch("run_command", {"command": "echo 'hello internal engine'"})
+    assert res_shell["ok"] is True
+    assert "hello internal engine" in res_shell["stdout"]
+
+    # Approval request tool is known and callable (not UNKNOWN_TOOL)
+    res_appr = dispatcher.dispatch("approval_request", {
+        "command": "git status",
+        "title": "Status check approval",
+        "timeout_seconds": 0.1,
+    })
+    assert res_appr.get("error_code") != "UNKNOWN_TOOL"
+    assert "approved" in res_appr

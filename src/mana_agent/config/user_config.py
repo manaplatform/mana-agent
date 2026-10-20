@@ -74,6 +74,17 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "OPENAI_TOOL_WORKER_MODEL": "",
     "OPENAI_CODING_PLANNER_MODEL": "",
     "OPENAI_EMBED_MODEL": "",
+    "OPENAI_BATCH_ENABLED": True,
+    "OPENAI_BATCH_MODE": "auto",
+    "OPENAI_BATCH_ENDPOINT": "/v1/responses",
+    "OPENAI_BATCH_COMPLETION_WINDOW": "24h",
+    "OPENAI_BATCH_MIN_REQUESTS": 1,
+    "OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED": True,
+    "OPENAI_BATCH_MAX_REQUESTS_PER_BATCH": 50000,
+    "OPENAI_BATCH_MAX_FILE_SIZE_MB": 200,
+    "OPENAI_BATCH_AUTO_RESUME": True,
+    "OPENAI_BATCH_RETRY_FAILED_REQUESTS": True,
+    "OPENAI_BATCH_COST_OPTIMIZATION": True,
     "MANA_ADAPTIVE_ROUTING_ENABLED": True,
     "MANA_MODEL_PROFILES": [],
     "MANA_ROUTING_COMPLEXITY_THRESHOLD": "high",
@@ -451,6 +462,17 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
     "OPENAI_CODING_PLANNER_MODEL": "openai_coding_planner_model",
     "OPENAI_EMBED_MODEL": "openai_embed_model",
+    "OPENAI_BATCH_ENABLED": "openai_batch_enabled",
+    "OPENAI_BATCH_MODE": "openai_batch_mode",
+    "OPENAI_BATCH_ENDPOINT": "openai_batch_endpoint",
+    "OPENAI_BATCH_COMPLETION_WINDOW": "openai_batch_completion_window",
+    "OPENAI_BATCH_MIN_REQUESTS": "openai_batch_min_requests",
+    "OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED": "openai_batch_always_enable_if_supported",
+    "OPENAI_BATCH_MAX_REQUESTS_PER_BATCH": "openai_batch_max_requests_per_batch",
+    "OPENAI_BATCH_MAX_FILE_SIZE_MB": "openai_batch_max_file_size_mb",
+    "OPENAI_BATCH_AUTO_RESUME": "openai_batch_auto_resume",
+    "OPENAI_BATCH_RETRY_FAILED_REQUESTS": "openai_batch_retry_failed_requests",
+    "OPENAI_BATCH_COST_OPTIMIZATION": "openai_batch_cost_optimization",
     "MANA_ADAPTIVE_ROUTING_ENABLED": "mana_adaptive_routing_enabled",
     "MANA_MODEL_PROFILES": "mana_model_profiles",
     "MANA_ROUTING_COMPLEXITY_THRESHOLD": "mana_routing_complexity_threshold",
@@ -1156,6 +1178,35 @@ def load_effective_settings(*, include_env: bool = False) -> dict[str, Any]:
         values["OPENAI_CHAT_MODEL"] = user_values["LLM_MODEL"]
     if not values.get("LLM_MODEL") and values.get("OPENAI_CHAT_MODEL"):
         values["LLM_MODEL"] = values["OPENAI_CHAT_MODEL"]
+
+    # Support nested YAML/TOML openai.batch configuration
+    openai_cfg = user_values.get("openai") or values.get("openai")
+    if isinstance(openai_cfg, dict):
+        batch_cfg = openai_cfg.get("batch")
+        if isinstance(batch_cfg, dict):
+            if "enabled" in batch_cfg:
+                values["OPENAI_BATCH_ENABLED"] = bool(batch_cfg["enabled"])
+            if "mode" in batch_cfg:
+                values["OPENAI_BATCH_MODE"] = str(batch_cfg["mode"]).lower()
+            if "endpoint" in batch_cfg:
+                values["OPENAI_BATCH_ENDPOINT"] = str(batch_cfg["endpoint"])
+            if "completion_window" in batch_cfg:
+                values["OPENAI_BATCH_COMPLETION_WINDOW"] = str(batch_cfg["completion_window"])
+            if "min_requests" in batch_cfg:
+                values["OPENAI_BATCH_MIN_REQUESTS"] = int(batch_cfg["min_requests"])
+            if "always_enable_if_supported" in batch_cfg:
+                values["OPENAI_BATCH_ALWAYS_ENABLE_IF_SUPPORTED"] = bool(batch_cfg["always_enable_if_supported"])
+            if "max_requests_per_batch" in batch_cfg:
+                values["OPENAI_BATCH_MAX_REQUESTS_PER_BATCH"] = int(batch_cfg["max_requests_per_batch"])
+            if "max_file_size_mb" in batch_cfg:
+                values["OPENAI_BATCH_MAX_FILE_SIZE_MB"] = int(batch_cfg["max_file_size_mb"])
+            if "auto_resume" in batch_cfg:
+                values["OPENAI_BATCH_AUTO_RESUME"] = bool(batch_cfg["auto_resume"])
+            if "retry_failed_requests" in batch_cfg:
+                values["OPENAI_BATCH_RETRY_FAILED_REQUESTS"] = bool(batch_cfg["retry_failed_requests"])
+            if "cost_optimization" in batch_cfg:
+                values["OPENAI_BATCH_COST_OPTIMIZATION"] = bool(batch_cfg["cost_optimization"])
+
     return values
 
 

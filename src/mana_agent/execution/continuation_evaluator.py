@@ -71,8 +71,9 @@ def _coerce_continuation_decision(response: Any, task_id: str = "") -> Continuat
     if start >= 0 and end >= start:
         text = text[start : end + 1]
     data = json.loads(text)
-    if isinstance(data, dict) and not data.get("task_id") and task_id:
-        data["task_id"] = task_id
+    if isinstance(data, dict):
+        if not data.get("task_id") and task_id:
+            data["task_id"] = task_id
     return ContinuationDecision.model_validate(data)
 
 
@@ -104,6 +105,7 @@ class ContinuationEvaluator:
         payload: dict[str, Any] = {
             "task_id": task_id,
             "user_goal": user_goal,
+            "user_request": user_goal,
             "step_output": step_output,
             "completed_steps_count": len(completed_steps),
             "completed_steps_summary": [
@@ -169,7 +171,19 @@ class ContinuationEvaluator:
                     raise coerce_exc
 
             if decision.task_id != task_id:
-                object.__setattr__(decision, "task_id", task_id)
+                reconciled = False
+                if decision.task_id in {"task_id", ""}:
+                    reconciled = True
+                elif taskboard_progress:
+                    tasks = taskboard_progress.get("tasks") or []
+                    known = {str(t.get("task_id")) for t in tasks} | {str(t.get("title")) for t in tasks}
+                    known.add(str(taskboard_progress.get("root_task_id")))
+                    if decision.task_id in known or "task-tb" in decision.task_id:
+                        reconciled = True
+                if reconciled:
+                    object.__setattr__(decision, "task_id", task_id)
+                else:
+                    raise ValueError("continuation decision selected a different task")
             return decision
 
         except Exception as exc:

@@ -39,6 +39,28 @@ class _MultiTurnStructuredModel:
         return {"category": "conversation_only", "safe_to_continue": True, "reason": "default"}
 
 
+def test_assistant_offer_resolves_without_task_candidates() -> None:
+    offer = "Details " * 100 + "I can add the retry control. Would you like it?"
+    classifier = FollowupClassifier(_StructuredModel({
+        "category": "new_task", "safe_to_continue": True, "reason": "User accepted the visible offer",
+        "resolved_request": "Add the retry control", "source_message_ids": ["assistant-offer"],
+    }))
+    result = classifier.decide(message="yes, I want it", candidates=[], recent_history=[
+        {"role": "assistant", "message_id": "assistant-offer", "content": offer},
+    ])
+    assert result.resolved_request == "Add the retry control"
+    assert result.source_message_ids == ("assistant-offer",)
+
+
+def test_followup_rejects_invented_message_provenance() -> None:
+    classifier = FollowupClassifier(_StructuredModel({
+        "category": "new_task", "safe_to_continue": True, "reason": "Invalid source",
+        "resolved_request": "Add a control", "source_message_ids": ["another-session-message"],
+    }))
+    with pytest.raises(FollowupClassificationError, match="unobserved message"):
+        classifier.decide(message="yes", candidates=[], recent_history=[])
+
+
 def test_expansion_must_select_an_offered_task() -> None:
     classifier = FollowupClassifier(
         _StructuredModel(
@@ -119,12 +141,8 @@ def test_completed_task_cannot_be_classified_as_a_resume() -> None:
         )
 
 
-def test_independent_category_overrides_unsafe_to_safe() -> None:
-    """new_task with no related task is unambiguous by construction.
-
-    Even if the model sets safe_to_continue=false, the structural invariant
-    in decide() overrides it to true because the classification is independent.
-    """
+def test_independent_category_rejects_unsafe_decision() -> None:
+    """Independent categories cannot override an unsafe model decision."""
     classifier = FollowupClassifier(
         _StructuredModel(
             {
@@ -136,18 +154,12 @@ def test_independent_category_overrides_unsafe_to_safe() -> None:
         )
     )
 
-    decision = classifier.decide(
-        message="user@example.com",
-        recent_history=[],
-        candidates=[{"task_id": "task_1"}],
-    )
-    assert decision.category == "new_task"
-    assert decision.related_task_id == ""
-    assert decision.safe_to_continue is True
+    with pytest.raises(FollowupClassificationError, match="did not authorize"):
+        classifier.decide(message="user@example.com", recent_history=[], candidates=[{"task_id": "task_1"}])
 
 
-def test_conversation_only_overrides_unsafe_to_safe() -> None:
-    """conversation_only with no related task is also structurally unambiguous."""
+def test_conversation_only_rejects_unsafe_decision() -> None:
+    """Conversation-only classification still requires model authorization."""
     classifier = FollowupClassifier(
         _StructuredModel(
             {
@@ -159,13 +171,8 @@ def test_conversation_only_overrides_unsafe_to_safe() -> None:
         )
     )
 
-    decision = classifier.decide(
-        message="hello",
-        recent_history=[],
-        candidates=[{"task_id": "task_1"}],
-    )
-    assert decision.category == "conversation_only"
-    assert decision.safe_to_continue is True
+    with pytest.raises(FollowupClassificationError, match="did not authorize"):
+        classifier.decide(message="hello", recent_history=[], candidates=[{"task_id": "task_1"}])
 
 
 def test_task_bound_category_with_unsafe_still_raises() -> None:
