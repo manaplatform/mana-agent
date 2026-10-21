@@ -226,6 +226,66 @@ def test_agent_decision_without_model_stops_without_static_route() -> None:
     assert "fallback" not in decision.reasoning_summary.lower()
 
 
+def test_agent_decision_repairs_write_route_missing_mutation_tool() -> None:
+    invalid = {
+        "intent": "edit",
+        "confidence": 0.94,
+        "selected_tools": ["repo_search", "read_file"],
+        "tool_inputs": {"repo_search": {"query": "requested code change"}},
+        "repo_context_needed": True,
+        "web_search_needed": False,
+        "code_editing_needed": True,
+        "requested_effect": "write",
+        "target_surface": "repository",
+        "reasoning_summary": "The request needs a code change.",
+    }
+    repaired = {
+        **invalid,
+        "selected_tools": ["repo_search", "read_file", "apply_patch"],
+        "reasoning_summary": "Repository context and patch capability are both selected.",
+    }
+
+    class RepairingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, _messages):  # noqa: ANN001
+            self.calls += 1
+            payload = invalid if self.calls < 3 else repaired
+            return type("Msg", (), {"content": json.dumps(payload)})()
+
+    model = RepairingModel()
+    decision = AgentDecisionEngine(llm=model).decide(user_request="fix the routing bug")
+
+    assert model.calls == 3
+    assert decision.verifier_passed is True
+    assert "apply_patch" in decision.selected_tools
+
+
+def test_agent_decision_repair_failure_stays_rejected() -> None:
+    invalid = {
+        "intent": "edit",
+        "confidence": 0.94,
+        "selected_tools": ["repo_search", "read_file"],
+        "tool_inputs": {"repo_search": {"query": "requested code change"}},
+        "repo_context_needed": True,
+        "web_search_needed": False,
+        "code_editing_needed": True,
+        "requested_effect": "write",
+        "target_surface": "repository",
+        "reasoning_summary": "The request needs a code change.",
+    }
+
+    class NonRepairingModel:
+        def invoke(self, _messages):  # noqa: ANN001
+            return type("Msg", (), {"content": json.dumps(invalid)})()
+
+    decision = AgentDecisionEngine(llm=NonRepairingModel()).decide(user_request="fix the routing bug")
+
+    assert decision.verifier_passed is False
+    assert "no mutation tool was selected" in decision.verifier_summary
+
+
 def test_router_uses_agent_decision_for_research_route() -> None:
     route = Router(decision_engine=_engine()).route(
         task_id="task_1",

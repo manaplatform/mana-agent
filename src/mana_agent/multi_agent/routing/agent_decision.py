@@ -395,6 +395,70 @@ class AgentDecisionEngine:
             )
             review_content = extract_model_text(getattr(review_response, "content", review_response))
             reviewed = self._decision_from_payload(_extract_json(review_content))
+            verification = verify_agent_decision(
+                reviewed,
+                user_request=request,
+                tool_descriptions=self.tool_descriptions,
+                require_flow_action=bool(memory_context.strip()),
+            )
+            if not verification.passed:
+                # A malformed coding route must not silently reach the caller
+                # as a no-op. Give the reviewer one bounded repair attempt with
+                # the concrete verifier failures, then let the normal verifier
+                # decide whether the repaired route is safe to execute.
+                try:
+                    repair_response = self.llm.invoke(
+                        [
+                            SystemMessage(
+                                content=(
+                                    AGENT_DECISION_REVIEW_PROMPT
+                                    + "\nThe previous reviewed decision failed validation. "
+                                    "Return a corrected, verifier-valid decision; do not omit "
+                                    "required capabilities for the requested effect."
+                                )
+                            ),
+                            HumanMessage(
+                                content=json.dumps(
+                                    {
+                                        "user_request": request,
+                                        "command_hint": command_hint,
+                                        "proposed_decision": reviewed.to_dict(),
+                                        "verification_errors": verification.warnings,
+                                        "memory_context": memory_context,
+                                        "operation_constraint": operation_constraint,
+                                        "available_tools": self.tool_descriptions,
+                                    },
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                )
+                            ),
+                        ]
+                    )
+                    repair_content = extract_model_text(
+                        getattr(repair_response, "content", repair_response)
+                    )
+                    repaired = self._decision_from_payload(_extract_json(repair_content))
+                    repaired_verification = verify_agent_decision(
+                        repaired,
+                        user_request=request,
+                        tool_descriptions=self.tool_descriptions,
+                        require_flow_action=bool(memory_context.strip()),
+                    )
+                    if repaired_verification.passed:
+                        reviewed = repaired
+                except Exception as repair_exc:
+                    # Preserve the original rejected decision for the caller's
+                    # fail-closed handling rather than turning a repair failure
+                    # into an apparently successful conversational fallback.
+                    record_current(
+                        "model.decision.repair_failed",
+                        {
+                            "boundary": "agent_decision",
+                            "error_type": type(repair_exc).__name__,
+                            "error": str(repair_exc),
+                            "verification_errors": verification.warnings,
+                        },
+                    )
             record_current(
                 "model.decision",
                 {

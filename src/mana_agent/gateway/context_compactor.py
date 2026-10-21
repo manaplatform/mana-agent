@@ -523,6 +523,7 @@ class ContextCompactor:
                 session_id=getattr(context, "session_id", ""),
                 conversation_id=getattr(context, "conversation_id", ""),
                 turn_id=getattr(context, "turn_id", ""),
+                user_message_id=getattr(context, "user_message_id", ""),
                 previous_route=getattr(context, "previous_route", ""),
                 conversation_summary=summary,
                 conversation_context=dialogue,

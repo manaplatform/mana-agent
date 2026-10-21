@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Mapping, Sequence
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -144,8 +144,9 @@ conversation_only with safe_to_continue true when no offered task applies. Set i
 turn cannot be safely classified at all, and explain the concrete ambiguity in reason. Do not set it
 false merely because downstream work may be consequential or require separate approval.
 
-When a prior assistant proposal resolves a confirmation, return resolved_request and
-source_message_ids from the observed conversation. If the referent is unavailable or ambiguous,
+When a prior assistant proposal resolves a confirmation, or when a user responds to an assistant turn
+(such as "fix this", "do that", or "yes"), return resolved_request and exact message_id strings in
+source_message_ids from the observed conversation (recent_history). If the referent is unavailable or ambiguous,
 request context or return action=request_clarification with a concrete clarification_question.
 Never change safe_to_continue=false into authorization because an input is short."""
 
@@ -178,6 +179,107 @@ def _coerce_followup_output(raw: Any) -> FollowupClassificationOutput:
     if start >= 0 and end >= start:
         text = text[start : end + 1]
     return FollowupClassificationOutput.model_validate_json(text)
+
+
+def resolve_followup_source_message_ids(
+    source_message_ids: Sequence[str],
+    *,
+    safe_history: Sequence[Mapping[str, Any] | Any] = (),
+    current_message_id: str = "",
+    retrieved_contexts: Sequence[Mapping[str, Any]] = (),
+    previous_turn_id: str = "",
+) -> tuple[str, ...]:
+    """Resolve and validate followup source_message_ids against observed chat history."""
+    if not source_message_ids:
+        return ()
+
+    observed_ids: set[str] = set()
+    turn_to_msg_ids: dict[str, list[str]] = {}
+    turn_to_assistant_mid: dict[str, str] = {}
+    latest_assistant_mid: str = ""
+    latest_user_mid: str = ""
+
+    for item in safe_history:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("message_id") or "").strip()
+        tid = str(item.get("turn_id") or "").strip()
+        role = str(item.get("role") or "").strip().lower()
+        if mid:
+            observed_ids.add(mid)
+            if tid:
+                turn_to_msg_ids.setdefault(tid, []).append(mid)
+                if role == "assistant":
+                    turn_to_assistant_mid[tid] = mid
+            if role == "assistant":
+                latest_assistant_mid = mid
+            elif role == "user":
+                latest_user_mid = mid
+
+    if current_message_id:
+        c_mid = str(current_message_id).strip()
+        observed_ids.add(c_mid)
+        if not latest_user_mid:
+            latest_user_mid = c_mid
+
+    for retrieved in retrieved_contexts:
+        if not isinstance(retrieved, dict):
+            continue
+        for turn in retrieved.get("turns") or []:
+            if not isinstance(turn, dict):
+                continue
+            t_mid = str(turn.get("message_id") or "").strip()
+            t_tid = str(turn.get("turn_id") or "").strip()
+            t_role = str(turn.get("role") or "").strip().lower()
+            if t_mid:
+                observed_ids.add(t_mid)
+                if t_tid:
+                    turn_to_msg_ids.setdefault(t_tid, []).append(t_mid)
+                    if t_role == "assistant":
+                        turn_to_assistant_mid[t_tid] = t_mid
+                if t_role == "assistant":
+                    latest_assistant_mid = t_mid
+            for m in turn.get("messages") or []:
+                if not isinstance(m, dict):
+                    continue
+                m_mid = str(m.get("message_id") or "").strip()
+                m_tid = str(m.get("turn_id") or t_tid or "").strip()
+                m_role = str(m.get("role") or "").strip().lower()
+                if m_mid:
+                    observed_ids.add(m_mid)
+                    if m_tid:
+                        turn_to_msg_ids.setdefault(m_tid, []).append(m_mid)
+                        if m_role == "assistant":
+                            turn_to_assistant_mid[m_tid] = m_mid
+                    if m_role == "assistant":
+                        latest_assistant_mid = m_mid
+
+    resolved: list[str] = []
+    unobserved: list[str] = []
+
+    for raw_id in source_message_ids:
+        identifier = str(raw_id or "").strip()
+        if not identifier:
+            continue
+        if identifier in observed_ids:
+            resolved.append(identifier)
+        elif identifier in turn_to_assistant_mid:
+            resolved.append(turn_to_assistant_mid[identifier])
+        elif identifier in turn_to_msg_ids:
+            resolved.extend(turn_to_msg_ids[identifier])
+        elif identifier.lower() in {"assistant", "model", "ai", "bot", "last", "latest", "previous"} and latest_assistant_mid:
+            resolved.append(latest_assistant_mid)
+        elif identifier.lower() in {"user", "human"} and latest_user_mid:
+            resolved.append(latest_user_mid)
+        elif identifier == previous_turn_id and latest_assistant_mid:
+            resolved.append(latest_assistant_mid)
+        else:
+            unobserved.append(identifier)
+
+    if unobserved:
+        raise FollowupClassificationError("Reference resolution selected an unobserved message")
+
+    return tuple(dict.fromkeys(resolved))
 
 
 class FollowupClassifier:
@@ -289,20 +391,19 @@ class FollowupClassifier:
                 continue
             break
 
-        observed_ids = {str(item.get("message_id")) for item in safe_history if isinstance(item, dict) and item.get("message_id")}
-        if current_message_id:
-            observed_ids.add(current_message_id)
-        for retrieved in retrieved_contexts:
-            for turn in retrieved.get("turns") or []:
-                if not isinstance(turn, dict):
-                    continue
-                if turn.get("message_id"):
-                    observed_ids.add(str(turn["message_id"]))
-                for item in turn.get("messages") or []:
-                    if isinstance(item, dict) and item.get("message_id"):
-                        observed_ids.add(str(item["message_id"]))
-        if any(message_id not in observed_ids for message_id in output.source_message_ids):
-            raise FollowupClassificationError("Reference resolution selected an unobserved message")
+        prev_tid = ""
+        if pointers is not None:
+            prev_tid = str(getattr(pointers, "previous_turn_id", "") or "")
+            if not prev_tid and isinstance(pointers, dict):
+                prev_tid = str(pointers.get("previous_turn_id") or "")
+        normalized_sources = resolve_followup_source_message_ids(
+            output.source_message_ids,
+            safe_history=safe_history,
+            current_message_id=current_message_id,
+            retrieved_contexts=retrieved_contexts,
+            previous_turn_id=prev_tid,
+        )
+        output = output.model_copy(update={"source_message_ids": list(normalized_sources)})
         offered = {str(item.get("task_id") or "") for item in candidates}
         needs_task = output.category in {
             "followup_task",

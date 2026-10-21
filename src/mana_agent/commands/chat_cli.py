@@ -2626,6 +2626,8 @@ def chat(
                     + agent_decision.verifier_summary
                 )
                 _finish_ui_turn(current_turn_id)
+                if single_shot_noninteractive:
+                    single_shot_exit_code = 1
                 continue
 
             if (
@@ -2638,6 +2640,9 @@ def chat(
                     "No repository action was executed. The active coding flow requires "
                     "a validated continue or new decision."
                 )
+                _finish_ui_turn(current_turn_id)
+                if single_shot_noninteractive:
+                    single_shot_exit_code = 1
                 continue
             if active_flow_id and agent_decision.flow_action == "new":
                 prior_flow_id = active_flow_id

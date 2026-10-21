@@ -4,6 +4,44 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-21
 
+- Bumped the package version to `0.5.2` and updated the README version badge.
+  - User-owned verification: `python -m pytest tests/test_package_version.py -q`.
+
+- Added Model Approval Judgment and Dynamic Budget Renewal for Coding Tasks:
+  - Model Approval Judgment (`src/mana_agent/multi_agent/agents/approval_agent.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/human_inbox/approval_tools.py`):
+    - Added `ModelApprovalJudgment` typed schema with `judgment` ("accept" | "deny"), `reason`, `suggested_command`, `confidence`, and `risk_assessment`.
+    - Added `judge_approval_request()` with deterministic hard-denial gates for destructive operations (`rm -rf`, `sudo`, `git reset --hard`) and model-directed safety/alignment evaluation.
+    - Updated `ToolExecutionDispatcher` in `src/mana_agent/coding/programmatic.py` to intercept `ApprovalRequired` on `run_command`, `run_script_once`, and `shell`. If accepted by model judgment, resolves authorized reviewer identity from the pending inbox item, transitions the durable inbox item to `APPROVED`, issues the approval grant, and executes the command directly ("if judgement accept that -> run it"). If denied, marks the inbox item denied and returns the reason and alternative `suggested_command`.
+    - Updated `approval_request` in `src/mana_agent/human_inbox/approval_tools.py` with `enable_model_judgment` and model judgment evaluation, eliminating human polling timeouts in automated/coding flows while respecting pre-resolved/terminal inbox items.
+  - Coding Engine Budget Renewal on Model-Accepted Progress (`src/mana_agent/coding/internal_engine.py`):
+    - Introduced `_evaluate_progress_and_renew_budget()` in `InternalCodingEngine` with `max_auto_renewals=3`, `renew_tool_calls=50`, and `renew_model_turns=30`.
+    - When tool calls or turns reach limits, checks concrete progress signals (`changed_files`, `commands_run`, verification outcomes) and prompts model progress evaluation.
+    - If progress/improvement is accepted toward the task goal, dynamically extends `max_tool_calls` and `max_turns`, revises supervisor budget if attached, and emits `budget.renewed` events instead of crashing with `Internal model loop exhausted its budget without a completion decision`.
+  - Regression Testing (`tests/coding/test_coding_approval_judgment.py`, `tests/coding/test_coding_budget_renewal.py`):
+    - Added unit and lifecycle tests covering model approval acceptance and direct execution, deterministic destructive command rejection, alternative command suggestion, model-accepted budget renewal on file writes, and clean termination without progress.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/coding/test_coding_approval_judgment.py -q`
+    - `./venv/bin/pytest tests/coding/test_coding_budget_renewal.py -q`
+    - `./venv/bin/pytest tests/coding/test_internal_engine_budget.py -q`
+    - `./venv/bin/pytest tests/human_inbox/test_approval_tools.py -q`
+    - `./venv/bin/pytest tests/multi_agent/test_approval_agent.py -q`
+
+- Fixed reference resolution for answers to model responses ("Reference resolution selected an unobserved message"):
+  - Canonical Message ID Normalization (`src/mana_agent/gateway/entry_routing.py`, `src/mana_agent/gateway/followup_classifier.py`):
+    - Added `resolve_observed_message_ids()` and `resolve_followup_source_message_ids()` to resolve and normalize turn-level identifiers (`turn_id`), role aliases (`"assistant"`, `"model"`, `"user"`), and `latest_message_ids` from observed conversation context to exact canonical message IDs when classifying follow-up requests or routing entry turns.
+    - Preserved closed-failure enforcement when completely unobserved or invented message IDs are referenced.
+  - Model Decision Correction Guidance (`src/mana_agent/gateway/entry_routing.py`):
+    - Added explicit model-directed bounded correction guidance for `"Reference resolution selected an unobserved message"` in `_routing_correction`, instructing the router model to cite only visible message IDs from `conversation_context.messages`, request context retrieval, or ask for user clarification.
+  - Prompt Schema and Guidance Clarification (`src/mana_agent/gateway/entry_routing.py`, `src/mana_agent/gateway/followup_classifier.py`):
+    - Added `resolved_request` and `source_message_ids` to the JSON schema output template in `ENTRY_ROUTER_PROMPT` and clarified reference resolution for responses such as "fix this", "do that", or "yes".
+  - User Message ID Preservation in Context Compaction (`src/mana_agent/gateway/context_compactor.py`):
+    - Passed `user_message_id=getattr(context, "user_message_id", "")` in `ContextCompactor._build_bounded` so `context.user_message_id` is preserved through compaction.
+  - Regression Testing (`tests/gateway/test_entry_routing.py`, `tests/gateway/test_followup_classifier.py`):
+    - Added test coverage in `test_followup_classifier.py` and `test_entry_routing.py` for role ("assistant", "model") and turn-based reference resolution, invalid reference rejection, routing correction guidance, and user message ID preservation under compaction.
+  - User-owned verification commands:
+    - `./venv/bin/pytest tests/gateway/test_entry_routing.py -k "test_entry_router_resolves_role_references or test_entry_router_correction_for_unobserved_message or test_context_compactor_preserves_user_message_id" -q`
+    - `./venv/bin/pytest tests/gateway/test_followup_classifier.py -k "test_followup_resolves_role_and_turn_references or test_followup_rejects_invented_message_provenance" -q`
+
 - Fixed asynchronous child widget cleanup race in `ChatLog.clear_log()`:
   - Synchronous DOM Node Clearing (`src/mana_agent/tui/widgets/chat_log.py`):
     - In `ChatLog.clear_log()`, added `self.remove_children()` and `self._nodes._clear()` alongside per-child removal so child widgets (such as complex `ExecutionPanel` container trees) are immediately detached from the DOM without leaving transient nodes during asynchronous prune completion.

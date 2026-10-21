@@ -59,8 +59,14 @@ from mana_agent.tools.batch_file_ops import (
     batch_delete_files,
 )
 from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
+from mana_agent.utils.text import extract_model_text
 
 logger = logging.getLogger(__name__)
+
+# Keep the model interaction budget separate from the per-session tool-call
+# budget. Coding tasks often need more than 30 reasoning/tool rounds before a
+# completion response, while tool execution is independently bounded below.
+MAX_INTERNAL_MODEL_TURNS = 120
 
 
 def _utc_now() -> datetime:
@@ -155,6 +161,10 @@ class InternalCodingEngine(CodingEngine):
         self._task_statuses: dict[str, CodingStatus] = {}
         self._active_sessions: dict[str, ProgrammaticExecutionSession] = {}
         self._cancellation_events: dict[str, asyncio.Event] = {}
+        self.max_auto_renewals: int = 3
+        self.renew_tool_calls: int = 50
+        self.renew_model_turns: int = 30
+        self.renewals_count: int = 0
 
     async def start(self) -> None:
         return None
@@ -274,6 +284,7 @@ class InternalCodingEngine(CodingEngine):
             task_id=task_id,
             model=self.model,
             provider=self.provider,
+            llm=self._get_or_create_llm(),
         )
         session = ProgrammaticExecutionSession(
             task_id=task_id,
@@ -521,10 +532,11 @@ class InternalCodingEngine(CodingEngine):
             self.provider,
         )
 
-        max_turns = min(self.max_tool_calls, 30)
+        max_turns = MAX_INTERNAL_MODEL_TURNS
         final_summary = ""
 
-        for turn in range(max_turns):
+        turn = 0
+        while turn < max_turns:
             if cancel_ev.is_set():
                 raise asyncio.CancelledError()
 
@@ -677,6 +689,26 @@ class InternalCodingEngine(CodingEngine):
                     except Exception:
                         pass
 
+                if session.state.tool_calls_executed >= session.state.max_tool_calls:
+                    renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
+                        task=task,
+                        session=session,
+                        workspace=workspace,
+                        llm=llm,
+                        current_turn=turn,
+                        max_turns=max_turns,
+                    )
+                    if renewed:
+                        max_turns += self.renew_model_turns
+                    else:
+                        logger.warning(
+                            "Tool calls limit (%d) reached for task %s and renewal rejected: %s",
+                            session.state.max_tool_calls,
+                            task.task_id,
+                            renewal_reason,
+                        )
+                        break
+
             else:
                 for tc in tool_calls:
                     if cancel_ev.is_set():
@@ -686,6 +718,26 @@ class InternalCodingEngine(CodingEngine):
                     args = tc.get("args") or {}
                     call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
 
+                    if session.state.tool_calls_executed >= session.state.max_tool_calls:
+                        renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
+                            task=task,
+                            session=session,
+                            workspace=workspace,
+                            llm=llm,
+                            current_turn=turn,
+                            max_turns=max_turns,
+                        )
+                        if renewed:
+                            max_turns += self.renew_model_turns
+                        else:
+                            logger.warning(
+                                "Tool calls limit (%d) reached for task %s and renewal rejected: %s",
+                                session.state.max_tool_calls,
+                                task.task_id,
+                                renewal_reason,
+                            )
+                            break
+
                     call_spec = {"call_id": call_id, "name": fn_name, "arguments": args}
                     fn_output = session.handle_function_call(call_spec)
                     output_str = fn_output.get("output", "")
@@ -693,20 +745,151 @@ class InternalCodingEngine(CodingEngine):
                     messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
 
                     if session.state.tool_calls_executed >= session.state.max_tool_calls:
-                        logger.warning(
-                            "Tool calls limit (%d) reached for task %s",
-                            session.state.max_tool_calls,
-                            task.task_id,
+                        renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
+                            task=task,
+                            session=session,
+                            workspace=workspace,
+                            llm=llm,
+                            current_turn=turn,
+                            max_turns=max_turns,
                         )
-                        break
+                        if renewed:
+                            max_turns += self.renew_model_turns
+                        else:
+                            logger.warning(
+                                "Tool calls limit (%d) reached for task %s and renewal rejected: %s",
+                                session.state.max_tool_calls,
+                                task.task_id,
+                                renewal_reason,
+                            )
+                            break
 
             if session.state.tool_calls_executed >= session.state.max_tool_calls:
                 break
+
+            turn += 1
+            if turn >= max_turns and not final_summary:
+                renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
+                    task=task,
+                    session=session,
+                    workspace=workspace,
+                    llm=llm,
+                    current_turn=turn,
+                    max_turns=max_turns,
+                )
+                if renewed:
+                    max_turns += self.renew_model_turns
 
         if not final_summary:
             raise RuntimeError("Internal model loop exhausted its budget without a completion decision")
 
         return final_summary
+
+    async def _evaluate_progress_and_renew_budget(
+        self,
+        *,
+        task: CodingTask,
+        session: ProgrammaticExecutionSession,
+        workspace: WorkspaceContext,
+        llm: Any,
+        current_turn: int,
+        max_turns: int,
+    ) -> tuple[bool, str]:
+        """Check for observable progress and evaluate whether model accepts budget renewal."""
+        if self.renewals_count >= self.max_auto_renewals:
+            return False, f"Maximum auto-renewals ({self.max_auto_renewals}) reached"
+
+        changed_files = list(session.state.changed_files)
+        commands_run = list(session.state.commands_run)
+        tool_calls_executed = session.state.tool_calls_executed
+        verification_results = list(session.state.verification_results)
+
+        # Require observable progress signals (files modified, commands run, or tool results)
+        if not changed_files and not commands_run and not verification_results:
+            return False, "No observable repository mutations, command runs, or verification progress"
+
+        progress_prompt = (
+            "You are Mana-Agent's progress evaluation judge.\n"
+            "Evaluate whether concrete improvement has been achieved toward the coding task goal, "
+            "and decide whether to ACCEPT a budget extension.\n\n"
+            f"Task Goal: {task.goal}\n"
+            f"Files Touched: {json.dumps(changed_files)}\n"
+            f"Commands Executed: {json.dumps(commands_run[-5:])}\n"
+            f"Tool Calls Executed: {tool_calls_executed}\n"
+            f"Recent Errors: {json.dumps(session.state.errors[-3:])}\n\n"
+            "Rules:\n"
+            "1. ACCEPT (improvement_accepted=true) if meaningful progress has been made toward the goal.\n"
+            "2. REJECT (improvement_accepted=false) if the loop is stuck in identical failures or repetitive no-op calls.\n"
+            "Return strictly JSON:\n"
+            '{"improvement_accepted": true, "reason": "concise explanation", "confidence": 1.0}'
+        )
+
+        improvement_accepted = False
+        reason = ""
+
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            eval_msgs = [SystemMessage(content=progress_prompt)]
+            if hasattr(llm, "ainvoke") and callable(llm.ainvoke):
+                resp = await llm.ainvoke(eval_msgs)
+            else:
+                resp = await asyncio.to_thread(llm.invoke if hasattr(llm, "invoke") else llm, eval_msgs)
+            txt = extract_model_text(resp).strip()
+            if txt.startswith("```"):
+                txt = txt.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+            s = txt.find("{")
+            e = txt.rfind("}")
+            if s >= 0 and e >= s:
+                data = json.loads(txt[s : e + 1])
+                improvement_accepted = bool(data.get("improvement_accepted", False))
+                reason = str(data.get("reason") or "Model evaluated progress.")
+        except Exception as exc:
+            logger.debug("Model progress evaluation failed, checking baseline progress heuristics: %s", exc)
+            if changed_files or commands_run:
+                improvement_accepted = True
+                reason = f"Heuristic progress verified ({len(changed_files)} files modified, {len(commands_run)} commands run)."
+            else:
+                return False, f"Progress evaluation failed: {exc}"
+
+        if not improvement_accepted:
+            return False, f"Model rejected renewal: {reason or 'no substantial improvement verified'}"
+
+        self.renewals_count += 1
+        session.state.max_tool_calls += self.renew_tool_calls
+
+        if self.execution_supervisor is not None and hasattr(self.execution_supervisor, "revise_budget"):
+            try:
+                self.execution_supervisor.revise_budget(
+                    task.task_id,
+                    reason="coding_engine_progress_auto_renew",
+                    evidence={
+                        "renewals_count": self.renewals_count,
+                        "changed_files": changed_files,
+                        "new_max_tool_calls": session.state.max_tool_calls,
+                    },
+                )
+            except Exception:
+                pass
+
+        publish_coding_event(
+            AgentEvent(
+                event_type="budget.renewed",
+                task_id=task.task_id,
+                backend=self.name,
+                sequence=session._next_sequence(),
+                title="Coding budget renewed",
+                summary=f"Renewed budget (renewal #{self.renewals_count}): +{self.renew_tool_calls} tool calls, +{self.renew_model_turns} turns ({reason})",
+                visibility="progress",
+                payload={
+                    "renewals_count": self.renewals_count,
+                    "tool_calls_limit": session.state.max_tool_calls,
+                    "reason": reason,
+                },
+            )
+        )
+
+        return True, f"Progress improvement accepted: {reason}"
 
     async def _run_batch_coding_workflow(
         self,
