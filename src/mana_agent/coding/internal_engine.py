@@ -62,6 +62,11 @@ from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
 
 logger = logging.getLogger(__name__)
 
+# Keep the model interaction budget separate from the per-session tool-call
+# budget. Coding tasks often need more than 30 reasoning/tool rounds before a
+# completion response, while tool execution is independently bounded below.
+MAX_INTERNAL_MODEL_TURNS = 120
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -521,7 +526,7 @@ class InternalCodingEngine(CodingEngine):
             self.provider,
         )
 
-        max_turns = min(self.max_tool_calls, 30)
+        max_turns = MAX_INTERNAL_MODEL_TURNS
         final_summary = ""
 
         for turn in range(max_turns):

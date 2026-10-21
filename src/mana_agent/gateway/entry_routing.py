@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Literal, get_args
+from typing import Any, Callable, Literal, Mapping, Sequence, get_args
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
@@ -456,9 +456,10 @@ availability fallback for a cloud calendar or isolated public-browser request.
 Use previous_route and conversation_summary only for continuity. Reuse the active route for a true
 follow-up; reroute when the user's intent changes. Do not route by isolated keywords alone.
 Read conversation_context.messages including assistant replies before resolving references such as
-"yes, I want it" or "do that". Return resolved_request containing the user's intended action and
-source_message_ids naming the visible messages that support it. Never treat an assistant offer as
-permission to bypass an approval gate. If a referent is missing or marked retrieval_required,
+"yes, I want it", "fix this", or "do that". Return resolved_request containing the user's intended action and
+source_message_ids containing the exact "message_id" strings of the observed messages that support it
+(such as the assistant reply being confirmed, corrected, or fixed).
+Never treat an assistant offer as permission to bypass an approval gate. If a referent is missing or marked retrieval_required,
 return conversation with context_request selecting a bounded conversation_context_read query
 or observed message_ids. That provisional route performs retrieval only; choose the actual route
 after observing the retrieved messages. If retrieval cannot resolve the ambiguity, return
@@ -524,7 +525,13 @@ Return JSON only:
   "artifact_family": "",
   "media_request": null,
   "automation_operation": "",
-  "runtime_capability_change": false
+  "runtime_capability_change": false,
+  "resolved_request": "",
+  "source_message_ids": [],
+  "related_task_id": "",
+  "clarification_question": "",
+  "response_kind": "task",
+  "context_request": null
 }
 
 Examples:
