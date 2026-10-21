@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mana-agent"
-version = "0.5.1"
+version = "0.5.2"
 description = "LLM-powered static analysis and repository understanding tool"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"  # Support Python 3.10 through 3.14 (3.14.x); some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)

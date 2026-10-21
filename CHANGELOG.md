@@ -4,6 +4,9 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-21
 
+- Bumped the package version to `0.5.2` and updated the README version badge.
+  - User-owned verification: `python -m pytest tests/test_package_version.py -q`.
+
 - Added Model Approval Judgment and Dynamic Budget Renewal for Coding Tasks:
   - Model Approval Judgment (`src/mana_agent/multi_agent/agents/approval_agent.py`, `src/mana_agent/coding/programmatic.py`, `src/mana_agent/human_inbox/approval_tools.py`):
     - Added `ModelApprovalJudgment` typed schema with `judgment` ("accept" | "deny"), `reason`, `suggested_command`, `confidence`, and `risk_assessment`.
