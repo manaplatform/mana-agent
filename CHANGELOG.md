@@ -2,6 +2,16 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-21
+
+- Fixed asynchronous child widget cleanup race in `ChatLog.clear_log()`:
+  - Synchronous DOM Node Clearing (`src/mana_agent/tui/widgets/chat_log.py`):
+    - In `ChatLog.clear_log()`, added `self.remove_children()` and `self._nodes._clear()` alongside per-child removal so child widgets (such as complex `ExecutionPanel` container trees) are immediately detached from the DOM without leaving transient nodes during asynchronous prune completion.
+  - Regression and Test Resilience (`tests/test_execution_trace.py`):
+    - Hardened `test_chat_log_places_panel_under_user_message_and_clears_on_new` to poll for child detachment across event loop ticks on loaded CI runners.
+  - User-owned verification command:
+    - `./venv/bin/pytest tests/test_execution_trace.py -k test_chat_log_places_panel_under_user_message_and_clears_on_new -q`
+
 ## 2026-10-20
 
 - Bumped the package version to `0.5.1` and updated the README version badge.

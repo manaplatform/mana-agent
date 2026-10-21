@@ -450,13 +450,28 @@ class ChatLog(VerticalScroll):
     def clear_log(self) -> None:
         """Remove all children (used for new session)."""
         for child in list(self.children):
-            child.remove()
+            try:
+                child.remove()
+            except Exception:
+                pass
+        try:
+            self.remove_children()
+        except Exception:
+            pass
+        try:
+            self._nodes._clear()
+        except Exception:
+            pass
         self._assistant_widgets.clear()
         self._tool_cards.clear()
         self._execution_panels.clear()
         self._user_widgets_by_turn.clear()
         self._latest_user_widget = None
         self._rendered_ids.clear()
+        try:
+            self.refresh(layout=True)
+        except Exception:
+            pass
 
     def on_mount(self) -> None:
         """Defer initial replay until after this VerticalScroll (and its internal Vertical)

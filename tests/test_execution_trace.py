@@ -405,7 +405,10 @@ def test_chat_log_places_panel_under_user_message_and_clears_on_new() -> None:
 
             # Clear log on /new
             chat_log.clear_log()
-            await pilot.pause()
+            for _ in range(5):
+                if len(chat_log.children) == 0:
+                    break
+                await pilot.pause(0.05)
             assert len(chat_log.children) == 0
             assert chat_log.get_execution_panel("turn-user-1") is None
 
