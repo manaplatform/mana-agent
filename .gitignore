@@ -24,6 +24,7 @@ logs/
 .mana/evals/evals.lock
 .ruff_cache/
 .swe-bench/
+swe-bench-tasks/
 predictions.jsonl
 sb-cli-reports/
 mana-agent.*.json

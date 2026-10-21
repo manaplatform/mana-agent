@@ -381,8 +381,10 @@ def approval_request(
     source_decision_id: str = "",
     task_id: str = "",
     agent_id: str = "",
+    llm: Any = None,
+    enable_model_judgment: bool = True,
 ) -> dict[str, Any]:
-    """Request human approval for a command or action, emit live approval events, and wait for verdict.
+    """Request human or model-judged approval for a command or action, emit live approval events, and wait for verdict.
 
     Returns a dictionary with approved status, approval_id (grant), inbox_item_id, and explanatory message.
     """
@@ -569,6 +571,146 @@ def approval_request(
     start_time = time.monotonic()
     approved = False
     grant_id = ""
+
+    # Check if target inbox item or action is already resolved
+    if target_inbox_id and service is not None:
+        try:
+            cur_item = service.repository.get(target_inbox_id)
+        except Exception:
+            cur_item = None
+        if cur_item is not None:
+            if cur_item.status == InboxStatus.APPROVED:
+                approved = True
+                if cur_item.action_intent_id:
+                    action = gateway.store.get_action(cur_item.action_intent_id)
+                    if action is not None:
+                        grant = gateway.approvals.find_valid(action)
+                        if grant is None:
+                            grant = gateway.approvals.issue(
+                                action,
+                                approved_by=cur_item.response_actor_id or "user",
+                                ttl_seconds=300,
+                            )
+                        grant_id = grant.approval_id
+                return {
+                    "approved": True,
+                    "approval_id": grant_id,
+                    "inbox_item_id": target_inbox_id,
+                    "status": "approved",
+                    "command": cmd,
+                    "message": (
+                        f"Approval granted. You may now execute the command with action_approval_id={grant_id!r}."
+                        if grant_id
+                        else "Approval granted."
+                    ),
+                }
+            elif cur_item.status in {
+                InboxStatus.DENIED,
+                InboxStatus.CANCELLED,
+                InboxStatus.SUPERSEDED,
+                InboxStatus.EXPIRED,
+            }:
+                return {
+                    "approved": False,
+                    "inbox_item_id": target_inbox_id,
+                    "status": cur_item.status.value,
+                    "message": f"Approval request was {cur_item.status.value} by the reviewer.",
+                }
+
+    # Evaluate model approval judgment if enabled and a command is provided
+    if enable_model_judgment and bool(cmd and cmd.strip()):
+        try:
+            from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
+
+            mj = judge_approval_request(
+                command=cmd,
+                reason=reason,
+                goal=task_id or "",
+                working_directory=str(root),
+                risk_level=risk_level,
+                llm=llm,
+                action_id=target_action_id,
+            )
+            if mj.judgment == "accept":
+                approved = True
+                reviewer_id = "model_judgment"
+                if target_inbox_id and service is not None:
+                    try:
+                        cur_item = service.repository.get(target_inbox_id)
+                        if cur_item is not None:
+                            reviewer_id = (
+                                cur_item.eligible_reviewer_ids[0]
+                                if cur_item.eligible_reviewer_ids
+                                else cur_item.assigned_reviewer_id
+                            ) or "model_judgment"
+                        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+
+                        service.respond(
+                            ResponseSubmission(
+                                inbox_item_id=target_inbox_id,
+                                operation=ResponseOperation.APPROVE,
+                                actor_id=reviewer_id,
+                                channel="model_judgment",
+                                idempotency_key=f"mj_app_{target_inbox_id}",
+                                comment=mj.reason,
+                            )
+                        )
+                    except Exception as inb_err:
+                        logger.debug("Failed updating inbox item on model approval accept: %s", inb_err)
+                if target_action_id:
+                    act_obj = gateway.store.get_action(target_action_id)
+                    if act_obj is not None:
+                        found_grant = gateway.approvals.find_valid(act_obj)
+                        if found_grant is None:
+                            from mana_agent.transactional_actions.models import ApprovalScope
+                            req_scope = (
+                                act_obj.policy_decision.required_approval_scope
+                                if act_obj.policy_decision
+                                else ApprovalScope.ACTION_ONCE
+                            )
+                            found_grant = gateway.approvals.issue(
+                                act_obj,
+                                approved_by=reviewer_id,
+                                ttl_seconds=300,
+                                scope=req_scope or ApprovalScope.ACTION_ONCE,
+                            )
+                        grant_id = found_grant.approval_id
+            elif mj.judgment == "deny" and mj.confidence > 0.0:
+                if target_inbox_id and service is not None:
+                    try:
+                        cur_item = service.repository.get(target_inbox_id)
+                        deny_reviewer_id = "model_judgment"
+                        if cur_item is not None:
+                            deny_reviewer_id = (
+                                cur_item.eligible_reviewer_ids[0]
+                                if cur_item.eligible_reviewer_ids
+                                else cur_item.assigned_reviewer_id
+                            ) or "model_judgment"
+                        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+
+                        service.respond(
+                            ResponseSubmission(
+                                inbox_item_id=target_inbox_id,
+                                operation=ResponseOperation.DENY,
+                                actor_id=deny_reviewer_id,
+                                channel="model_judgment",
+                                idempotency_key=f"mj_deny_{target_inbox_id}",
+                                comment=mj.reason,
+                            )
+                        )
+                    except Exception:
+                        pass
+                return {
+                    "approved": False,
+                    "inbox_item_id": target_inbox_id,
+                    "status": "denied",
+                    "message": f"Approval request was denied by model judgment: {mj.reason}",
+                    "reason": mj.reason,
+                    "suggested_command": mj.suggested_command,
+                    "risk_assessment": mj.risk_assessment,
+                }
+        except Exception as mj_exc:
+            logger.debug("Model approval judgment evaluation bypassed: %s", mj_exc)
 
     while time.monotonic() - start_time < max_timeout:
         # Check action grant

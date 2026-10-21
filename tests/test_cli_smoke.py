@@ -445,6 +445,33 @@ def test_chat_blocks_edit_requests_without_coding_agent(monkeypatch, tmp_path: P
     assert "--coding-agent" in result.stdout
 
 
+def test_single_shot_chat_exits_nonzero_for_invalid_route(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr(
+        "mana_agent.commands.cli.build_ask_service",
+        lambda _settings, model_override=None, **_kwargs: FakeAskService(),
+    )
+    monkeypatch.setattr(
+        "mana_agent.commands.chat_cli._decide_chat_route",
+        lambda **_kwargs: AgentDecision(
+            intent="edit",
+            confidence=0.9,
+            selected_tools=[],
+            code_editing_needed=True,
+            requested_effect="write",
+            target_surface="repository",
+            verifier_passed=False,
+            verifier_summary="code_editing_needed=true but no mutation tool was selected",
+        ),
+    )
+
+    result = runner.invoke(app, ["chat", "fix this", "--root-dir", str(tmp_path), "--no-tui"])
+
+    assert result.exit_code != 0
+    assert "routing verification" in result.stdout
+    assert "No route or tool action was" in result.stdout
+
+
 def test_chat_zero_tool_response_renders_only_answer(monkeypatch, tmp_path: Path) -> None:
     """Regression: classic chat with no tool calls shows only the answer."""
     class _AskService(FakeAskService):

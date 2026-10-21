@@ -52,6 +52,29 @@ def test_assistant_offer_resolves_without_task_candidates() -> None:
     assert result.source_message_ids == ("assistant-offer",)
 
 
+def test_followup_resolves_role_and_turn_references_to_assistant_message() -> None:
+    offer = "I found a bug in auth.py. Would you like me to fix it?"
+    classifier = FollowupClassifier(_StructuredModel({
+        "category": "new_task", "safe_to_continue": True, "reason": "User requested fix to model response",
+        "resolved_request": "Fix bug in auth.py", "source_message_ids": ["assistant"],
+    }))
+    result = classifier.decide(message="fix this.", candidates=[], recent_history=[
+        {"role": "assistant", "message_id": "msg-model-1", "turn_id": "turn-1", "content": offer},
+    ])
+    assert result.resolved_request == "Fix bug in auth.py"
+    assert result.source_message_ids == ("msg-model-1",)
+
+    # Also verify turn_id resolution
+    classifier_turn = FollowupClassifier(_StructuredModel({
+        "category": "new_task", "safe_to_continue": True, "reason": "User requested fix to model turn",
+        "resolved_request": "Fix bug in auth.py", "source_message_ids": ["turn-1"],
+    }))
+    result_turn = classifier_turn.decide(message="fix this.", candidates=[], recent_history=[
+        {"role": "assistant", "message_id": "msg-model-1", "turn_id": "turn-1", "content": offer},
+    ])
+    assert result_turn.source_message_ids == ("msg-model-1",)
+
+
 def test_followup_rejects_invented_message_provenance() -> None:
     classifier = FollowupClassifier(_StructuredModel({
         "category": "new_task", "safe_to_continue": True, "reason": "Invalid source",

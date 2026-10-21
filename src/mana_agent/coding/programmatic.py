@@ -61,6 +61,7 @@ class ToolExecutionDispatcher:
         task_id: str = "",
         model: str = "",
         provider: str = "openai",
+        llm: Any = None,
     ) -> None:
         if workspace is not None:
             self.workspace = workspace
@@ -77,6 +78,7 @@ class ToolExecutionDispatcher:
         self.task_id = task_id
         self.model = model
         self.provider = provider
+        self.llm = llm
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         tool_name = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_name)
@@ -373,7 +375,102 @@ class ToolExecutionDispatcher:
             try:
                 outcome = action_runtime.execute(adapter, approval_id=approval_id)
             except ApprovalRequired as pending:
-                return {"ok": False, "awaiting_approval": True, "inbox_item_id": pending.inbox_item_id}
+                from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
+
+                llm_for_judge = getattr(self, "llm", None)
+                mj = judge_approval_request(
+                    command=cmd,
+                    reason=str(args.get("reason") or "Execute command in workspace"),
+                    goal=str(getattr(self.workspace, "goal", "") or self.task_id or ""),
+                    working_directory=str(working),
+                    risk_level="medium",
+                    llm=llm_for_judge,
+                    action_id=pending.action.action_id,
+                )
+                if mj.judgment == "accept":
+                    reviewer_id = "model_judgment"
+                    if action_runtime.inbox_service is not None and pending.inbox_item_id:
+                        try:
+                            cur_item = action_runtime.inbox_service.repository.get(pending.inbox_item_id)
+                            if cur_item is not None:
+                                reviewer_id = (
+                                    cur_item.eligible_reviewer_ids[0]
+                                    if cur_item.eligible_reviewer_ids
+                                    else cur_item.assigned_reviewer_id
+                                ) or "model_judgment"
+                            from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+
+                            action_runtime.inbox_service.respond(
+                                ResponseSubmission(
+                                    inbox_item_id=pending.inbox_item_id,
+                                    operation=ResponseOperation.APPROVE,
+                                    actor_id=reviewer_id,
+                                    channel="model_judgment",
+                                    idempotency_key=f"mj_app_{pending.inbox_item_id}",
+                                    comment=mj.reason,
+                                )
+                            )
+                        except Exception as inb_err:
+                            logger.warning("Inbox item approval update failed: %s", inb_err)
+                    grant = action_runtime.approvals.find_valid(pending.action)
+                    if grant is None:
+                        from mana_agent.transactional_actions.models import ApprovalScope
+
+                        req_scope = (
+                            pending.action.policy_decision.required_approval_scope
+                            if pending.action.policy_decision
+                            else ApprovalScope.ACTION_ONCE
+                        )
+                        grant = action_runtime.approvals.issue(
+                            pending.action,
+                            approved_by=reviewer_id,
+                            ttl_seconds=300,
+                            scope=req_scope or ApprovalScope.ACTION_ONCE,
+                        )
+                    # "if judgement accept that -> run it"
+                    outcome = action_runtime.execute(adapter, approval_id=grant.approval_id)
+                    return {
+                        "ok": outcome.action.state.value == "committed",
+                        **outcome.result,
+                        "action_id": outcome.action.action_id,
+                        "model_judgment": mj.model_dump(mode="json"),
+                    }
+                else:
+                    reviewer_id = "model_judgment"
+                    if action_runtime.inbox_service is not None and pending.inbox_item_id:
+                        try:
+                            cur_item = action_runtime.inbox_service.repository.get(pending.inbox_item_id)
+                            if cur_item is not None:
+                                reviewer_id = (
+                                    cur_item.eligible_reviewer_ids[0]
+                                    if cur_item.eligible_reviewer_ids
+                                    else cur_item.assigned_reviewer_id
+                                ) or "model_judgment"
+                            from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+
+                            action_runtime.inbox_service.respond(
+                                ResponseSubmission(
+                                    inbox_item_id=pending.inbox_item_id,
+                                    operation=ResponseOperation.DENY,
+                                    actor_id=reviewer_id,
+                                    channel="model_judgment",
+                                    idempotency_key=f"mj_deny_{pending.inbox_item_id}",
+                                    comment=mj.reason,
+                                )
+                            )
+                        except Exception as inb_err:
+                            logger.warning("Inbox item denial update failed: %s", inb_err)
+                    return {
+                        "ok": False,
+                        "awaiting_approval": False,
+                        "approved": False,
+                        "status": "denied",
+                        "error": f"Command denied by model judgment: {mj.reason}",
+                        "error_code": "APPROVAL_DENIED_BY_MODEL_JUDGMENT",
+                        "reason": mj.reason,
+                        "suggested_command": mj.suggested_command,
+                        "inbox_item_id": pending.inbox_item_id,
+                    }
             return {"ok": outcome.action.state.value == "committed", **outcome.result,
                     "action_id": outcome.action.action_id}
 
@@ -524,6 +621,8 @@ class ToolExecutionDispatcher:
                     risk_level=risk_level,
                     timeout_seconds=timeout_seconds,
                     workspace_root=ws_root,
+                    llm=self.llm,
+                    enable_model_judgment=True,
                 )
                 if isinstance(res, dict):
                     if "ok" not in res:

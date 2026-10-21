@@ -2276,4 +2276,51 @@ def test_shell_route_executes_without_codex(tmp_path: Path) -> None:
     assert call["tool_policy"]["allowed_tools"] == ["shell", "run_command"]
 
 
+def test_entry_router_resolves_role_references_for_answer_to_model_response() -> None:
+    from mana_agent.gateway.entry_routing import _routing_correction, resolve_observed_message_ids
+
+    messages = [
+        {"role": "user", "message_id": "msg_u1", "turn_id": "t1", "content": "check code"},
+        {"role": "assistant", "message_id": "msg_a1", "turn_id": "t1", "content": "I found a syntax error on line 10."},
+    ]
+    resolved = resolve_observed_message_ids(["assistant"], messages=messages, user_message_id="msg_u2")
+    assert resolved == ("msg_a1",)
+
+    resolved_model = resolve_observed_message_ids(["model"], messages=messages, user_message_id="msg_u2")
+    assert resolved_model == ("msg_a1",)
+
+    resolved_turn = resolve_observed_message_ids(["t1"], messages=messages, user_message_id="msg_u2")
+    assert resolved_turn == ("msg_a1",)
+
+    with pytest.raises(EntryRoutingError, match="Reference resolution selected an unobserved message"):
+        resolve_observed_message_ids(["msg_unknown"], messages=messages, user_message_id="msg_u2")
+
+
+def test_entry_router_correction_for_unobserved_message() -> None:
+    from mana_agent.gateway.entry_routing import _routing_correction
+
+    guidance = _routing_correction("Reference resolution selected an unobserved message")
+    assert "source_message_ids must select only message_id" in guidance
+
+
+def test_context_compactor_preserves_user_message_id() -> None:
+    from mana_agent.gateway.context_compactor import ContextCompactor
+
+    compactor = ContextCompactor()
+    context = EntryRouteContext(
+        session_id="s1",
+        conversation_id="c1",
+        turn_id="t2",
+        user_message_id="msg_user_current_123",
+        conversation_context={"messages": []},
+    )
+    res = compactor.compact_routing_context(
+        user_prompt="fix this",
+        system_prompt="system",
+        context=context,
+        routes=[{"name": "coding", "description": "code", "available": True}],
+    )
+    assert res.bounded_context.user_message_id == "msg_user_current_123"
+
+
 

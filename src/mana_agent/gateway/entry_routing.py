@@ -613,7 +613,97 @@ def _routing_correction(validation_error: str) -> str:
             'Return a new complete routing decision. Select a task ID that is explicitly present '
             'in context.memory_task_candidates for memory_task_id.'
         )
+    if "Reference resolution selected an unobserved message" in validation_error:
+        return (
+            "Return a new complete routing decision. source_message_ids must select only message_id "
+            "strings explicitly observed in context.conversation_context.messages. "
+            "Do not invent message IDs, and do not select unobserved messages. "
+            "If the referenced conversation message is not visible in conversation_context.messages, "
+            "select route='conversation' with context_request to retrieve prior turns, "
+            "or set clarification_question to ask the user to clarify."
+        )
     return ""
+
+
+def resolve_observed_message_ids(
+    source_message_ids: Sequence[str],
+    *,
+    messages: Sequence[Mapping[str, Any]] = (),
+    user_message_id: str = "",
+    latest_message_ids: Sequence[str] = (),
+    latest_turn_id: str = "",
+    previous_turn_id: str = "",
+) -> tuple[str, ...]:
+    """Resolve and validate source_message_ids against visible conversation context.
+
+    Normalizes turn-level and role-level references to canonical observed message IDs.
+    Fails closed if any reference cannot be resolved to an observed message.
+    """
+    if not source_message_ids:
+        return ()
+
+    observed_message_ids: set[str] = set()
+    turn_to_msg_ids: dict[str, list[str]] = {}
+    turn_to_assistant_mid: dict[str, str] = {}
+    latest_assistant_mid: str = ""
+    latest_user_mid: str = ""
+
+    for m in messages:
+        mid = str(m.get("message_id") or "").strip()
+        tid = str(m.get("turn_id") or "").strip()
+        role = str(m.get("role") or "").strip().lower()
+        if mid:
+            observed_message_ids.add(mid)
+            if tid:
+                turn_to_msg_ids.setdefault(tid, []).append(mid)
+                if role == "assistant":
+                    turn_to_assistant_mid[tid] = mid
+            if role == "assistant":
+                latest_assistant_mid = mid
+            elif role == "user":
+                latest_user_mid = mid
+
+    if user_message_id:
+        u_mid = str(user_message_id).strip()
+        observed_message_ids.add(u_mid)
+        if not latest_user_mid:
+            latest_user_mid = u_mid
+
+    for lmid in latest_message_ids:
+        lmid_str = str(lmid or "").strip()
+        if lmid_str:
+            observed_message_ids.add(lmid_str)
+            if not latest_assistant_mid:
+                latest_assistant_mid = lmid_str
+
+    resolved: list[str] = []
+    unobserved: list[str] = []
+
+    for raw_id in source_message_ids:
+        identifier = str(raw_id or "").strip()
+        if not identifier:
+            continue
+        if identifier in observed_message_ids:
+            resolved.append(identifier)
+        elif identifier in turn_to_assistant_mid:
+            resolved.append(turn_to_assistant_mid[identifier])
+        elif identifier in turn_to_msg_ids:
+            resolved.extend(turn_to_msg_ids[identifier])
+        elif identifier.lower() in {"assistant", "model", "ai", "bot", "last", "latest", "previous"} and latest_assistant_mid:
+            resolved.append(latest_assistant_mid)
+        elif identifier.lower() in {"user", "human"} and latest_user_mid:
+            resolved.append(latest_user_mid)
+        elif (identifier == latest_turn_id or identifier == previous_turn_id) and latest_assistant_mid:
+            resolved.append(latest_assistant_mid)
+        elif (identifier == latest_turn_id or identifier == previous_turn_id) and latest_message_ids:
+            resolved.extend(str(x) for x in latest_message_ids if str(x))
+        else:
+            unobserved.append(identifier)
+
+    if unobserved:
+        raise EntryRoutingError("Reference resolution selected an unobserved message")
+
+    return tuple(dict.fromkeys(resolved))
 
 
 
@@ -1218,10 +1308,23 @@ class EntryRouter:
         source_message_ids = tuple(payload.get("source_message_ids") or [])
         related_task_id = str(payload.get("related_task_id") or "")
         if context is not None:
-            visible_ids = {str(m.get("message_id")) for m in context.conversation_context.get("messages", [])}
-            visible_ids.add(context.user_message_id)
-            if any(identifier not in visible_ids for identifier in source_message_ids):
-                raise EntryRoutingError("Reference resolution selected an unobserved message")
+            conv_ctx = context.conversation_context or {}
+            env = getattr(context, "envelope", None)
+            prev_turn_pointers = getattr(env, "previous_turn_pointers", None) if env else None
+            prev_turn_id = str(getattr(prev_turn_pointers, "previous_turn_id", "") or "")
+            source_message_ids = resolve_observed_message_ids(
+                source_message_ids,
+                messages=conv_ctx.get("messages", []),
+                user_message_id=context.user_message_id,
+                latest_message_ids=conv_ctx.get("latest_message_ids", []),
+                latest_turn_id=str(conv_ctx.get("latest_turn_id") or ""),
+                previous_turn_id=prev_turn_id,
+            )
+            visible_ids = {str(m.get("message_id")) for m in conv_ctx.get("messages", []) if m.get("message_id")}
+            visible_ids.update(str(mid) for mid in conv_ctx.get("latest_message_ids", []) if mid)
+            if context.user_message_id:
+                visible_ids.add(context.user_message_id)
+            visible_ids.update(source_message_ids)
             if related_task_id and related_task_id not in context.task_execution_policies:
                 raise EntryRoutingError("Execution policy selected an unoffered task")
             if related_task_id and execution_policy.mode == "auto":
