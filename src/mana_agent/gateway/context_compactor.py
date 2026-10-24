@@ -534,6 +534,7 @@ class ContextCompactor:
                 atomic_child=getattr(context, "atomic_child", False),
                 orchestration_parent_task_id=getattr(context, "orchestration_parent_task_id", ""),
                 authenticated_user_id=getattr(context, "authenticated_user_id", ""),
+                repository_root=getattr(context, "repository_root", ""),
                 envelope=env,
             )
             return env, ctx

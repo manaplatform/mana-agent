@@ -552,6 +552,10 @@ class InternalCodingEngine(CodingEngine):
                     final_summary = "".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content_val)
                 else:
                     final_summary = str(content_val or "")
+                if not final_summary.strip() and getattr(session.state, "executed_operations", []):
+                    ops = [op["tool"] for op in session.state.executed_operations if op.get("ok", True)]
+                    if ops:
+                        final_summary = f"Successfully completed operations: {', '.join(ops[-5:])}."
                 break
 
             messages.append(response)
@@ -613,6 +617,24 @@ class InternalCodingEngine(CodingEngine):
                             cmd = str(data.get("arguments", {}).get("command") or data.get("arguments", {}).get("script") or "")
                             if cmd:
                                 session.state.commands_run.append(cmd)
+                        elif tname.startswith("git_") or tname.startswith("git."):
+                            git_cmd = tname.replace("git_", "").replace("git.", "")
+                            session.state.commands_run.append(f"git {git_cmd}")
+
+                        out_prev = ""
+                        if isinstance(res, dict):
+                            out_prev = str(res.get("stdout") or res.get("output") or res.get("result") or res.get("summary") or "")[:300]
+                        elif isinstance(res, str):
+                            out_prev = res[:300]
+                        session.state.executed_operations.append({
+                            "tool": tname,
+                            "call_id": cid,
+                            "arguments": data.get("arguments", {}),
+                            "ok": bool(res.get("ok", True)) if isinstance(res, dict) else True,
+                            "status": "success",
+                            "output_preview": out_prev,
+                            "duration_ms": dur,
+                        })
 
                         try:
                             from mana_agent.commands.ui_helpers import emit_tool_event
@@ -625,6 +647,15 @@ class InternalCodingEngine(CodingEngine):
                         dur = data.get("duration_ms", 0)
                         err = data.get("error", "")
                         session.state.errors.append(f"{tname}: {err}")
+                        session.state.executed_operations.append({
+                            "tool": tname,
+                            "call_id": cid,
+                            "arguments": data.get("arguments", {}),
+                            "ok": False,
+                            "status": "failed",
+                            "output_preview": str(err)[:300],
+                            "duration_ms": dur,
+                        })
                         try:
                             from mana_agent.commands.ui_helpers import emit_tool_event
                             emit_tool_event("error", tname, duration=dur / 1000.0, error=err, event_id=cid)
@@ -764,6 +795,32 @@ class InternalCodingEngine(CodingEngine):
                             )
                             break
 
+                op_names = [tc.get("name") for tc in tool_calls if tc.get("name")]
+                seq_summary = (
+                    f"Executed {len(tool_calls)} operation(s): {', '.join(op_names[:3])}"
+                    if op_names
+                    else f"Executed {len(tool_calls)} operation(s)"
+                )
+                if self.execution_supervisor is not None and hasattr(self.execution_supervisor, "record_action"):
+                    try:
+                        self.execution_supervisor.record_action(
+                            task_id=task.task_id,
+                            action_name="sequential_tools_turn",
+                            changed_files=list(session.state.changed_files),
+                        )
+                    except Exception:
+                        pass
+
+                if self.taskboard is not None and hasattr(self.taskboard, "update_task"):
+                    try:
+                        self.taskboard.update_task(
+                            task_id=task.task_id,
+                            progress_summary=seq_summary,
+                            changed_files=list(session.state.changed_files),
+                        )
+                    except Exception:
+                        pass
+
             if session.state.tool_calls_executed >= session.state.max_tool_calls:
                 break
 
@@ -803,23 +860,36 @@ class InternalCodingEngine(CodingEngine):
         commands_run = list(session.state.commands_run)
         tool_calls_executed = session.state.tool_calls_executed
         verification_results = list(session.state.verification_results)
+        executed_operations = list(getattr(session.state, "executed_operations", []))
 
-        # Require observable progress signals (files modified, commands run, or tool results)
-        if not changed_files and not commands_run and not verification_results:
-            return False, "No observable repository mutations, command runs, or verification progress"
+        # Require observable progress signals (operations executed, files modified, commands run, or tool results)
+        if not changed_files and not commands_run and not verification_results and not executed_operations and tool_calls_executed == 0:
+            return False, "No observable repository mutations, command runs, or tool operations executed"
 
+        ops_summary = [
+            {
+                "tool": str(op.get("tool", "unknown")),
+                "status": str(op.get("status", "unknown")),
+                "ok": bool(op.get("ok", True)),
+                "output_preview": str(op.get("output_preview", ""))[:120],
+            }
+            for op in executed_operations[-8:]
+        ]
         progress_prompt = (
             "You are Mana-Agent's progress evaluation judge.\n"
-            "Evaluate whether concrete improvement has been achieved toward the coding task goal, "
+            "Evaluate whether concrete improvement or valid advancing work has been achieved toward the task goal, "
             "and decide whether to ACCEPT a budget extension.\n\n"
             f"Task Goal: {task.goal}\n"
+            f"Executed Operations: {json.dumps(ops_summary, ensure_ascii=False)}\n"
             f"Files Touched: {json.dumps(changed_files)}\n"
             f"Commands Executed: {json.dumps(commands_run[-5:])}\n"
             f"Tool Calls Executed: {tool_calls_executed}\n"
             f"Recent Errors: {json.dumps(session.state.errors[-3:])}\n\n"
             "Rules:\n"
-            "1. ACCEPT (improvement_accepted=true) if meaningful progress has been made toward the goal.\n"
-            "2. REJECT (improvement_accepted=false) if the loop is stuck in identical failures or repetitive no-op calls.\n"
+            "1. Progress is NOT limited to file creation or editing. Engineering tasks include Git operations "
+            "(such as git push, commit, branch, merge), shell commands, inspection, testing, environment setup, and API workflows.\n"
+            "2. ACCEPT (improvement_accepted=true) if valid, meaningful progress or correct actions have been performed toward the goal.\n"
+            "3. REJECT (improvement_accepted=false) only if the agent is stuck in repetitive no-op calls, identical recurring failures, or taking actions completely unrelated to the goal.\n"
             "Return strictly JSON:\n"
             '{"improvement_accepted": true, "reason": "concise explanation", "confidence": 1.0}'
         )
@@ -846,9 +916,10 @@ class InternalCodingEngine(CodingEngine):
                 reason = str(data.get("reason") or "Model evaluated progress.")
         except Exception as exc:
             logger.debug("Model progress evaluation failed, checking baseline progress heuristics: %s", exc)
-            if changed_files or commands_run:
+            successful_ops = [op for op in executed_operations if op.get("ok", True)]
+            if changed_files or commands_run or successful_ops or tool_calls_executed > 0:
                 improvement_accepted = True
-                reason = f"Heuristic progress verified ({len(changed_files)} files modified, {len(commands_run)} commands run)."
+                reason = f"Heuristic progress verified ({len(changed_files)} files modified, {len(commands_run)} commands run, {len(successful_ops) or tool_calls_executed} operations executed)."
             else:
                 return False, f"Progress evaluation failed: {exc}"
 
@@ -866,6 +937,8 @@ class InternalCodingEngine(CodingEngine):
                     evidence={
                         "renewals_count": self.renewals_count,
                         "changed_files": changed_files,
+                        "commands_run": commands_run[-5:],
+                        "executed_operations_count": len(executed_operations),
                         "new_max_tool_calls": session.state.max_tool_calls,
                     },
                 )

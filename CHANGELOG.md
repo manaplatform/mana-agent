@@ -2,6 +2,40 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-24
+
+- Decoupled internal coding engine progress recognition and checkpointing from file creation/modification:
+  - Enabled model-directed evaluation of all valid operations (such as `git_push`, Git commits, commands, inspection, and API workflows) rather than rejecting progress when `changed_files` is empty.
+  - Updated `ProgrammaticExecutionState` and `handle_function_call` (`src/mana_agent/coding/programmatic.py`) to track `executed_operations` across all tool types, and recorded Git commands in `commands_run`.
+  - Updated `InternalCodingEngine` (`src/mana_agent/coding/internal_engine.py`):
+    - Removed the static gate blocking budget renewal when no files were touched, passing complete operational evidence to the progress judge so the model evaluates progress toward the goal.
+    - Updated fallback heuristics to recognize executed tool operations.
+    - Added TaskBoard progress updates and supervisor checkpoints in sequential tool execution mode.
+    - Added graceful completion summary synthesis from executed operations when the model finishes tool calls with empty text, eliminating `Internal model loop exhausted its budget without a completion decision` and `INTERNAL_EXECUTION_FAILED`.
+  - Updated `INTERNAL_CODING_SYSTEM_INSTRUCTION` (`src/mana_agent/coding/prompts.py`) to clarify that engineering tasks include operational actions (e.g. `git push`) that do not require file edits.
+  - Added regression tests in `tests/coding/test_coding_budget_renewal.py`.
+  - User-owned verification commands (not run by the agent):
+    - `./venv/bin/pytest tests/coding/test_coding_budget_renewal.py -q`
+    - `./venv/bin/pytest tests/coding/test_internal_engine_budget.py -q`
+    - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py -q`
+
+- Fenced gateway supervisor heartbeats to the attempt that acquired the lease, ignoring expected stale-heartbeat races after attempt replacement or shutdown while still surfacing failures for the active owner. Added regression coverage for both cases.
+  - User-owned verification command (not run by the agent): `./venv/bin/pytest tests/gateway/test_lane_coordinator.py -q`.
+
+- Fixed the stable coding prompt's repository guidance heading to render as `Repository Rules`, restoring the expected prompt section and its ordering in prompt-builder and Spirit assertions.
+  - User-owned verification command (not run by the agent): `./venv/bin/pytest tests/test_prompting_builder.py tests/test_spirit.py -q`.
+
+- Bumped the package version to `0.5.3` and updated the README version badge.
+
+- Added repository agent-instruction loading to job routing boundaries:
+  - Gateway entry routing and MainAgent routing now inspect root-level `AGENTS.md` and `agents.md` before routing; MainAgent passes guidance to repository-scope selection as well. Autonomous MainAgent strategy routing carries the same root and loaded guidance. Content is supplied separately as subordinate repository guidance.
+  - Gateway repository-root context survives compaction and is available to multi-task child entry decisions. Guidance symlinks resolving outside the repository are ignored; absent files are reported explicitly.
+  - Added regression coverage and documented the root cause and **Do not reintroduce** invariant in `docs/regressions/routing-omitted-repository-agent-guidance.md`.
+  - User-owned verification commands (not run by the agent):
+    - `./venv/bin/pytest tests/gateway/test_entry_routing.py -k test_entry_router_includes_repository_agents_guidance -q`
+    - `./venv/bin/pytest tests/multi_agent/test_router_repository_guidance.py -q`
+    - `./venv/bin/pytest tests/gateway/test_entry_routing.py -q`
+
 ## 2026-10-21
 
 - Bumped the package version to `0.5.2` and updated the README version badge.

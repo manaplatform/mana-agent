@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +15,8 @@ from mana_agent.execution_supervisor import (
     RecoveryDecision,
     SideEffectClassification,
 )
-from mana_agent.execution_supervisor.models import RecoveryAction, RetryCategory
+from mana_agent.execution_supervisor.errors import StaleLeaseError
+from mana_agent.execution_supervisor.models import RecoveryAction, RetryCategory, TaskRecord
 from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.gateway.lane_coordinator import (
     LaneBudget,
@@ -1622,3 +1624,45 @@ def test_lane_coordinator_supervisor_heartbeats_and_failure_surfacing(
         state=LaneTaskState.COMPLETED,
     )
     assert task_id not in coordinator._supervisor_heartbeat_threads
+
+
+@pytest.mark.parametrize("replace_attempt", [False, True])
+def test_lane_heartbeat_failure_is_scoped_to_the_owning_attempt(
+    coordinator: LaneCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_attempt: bool,
+) -> None:
+    reservation = _reserve(coordinator, LaneId.CODING, intent="test stale heartbeat fencing")
+    execution = coordinator.start(reservation)
+    task_id = execution.task_id
+    coordinator._stop_supervisor_heartbeats(task_id)
+
+    if replace_attempt:
+        def replace_durable_attempt(task: TaskRecord) -> None:
+            task.attempt_id = "replacement-attempt"
+
+        coordinator.execution_supervisor.store.update_task(task_id, replace_durable_attempt)
+
+    heartbeat_attempted = threading.Event()
+
+    def reject_heartbeat(*args: object, **kwargs: object) -> None:
+        heartbeat_attempted.set()
+        raise StaleLeaseError("lease token is stale or invalid")
+
+    monkeypatch.setattr(coordinator.execution_supervisor, "heartbeat", reject_heartbeat)
+    monkeypatch.setattr(
+        coordinator.execution_supervisor,
+        "config",
+        SimpleNamespace(heartbeat_seconds=0.01, lease_seconds=30),
+    )
+    coordinator._start_supervisor_heartbeats(execution)
+
+    assert heartbeat_attempted.wait(timeout=1)
+    thread = coordinator._supervisor_heartbeat_threads[task_id]
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    if replace_attempt:
+        assert execution.heartbeat_failure == ""
+    else:
+        assert "lease token is stale or invalid" in execution.heartbeat_failure
+    coordinator._stop_supervisor_heartbeats(task_id)

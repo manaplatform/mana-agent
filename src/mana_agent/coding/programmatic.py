@@ -46,6 +46,7 @@ class ProgrammaticExecutionState:
     errors: list[str] = field(default_factory=list)
     total_tokens: dict[str, int] = field(default_factory=dict)
     verification_results: list[dict[str, Any]] = field(default_factory=list)
+    executed_operations: list[dict[str, Any]] = field(default_factory=list)
     active: bool = True
 
 
@@ -837,8 +838,30 @@ class ProgrammaticExecutionSession:
                 cmd = str(arguments.get("command") or arguments.get("script") or "")
                 if cmd:
                     self.state.commands_run.append(cmd)
+            elif tool_name.startswith("git_") or tool_name.startswith("git."):
+                git_cmd = tool_name.replace("git_", "").replace("git.", "")
+                self.state.commands_run.append(f"git {git_cmd}")
 
         status = "success" if result.get("ok", True) else "failed"
+
+        output_preview = ""
+        if isinstance(result, dict):
+            output_preview = str(result.get("stdout") or result.get("output") or result.get("result") or result.get("summary") or "")[:300]
+        elif isinstance(result, str):
+            output_preview = result[:300]
+        self.state.executed_operations.append({
+            "tool": tool_name,
+            "call_id": call_id,
+            "arguments": arguments,
+            "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
+            "status": status,
+            "output_preview": output_preview,
+            "duration_ms": duration_ms,
+        })
+        if status != "success" and isinstance(result, dict):
+            err_str = str(result.get("error") or "")
+            if err_str and f"{tool_name}: {err_str}" not in self.state.errors:
+                self.state.errors.append(f"{tool_name}: {err_str}")
 
         try:
             from mana_agent.commands.ui_helpers import emit_tool_event

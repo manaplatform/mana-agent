@@ -988,7 +988,7 @@
         .main-activity-box>summary,.coding-activity-box>summary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:600;color:#e2e8f0;user-select:none}
         .activity-box-title{font-size:13px;font-weight:600}
         .activity-box-badge{background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;font-size:11px;color:#94a3b8}
-        .activity-stream{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto;scroll-behavior:smooth}
+        .activity-stream{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto;scroll-behavior:auto}
         .activity-event-row{display:flex;flex-direction:column;gap:2px;padding:4px 6px;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px;border-radius:4px;transition:background 0.2s}
         .activity-event-row:last-child{border-bottom:none}
         .activity-event-row.activity-latest{background:rgba(59,130,246,0.12);border-left:2px solid #3b82f6}
@@ -1152,6 +1152,34 @@
       return node;
     };
     const activityBoxState = new Map();
+    const activityStreamScrollState = new Map();
+
+    const rememberActivityStreamPosition = (stream, key) => {
+      if (stream.dataset.scrollPositionReady !== "true") return;
+      const distanceFromBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight;
+      activityStreamScrollState.set(key, {
+        scrollTop: stream.scrollTop,
+        followLatest: distanceFromBottom < 40,
+      });
+    };
+
+    const restoreActivityStreamPosition = (stream, key) => {
+      const previous = activityStreamScrollState.get(key);
+      const restore = () => {
+        const maxScrollTop = Math.max(0, stream.scrollHeight - stream.clientHeight);
+        const followLatest = !previous || previous.followLatest;
+        stream.scrollTop = followLatest
+          ? maxScrollTop
+          : Math.min(previous.scrollTop, maxScrollTop);
+        stream.dataset.scrollPositionReady = "true";
+        rememberActivityStreamPosition(stream, key);
+      };
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(restore);
+      } else {
+        Promise.resolve().then(restore);
+      }
+    };
 
     const renderMainActivityBox = (trace) => {
       if (!trace || !trace.mainBox || trace.mainBox.events.length === 0) return null;
@@ -1211,6 +1239,9 @@
 
       const stream = document.createElement("div");
       stream.className = "activity-stream";
+      stream.dataset.activityStreamKey = key;
+      stream.dataset.scrollPositionReady = "false";
+      stream.addEventListener("scroll", () => rememberActivityStreamPosition(stream, key));
 
       const showAllKey = `${key}:show_all`;
       const showAll = activityBoxState.get(showAllKey) === true;
@@ -1305,19 +1336,10 @@
       }
       node.appendChild(stream);
       if (node.open) {
-        stream.scrollTop = stream.scrollHeight;
         if (stream.lastElementChild) {
           stream.lastElementChild.classList.add("activity-latest");
         }
-        if (typeof requestAnimationFrame === "function") {
-          requestAnimationFrame(() => {
-            stream.scrollTop = stream.scrollHeight;
-            const latest = stream.querySelector(".activity-latest") || stream.lastElementChild;
-            if (latest && typeof latest.scrollIntoView === "function") {
-              latest.scrollIntoView({ block: "nearest", behavior: "auto" });
-            }
-          });
-        }
+        restoreActivityStreamPosition(stream, key);
       }
       return node;
     };
@@ -1401,6 +1423,9 @@
       if (box.events.length > 0) {
         const stream = document.createElement("div");
         stream.className = "activity-stream";
+        stream.dataset.activityStreamKey = key;
+        stream.dataset.scrollPositionReady = "false";
+        stream.addEventListener("scroll", () => rememberActivityStreamPosition(stream, key));
 
         const showAllKey = `${key}:show_all`;
         const showAll = activityBoxState.get(showAllKey) === true;
@@ -1495,19 +1520,10 @@
         }
         node.appendChild(stream);
         if (node.open) {
-          stream.scrollTop = stream.scrollHeight;
           if (stream.lastElementChild) {
             stream.lastElementChild.classList.add("activity-latest");
           }
-          if (typeof requestAnimationFrame === "function") {
-            requestAnimationFrame(() => {
-              stream.scrollTop = stream.scrollHeight;
-              const latest = stream.querySelector(".activity-latest") || stream.lastElementChild;
-              if (latest && typeof latest.scrollIntoView === "function") {
-                latest.scrollIntoView({ block: "nearest", behavior: "auto" });
-              }
-            });
-          }
+          restoreActivityStreamPosition(stream, key);
         }
       }
 
@@ -1534,6 +1550,9 @@
 
     const render = () => {
       const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
+      for (const stream of timeline.querySelectorAll(".activity-stream[data-activity-stream-key]")) {
+        rememberActivityStreamPosition(stream, stream.dataset.activityStreamKey);
+      }
       timeline.replaceChildren();
       const rows = [];
       for (const message of state.messages.values()) rows.push({ kind: "message", time: message.created_at || "", sequence: 0, value: message });
@@ -1722,8 +1741,7 @@
       contextMeter.textContent = budget.context_window
         ? `ctx ${budget.used_tokens || 0}/${budget.context_window} (${percent}%) · schema ${breakdown.schema_tokens || budget.schema_tokens || 0} · ${exact} $${Number(budget.cumulative_cost || 0).toFixed(4)}${budget.remaining_cost == null ? "" : ` · $${Number(budget.remaining_cost).toFixed(4)} left`}`
         : "";
-      const anyOpen = [...activityBoxState.entries()].some(([k, v]) => v === true && (k.endsWith(":main") || k.endsWith(":coding")));
-      if (nearBottom || anyOpen) {
+      if (nearBottom) {
         timeline.scrollTop = timeline.scrollHeight;
         if (typeof requestAnimationFrame === "function") {
           requestAnimationFrame(() => {

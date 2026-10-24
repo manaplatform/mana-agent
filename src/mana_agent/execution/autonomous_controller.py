@@ -1222,7 +1222,12 @@ class AutonomousExecutionController:
         elif self.router is not None:
             try:
                 if hasattr(self.router, "route"):
-                    route_dec = self.router.route(task_id=task_id, user_request=user_goal)
+                    route_dec = self.router.route(
+                        task_id=task_id,
+                        user_request=user_goal,
+                        repo_root=ctx.get("repository_root"),
+                        repository_guidance=ctx.get("repository_guidance"),
+                    )
                     strat = normalize_strategy(getattr(route_dec, "route_name", None) or getattr(route_dec, "kind", None))
                     reason = f"Router classified request as {strat}"
                 elif hasattr(self.router, "classify"):
