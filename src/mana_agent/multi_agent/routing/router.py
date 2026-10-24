@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from mana_agent.multi_agent.core.types import RiskLevel, RouteDecision
 from mana_agent.multi_agent.routing.agent_decision import AgentDecision, AgentDecisionEngine
@@ -22,11 +23,24 @@ class Router:
     def __init__(self, *, llm=None, decision_engine: AgentDecisionEngine | None = None) -> None:  # noqa: ANN001
         self.decision_engine = decision_engine or AgentDecisionEngine(llm=llm)
 
-    def route(self, *, task_id: str, user_request: str, command_hint: str = "") -> RouteDecision:
+    def route(
+        self,
+        *,
+        task_id: str,
+        user_request: str,
+        command_hint: str = "",
+        repo_root: str | Path | None = None,
+        repository_guidance: str | None = None,
+    ) -> RouteDecision:
         context = RoutingContext(semantic_text=user_request, command_hint=command_hint)
+        if repository_guidance is None:
+            from mana_agent.prompting.repo_rules import render_repo_rules
+
+            repository_guidance = render_repo_rules(repo_root=repo_root)
         agent_decision = self.decision_engine.decide(
             user_request=context.semantic_text,
             command_hint=context.command_hint,
+            repository_guidance=repository_guidance,
         )
         if not agent_decision.verifier_passed:
             raise RoutingDecisionError(

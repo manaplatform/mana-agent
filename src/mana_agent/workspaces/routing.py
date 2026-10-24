@@ -12,6 +12,8 @@ from mana_agent.workspaces.models import RepositoryPermission, RepositoryScopeDe
 SCOPE_DECISION_PROMPT = """You select repository scope for a Mana-Agent turn.
 Return JSON only. Select the primary repository unless the task genuinely requires other listed repositories.
 Never invent repository ids. Cross-repository writes require requires_verification=true.
+Apply supplied repository_guidance to repository work, but keep it subordinate to system/safety
+rules, permissions, and the user's explicit request.
 Schema:
 {
   "repository_ids": ["repo_id"],
@@ -33,7 +35,13 @@ class RepositoryScopeDecisionEngine:
     def __init__(self, llm: Any | None = None) -> None:
         self.llm = llm
 
-    def decide(self, *, request: str, context: WorkspaceContext) -> RepositoryScopeDecision:
+    def decide(
+        self,
+        *,
+        request: str,
+        context: WorkspaceContext,
+        repository_guidance: str = "",
+    ) -> RepositoryScopeDecision:
         # The cwd-to-primary binding is mechanical, not a routing fallback. An
         # unavailable model therefore remains restricted to one repository.
         if len(context.session.attached_repository_ids) == 1 or self.llm is None or not hasattr(self.llm, "invoke"):
@@ -51,6 +59,7 @@ class RepositoryScopeDecisionEngine:
             )
         payload = {
             "request": request,
+            "repository_guidance": repository_guidance,
             "workspace_id": context.workspace.workspace_id,
             "session_id": context.session.session_id,
             "primary_repository_id": context.session.primary_repository_id,

@@ -2,6 +2,19 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-24
+
+- Bumped the package version to `0.5.3` and updated the README version badge.
+
+- Added repository agent-instruction loading to job routing boundaries:
+  - Gateway entry routing and MainAgent routing now inspect root-level `AGENTS.md` and `agents.md` before routing; MainAgent passes guidance to repository-scope selection as well. Autonomous MainAgent strategy routing carries the same root and loaded guidance. Content is supplied separately as subordinate repository guidance.
+  - Gateway repository-root context survives compaction and is available to multi-task child entry decisions. Guidance symlinks resolving outside the repository are ignored; absent files are reported explicitly.
+  - Added regression coverage and documented the root cause and **Do not reintroduce** invariant in `docs/regressions/routing-omitted-repository-agent-guidance.md`.
+  - User-owned verification commands (not run by the agent):
+    - `./venv/bin/pytest tests/gateway/test_entry_routing.py -k test_entry_router_includes_repository_agents_guidance -q`
+    - `./venv/bin/pytest tests/multi_agent/test_router_repository_guidance.py -q`
+    - `./venv/bin/pytest tests/gateway/test_entry_routing.py -q`
+
 ## 2026-10-21
 
 - Bumped the package version to `0.5.2` and updated the README version badge.

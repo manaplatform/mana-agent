@@ -5983,6 +5983,7 @@ class AgentChatGateway:
                 memory_task_candidates=memory_task_candidates,
                 memory_capsules_enabled=capsules_enabled,
                 authenticated_user_id=authenticated_user_id,
+                repository_root=str(self.root),
                 envelope=routing_envelope,
             )
             memory_task_binding = MemoryTaskBinding(selected_memory_task_id="")
@@ -8656,6 +8657,7 @@ class AgentChatGateway:
                 atomic_child=True,
                 orchestration_parent_task_id=root_task.task_id,
                 authenticated_user_id=context.authenticated_user_id,
+                repository_root=str(self.root),
                 envelope=child_envelope,
             )
             try:

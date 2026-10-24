@@ -219,8 +219,15 @@ class MainAgent:
                 step_runner=step_runner,
             )
         request = str(user_request or "").strip()
+        from mana_agent.prompting.repo_rules import render_repo_rules
+
+        repository_guidance = render_repo_rules(repo_root=self.root)
         try:
-            scope = self.scope_engine.decide(request=request, context=self.workspace_context)
+            scope = self.scope_engine.decide(
+                request=request,
+                context=self.workspace_context,
+                repository_guidance=repository_guidance,
+            )
         except ScopeDecisionError as exc:
             return MainAgentResult("", "blocked", "scope_error", str(exc), [], [], [])
         self.memory.remember_task(f"User request received: {request[:500]}")
@@ -293,6 +300,8 @@ class MainAgent:
                     task_id=task.task_id,
                     user_request=request,
                     command_hint=entrypoint,
+                    repo_root=self.root,
+                    repository_guidance=repository_guidance,
                 )
             except RoutingDecisionError as exc:
                 self.memory_service.record_decision(
@@ -555,8 +564,15 @@ class MainAgent:
         max_turns: int | None = None,
     ) -> MainAgentResult:
         request = str(user_request or "").strip()
+        from mana_agent.prompting.repo_rules import render_repo_rules
+
+        repository_guidance = render_repo_rules(repo_root=self.root)
         try:
-            scope = self.scope_engine.decide(request=request, context=self.workspace_context)
+            scope = self.scope_engine.decide(
+                request=request,
+                context=self.workspace_context,
+                repository_guidance=repository_guidance,
+            )
         except ScopeDecisionError as exc:
             return MainAgentResult("", "blocked", "scope_error", str(exc), [], [], [])
 
@@ -588,6 +604,10 @@ class MainAgent:
             user_goal=request,
             step_runner=runner,
             max_turns=max_turns,
+            context={
+                "repository_root": str(self.root),
+                "repository_guidance": repository_guidance,
+            },
         )
 
         answer = (

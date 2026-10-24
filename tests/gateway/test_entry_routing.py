@@ -2312,6 +2312,7 @@ def test_context_compactor_preserves_user_message_id() -> None:
         conversation_id="c1",
         turn_id="t2",
         user_message_id="msg_user_current_123",
+        repository_root="/workspace/repository",
         conversation_context={"messages": []},
     )
     res = compactor.compact_routing_context(
@@ -2321,6 +2322,38 @@ def test_context_compactor_preserves_user_message_id() -> None:
         routes=[{"name": "coding", "description": "code", "available": True}],
     )
     assert res.bounded_context.user_message_id == "msg_user_current_123"
+    assert res.bounded_context.repository_root == "/workspace/repository"
+
+
+def test_entry_router_includes_repository_agents_guidance(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Follow the local repository conventions.\n", encoding="utf-8")
+
+    class _NoopCompactor:
+        def compact_routing_context(self, *, context: EntryRouteContext, envelope=None, **_kwargs):
+            return SimpleNamespace(
+                is_valid=True,
+                bounded_context=context,
+                bounded_envelope=envelope,
+                diagnostic_details={},
+            )
+
+    model = _RouteModel("conversation")
+    decision = EntryRouter(
+        llm=model,
+        registry=_registry(),
+        compactor=_NoopCompactor(),
+    ).route(
+        user_prompt="Explain the project.",
+        context=EntryRouteContext(
+            session_id="s1",
+            conversation_id="c1",
+            turn_id="t1",
+            repository_root=str(tmp_path),
+        ),
+    )
+
+    assert decision.route == "conversation"
+    assert "Follow the local repository conventions." in model.payloads[0]["repository_guidance"]
 
 
 
