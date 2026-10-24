@@ -155,3 +155,136 @@ def test_internal_engine_rejects_renewal_without_progress(tmp_path: Path) -> Non
     assert result.status == "failed"
     assert "budget" in result.summary.lower() or any("budget" in e.lower() for e in result.errors)
     assert engine.renewals_count == 0
+
+
+class _GitOperationalModel:
+    """Simulates an LLM executing Git operations without touching files."""
+
+    def __init__(self, total_tool_calls: int = 5) -> None:
+        self.total_tool_calls = total_tool_calls
+        self.call_count = 0
+
+    def bind_tools(self, _tools: object) -> "_GitOperationalModel":
+        return self
+
+    async def ainvoke(self, messages: list[object]) -> SimpleNamespace:
+        for msg in messages:
+            content = str(getattr(msg, "content", "") or "")
+            if "progress evaluation judge" in content:
+                return SimpleNamespace(
+                    content=json.dumps({
+                        "improvement_accepted": True,
+                        "reason": "Git operational progress verified toward goal.",
+                        "confidence": 1.0,
+                    }),
+                    tool_calls=[],
+                )
+
+        if self.call_count < self.total_tool_calls:
+            self.call_count += 1
+            if self.call_count == 1:
+                return SimpleNamespace(
+                    content="",
+                    tool_calls=[{
+                        "name": "git_push",
+                        "args": {"remote": "origin", "branch_name": "main"},
+                        "id": f"call-{self.call_count}",
+                    }],
+                )
+            return SimpleNamespace(
+                content="",
+                tool_calls=[{
+                    "name": "git_status",
+                    "args": {},
+                    "id": f"call-{self.call_count}",
+                }],
+            )
+
+        return SimpleNamespace(content="Git push and status verified.", tool_calls=[])
+
+
+def test_internal_engine_renews_budget_for_non_file_git_operations(tmp_path: Path) -> None:
+    # Model executes git_push and git_status (0 files touched).
+    # Initial budget is 2 tool calls, model needs 5.
+    # Budget must auto-renew and complete successfully without requiring file edits!
+    model = _GitOperationalModel(total_tool_calls=5)
+    engine = InternalCodingEngine(
+        llm_client=model,
+        supports_responses_api=False,
+        programmatic_tool_calling_enabled=False,
+        max_tool_calls=2,
+        extra_tools={
+            "git_push": lambda **_kwargs: {"ok": True, "output": "Everything up-to-date"},
+            "git_status": lambda **_kwargs: {"ok": True, "output": "On branch main"},
+        },
+        global_memory=_DummyMemory(),
+        batch_manager=object(),
+        parallel_scheduling_enabled=False,
+    )
+    engine.renew_tool_calls = 5
+    engine.renew_model_turns = 10
+    engine.max_auto_renewals = 2
+
+    task = CodingTask(task_id="task_git_op", goal="Push current branch to origin")
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "completed"
+    assert "git push" in result.summary.lower()
+    assert result.changed_files == []
+    assert engine.renewals_count >= 1
+
+
+def test_internal_engine_operational_task_completes_when_model_returns_empty_content(tmp_path: Path) -> None:
+    # When model calls git_push and finishes with empty content,
+    # engine synthesizes completion from executed operations rather than crashing with budget exhaustion.
+    class _EmptyContentModel:
+        def __init__(self) -> None:
+            self.called = False
+
+        def bind_tools(self, _tools: object) -> "_EmptyContentModel":
+            return self
+
+        async def ainvoke(self, _messages: list[object]) -> SimpleNamespace:
+            if not self.called:
+                self.called = True
+                return SimpleNamespace(
+                    content="",
+                    tool_calls=[{"name": "git_push", "args": {"remote": "origin"}, "id": "call-push"}],
+                )
+            return SimpleNamespace(content="", tool_calls=[])
+
+    engine = InternalCodingEngine(
+        llm_client=_EmptyContentModel(),
+        supports_responses_api=False,
+        programmatic_tool_calling_enabled=False,
+        max_tool_calls=10,
+        extra_tools={
+            "git_push": lambda **_kwargs: {"ok": True, "stdout": "pushed to origin/main"},
+        },
+        global_memory=_DummyMemory(),
+        batch_manager=object(),
+        parallel_scheduling_enabled=False,
+    )
+
+    task = CodingTask(task_id="task_git_push_empty", goal="git push to remote")
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "completed"
+    assert "git_push" in result.summary
+    assert result.errors == []

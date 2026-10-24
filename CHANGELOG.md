@@ -4,6 +4,21 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-24
 
+- Decoupled internal coding engine progress recognition and checkpointing from file creation/modification:
+  - Enabled model-directed evaluation of all valid operations (such as `git_push`, Git commits, commands, inspection, and API workflows) rather than rejecting progress when `changed_files` is empty.
+  - Updated `ProgrammaticExecutionState` and `handle_function_call` (`src/mana_agent/coding/programmatic.py`) to track `executed_operations` across all tool types, and recorded Git commands in `commands_run`.
+  - Updated `InternalCodingEngine` (`src/mana_agent/coding/internal_engine.py`):
+    - Removed the static gate blocking budget renewal when no files were touched, passing complete operational evidence to the progress judge so the model evaluates progress toward the goal.
+    - Updated fallback heuristics to recognize executed tool operations.
+    - Added TaskBoard progress updates and supervisor checkpoints in sequential tool execution mode.
+    - Added graceful completion summary synthesis from executed operations when the model finishes tool calls with empty text, eliminating `Internal model loop exhausted its budget without a completion decision` and `INTERNAL_EXECUTION_FAILED`.
+  - Updated `INTERNAL_CODING_SYSTEM_INSTRUCTION` (`src/mana_agent/coding/prompts.py`) to clarify that engineering tasks include operational actions (e.g. `git push`) that do not require file edits.
+  - Added regression tests in `tests/coding/test_coding_budget_renewal.py`.
+  - User-owned verification commands (not run by the agent):
+    - `./venv/bin/pytest tests/coding/test_coding_budget_renewal.py -q`
+    - `./venv/bin/pytest tests/coding/test_internal_engine_budget.py -q`
+    - `./venv/bin/pytest tests/test_internal_coding_engine_workflow.py -q`
+
 - Fenced gateway supervisor heartbeats to the attempt that acquired the lease, ignoring expected stale-heartbeat races after attempt replacement or shutdown while still surfacing failures for the active owner. Added regression coverage for both cases.
   - User-owned verification command (not run by the agent): `./venv/bin/pytest tests/gateway/test_lane_coordinator.py -q`.
 
