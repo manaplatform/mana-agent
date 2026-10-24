@@ -938,6 +938,11 @@ class LaneCoordinator:
         self._stop_supervisor_heartbeats(execution.task_id)
         stop = threading.Event()
         self._supervisor_heartbeat_stops[execution.task_id] = stop
+        # Lease credentials belong to one attempt. Capture them rather than
+        # reading mutable execution fields on each renewal; recovery may replace
+        # those fields while an old heartbeat thread is winding down.
+        attempt_id = execution.supervisor_attempt_id
+        lease_token = execution.supervisor_lease_token
 
         def renew() -> None:
             interval = self.execution_supervisor.config.heartbeat_seconds
@@ -945,14 +950,52 @@ class LaneCoordinator:
                 try:
                     self.execution_supervisor.heartbeat(
                         execution.task_id,
-                        attempt_id=execution.supervisor_attempt_id,
-                        lease_token=execution.supervisor_lease_token,
+                        attempt_id=attempt_id,
+                        lease_token=lease_token,
                     )
                 except Exception as exc:
-                    failure = f"supervisor heartbeat failed: {type(exc).__name__}: {exc}"
-                    execution.heartbeat_failure = failure
-                    execution.error = failure
-                    stop.set()
+                    # Lifecycle transitions revoke a lease before their caller
+                    # stops this thread (e.g. suspension or completion). A
+                    # renewal that loses that race is expected, not evidence
+                    # that the active worker lost ownership. Only surface a
+                    # failure while this same attempt is still authoritative.
+                    if stop.is_set():
+                        return
+                    inspection_error = ""
+                    try:
+                        current = self.execution_supervisor.store.get_task_or_none(
+                            execution.task_id
+                        )
+                    except Exception as state_exc:
+                        current = None
+                        inspection_error = f"; current attempt could not be verified: {state_exc}"
+                    if not inspection_error and (
+                        current is None
+                        or current.attempt_id != attempt_id
+                        or current.state
+                        not in {
+                            SupervisorState.LEASED,
+                            SupervisorState.RUNNING,
+                            SupervisorState.CHECKPOINTING,
+                        }
+                    ):
+                        return
+                    # Fence the write against an attempt replacement or shutdown
+                    # that happened while the durable state was being inspected.
+                    with self._condition:
+                        if (
+                            stop.is_set()
+                            or execution.supervisor_attempt_id != attempt_id
+                        ):
+                            return
+                        failure = (
+                            f"supervisor heartbeat failed: {type(exc).__name__}: {exc}"
+                            f"{inspection_error}"
+                        )
+                        execution.heartbeat_failure = failure
+                        execution.error = failure
+                        stop.set()
+                    return
 
         heartbeat_thread = threading.Thread(
             target=renew,
