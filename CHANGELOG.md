@@ -7,6 +7,9 @@ All notable repository changes should be recorded here.
 - Fenced gateway supervisor heartbeats to the attempt that acquired the lease, ignoring expected stale-heartbeat races after attempt replacement or shutdown while still surfacing failures for the active owner. Added regression coverage for both cases.
   - User-owned verification command (not run by the agent): `./venv/bin/pytest tests/gateway/test_lane_coordinator.py -q`.
 
+- Fixed the stable coding prompt's repository guidance heading to render as `Repository Rules`, restoring the expected prompt section and its ordering in prompt-builder and Spirit assertions.
+  - User-owned verification command (not run by the agent): `./venv/bin/pytest tests/test_prompting_builder.py tests/test_spirit.py -q`.
+
 - Bumped the package version to `0.5.3` and updated the README version badge.
 
 - Added repository agent-instruction loading to job routing boundaries:
