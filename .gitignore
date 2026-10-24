@@ -3,7 +3,8 @@
 .pytest_cache/
 .venv/
 venv/
-sb-cli-venv/
+*venv/
+.venv*/
 .env
 .DS_Store
 *.egg-info/
