@@ -797,12 +797,24 @@ class ManaChatApp(App):
                         msg = str(result.get("message") or "")
                         handled = True
                     except Exception as exc:
-                        logger.warning("Gateway transactional approval command error: %s", exc)
+                        if is_approve and "already terminal: approved" in str(exc).lower():
+                            msg = "Transactional action approved."
+                            handled = True
+                        elif not is_approve and "already terminal: denied" in str(exc).lower():
+                            msg = "Transactional action denied."
+                            handled = True
+                        else:
+                            logger.warning("Gateway transactional approval command error: %s", exc)
 
                 if not handled:
                     try:
                         from mana_agent.human_inbox import default_human_inbox_service
-                        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+                        from mana_agent.human_inbox.models import (
+                            InboxStatus,
+                            ResponseOperation,
+                            ResponseSubmission,
+                            UNRESOLVED_STATUSES,
+                        )
                         from mana_agent.transactional_actions.runtime import default_action_gateway
 
                         service = (
@@ -842,15 +854,32 @@ class ManaChatApp(App):
                         )
                         operation = ResponseOperation.APPROVE if is_approve else ResponseOperation.DENY
                         if item is not None:
-                            service.respond(ResponseSubmission(
-                                inbox_item_id=item.inbox_item_id,
-                                operation=operation,
-                                actor_id=actor_id,
-                                channel="tui-local",
-                                idempotency_key=f"tui-resp:{item.inbox_item_id}:{item.version}",
-                                expected_version=item.version,
-                                current_action_digest=item.action_digest,
-                            ))
+                            if item.status in UNRESOLVED_STATUSES:
+                                service.respond(ResponseSubmission(
+                                    inbox_item_id=item.inbox_item_id,
+                                    operation=operation,
+                                    actor_id=actor_id,
+                                    channel="tui-local",
+                                    idempotency_key=f"tui-resp:{item.inbox_item_id}",
+                                    expected_version=item.version,
+                                    current_action_digest=item.action_digest,
+                                ))
+                            elif (is_approve and item.status == InboxStatus.APPROVED) or (not is_approve and item.status == InboxStatus.DENIED):
+                                logger.info(
+                                    "Inbox item %s is already terminal (%s); treating as idempotent",
+                                    item.inbox_item_id,
+                                    item.status.value,
+                                )
+                            else:
+                                service.respond(ResponseSubmission(
+                                    inbox_item_id=item.inbox_item_id,
+                                    operation=operation,
+                                    actor_id=actor_id,
+                                    channel="tui-local",
+                                    idempotency_key=f"tui-resp:{item.inbox_item_id}",
+                                    expected_version=item.version,
+                                    current_action_digest=item.action_digest,
+                                ))
 
                         if is_approve:
                             act_gw = default_action_gateway(self.repo_root)
@@ -870,8 +899,25 @@ class ManaChatApp(App):
                         msg = f"Transactional action {'approved' if is_approve else 'denied'}."
                         handled = True
                     except Exception as exc:
-                        logger.exception("Failed to resolve transactional action approval directly")
-                        msg = f"Failed to record approval decision: {exc}"
+                        if is_approve and "already terminal: approved" in str(exc).lower():
+                            logger.info("Transactional action approval was already recorded: %s", exc)
+                            try:
+                                act_gw = default_action_gateway(self.repo_root)
+                                act_id = getattr(item, "action_intent_id", "") or choice.request_id
+                                action = act_gw.store.get_action(act_id) if act_id else None
+                                if action is not None:
+                                    act_gw.approvals.issue(action, approved_by=actor_id, ttl_seconds=300)
+                            except Exception:
+                                pass
+                            msg = "Transactional action approved."
+                            handled = True
+                        elif not is_approve and "already terminal: denied" in str(exc).lower():
+                            logger.info("Transactional action denial was already recorded: %s", exc)
+                            msg = "Transactional action denied."
+                            handled = True
+                        else:
+                            logger.exception("Failed to resolve transactional action approval directly")
+                            msg = f"Failed to record approval decision: {exc}"
 
                 decided_event = "action.approval.granted" if is_approve else "action.approval.denied"
                 self.history.add(

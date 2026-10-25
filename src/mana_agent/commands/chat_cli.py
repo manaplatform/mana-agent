@@ -5,6 +5,8 @@ from typing import Any
 import sys
 import uuid
 
+from rich.markdown import Markdown
+
 from .cli_internal import *
 from .cli_internal import _build_project_llm_analyzer
 import logging
@@ -963,6 +965,8 @@ def chat(
         context_cost_governor=stack.context_cost_governor,
     )
     gateway.create_session(frontend="cli", session_id=chat_ui_state.session_id)
+    if hasattr(gateway, "set_session_execution_mode"):
+        gateway.set_session_execution_mode(chat_ui_state.session_id, "plan")
     shutdown_coordinator = ShutdownCoordinator(gateway=gateway)
     shutdown_coordinator.register_session(chat_ui_state.session_id)
     shutdown_coordinator.install_signal_handlers()
@@ -2352,9 +2356,112 @@ def chat(
             chat_ui_state.start_turn(current_turn_id)
             if question.lower() == "/help":
                 question = "help"
+            if question.strip().startswith("/mode"):
+                mode_args = question.strip()[len("/mode"):].strip().lower()
+                current_mode = gateway.get_session_execution_mode(chat_ui_state.session_id)
+                if not mode_args or mode_args in {"show", "status"}:
+                    desc = "Plan Mode (read-only exploration & planning)" if current_mode == "plan" else "Act Mode (execution & modifications)"
+                    console.print(f"[cyan]Current execution mode: [bold]{current_mode.upper()}[/bold] ({desc})[/cyan]")
+                elif mode_args in {"plan", "act"}:
+                    if mode_args == "act":
+                        plan = gateway.get_session_active_plan(chat_ui_state.session_id)
+                        if plan and not plan.get("approved"):
+                            console.print("[yellow]An unapproved plan is pending. Use /approve or /act to approve before switching to Act Mode.[/yellow]")
+                            _finish_ui_turn(current_turn_id)
+                            continue
+                    gateway.set_session_execution_mode(chat_ui_state.session_id, mode_args)
+                    desc = "Plan Mode (read-only exploration & planning)" if mode_args == "plan" else "Act Mode (execution & modifications)"
+                    console.print(f"[green]Switched execution mode to [bold]{mode_args.upper()}[/bold] ({desc}).[/green]")
+                else:
+                    console.print("[yellow]Usage: /mode [show|plan|act][/yellow]")
+                _finish_ui_turn(current_turn_id)
+                continue
+
+            if question.strip().startswith("/act"):
+                plan = gateway.get_session_active_plan(chat_ui_state.session_id)
+                if plan:
+                    gateway.approve_session_plan(chat_ui_state.session_id)
+                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
+                    console.print("[green]Implementation plan approved! Switched to [bold]ACT MODE[/bold]. Ready to execute.[/green]")
+                else:
+                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
+                    console.print("[green]Switched to [bold]ACT MODE[/bold]. Authorized for execution.[/green]")
+                _finish_ui_turn(current_turn_id)
+                continue
+
+            if question.strip() in {"/approve", "/accept"}:
+                success = gateway.approve_session_plan(chat_ui_state.session_id)
+                if success:
+                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
+                    plan = gateway.get_session_active_plan(chat_ui_state.session_id)
+                    goal = plan.get("goal", "") if plan else ""
+                    console.print("[green]Implementation plan explicitly approved! Switched to [bold]ACT MODE[/bold]. Starting execution...[/green]")
+                    if goal:
+                        question = goal
+                    else:
+                        _finish_ui_turn(current_turn_id)
+                        continue
+                else:
+                    console.print("[yellow]No pending plan found to approve.[/yellow]")
+                    _finish_ui_turn(current_turn_id)
+                    continue
+
+            if question.strip() == "/reject":
+                plan = gateway.get_session_active_plan(chat_ui_state.session_id)
+                if plan:
+                    gateway.set_session_active_plan(chat_ui_state.session_id, None)
+                    gateway.set_session_execution_mode(chat_ui_state.session_id, "plan")
+                    console.print("[green]Active plan rejected. Remained in Plan Mode without making changes.[/green]")
+                else:
+                    console.print("[yellow]No active plan found to reject.[/yellow]")
+                _finish_ui_turn(current_turn_id)
+                continue
+
             if question.strip().startswith("/plan"):
-                plan_args = question.strip()[len("/plan"):].strip()
-                question = f"plan {plan_args}" if plan_args else "plan the next repository change"
+                plan_task = question.strip()[len("/plan"):].strip()
+                if not plan_task:
+                    plan_task = "analyze and plan the next repository change"
+                gateway.set_session_execution_mode(chat_ui_state.session_id, "plan")
+                console.print(f"[cyan]Plan Mode: exploring repository context for:[/cyan] {plan_task}")
+                from mana_agent.agent.plan_service import PlanService
+                from mana_agent.skills.manager import SkillManager
+
+                manager = SkillManager(root)
+                try:
+                    loaded_skills = manager.load_for_task(plan_task, [])
+                except Exception:
+                    loaded_skills = []
+                plan_service = PlanService(root)
+                structured_plan = plan_service.generate_plan(plan_task, skills=loaded_skills)
+                saved_path = plan_service.save_plan(structured_plan)
+                gateway.set_session_active_plan(chat_ui_state.session_id, structured_plan)
+
+                console.print(Markdown(structured_plan.to_markdown()))
+                console.print(f"[green]Saved plan artifact:[/green] {saved_path}")
+
+                decision = ""
+                if queued_questions:
+                    decision = queued_questions.pop(0).strip().lower()
+                elif sys.stdin.isatty():
+                    try:
+                        decision = _read_chat_input(
+                            console,
+                            prompt="Accept plan and start implementation? [accept/reject]: ",
+                            multiline_enabled=False,
+                        ).strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        decision = ""
+
+                if decision in {"accept", "yes", "y", "approve", "start"}:
+                    gateway.approve_session_plan(chat_ui_state.session_id)
+                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
+                    console.print("[green]Plan accepted! Switched to Act Mode. Starting implementation...[/green]")
+                    question = plan_task
+                else:
+                    console.print("[yellow]Plan rejected or kept in Plan Mode. Remained in Plan Mode without making changes.[/yellow]")
+                    chat_ui_state.begin_conversation_turn(f"/plan {plan_task}", current_turn_id)
+                    _finish_ui_turn(current_turn_id)
+                    continue
             chat_ui_state.begin_conversation_turn(question, current_turn_id)
 
             # -----------------------------
@@ -2653,12 +2760,35 @@ def chat(
                 )
 
             from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent, is_plan_execution_request
-            auto_chat_mode = _auto_chat_mode_from_agent_decision(
-                agent_decision,
-                classify_auto_chat_intent(question),
-            )
-            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or is_plan_execution_request(question))
-            edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
+            session_exec_mode = gateway.get_session_execution_mode(chat_ui_state.session_id)
+            if session_exec_mode == "plan":
+                auto_chat_mode = AutoChatMode.PLAN_ONLY
+                edit_request = False
+                plan_trigger_request = True
+                from mana_agent.agent.plan_service import PlanService
+                try:
+                    plan_service = PlanService(root)
+                    structured_plan = plan_service.generate_plan(question)
+                    gateway.set_session_active_plan(chat_ui_state.session_id, structured_plan)
+                except Exception:
+                    pass
+            else:
+                auto_chat_mode = _auto_chat_mode_from_agent_decision(
+                    agent_decision,
+                    classify_auto_chat_intent(question),
+                )
+                plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or is_plan_execution_request(question))
+                edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
+
+            if session_exec_mode == "act" and edit_request:
+                active_plan = gateway.get_session_active_plan(chat_ui_state.session_id)
+                if active_plan and not active_plan.get("approved"):
+                    console.print(
+                        "[yellow]An implementation plan exists but is not yet approved.[/yellow] "
+                        "Type [bold]/approve[/bold] or [bold]/act[/bold] to approve the plan before execution."
+                    )
+                    _finish_ui_turn(current_turn_id)
+                    continue
             if (
                 coding_agent_instance is None
                 and agent_tools

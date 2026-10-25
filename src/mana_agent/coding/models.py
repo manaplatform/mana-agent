@@ -59,6 +59,15 @@ class CodingTask(BaseModel):
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
     context: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_plan_mode(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            mode = str(data.get("execution_mode") or "").strip().lower()
+            if mode in {"plan", "plan_only"}:
+                data.setdefault("requires_repository_write", False)
+        return data
+
     @field_validator("task_id", "goal")
     @classmethod
     def _required_text(cls, value: str) -> str:

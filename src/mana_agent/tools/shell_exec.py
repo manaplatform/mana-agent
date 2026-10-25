@@ -283,6 +283,101 @@ def is_read_only_command(cmd: str | Sequence[str]) -> bool:
     return False
 
 
+def is_plan_mode_read_only_command(cmd: str | Sequence[str]) -> bool:
+    """Conservatively allow commands that cannot turn read-only syntax into writes.
+
+    ``is_read_only_command`` is used by the approval policy and intentionally
+    permits some commands (for example test runners) that may have side effects.
+    Plan Mode needs a stricter boundary: reject shell composition, shell
+    wrappers, commands with known write-capable options, and generic code/test
+    execution. False negatives are preferable to allowing a Plan Mode write.
+    """
+    if isinstance(cmd, str):
+        text = cmd.strip()
+        # The executor runs argv directly, but shell wrappers interpret these
+        # operators in their arguments. Reject them before command parsing.
+        if re.search(r"[;&|<>`$]", text):
+            return False
+        try:
+            tokens = split_shell_command(text)
+        except ValueError:
+            return False
+    else:
+        tokens = [str(token) for token in cmd]
+        if any(re.search(r"[;&|<>`$]", token) for token in tokens):
+            return False
+
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name.lower()
+
+    # Do not permit interpreters to re-enter a shell or execute arbitrary code.
+    if executable in {"sh", "bash", "zsh", "dash", "cmd.exe", "powershell", "pwsh"}:
+        return False
+    if executable in {"python", "python3", "node", "npm", "pytest", "ruff", "mypy"}:
+        return len(tokens) == 2 and tokens[1] in {"--version", "-V", "--help", "-h"}
+
+    if executable == "find" and any(
+        token in {
+            "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls",
+            "-fprint", "-fprint0", "-fprintf",
+        }
+        for token in tokens[1:]
+    ):
+        return False
+
+    if executable == "git":
+        if len(tokens) < 2:
+            return False
+        subcommand = tokens[1].lower()
+        if subcommand not in READ_ONLY_GIT_SUBCOMMANDS:
+            return False
+        args = tokens[2:]
+        if any(arg == "--output" or arg.startswith("--output=") for arg in args):
+            return False
+        if subcommand == "branch":
+            # `git branch <name>` creates a branch; only listing forms are safe.
+            if any(not arg.startswith("-") for arg in args):
+                return False
+            if any(arg in {"-d", "-D", "-m", "-M", "--delete", "--move", "--copy"} for arg in args):
+                return False
+        if subcommand == "tag":
+            # `git tag <name>` creates a tag. Listing/revision inspection is safe.
+            if any(not arg.startswith("-") for arg in args):
+                return False
+            if any(arg in {"-d", "-a", "-s", "-m", "--delete", "--annotate", "--sign"} for arg in args):
+                return False
+        if subcommand == "remote" and args:
+            # `git remote add/remove/rename/set-url/prune` changes repository
+            # configuration or refs. Permit only inspection forms.
+            if args[0] not in {"-v", "--verbose", "show", "get-url"}:
+                return False
+            if args[0] in {"-v", "--verbose"} and any(
+                arg in {"add", "remove", "rm", "rename", "set-url", "prune"}
+                for arg in args[1:]
+            ):
+                return False
+        if subcommand == "diff" and any(arg in {"--ext-diff", "--textconv"} for arg in args):
+            return False
+        if subcommand == "branch" and any(
+            arg in {"--edit-description", "--set-upstream-to", "-u", "--unset-upstream"}
+            for arg in args
+        ):
+            return False
+        return True
+
+    # Other allowlisted utilities must not be given known output-file options.
+    if any(arg in {"-o", "--output", "--output-file"} or arg.startswith("--output=") for arg in tokens[1:]):
+        return False
+    return executable in READ_ONLY_EXECUTABLES
+
+
+def _execution_is_read_only(mode: Any) -> bool:
+    """Fail closed for unknown execution modes; only Act/Edit permits writes."""
+    value = getattr(mode, "value", mode)
+    return str(value or "").strip().lower() not in {"act", "edit"}
+
+
 @dataclass(frozen=True, slots=True)
 class ShellOutcome:
     """Outcome object matching OpenAI Shell tool specification."""
@@ -353,6 +448,7 @@ class ShellExecutor:
         on_approval: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         audit_log_path: Path | str | None = None,
         conversation_id: str = "",
+        task_id: str = "",
         global_memory: Any | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
@@ -370,6 +466,7 @@ class ShellExecutor:
         self.approval_wait_timeout_seconds = max(0.01, float(approval_wait_timeout_seconds))
         self.on_approval = on_approval
         self.conversation_id = str(conversation_id or "").strip()
+        self.task_id = str(task_id or "").strip()
         if global_memory is not None:
             self.global_memory = global_memory
         else:
@@ -423,6 +520,7 @@ class ShellExecutor:
         *,
         max_output_length: int | None = None,
         cwd: Path | str | None = None,
+        execution_mode: str = "act",
     ) -> ShellCommandOutput:
         """Execute a single shell command locally without shell=True.
 
@@ -431,6 +529,7 @@ class ShellExecutor:
             timeout: Timeout in seconds (if omitted, uses default_timeout_ms).
             max_output_length: Maximum characters of output to capture.
             cwd: Optional subdirectory inside the workspace root.
+            execution_mode: "plan" (strictly read-only) or "act" (normal execution).
 
         Returns:
             ShellCommandOutput with stdout, stderr, and outcome.
@@ -438,6 +537,17 @@ class ShellExecutor:
         start_time = time.perf_counter()
         timeout_seconds = timeout if timeout is not None else (self.default_timeout_ms / 1000.0)
         output_limit = max_output_length if max_output_length is not None else self.default_max_output_length
+
+        # 0. Plan Mode read-only enforcement
+        if _execution_is_read_only(execution_mode) and not is_plan_mode_read_only_command(cmd):
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            self._audit("command_blocked_plan_mode", cmd=cmd, duration_ms=duration_ms)
+            return ShellCommandOutput(
+                command=cmd,
+                stdout="",
+                stderr="PlanModeError: Mutating or destructive command blocked in Plan Mode. Plan Mode operates strictly read-only. Switch to Act Mode to execute this command.",
+                outcome=ShellOutcome(type="exit", exit_code=1),
+            )
 
         # 1. Security denylist check
         violation = self._check_security(cmd)
@@ -641,7 +751,7 @@ class ShellExecutor:
                 cwd=self.workspace_root,
                 environment={},
                 expected_outputs=[],
-                parent_task_id="shell_exec",
+                parent_task_id=self.task_id or self.conversation_id or "shell_exec",
                 actor="user",
                 originating_agent="shell_executor",
                 idempotency_key=idempotency_key,
@@ -766,6 +876,7 @@ class ShellExecutor:
         *,
         call_id: str | None = None,
         action_approval_id: str = "",
+        execution_mode: str = "act",
     ) -> dict[str, Any]:
         """Execute commands defined in an OpenAI Shell tool action dictionary.
 
@@ -794,8 +905,23 @@ class ShellExecutor:
 
         timeout_sec = timeout_ms / 1000.0
         results: list[ShellCommandOutput] = []
+        # The mode is trusted execution context supplied by the caller, not a
+        # field in the model-controlled shell action payload.
 
         for cmd in commands:
+            # Check Plan Mode read-only enforcement
+            if _execution_is_read_only(execution_mode) and not is_plan_mode_read_only_command(cmd):
+                self._audit("command_blocked_plan_mode", cmd=cmd)
+                results.append(
+                    ShellCommandOutput(
+                        command=cmd,
+                        stdout="",
+                        stderr="PlanModeError: Mutating or destructive command blocked in Plan Mode. Plan Mode operates strictly read-only. Switch to Act Mode to execute this command.",
+                        outcome=ShellOutcome(type="exit", exit_code=1),
+                    )
+                )
+                break
+
             # Check security policy first (denylist / allowlist)
             security_err = self._check_security(cmd)
             if security_err:
@@ -848,7 +974,12 @@ class ShellExecutor:
                     )
                     break
 
-            cmd_result = self.run(cmd, timeout=timeout_sec, max_output_length=max_output_length)
+            cmd_result = self.run(
+                cmd,
+                timeout=timeout_sec,
+                max_output_length=max_output_length,
+                execution_mode=execution_mode,
+            )
             results.append(cmd_result)
 
             # If a command timed out or had a non-zero exit code, preserve output and stop chain
@@ -874,6 +1005,7 @@ class ShellExecutor:
         max_output_length: int | None = None,
         call_id: str | None = None,
         action_approval_id: str = "",
+        execution_mode: str = "act",
     ) -> dict[str, Any]:
         """Convenience method matching OpenAI Shell tool execution invocation."""
         resolved_action: dict[str, Any] = dict(action or {})
@@ -883,7 +1015,14 @@ class ShellExecutor:
             resolved_action["timeout_ms"] = timeout_ms
         if max_output_length is not None:
             resolved_action["max_output_length"] = max_output_length
-        return self.execute_action(resolved_action, call_id=call_id, action_approval_id=action_approval_id)
+        if execution_mode is not None and "execution_mode" not in resolved_action:
+            resolved_action["execution_mode"] = execution_mode
+        return self.execute_action(
+            resolved_action,
+            call_id=call_id,
+            action_approval_id=action_approval_id,
+            execution_mode=execution_mode,
+        )
 
     run_command = run
 

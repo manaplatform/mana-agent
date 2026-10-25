@@ -428,6 +428,113 @@ def _engine(context: CommandContext, args: list[str]) -> CommandResult:
     raise ValueError("Usage: /engine [show|internal|external|codex]")
 
 
+def _execution_mode_command(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None:
+        return CommandResult(status="error", message="/mode requires an active agent gateway.")
+    current = "plan"
+    if hasattr(context.gateway, "get_session_execution_mode"):
+        current = context.gateway.get_session_execution_mode(context.session_id)
+    if not args or args[0].lower() in {"show", "status"}:
+        desc = (
+            "Plan Mode (Read-only exploration & structured plan generation)"
+            if current == "plan"
+            else "Act Mode (Authorized execution & modifications)"
+        )
+        return CommandResult(
+            status="success",
+            message=f"Current execution mode: {current.upper()} ({desc})",
+            data={"mode": current},
+        )
+    target = args[0].lower()
+    if target in {"plan", "act"}:
+        if target == "act":
+            has_plan = False
+            is_approved = False
+            if hasattr(context.gateway, "get_session_active_plan"):
+                plan = context.gateway.get_session_active_plan(context.session_id)
+                has_plan = plan is not None
+                is_approved = bool(plan and plan.get("approved"))
+            if has_plan and not is_approved:
+                return CommandResult(
+                    status="error",
+                    message="An unapproved plan is pending. Use /approve or /act to approve the plan before switching to Act Mode.",
+                    data={"mode": "plan", "plan_pending": True},
+                )
+        if hasattr(context.gateway, "set_session_execution_mode"):
+            context.gateway.set_session_execution_mode(context.session_id, target)
+        desc = (
+            "Plan Mode (Read-only exploration & structured plan generation)"
+            if target == "plan"
+            else "Act Mode (Authorized execution & modifications)"
+        )
+        return CommandResult(
+            status="success",
+            message=f"Switched execution mode to {target.upper()} ({desc}).",
+            data={"mode": target},
+        )
+    raise ValueError("Usage: /mode [show|plan|act]")
+
+
+def _act_command(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None:
+        return CommandResult(status="error", message="/act requires an active agent gateway.")
+    has_plan = False
+    if hasattr(context.gateway, "get_session_active_plan"):
+        has_plan = context.gateway.get_session_active_plan(context.session_id) is not None
+    if has_plan and hasattr(context.gateway, "approve_session_plan"):
+        context.gateway.approve_session_plan(context.session_id)
+        if hasattr(context.gateway, "set_session_execution_mode"):
+            context.gateway.set_session_execution_mode(context.session_id, "act")
+        return CommandResult(
+            status="success",
+            message="Plan approved! Switched to Act Mode. The agent is ready to execute the approved plan.",
+            data={"mode": "act", "plan_approved": True},
+        )
+    if hasattr(context.gateway, "set_session_execution_mode"):
+        context.gateway.set_session_execution_mode(context.session_id, "act")
+    return CommandResult(
+        status="success",
+        message="Switched to Act Mode. The agent can now perform authorized modifications and verification.",
+        data={"mode": "act"},
+    )
+
+
+def _approve_command(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None:
+        return CommandResult(status="error", message="/approve requires an active agent gateway.")
+    if hasattr(context.gateway, "approve_session_plan"):
+        success = context.gateway.approve_session_plan(context.session_id)
+        if success:
+            return CommandResult(
+                status="success",
+                message="Implementation plan explicitly approved! Switched to Act Mode.",
+                data={"mode": "act", "plan_approved": True},
+            )
+    return CommandResult(
+        status="error",
+        message="No pending plan found to approve for this session.",
+    )
+
+
+def _reject_command(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None:
+        return CommandResult(status="error", message="/reject requires an active agent gateway.")
+    plan = context.gateway.get_session_active_plan(context.session_id) if hasattr(context.gateway, "get_session_active_plan") else None
+    if plan:
+        context.gateway.set_session_active_plan(context.session_id, None)
+        if hasattr(context.gateway, "set_session_execution_mode"):
+            context.gateway.set_session_execution_mode(context.session_id, "plan")
+        return CommandResult(
+            status="success",
+            message="Active plan rejected and cleared. Retained in Plan Mode without making changes.",
+            data={"mode": "plan", "plan_rejected": True},
+        )
+    return CommandResult(
+        status="error",
+        message="No active plan found to reject.",
+    )
+
+
 def definitions() -> list[CommandDefinition]:
     rows = [
         CommandDefinition(canonical_name="new", description="Permanently replace the current chat.", required_capability="sessions", handler=_new),
@@ -497,6 +604,10 @@ def definitions() -> list[CommandDefinition]:
         rows.append(CommandDefinition(canonical_name=name, description=description, required_capability="gateway", handler=_gateway(name)))
     rows.extend([
         CommandDefinition(canonical_name="plan", description="Create a repository-aware implementation plan.", argument_schema="[request]", required_capability="gateway", execution_mode="task", handler=_agent_command("plan")),
+        CommandDefinition(canonical_name="mode", description="Inspect or switch execution mode (plan or act).", argument_schema="[show|plan|act]", required_capability="gateway", handler=_execution_mode_command),
+        CommandDefinition(canonical_name="act", description="Approve pending plan and switch to Act Mode.", argument_schema="[--approve]", required_capability="gateway", handler=_act_command),
+        CommandDefinition(canonical_name="approve", aliases=("accept",), description="Explicitly approve the current implementation plan.", required_capability="gateway", handler=_approve_command),
+        CommandDefinition(canonical_name="reject", description="Reject the pending implementation plan.", required_capability="gateway", handler=_reject_command),
         CommandDefinition(canonical_name="analyze", description="Analyze the selected repository context.", argument_schema="[request]", required_capability="gateway", execution_mode="task", handler=_agent_command("analyze")),
         CommandDefinition(canonical_name="doctor", description="Diagnose Mana-Agent and optionally apply safe repairs.", argument_schema="[--safe-fixes]", required_capability="gateway", confirmation_actions=frozenset({"--safe-fixes", "safe-fixes"}), execution_mode="task", handler=_agent_command("doctor")),
     ])

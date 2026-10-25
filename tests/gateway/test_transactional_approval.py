@@ -116,3 +116,35 @@ def test_transactional_action_approval_by_action_id(tmp_path: Path, monkeypatch)
     assert grant is not None
     assert grant.approval_id == result["approval_id"]
 
+
+def test_transactional_action_double_accept_is_idempotent(tmp_path: Path, monkeypatch) -> None:
+    """Verifies approving an already approved inbox item succeeds idempotently without error."""
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    gw = _build_test_gateway(tmp_path)
+
+    adapter = ShellActionAdapter(
+        argv=["nmap", "-p", "443", "manadev.net"],
+        cwd=tmp_path,
+        environment={},
+        expected_outputs=[],
+        parent_task_id="shell_exec",
+        actor="user",
+        originating_agent="shell_executor",
+        idempotency_key="shell_test_double_approval",
+        allow_command_result_verification=True,
+    )
+    action_intent = gw._transactional_runtime.gateway.propose(adapter)
+    inbox_item_id = action_intent.inbox_item_id
+    assert inbox_item_id
+
+    # First approval
+    result1 = gw.transactional_action_approval_command(inbox_item_id)
+    assert result1["status"] == "approved"
+    assert result1["approval_id"] != ""
+
+    # Second approval (simulating user clicking accept twice)
+    result2 = gw.transactional_action_approval_command(inbox_item_id)
+    assert result2["status"] == "approved"
+    assert result2["approval_id"] != ""
+
+

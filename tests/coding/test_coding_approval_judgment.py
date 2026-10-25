@@ -191,3 +191,158 @@ def test_approval_request_tool_resolves_via_model_judgment(tmp_path: Path) -> No
     assert res.get("approved") is True
     assert bool(res.get("approval_id")) is True
     assert res.get("status") == "approved"
+
+
+def test_dispatcher_evaluates_different_task_approval_via_judgment_and_executes_with_correct_approval(tmp_path: Path) -> None:
+    # 1. Create an approval under a foreign task ID (e.g. 'shell_exec' or 'task_foreign')
+    mock_llm_setup = _MockLLM({
+        "judgment": "accept",
+        "reason": "Foreign setup command approved.",
+        "confidence": 1.0,
+    })
+    foreign_approval = approval_request(
+        command="python -V",
+        reason="Verify python version in initial task",
+        task_id="shell_exec",
+        workspace_root=tmp_path,
+        llm=mock_llm_setup,
+        enable_model_judgment=True,
+    )
+    foreign_grant_id = str(foreign_approval.get("approval_id") or "")
+    assert foreign_grant_id
+
+    # 2. Set up dispatcher with a different active task ID
+    mock_judge_llm = _MockLLM({
+        "judgment": "accept",
+        "reason": "Python check is directly related to active task goal.",
+        "suggested_command": "",
+        "confidence": 0.98,
+        "risk_assessment": "safe_verification",
+    })
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+    dispatcher = ToolExecutionDispatcher(
+        workspace=workspace,
+        task_id="task_active_lineage_999",
+        llm=mock_judge_llm,
+    )
+
+    # 3. Dispatch run_command with foreign approval ID.
+    # It must NOT raise ValueError("Command approval belongs to a different task").
+    # It must invoke judgment, decide it is related, issue the correct approval, and execute.
+    result = dispatcher.dispatch(
+        "run_command",
+        {
+            "command": "python -V",
+            "action_approval_id": foreign_grant_id,
+            "reason": "Verify python environment for task_active",
+        },
+        call_id="call_cross_task_1",
+    )
+
+    assert result.get("ok") is True
+    assert mock_judge_llm.invoked is True
+    assert "model_judgment" in result
+    assert result["model_judgment"]["judgment"] == "accept"
+    assert "Python check is directly related" in result["model_judgment"]["reason"]
+
+
+def test_dispatcher_denies_unrelated_command_approval_from_different_task_via_judgment(tmp_path: Path) -> None:
+    # 1. Create an approval under task_1
+    mock_llm_setup = _MockLLM({
+        "judgment": "accept",
+        "reason": "Command approved in task_1.",
+        "confidence": 1.0,
+    })
+    foreign_approval = approval_request(
+        command="python -c 'print(\"UNRELATED\")'",
+        reason="Run script in task_1",
+        task_id="task_1",
+        workspace_root=tmp_path,
+        llm=mock_llm_setup,
+        enable_model_judgment=True,
+    )
+    foreign_grant_id = str(foreign_approval.get("approval_id") or "")
+    assert foreign_grant_id
+
+    # 2. Dispatch under task_2 where judgment decides it is unrelated
+    mock_judge_llm = _MockLLM({
+        "judgment": "deny",
+        "reason": "Command from task_1 is completely unrelated to task_2 goals.",
+        "suggested_command": "pytest tests/",
+        "confidence": 0.9,
+        "risk_assessment": "unrelated_execution",
+    })
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+    dispatcher = ToolExecutionDispatcher(
+        workspace=workspace,
+        task_id="task_2",
+        llm=mock_judge_llm,
+    )
+
+    result = dispatcher.dispatch(
+        "run_command",
+        {
+            "command": "python -c 'print(\"UNRELATED\")'",
+            "action_approval_id": foreign_grant_id,
+            "reason": "Run unrelated script",
+        },
+        call_id="call_cross_task_2",
+    )
+
+    assert result.get("ok") is False
+    assert result.get("status") == "denied"
+    assert result.get("error_code") == "APPROVAL_DENIED_BY_MODEL_JUDGMENT"
+    assert "completely unrelated" in result.get("reason", "")
+    assert result.get("suggested_command") == "pytest tests/"
+
+
+def test_dispatcher_ignores_hardcoded_or_unverified_approval_tokens(tmp_path: Path) -> None:
+    script_path = tmp_path / "check.py"
+    script_path.write_text("print('HARDCODED_TEST_SUCCESS')\n", encoding="utf-8")
+
+    mock_judge_llm = _MockLLM({
+        "judgment": "accept",
+        "reason": "Safe script execution accepted by judgment.",
+        "confidence": 1.0,
+    })
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+    dispatcher = ToolExecutionDispatcher(
+        workspace=workspace,
+        task_id="task_legitimate",
+        llm=mock_judge_llm,
+    )
+
+    # Calling with a fake / hardcoded approval ID string
+    result = dispatcher.dispatch(
+        "run_command",
+        {
+            "command": f"python {script_path.name}",
+            "action_approval_id": "hardcoded_fake_grant_xyz",
+            "reason": "Test hardcoded rejection",
+        },
+        call_id="call_hardcoded_1",
+    )
+
+    assert result.get("ok") is True
+    assert "HARDCODED_TEST_SUCCESS" in str(result.get("stdout") or "")
+    assert mock_judge_llm.invoked is True
+    assert result.get("model_judgment", {}).get("judgment") == "accept"
+

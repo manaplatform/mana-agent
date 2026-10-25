@@ -3434,7 +3434,12 @@ class AgentChatGateway:
         session_id: str = "",
     ) -> dict[str, Any]:
         """Approve the authoritative inbox item; branch resumption owns execution."""
-        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+        from mana_agent.human_inbox.models import (
+            InboxStatus,
+            ResponseOperation,
+            ResponseSubmission,
+            UNRESOLVED_STATUSES,
+        )
 
         inbox_svc = self.human_inbox_service
         try:
@@ -3463,15 +3468,18 @@ class AgentChatGateway:
         if item.request_type.value != "approval" or not item.action_intent_id:
             raise ValueError("inbox item is not an actionable transactional approval")
         actor_id = getpass.getuser()
-        inbox_svc.respond(ResponseSubmission(
-            inbox_item_id=inbox_item_id,
-            operation=ResponseOperation.APPROVE,
-            actor_id=actor_id,
-            channel="tui-local",
-            idempotency_key=f"tui-approve:{inbox_item_id}:{item.version}",
-            expected_version=item.version,
-            current_action_digest=item.action_digest,
-        ))
+        if item.status in UNRESOLVED_STATUSES:
+            inbox_svc.respond(ResponseSubmission(
+                inbox_item_id=inbox_item_id,
+                operation=ResponseOperation.APPROVE,
+                actor_id=actor_id,
+                channel="tui-local",
+                idempotency_key=f"tui-approve:{inbox_item_id}",
+                expected_version=item.version,
+                current_action_digest=item.action_digest,
+            ))
+        elif item.status != InboxStatus.APPROVED:
+            raise ValueError(f"inbox item is already terminal: {item.status.value}")
         action = self._transactional_runtime.store.get_action(item.action_intent_id)
         if action is None:
             raise LookupError("approved inbox item has no durable transactional action")
@@ -3578,15 +3586,25 @@ class AgentChatGateway:
                     inbox_svc = fallback_svc
                 except Exception:
                     raise
-        inbox_svc.respond(ResponseSubmission(
-            inbox_item_id=inbox_item_id,
-            operation=ResponseOperation.DENY,
-            actor_id=getpass.getuser(),
-            channel="tui-local",
-            idempotency_key=f"tui-deny:{inbox_item_id}:{item.version}",
-            expected_version=item.version,
-            current_action_digest=item.action_digest,
-        ))
+        from mana_agent.human_inbox.models import (
+            InboxStatus,
+            ResponseOperation,
+            ResponseSubmission,
+            UNRESOLVED_STATUSES,
+        )
+
+        if item.status in UNRESOLVED_STATUSES:
+            inbox_svc.respond(ResponseSubmission(
+                inbox_item_id=inbox_item_id,
+                operation=ResponseOperation.DENY,
+                actor_id=getpass.getuser(),
+                channel="tui-local",
+                idempotency_key=f"tui-deny:{inbox_item_id}",
+                expected_version=item.version,
+                current_action_digest=item.action_digest,
+            ))
+        elif item.status != InboxStatus.DENIED:
+            raise ValueError(f"inbox item is already terminal: {item.status.value}")
         return {
             "status": "denied",
             "inbox_item_id": inbox_item_id,
@@ -4141,7 +4159,47 @@ class AgentChatGateway:
             "pending_prechecklist": None,
             "pending_prechecklist_source": "",
             "pending_prechecklist_warning": "",
+            "execution_mode": "plan",
+            "active_plan": None,
+            "plan_approved": False,
+            "plan_approval_state": None,
         }
+
+    def get_session_execution_mode(self, session_id: str) -> str:
+        sess = self._session(session_id)
+        return str(sess.get("execution_mode") or "plan")
+
+    def set_session_execution_mode(self, session_id: str, mode: str) -> str:
+        sess = self._session(session_id)
+        norm = "act" if str(mode or "").strip().lower() in {"act", "edit"} else "plan"
+        sess["execution_mode"] = norm
+        return norm
+
+    def get_session_active_plan(self, session_id: str) -> dict[str, Any] | None:
+        sess = self._session(session_id)
+        plan = sess.get("active_plan")
+        if plan is not None and hasattr(plan, "model_dump"):
+            return plan.model_dump()
+        return plan if isinstance(plan, dict) else None
+
+    def set_session_active_plan(self, session_id: str, plan: Any) -> None:
+        sess = self._session(session_id)
+        sess["active_plan"] = plan
+        sess["plan_approved"] = False
+
+    def approve_session_plan(self, session_id: str, approver: str = "user") -> bool:
+        sess = self._session(session_id)
+        if sess.get("active_plan") is None:
+            return False
+        sess["plan_approved"] = True
+        plan = sess.get("active_plan")
+        if hasattr(plan, "with_approval"):
+            sess["active_plan"] = plan.with_approval(approved=True, approver=approver)
+        elif isinstance(plan, dict):
+            plan["approved"] = True
+            plan["approved_by"] = approver
+        sess["execution_mode"] = "act"
+        return True
 
     def _session(self, session_id: str) -> dict[str, Any]:
         if session_id not in self._sessions:

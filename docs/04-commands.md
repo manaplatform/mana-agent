@@ -313,6 +313,24 @@ Direct forms accepted by the parser include:
 
 If no format is supplied, the slash command opens the numbered menu. The menu offers JSON, Markdown, HTML, DOT graph, GraphML, Mermaid diagram, and an all-formats option. [src/mana_agent/commands/chat_analyze_command.py:32-42](../src/mana_agent/commands/chat_analyze_command.py#L32-L42) [src/mana_agent/commands/analyze_formats.py:49-63](../src/mana_agent/commands/analyze_formats.py#L49-L63)
 
+## Plan Mode & Act Mode
+
+Mana-Agent supports **Plan Mode** (read-only exploration and structured plan generation) and **Act Mode** (authorized implementation):
+
+```bash
+# Plan command: inspects repository and builds an approval-gated plan
+mana-agent plan "Task description" [--no-code] [--yes] [--repo <path>]
+```
+
+In interactive chat sessions (`mana-agent chat`):
+- `/plan <task>`: Formulate a structured implementation plan in Plan Mode, display it as rich Markdown, and prompt to accept or reject before starting implementation in Act Mode.
+- `/mode [show|plan|act]`: View or switch the active execution mode.
+- `/approve` / `/accept`: Explicitly approve the active implementation plan.
+- `/reject`: Reject the active implementation plan and remain safely in Plan Mode.
+- `/act`: Approve any pending plan and transition to Act Mode for execution.
+
+See [Plan and Act Modes](plan-and-act-modes.md) for full details.
+
 ## Quick diff against the markdown commands list
 
 The previous markdown already mentioned the following commands or slash command:

@@ -272,6 +272,21 @@ def test_concurrent_approve_and_deny_accepts_one_terminal_response(tmp_path: Pat
     assert inbox.repository.get(item.inbox_item_id).status in {InboxStatus.APPROVED, InboxStatus.DENIED}
 
 
+def test_repeated_approve_submission_is_idempotent(tmp_path: Path) -> None:
+    clock = Clock()
+    inbox = service(tmp_path, clock)
+    item = inbox.create(request(clock))
+
+    first = inbox.respond(respond(item, operation=ResponseOperation.APPROVE, idempotency_key="approve-1"))
+    assert first.status is InboxStatus.APPROVED
+
+    # Second approval with a different idempotency key on the same already-approved item
+    # must succeed idempotently without raising "inbox item is already terminal: approved"
+    second = inbox.respond(respond(item, operation=ResponseOperation.APPROVE, idempotency_key="approve-2"))
+    assert second.status is InboxStatus.APPROVED
+    assert second.inbox_item_id == item.inbox_item_id
+
+
 def test_concurrent_signers_publish_only_complete_key_files(tmp_path: Path, monkeypatch) -> None:
     key_path = tmp_path / "inbox" / "signing.key"
     first = ResponseTokenSigner(key_path)

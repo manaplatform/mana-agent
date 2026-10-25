@@ -335,6 +335,17 @@ class HumanInboxService:
             self._resume_terminal_if_needed(initial)
             return self.repository.get(initial.inbox_item_id)
         if initial.status in TERMINAL_STATUSES:
+            if (
+                (submission.operation == ResponseOperation.APPROVE and initial.status == InboxStatus.APPROVED)
+                or (submission.operation == ResponseOperation.DENY and initial.status == InboxStatus.DENIED)
+            ):
+                self._audit(
+                    "response_idempotent_replay",
+                    initial,
+                    reviewer_id=submission.actor_id,
+                )
+                self._resume_terminal_if_needed(initial)
+                return self.repository.get(initial.inbox_item_id)
             self._audit("response_rejected", initial, reviewer_id=submission.actor_id, reason="terminal_state")
             raise InboxConcurrentUpdateError(f"inbox item is already terminal: {initial.status.value}")
         if initial.expires_at <= self.clock():
@@ -421,8 +432,6 @@ class HumanInboxService:
         }[submission.operation]
 
         def accept(item: InboxItem) -> None:
-            if submission.expected_version is not None and item.version != submission.expected_version:
-                raise InboxConcurrentUpdateError("inbox version changed before response submission")
             if submission.idempotency_key in item.response_idempotency_keys:
                 recorded = item.response_idempotency_digests.get(submission.idempotency_key)
                 if recorded and recorded != response_digest:
@@ -431,7 +440,14 @@ class HumanInboxService:
                     )
                 raise _IdempotentResponseReplay
             if item.status not in UNRESOLVED_STATUSES:
+                if (
+                    (submission.operation == ResponseOperation.APPROVE and item.status == InboxStatus.APPROVED)
+                    or (submission.operation == ResponseOperation.DENY and item.status == InboxStatus.DENIED)
+                ):
+                    raise _IdempotentResponseReplay
                 raise InboxConcurrentUpdateError(f"inbox item is already terminal: {item.status.value}")
+            if submission.expected_version is not None and item.version != submission.expected_version:
+                raise InboxConcurrentUpdateError("inbox version changed before response submission")
             if item.expires_at <= self.clock():
                 raise PermissionError("inbox item expired before response commit")
             if nonce_hash and nonce_hash not in item.token_nonce_hashes:

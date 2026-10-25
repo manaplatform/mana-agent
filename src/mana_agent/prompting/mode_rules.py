@@ -4,6 +4,8 @@ from __future__ import annotations
 _MODE_RULES: dict[str, str] = {
     "answer_only": "Chat mode: answer directly when repository evidence is already sufficient; inspect the repo only when needed.",
     "plan_only": "Plan mode: produce an actionable implementation plan; ask only when a missing detail blocks a safe plan.",
+    "plan": "Plan mode: operate strictly read-only; inspect context, gather dependencies, assess risks, and produce an actionable structured plan before any changes.",
+    "act": "Act mode: execute changes, apply authorized patches, and perform required verification according to the approved plan.",
     "edit": "Edit mode: inspect relevant files, patch code, verify changed-file evidence, and summarize the result.",
     "review": "Review mode: prioritize bugs, regressions, risks, and missing tests before summaries.",
     "verify": "Verify mode: run or identify the relevant checks and report exact outcomes.",

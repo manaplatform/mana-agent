@@ -788,6 +788,74 @@ def test_deferred_shell_calls_keep_distinct_receipts_and_reuse_approved_action(t
     assert not current_batch_tool_call_id()
 
 
+def test_ask_agent_cross_task_approval_evaluated_by_judgment(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import MagicMock
+    from mana_agent.batch.policy import batch_tool_call_context
+    from mana_agent.multi_agent.agents.approval_agent import ModelApprovalJudgment
+    agent = _build_agent(tmp_path)
+    gateway = MagicMock()
+    gateway.execute.return_value = SimpleNamespace(
+        action=SimpleNamespace(state=SimpleNamespace(value="committed"), action_id="action", verification=None),
+        result={"returncode": 0},
+    )
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+    tools, _, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="active-task", enable_run_evidence=False)
+    command = next(tool for tool in tools if tool.name == "run_command")
+
+    gateway.approvals.get.return_value = SimpleNamespace(action_id="approved")
+    gateway.store.get_action.return_value = SimpleNamespace(parent_task_id="foreign-task", idempotency_key="foreign_key", action_id="approved")
+    gateway.store.action_for_idempotency_key.return_value = None
+    mock_action = SimpleNamespace(state=SimpleNamespace(value="committed"), action_id="new_action", intent_digest=lambda: "digest1")
+    gateway.propose.return_value = mock_action
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.agents.approval_agent.judge_approval_request",
+        lambda **kw: ModelApprovalJudgment(
+            judgment="accept",
+            reason="Approved command is related to active task",
+            suggested_command="",
+            confidence=1.0,
+            risk_assessment="low",
+        ),
+    )
+
+    with batch_tool_call_context("approval-retry"):
+        res = json.loads(command.invoke({"cmd": "rg demo", "action_approval_id": "grant"}))
+        assert res["ok"] is True
+        assert res.get("model_judgment", {}).get("judgment") == "accept"
+
+
+def test_ask_agent_cross_task_approval_denied_by_judgment(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import MagicMock
+    from mana_agent.batch.policy import batch_tool_call_context
+    from mana_agent.multi_agent.agents.approval_agent import ModelApprovalJudgment
+    agent = _build_agent(tmp_path)
+    gateway = MagicMock()
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+    tools, _, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="active-task", enable_run_evidence=False)
+    command = next(tool for tool in tools if tool.name == "run_command")
+
+    gateway.approvals.get.return_value = SimpleNamespace(action_id="approved")
+    gateway.store.get_action.return_value = SimpleNamespace(parent_task_id="foreign-task", idempotency_key="foreign_key", action_id="approved")
+
+    monkeypatch.setattr(
+        "mana_agent.multi_agent.agents.approval_agent.judge_approval_request",
+        lambda **kw: ModelApprovalJudgment(
+            judgment="deny",
+            reason="Command is unrelated to active task",
+            suggested_command="rg safe",
+            confidence=0.9,
+            risk_assessment="unrelated",
+        ),
+    )
+
+    with batch_tool_call_context("approval-retry"):
+        res = json.loads(command.invoke({"cmd": "rg demo", "action_approval_id": "grant"}))
+        assert res["ok"] is False
+        assert res["error_code"] == "APPROVAL_DENIED_BY_MODEL_JUDGMENT"
+        assert "unrelated" in res["reason"]
+
+
 def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:
     agent = _build_agent(tmp_path)
     tools, traces, _, _ = agent._build_tools(k_default=4, timeout_seconds=1)

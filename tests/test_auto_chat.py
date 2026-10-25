@@ -66,6 +66,8 @@ def test_auto_chat_tool_policy_applies_limits_and_read_only_allowlist() -> None:
 
     assert "apply_patch" not in policy["allowed_tools"]
     assert "write_file" not in policy["allowed_tools"]
+    assert "git_generic" not in policy["allowed_tools"]
+    assert "run_command" not in policy["allowed_tools"]
     assert policy["mutation_allowed"] is False
     assert policy["search_budget"] == AUTO_MAX_SEARCH_QUERIES
     assert policy["read_budget"] == AUTO_MAX_FILES_TO_READ
@@ -88,6 +90,14 @@ def test_auto_chat_edit_policy_keeps_mutation_tools_but_still_bounded() -> None:
     assert policy["mutation_allowed"] is True
     assert policy["search_budget"] == AUTO_MAX_SEARCH_QUERIES
     assert policy["read_budget"] == AUTO_MAX_FILES_TO_READ
+
+
+def test_auto_chat_verification_policy_keeps_explicit_test_tools() -> None:
+    policy = apply_auto_chat_tool_policy({}, AutoChatMode.VERIFY)
+
+    assert "run_command" in policy["allowed_tools"]
+    assert "run_script_once" in policy["allowed_tools"]
+    assert tool_allowed_for_mode("run_command", AutoChatMode.VERIFY) is True
 
 
 def test_auto_chat_followup_reuses_compact_state() -> None:
