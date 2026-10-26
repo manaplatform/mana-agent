@@ -3485,11 +3485,18 @@ class AgentChatGateway:
             raise LookupError("approved inbox item has no durable transactional action")
         grant = self._transactional_runtime.gateway.approvals.find_valid(action)
         if grant is None:
-            grant = self._transactional_runtime.gateway.approvals.issue(
-                action,
-                approved_by=actor_id,
-                ttl_seconds=300,
-            )
+            from mana_agent.transactional_actions.models import ActionState
+
+            if action.state is ActionState.AWAITING_APPROVAL:
+                grant = self._transactional_runtime.gateway.approvals.issue(
+                    action,
+                    approved_by=actor_id,
+                    ttl_seconds=300,
+                )
+            elif action.state in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED}:
+                logger.info("Action %s is already %s, approval already processed", action.action_id, action.state.value)
+            else:
+                raise ValueError(f"action is in non-approvable state: {action.state.value}")
 
         if item.checkpoint_id and action.parent_task_id == item.task_id:
             return {
@@ -6235,11 +6242,41 @@ class AgentChatGateway:
                             shlex.quote(item)
                             for item in entry_decision.command_arguments
                         )
+
+                    def publish_command_activity(activity: dict[str, Any]) -> None:
+                        if not callable(sink):
+                            return
+                        metadata = dict(activity.get("metadata") or {})
+                        for key in ("tool_name", "backend", "detail"):
+                            if activity.get(key) is not None:
+                                metadata.setdefault(key, activity[key])
+                        sink(
+                            str(activity.get("event_type") or "agent.planning"),
+                            str(activity.get("title") or "Plan activity"),
+                            status=str(activity.get("status") or "running"),
+                            event_id=str(activity.get("event_id") or ""),
+                            tool_name=str(activity.get("tool_name") or ""),
+                            metadata=metadata,
+                        )
+
                     command_result = self.dispatch_command(
                         command_text,
                         session_id=session_id,
                         frontend=str(state.get("frontend") or "cli"),
+                        frontend_data={"activity_sink": publish_command_activity},
                     )
+                    if (
+                        entry_decision.command_name == "plan"
+                        and command_result is not None
+                        and command_result.status != "success"
+                    ):
+                        publish_command_activity({
+                            "event_id": f"plan-preparation-{session_id}",
+                            "event_type": "agent.planning",
+                            "title": "Plan preparation failed",
+                            "status": "failed",
+                            "detail": command_result.message,
+                        })
                     if command_result is None:
                         raise EntryRoutingError(
                             "Model decision failed: chat_command. No fallback action was executed."
@@ -9377,8 +9414,10 @@ class AgentChatGateway:
 
         def visit(value: Any) -> None:
             if isinstance(value, dict):
-                request_id = value.get("permission_request_id") or value.get(
-                    "confirmation_request_id"
+                request_id = (
+                    value.get("permission_request_id")
+                    or value.get("confirmation_request_id")
+                    or value.get("inbox_item_id")
                 )
                 if request_id and str(request_id) not in found:
                     found.append(str(request_id))

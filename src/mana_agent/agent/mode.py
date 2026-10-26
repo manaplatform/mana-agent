@@ -84,6 +84,10 @@ class StructuredPlan(BaseModel):
             }
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return the structured plan as a dictionary."""
+        return self.model_dump()
+
     def to_markdown(self) -> str:
         """Render a formatted markdown implementation plan."""
         lines = [

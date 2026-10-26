@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import getpass
+import json
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -428,6 +429,125 @@ def _engine(context: CommandContext, args: list[str]) -> CommandResult:
     raise ValueError("Usage: /engine [show|internal|external|codex]")
 
 
+def _plan_command(context: CommandContext, args: list[str]) -> CommandResult:
+    if context.gateway is None:
+        return CommandResult(status="error", message="/plan requires an active agent gateway.")
+
+    plan_task = " ".join(args).strip() if args else ""
+    if not plan_task:
+        plan_task = "analyze and plan the next repository change"
+
+    activity_sink = context.frontend_data.get("activity_sink")
+    preparation_event_id = f"plan-preparation-{context.session_id or 'session'}"
+    if callable(activity_sink):
+        activity_sink({
+            "event_id": preparation_event_id,
+            "event_type": "agent.planning",
+            "title": "Preparing implementation plan",
+            "status": "running",
+            "metadata": {"phase": "plan"},
+        })
+
+    if hasattr(context.gateway, "set_session_execution_mode"):
+        context.gateway.set_session_execution_mode(context.session_id, "plan")
+
+    repo_root = (
+        getattr(context.gateway, "root", None)
+        or getattr(context.gateway, "repo_root", None)
+        or Path.cwd()
+    )
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.skills.manager import SkillManager
+
+    loaded_skills = []
+    if callable(activity_sink):
+        activity_sink({
+            "event_id": f"{preparation_event_id}-skills",
+            "event_type": "agent.planning",
+            "title": "Checking relevant skills",
+            "status": "running",
+            "metadata": {"phase": "plan"},
+        })
+    try:
+        manager = SkillManager(repo_root)
+        loaded_skills = manager.load_for_task(plan_task, [])
+    except Exception:
+        loaded_skills = []
+    if callable(activity_sink):
+        activity_sink({
+            "event_id": f"{preparation_event_id}-skills",
+            "event_type": "agent.planning",
+            "title": "Skill check complete",
+            "status": "completed",
+            "metadata": {"phase": "plan"},
+            "detail": f"Loaded {len(loaded_skills)} relevant skills",
+        })
+
+    llm = None
+    if context.gateway is not None:
+        try:
+            if hasattr(context.gateway, "get_ask_service"):
+                from mana_agent.gateway.turn_engine import agent_decision_llm
+                llm = agent_decision_llm(context.gateway.get_ask_service())
+            if llm is None:
+                llm = getattr(getattr(context.gateway, "_entry_router", None), "llm", None) or getattr(context.gateway, "llm", None)
+        except Exception:
+            llm = None
+
+    plan_service = PlanService(repo_root, llm=llm, progress_callback=activity_sink)
+    structured_plan = plan_service.generate_plan(plan_task, skills=loaded_skills)
+    save_event_id = f"{preparation_event_id}-save"
+    if callable(activity_sink):
+        activity_sink({
+            "event_id": save_event_id,
+            "event_type": "tool.started",
+            "title": "Saving implementation plan",
+            "status": "running",
+            "tool_name": "write_file",
+            "metadata": {"phase": "plan", "tool_name": "write_file"},
+        })
+    saved_path = plan_service.save_plan(structured_plan)
+
+    if hasattr(context.gateway, "set_session_active_plan"):
+        context.gateway.set_session_active_plan(context.session_id, structured_plan)
+
+    if callable(activity_sink):
+        activity_sink({
+            "event_id": save_event_id,
+            "event_type": "tool.completed",
+            "title": "Saved implementation plan",
+            "status": "completed",
+            "tool_name": "write_file",
+            "metadata": {"phase": "plan", "tool_name": "write_file"},
+            "detail": str(saved_path),
+        })
+        activity_sink({
+            "event_id": preparation_event_id,
+            "event_type": "agent.planning",
+            "title": "Implementation plan ready for approval",
+            "status": "completed",
+            "metadata": {"phase": "plan"},
+        })
+
+    markdown_plan = structured_plan.to_markdown()
+    guidance = (
+        f"\n\n**Saved plan artifact:** `{saved_path}`\n\n"
+        "To approve and execute this plan, type `/approve` or `/act`.\n"
+        "To reject this plan, type `/reject`."
+    )
+    return CommandResult(
+        status="success",
+        message=markdown_plan + guidance,
+        data={
+            "mode": "plan",
+            "plan_id": structured_plan.task_id,
+            "saved_path": str(saved_path),
+            "plan": structured_plan.to_dict(),
+        },
+    )
+
+
 def _execution_mode_command(context: CommandContext, args: list[str]) -> CommandResult:
     if context.gateway is None:
         return CommandResult(status="error", message="/mode requires an active agent gateway.")
@@ -478,9 +598,10 @@ def _execution_mode_command(context: CommandContext, args: list[str]) -> Command
 def _act_command(context: CommandContext, args: list[str]) -> CommandResult:
     if context.gateway is None:
         return CommandResult(status="error", message="/act requires an active agent gateway.")
-    has_plan = False
+    plan = None
     if hasattr(context.gateway, "get_session_active_plan"):
-        has_plan = context.gateway.get_session_active_plan(context.session_id) is not None
+        plan = context.gateway.get_session_active_plan(context.session_id)
+    has_plan = plan is not None
     if has_plan and hasattr(context.gateway, "approve_session_plan"):
         context.gateway.approve_session_plan(context.session_id)
         if hasattr(context.gateway, "set_session_execution_mode"):
@@ -488,7 +609,7 @@ def _act_command(context: CommandContext, args: list[str]) -> CommandResult:
         return CommandResult(
             status="success",
             message="Plan approved! Switched to Act Mode. The agent is ready to execute the approved plan.",
-            data={"mode": "act", "plan_approved": True},
+            data={"mode": "act", "plan_approved": True, "execution_request": str(plan.get("goal") or "")},
         )
     if hasattr(context.gateway, "set_session_execution_mode"):
         context.gateway.set_session_execution_mode(context.session_id, "act")
@@ -502,17 +623,74 @@ def _act_command(context: CommandContext, args: list[str]) -> CommandResult:
 def _approve_command(context: CommandContext, args: list[str]) -> CommandResult:
     if context.gateway is None:
         return CommandResult(status="error", message="/approve requires an active agent gateway.")
+    plan = (
+        context.gateway.get_session_active_plan(context.session_id)
+        if hasattr(context.gateway, "get_session_active_plan")
+        else None
+    )
     if hasattr(context.gateway, "approve_session_plan"):
         success = context.gateway.approve_session_plan(context.session_id)
         if success:
             return CommandResult(
                 status="success",
                 message="Implementation plan explicitly approved! Switched to Act Mode.",
-                data={"mode": "act", "plan_approved": True},
+                data={"mode": "act", "plan_approved": True, "execution_request": str((plan or {}).get("goal") or "")},
             )
+
+    inbox_svc = getattr(context.gateway, "human_inbox_service", None)
+    if inbox_svc is None:
+        try:
+            from mana_agent.human_inbox import default_human_inbox_service
+            inbox_svc = default_human_inbox_service()
+        except Exception:
+            inbox_svc = None
+
+    if inbox_svc is not None:
+        try:
+            import getpass
+            from mana_agent.human_inbox.models import InboxQuery, InboxStatus, ResponseOperation, ResponseSubmission
+
+            rows = inbox_svc.list(
+                InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
+            )
+            approval_rows = [r for r in rows if r.request_type.value == "approval"]
+            if approval_rows:
+                count = 0
+                for r in approval_rows:
+                    try:
+                        actor_id = r.assigned_reviewer_id or getpass.getuser()
+                        handled = False
+                        if r.action_intent_id and hasattr(context.gateway, "transactional_action_approval_command"):
+                            try:
+                                context.gateway.transactional_action_approval_command(r.inbox_item_id, session_id=context.session_id)
+                                handled = True
+                            except Exception:
+                                handled = False
+                        if not handled:
+                            inbox_svc.respond(ResponseSubmission(
+                                inbox_item_id=r.inbox_item_id,
+                                operation=ResponseOperation.APPROVE,
+                                actor_id=actor_id,
+                                channel="chat-command",
+                                idempotency_key=f"cmd-approve:{r.inbox_item_id}",
+                                expected_version=r.version,
+                                current_action_digest=r.action_digest,
+                            ))
+                        count += 1
+                    except Exception as inb_err:
+                        logger.debug("Failed approving pending inbox item %s: %s", r.inbox_item_id, inb_err)
+                if count > 0:
+                    return CommandResult(
+                        status="success",
+                        message=f"Approved {count} pending approval request(s). Execution proceeding.",
+                        data={"approved_requests_count": count},
+                    )
+        except Exception as exc:
+            logger.debug("Failed searching pending inbox items in /approve: %s", exc)
+
     return CommandResult(
         status="error",
-        message="No pending plan found to approve for this session.",
+        message="No pending plan or approval requests found to approve for this session.",
     )
 
 
@@ -603,12 +781,12 @@ def definitions() -> list[CommandDefinition]:
     }.items():
         rows.append(CommandDefinition(canonical_name=name, description=description, required_capability="gateway", handler=_gateway(name)))
     rows.extend([
-        CommandDefinition(canonical_name="plan", description="Create a repository-aware implementation plan.", argument_schema="[request]", required_capability="gateway", execution_mode="task", handler=_agent_command("plan")),
+        CommandDefinition(canonical_name="plan", description="Create a repository-aware implementation plan.", argument_schema="[request]", free_text_arguments=True, required_capability="gateway", handler=_plan_command),
         CommandDefinition(canonical_name="mode", description="Inspect or switch execution mode (plan or act).", argument_schema="[show|plan|act]", required_capability="gateway", handler=_execution_mode_command),
         CommandDefinition(canonical_name="act", description="Approve pending plan and switch to Act Mode.", argument_schema="[--approve]", required_capability="gateway", handler=_act_command),
         CommandDefinition(canonical_name="approve", aliases=("accept",), description="Explicitly approve the current implementation plan.", required_capability="gateway", handler=_approve_command),
         CommandDefinition(canonical_name="reject", description="Reject the pending implementation plan.", required_capability="gateway", handler=_reject_command),
-        CommandDefinition(canonical_name="analyze", description="Analyze the selected repository context.", argument_schema="[request]", required_capability="gateway", execution_mode="task", handler=_agent_command("analyze")),
+        CommandDefinition(canonical_name="analyze", description="Analyze the selected repository context.", argument_schema="[request]", free_text_arguments=True, required_capability="gateway", execution_mode="task", handler=_agent_command("analyze")),
         CommandDefinition(canonical_name="doctor", description="Diagnose Mana-Agent and optionally apply safe repairs.", argument_schema="[--safe-fixes]", required_capability="gateway", confirmation_actions=frozenset({"--safe-fixes", "safe-fixes"}), execution_mode="task", handler=_agent_command("doctor")),
     ])
     rows.append(CommandDefinition(canonical_name="help", description="List commands available in this frontend.", handler=lambda _context, _args: CommandResult(status="success", message="")))

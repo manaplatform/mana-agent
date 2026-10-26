@@ -21,11 +21,24 @@ class CommandDispatcher:
         if not raw:
             return None
         if raw.startswith("/"):
-            try:
-                parts = shlex.split(raw[1:], posix=True)
-            except ValueError as exc:
-                return CommandResult(status="error", message=f"Invalid command arguments: {exc}")
-            invocation = CommandInvocation(name=parts[0] if parts else "", arguments=parts[1:], confirmed=confirmed)
+            command_and_arguments = raw[1:].split(maxsplit=1)
+            name = command_and_arguments[0] if command_and_arguments else ""
+            definition = self.registry.resolve(name)
+            argument_text = command_and_arguments[1] if len(command_and_arguments) > 1 else ""
+            if definition is not None and definition.free_text_arguments:
+                try:
+                    arguments = shlex.split(argument_text, posix=True)
+                except ValueError:
+                    # These commands accept prose, not shell syntax. Keep unmatched
+                    # quote characters as literal user text instead of rejecting it.
+                    arguments = [argument_text] if argument_text else []
+                invocation = CommandInvocation(name=name, arguments=arguments, confirmed=confirmed)
+            else:
+                try:
+                    parts = shlex.split(raw[1:], posix=True)
+                except ValueError as exc:
+                    return CommandResult(status="error", message=f"Invalid command arguments: {exc}")
+                invocation = CommandInvocation(name=parts[0] if parts else "", arguments=parts[1:], confirmed=confirmed)
         else:
             if self.natural_language_resolver is None:
                 return None

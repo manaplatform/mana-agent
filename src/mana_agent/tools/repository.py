@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -68,12 +69,20 @@ def _safe_rel(repo_root: Path, path: str) -> tuple[Path | None, str | None]:
     return target, rel.as_posix()
 
 
+def _is_skipped_dir(dirname: str) -> bool:
+    return (
+        dirname in _SKIP_DIRS
+        or dirname.startswith(".venv")
+        or dirname.startswith("venv")
+        or (dirname.startswith("__") and dirname.endswith("__"))
+    )
+
+
 def _iter_files(repo_root: Path):
-    for path in repo_root.rglob("*"):
-        if any(part in _SKIP_DIRS for part in path.relative_to(repo_root).parts):
-            continue
-        if path.is_file():
-            yield path
+    for root, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if not _is_skipped_dir(d)]
+        for filename in filenames:
+            yield Path(root) / filename
 
 
 def _is_binary(path: Path) -> bool:

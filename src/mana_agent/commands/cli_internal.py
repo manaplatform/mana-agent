@@ -274,6 +274,38 @@ def _build_main_agent_routing_llm(routing_authority: Any | None = None) -> Any |
     )
 
 
+def _build_planning_llm(*, model_override: str | None = None) -> Any | None:
+    """Build the LLM used by Plan Mode for codebase exploration and plan synthesis."""
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
+    try:
+        settings = _public_symbol("Settings", Settings)()
+    except Exception as exc:  # noqa: BLE001 - missing env should not break CLI
+        logger.debug("Plan Mode model disabled (settings unavailable): %s", exc)
+        return None
+    from mana_agent.config.inference_provider import ProviderConfigurationError, resolve_inference_connection
+    try:
+        connection = resolve_inference_connection(settings)
+    except ProviderConfigurationError:
+        return None
+    model = (
+        model_override
+        or resolve_model_for_role(
+            AgentRole.HEAD_DECISION,
+            global_model=getattr(settings, "openai_chat_model", "gpt-4.1-mini"),
+            task_description="Plan Mode codebase exploration and structured plan generation.",
+        ).resolved_model
+    )
+    return create_chat_model(
+        api_key=connection.api_key,
+        model=model,
+        base_url=connection.base_url,
+        provider=connection.provider,
+        default_headers=connection.headers,
+        temperature=0.2,
+    )
+
+
 def _split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -461,10 +493,11 @@ def _project_snapshot(root: Path) -> dict[str, Any]:
     return {"root": str(root), "items": interesting}
 
 
-def _plan_markdown(*, task: str, root: Path, skills: list[Any], no_code: bool, yes: bool) -> str:
+def _plan_markdown(*, task: str, root: Path, skills: list[Any], no_code: bool, yes: bool, model: str | None = None) -> str:
     from mana_agent.agent.plan_service import PlanService
 
-    service = PlanService(root)
+    llm = _build_planning_llm(model_override=model)
+    service = PlanService(root, llm=llm)
     plan = service.generate_plan(task, skills=skills)
     if yes:
         plan = plan.with_approval(approved=True, approver="--yes")
@@ -592,7 +625,7 @@ def plan_command(
         console.print("[green]Loaded skills:[/green] " + ", ".join(item.name for item in loaded_skills))
     else:
         console.print("[yellow]Loaded skills:[/yellow] none")
-    plan_text = _plan_markdown(task=task, root=root, skills=loaded_skills, no_code=no_code, yes=yes)
+    plan_text = _plan_markdown(task=task, root=root, skills=loaded_skills, no_code=no_code, yes=yes, model=model)
     console.print(plan_text)
     plan_path: Path | None = None
     if save:

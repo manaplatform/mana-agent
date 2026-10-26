@@ -2402,7 +2402,37 @@ def chat(
                         _finish_ui_turn(current_turn_id)
                         continue
                 else:
-                    console.print("[yellow]No pending plan found to approve.[/yellow]")
+                    inbox_svc = getattr(gateway, "human_inbox_service", None)
+                    if inbox_svc is None:
+                        try:
+                            from mana_agent.human_inbox import default_human_inbox_service
+                            inbox_svc = default_human_inbox_service()
+                        except Exception:
+                            inbox_svc = None
+                    approved_count = 0
+                    if inbox_svc is not None:
+                        try:
+                            import getpass
+                            from mana_agent.human_inbox.models import InboxQuery, InboxStatus
+                            pending = inbox_svc.list(
+                                InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
+                                actor_id=getpass.getuser(),
+                            )
+                            for r in pending:
+                                if r.request_type.value == "approval":
+                                    try:
+                                        if hasattr(gateway, "transactional_action_approval_command"):
+                                            gateway.transactional_action_approval_command(r.inbox_item_id, session_id=chat_ui_state.session_id)
+                                        approved_count += 1
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                    if approved_count > 0:
+                        console.print(f"[green]Approved {approved_count} pending approval request(s). Execution proceeding.[/green]")
+                        _finish_ui_turn(current_turn_id)
+                        continue
+                    console.print("[yellow]No pending plan or approval requests found to approve.[/yellow]")
                     _finish_ui_turn(current_turn_id)
                     continue
 
@@ -2431,7 +2461,8 @@ def chat(
                     loaded_skills = manager.load_for_task(plan_task, [])
                 except Exception:
                     loaded_skills = []
-                plan_service = PlanService(root)
+                plan_llm = _agent_decision_llm(ask_service) if "ask_service" in locals() and ask_service else None
+                plan_service = PlanService(root, llm=plan_llm)
                 structured_plan = plan_service.generate_plan(plan_task, skills=loaded_skills)
                 saved_path = plan_service.save_plan(structured_plan)
                 gateway.set_session_active_plan(chat_ui_state.session_id, structured_plan)
@@ -2448,6 +2479,7 @@ def chat(
                             console,
                             prompt="Accept plan and start implementation? [accept/reject]: ",
                             multiline_enabled=False,
+                            multiline_terminator="",
                         ).strip().lower()
                     except (EOFError, KeyboardInterrupt):
                         decision = ""
@@ -2457,8 +2489,14 @@ def chat(
                     gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
                     console.print("[green]Plan accepted! Switched to Act Mode. Starting implementation...[/green]")
                     question = plan_task
+                elif decision in {"reject", "no", "n"}:
+                    gateway.set_session_active_plan(chat_ui_state.session_id, None)
+                    console.print("[yellow]Plan rejected. Remained in Plan Mode without making changes.[/yellow]")
+                    chat_ui_state.begin_conversation_turn(f"/plan {plan_task}", current_turn_id)
+                    _finish_ui_turn(current_turn_id)
+                    continue
                 else:
-                    console.print("[yellow]Plan rejected or kept in Plan Mode. Remained in Plan Mode without making changes.[/yellow]")
+                    console.print("[cyan]Plan saved. Type [bold]/approve[/bold] or [bold]/act[/bold] to execute, or [bold]/reject[/bold] to discard.[/cyan]")
                     chat_ui_state.begin_conversation_turn(f"/plan {plan_task}", current_turn_id)
                     _finish_ui_turn(current_turn_id)
                     continue
@@ -2767,7 +2805,8 @@ def chat(
                 plan_trigger_request = True
                 from mana_agent.agent.plan_service import PlanService
                 try:
-                    plan_service = PlanService(root)
+                    plan_llm = _agent_decision_llm(ask_service) if "ask_service" in locals() and ask_service else None
+                    plan_service = PlanService(root, llm=plan_llm)
                     structured_plan = plan_service.generate_plan(question)
                     gateway.set_session_active_plan(chat_ui_state.session_id, structured_plan)
                 except Exception:

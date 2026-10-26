@@ -34,6 +34,34 @@ def _safe_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def event_classification_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    """Collect event context used to classify execution steps and activity boxes.
+
+    Runtime events may place backend/tool context at the top level while other
+    producers nest it in metadata, details, or payload. Keep those contracts
+    equivalent so a coding approval stays in Coding Activity instead of being
+    misrouted to the general Activity stream.
+    """
+    metadata = dict(
+        _safe_dict(event.get("metadata") or event.get("details") or event.get("payload"))
+    )
+    nested_sources = [
+        _safe_dict(event.get("metadata")),
+        _safe_dict(event.get("details")),
+        _safe_dict(event.get("payload")),
+    ]
+    for field_name in ("backend", "tool_name", "name"):
+        value = event.get(field_name)
+        if value is None or not str(value).strip():
+            value = next(
+                (source[field_name] for source in nested_sources if source.get(field_name)),
+                None,
+            )
+        if value is not None and str(value).strip():
+            metadata[field_name] = value
+    return metadata
+
+
 @dataclass
 class ExecutionStep:
     """A single execution phase or operation within a chat turn."""
@@ -414,7 +442,7 @@ class ExecutionTrace:
         raw_status = str(ev.get("status") or "running").strip().lower()
         title = str(ev.get("title") or "").strip()
         detail = str(ev.get("detail") or ev.get("summary") or ev.get("output_preview") or ev.get("message") or ev.get("error") or "").strip()
-        meta = dict(ev.get("metadata") or ev.get("details") or ev.get("payload") or {})
+        meta = event_classification_metadata(ev)
         duration_ms = ev.get("duration_ms")
         event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
 

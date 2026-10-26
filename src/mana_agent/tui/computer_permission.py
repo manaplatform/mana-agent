@@ -21,6 +21,7 @@ class ComputerPermissionChoice:
     server: bool = False
     api: bool = False
     transactional: bool = False
+    approve_all: bool = False
 
 
 class ComputerPermissionRequested(Message):
@@ -36,6 +37,7 @@ class ComputerPermissionRequested(Message):
         server: bool = False,
         api: bool = False,
         transactional: bool = False,
+        pending_count: int = 1,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -45,6 +47,7 @@ class ComputerPermissionRequested(Message):
         self.server = server
         self.api = api
         self.transactional = transactional
+        self.pending_count = pending_count
 
 
 class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
@@ -73,6 +76,7 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
         server: bool = False,
         api: bool = False,
         transactional: bool = False,
+        pending_count: int = 1,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -82,6 +86,7 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
         self.server = server
         self.api = api
         self.transactional = transactional
+        self.pending_count = pending_count
 
     def compose(self) -> ComposeResult:
         with Vertical(id="computer-permission-dialog"):
@@ -102,11 +107,26 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
             with Horizontal(classes="computer-permission-actions"):
                 yield Button("Deny", id="permission-deny", variant="error")
                 yield Button("Allow once", id="permission-once", variant="primary")
-                if not self.server and not self.api and not self.transactional:
+                if self.pending_count > 1 or (self.transactional and self.pending_count > 1):
+                    yield Button(f"Allow all ({self.pending_count})", id="permission-all", variant="success")
+                elif not self.server and not self.api and not self.transactional:
                     yield Button("This session", id="permission-session", variant="success")
                     yield Button("Always", id="permission-always", variant="warning")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "permission-all":
+            self.dismiss(
+                ComputerPermissionChoice(
+                    self.request_id,
+                    PermissionDecision.ALLOW_ONCE,
+                    self.remote,
+                    self.server,
+                    self.api,
+                    self.transactional,
+                    approve_all=True,
+                )
+            )
+            return
         decisions = {
             "permission-deny": None,
             "permission-once": PermissionDecision.ALLOW_ONCE,

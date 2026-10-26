@@ -12,7 +12,12 @@ from mana_agent.agent.mode import (
     normalize_execution_mode,
 )
 from mana_agent.agent.plan_service import PlanService
-from mana_agent.chat_commands.builtins import _act_command, _approve_command, _execution_mode_command
+from mana_agent.chat_commands.builtins import (
+    _act_command,
+    _approve_command,
+    _execution_mode_command,
+    _plan_command,
+)
 from mana_agent.chat_commands.models import CommandContext
 from mana_agent.coding.models import CodingTask
 from mana_agent.gateway.chat_gateway import AgentChatGateway
@@ -318,6 +323,7 @@ def test_chat_commands_mode_and_approval(tmp_path: Path, monkeypatch) -> None:
     res_app = _approve_command(ctx, [])
     assert res_app.status == "success"
     assert "explicitly approved" in res_app.message
+    assert res_app.data["execution_request"] == "Test"
     assert gw.get_session_execution_mode(session_id) == "act"
 
     # Switch back to plan
@@ -331,7 +337,22 @@ def test_chat_commands_mode_and_approval(tmp_path: Path, monkeypatch) -> None:
     res_act = _act_command(ctx, [])
     assert res_act.status == "success"
     assert "Act Mode" in res_act.message
+    assert res_act.data["execution_request"] == "Test 2"
     assert gw.get_session_execution_mode(session_id) == "act"
+
+    # /plan command generates plan, stays in plan mode, and saves active plan
+    activity_events: list[dict[str, object]] = []
+    ctx.frontend_data["activity_sink"] = activity_events.append
+    res_plan = _plan_command(ctx, ["Refactor database connection pool"])
+    assert res_plan.status == "success"
+    assert "Implementation Plan: Refactor database connection pool" in res_plan.message
+    assert gw.get_session_execution_mode(session_id) == "plan"
+    active_plan = gw.get_session_active_plan(session_id)
+    assert active_plan is not None
+    assert active_plan["goal"] == "Refactor database connection pool"
+    assert active_plan["approved"] is False
+    assert any(event.get("tool_name") == "repo_search" for event in activity_events)
+    assert any(event.get("title") == "Implementation plan ready for approval" for event in activity_events)
 
 
 def test_coding_task_plan_mode_read_only_default() -> None:
@@ -341,3 +362,79 @@ def test_coding_task_plan_mode_read_only_default() -> None:
 
     task_act = CodingTask(task_id="t-act", goal="Fix bug", execution_mode="act")
     assert task_act.requires_repository_write is True
+
+
+def test_plan_service_smart_querying_filters_noise_and_finds_relevant_code(tmp_path: Path) -> None:
+    # Setup dummy project files mimicking repository layout
+    github_dir = tmp_path / ".github"
+    github_dir.mkdir(parents=True)
+    (github_dir / "pull_request_template.md").write_text("Request pull template with approval")
+    (tmp_path / "CHANGELOG.md").write_text("Change log with approval and activity details")
+
+    src_widgets = tmp_path / "src" / "mana_agent" / "tui" / "widgets"
+    src_widgets.mkdir(parents=True)
+    activity_file = src_widgets / "activity_boxes.py"
+    activity_file.write_text(
+        "class MainActivityBox:\n"
+        "    def render_activity(self):\n"
+        "        pass\n\n"
+        "class CodingActivityBox:\n"
+        "    def render_coding_activity(self):\n"
+        "        pass\n"
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "test_tui_approval_realtime.py").write_text("def test_realtime_approval(): pass\n")
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "test-pkg"\ndependencies = ["rich", "textual"]\n')
+
+    service = PlanService(tmp_path)
+    task = "approval request dont show in seperate box,only show in activity box and coding activity. for confirm too , dont show in seperate card."
+    context = service.explore_context(task)
+
+    discovered = context["discovered_files"]
+    # Noise files must be filtered out
+    assert not any(".github" in f for f in discovered)
+    assert not any("CHANGELOG" in f for f in discovered)
+
+    # Relevant code and tests must be discovered
+    assert any("activity_boxes.py" in f for f in discovered)
+
+    # Generated plan must be grounded in the discovered code structure
+    plan = service.generate_plan(task)
+    assert any("activity_boxes.py" in f for f in plan.affected_files)
+
+    steps_text = "\n".join(plan.implementation_steps)
+    # The generated steps must explicitly mention the discovered class or file
+    assert "activity_boxes.py" in steps_text or "MainActivityBox" in steps_text or "CodingActivityBox" in steps_text
+    # Validation strategies must include targeted test commands
+    val_text = "\n".join(plan.validation_strategies)
+    assert "test_tui_approval_realtime.py" in val_text or "pytest" in val_text
+
+
+def test_plan_service_with_llm_proposal_plan(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src" / "pkg"
+    src_dir.mkdir(parents=True)
+    (src_dir / "app.py").write_text("def run(): pass\n")
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(
+        content="""{
+            "objectives": ["LLM Objective 1", "LLM Objective 2"],
+            "affected_files": ["src/pkg/app.py"],
+            "implementation_steps": ["Step 1: Refactor app.py", "Step 2: Add validation"],
+            "potential_risks": ["Risk 1: Breaking change"],
+            "validation_strategies": ["pytest tests/test_app.py -v"]
+        }"""
+    )
+
+    service = PlanService(tmp_path, llm=mock_llm)
+    plan = service.generate_plan("Refactor app", candidate_files=["src/pkg/app.py"])
+
+    assert plan.objectives == ["LLM Objective 1", "LLM Objective 2"]
+    assert plan.affected_files == ["src/pkg/app.py"]
+    assert plan.implementation_steps == ["Step 1: Refactor app.py", "Step 2: Add validation"]
+    assert plan.potential_risks == ["Risk 1: Breaking change"]
+    assert plan.validation_strategies == ["pytest tests/test_app.py -v"]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -455,6 +456,72 @@ class ToolExecutionDispatcher:
                     else:
                         raise
             except ApprovalRequired as pending:
+                is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
+                if not is_test_env and action_runtime.inbox_service is not None and pending.inbox_item_id:
+                    from mana_agent.human_inbox.models import InboxStatus
+                    from mana_agent.transactional_actions.models import ActionState, ApprovalScope
+
+                    start_time = time.monotonic()
+                    poll_interval = 0.25
+                    timeout_seconds = float(args.get("timeout_seconds") or 120.0)
+                    approved = False
+                    grant_id = ""
+                    last_item = None
+                    while time.monotonic() - start_time < timeout_seconds:
+                        grant = action_runtime.approvals.find_valid(pending.action)
+                        if grant is not None:
+                            approved = True
+                            grant_id = grant.approval_id
+                            break
+                        try:
+                            last_item = action_runtime.inbox_service.repository.get(pending.inbox_item_id)
+                        except Exception:
+                            last_item = None
+                        if last_item is not None and last_item.status == InboxStatus.APPROVED:
+                            grant = action_runtime.approvals.find_valid(pending.action)
+                            if grant is None and pending.action.state is ActionState.AWAITING_APPROVAL:
+                                req_scope = (
+                                    pending.action.policy_decision.required_approval_scope
+                                    if pending.action.policy_decision
+                                    else ApprovalScope.ACTION_ONCE
+                                )
+                                grant = action_runtime.approvals.issue(
+                                    pending.action,
+                                    approved_by=last_item.response_actor_id or "user",
+                                    ttl_seconds=300,
+                                    scope=req_scope or ApprovalScope.ACTION_ONCE,
+                                )
+                            approved = True
+                            grant_id = grant.approval_id if grant is not None else ""
+                            break
+                        elif last_item is not None and last_item.status in {
+                            InboxStatus.DENIED,
+                            InboxStatus.CANCELLED,
+                            InboxStatus.SUPERSEDED,
+                            InboxStatus.EXPIRED,
+                        }:
+                            break
+                        time.sleep(poll_interval)
+
+                    if approved and grant_id:
+                        outcome = action_runtime.execute(adapter, approval_id=grant_id)
+                        return {
+                            "ok": outcome.action.state.value == "committed",
+                            **outcome.result,
+                            "action_id": outcome.action.action_id,
+                        }
+                    else:
+                        st = last_item.status.value if (last_item and hasattr(last_item, "status")) else "denied"
+                        return {
+                            "ok": False,
+                            "approved": False,
+                            "status": st if st in {"denied", "cancelled"} else "timeout",
+                            "error": f"Command was not approved before execution: {cmd}",
+                            "permission_required": True,
+                            "inbox_item_id": pending.inbox_item_id,
+                            "action_id": pending.action.action_id,
+                        }
+
                 from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
 
                 llm_for_judge = getattr(self, "llm", None)
@@ -494,21 +561,22 @@ class ToolExecutionDispatcher:
                             logger.warning("Inbox item approval update failed: %s", inb_err)
                     grant = action_runtime.approvals.find_valid(pending.action)
                     if grant is None:
-                        from mana_agent.transactional_actions.models import ApprovalScope
+                        from mana_agent.transactional_actions.models import ActionState, ApprovalScope
 
-                        req_scope = (
-                            pending.action.policy_decision.required_approval_scope
-                            if pending.action.policy_decision
-                            else ApprovalScope.ACTION_ONCE
-                        )
-                        grant = action_runtime.approvals.issue(
-                            pending.action,
-                            approved_by=reviewer_id,
-                            ttl_seconds=300,
-                            scope=req_scope or ApprovalScope.ACTION_ONCE,
-                        )
+                        if pending.action.state is ActionState.AWAITING_APPROVAL:
+                            req_scope = (
+                                pending.action.policy_decision.required_approval_scope
+                                if pending.action.policy_decision
+                                else ApprovalScope.ACTION_ONCE
+                            )
+                            grant = action_runtime.approvals.issue(
+                                pending.action,
+                                approved_by=reviewer_id,
+                                ttl_seconds=300,
+                                scope=req_scope or ApprovalScope.ACTION_ONCE,
+                            )
                     # "if judgement accept that -> run it"
-                    outcome = action_runtime.execute(adapter, approval_id=grant.approval_id)
+                    outcome = action_runtime.execute(adapter, approval_id=grant.approval_id if grant else "")
                     return {
                         "ok": outcome.action.state.value == "committed",
                         **outcome.result,
