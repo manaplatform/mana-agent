@@ -2,6 +2,42 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-30
+
+- Live steering groundwork: added an isolated typed SQLite input ledger with
+  per-execution ordering and idempotency. It is not connected to the TUI,
+  dashboard, execution controller, approvals, or recovery and does not enable
+  Steer Mode. Remaining safety and integration work is documented in
+  `docs/live-steering-design.md`. Verification command:
+  `PYTHONPATH=src venv/bin/python -m pytest tests/execution/test_steering_ledger.py -q`.
+
+- Transactional action execution and model approval judgment flow:
+  - **Allowed approved actions to execute from anywhere (`_assert_branch_runnable`):**
+    - Updated `src/mana_agent/transactional_actions/gateway.py` (`_assert_branch_runnable`): Removed the restrictive check requiring `task.state.value == "running"` and `not task.waiting_inbox_item_id`. Once an action is approved by an authorized reviewer and matches its intent digest, it is authorized to execute from any context (CLI, TUI, script runner, agent loop, API, or cross-branch callers).
+  - **Model approval judgment flow and removal of hardcoded policy gates:**
+    - Updated `src/mana_agent/multi_agent/agents/approval_agent.py` (`judge_approval_request`, `ModelApprovalJudgment`):
+      - Expanded `ModelApprovalJudgment.judgment` to `Literal["accept", "approval", "deny"]`, supporting direct acceptance, human approval delegation, and denial.
+      - Removed hardcoded regex filters (`_DANGEROUS_COMMAND_PATTERNS`) so that all commands pass to model judgment without being preemptively short-circuited.
+      - Added `error: str = ""` parameter to `judge_approval_request` so command execution errors are evaluated by judgment for potential retry or alternative suggestions.
+      - Defaulted to `judgment="approval"` when no LLM engine is configured, allowing human review rather than failing closed with hardcoded denial.
+    - Updated `src/mana_agent/transactional_actions/policy.py` (`ActionPolicy._shell`, `ActionPolicy._git`):
+      - Changed hardcoded `PolicyOutcome.DENY` for destructive shell and git actions to `PolicyOutcome.REQUIRE_APPROVAL`, ensuring requests pass to judgment and human approval rather than static hard denial.
+    - Updated `src/mana_agent/coding/programmatic.py` (`ToolExecutionDispatcher._execute_builtin_tool`):
+      - Removed the hardcoded polling loop that bypassed model judgment in non-test environments.
+      - Routed approval-required actions through `judge_approval_request`: auto-executing on `accept`, creating/dispatching durable human approval on `approval`, and blocking on `deny`.
+      - On script execution error (non-zero return code or execution failure), routed the error to `judge_approval_request`: retrying or running suggested fix on `accept`, requesting human approval on `approval`, and returning the error on `deny`.
+  - **Resolved approval recording errors (`Failed to record approval decision`):**
+    - Updated `src/mana_agent/transactional_actions/approvals.py` (`ApprovalGrant.valid_for`, `ApprovalRegistry.issue`): Allowed grants and grant issuing when actions are already in `ActionState.APPROVED`, `ActionState.EXECUTING`, or `ActionState.COMMITTED`, preventing `ValueError: only an action awaiting approval may receive a grant` when repeat or concurrent approval calls occur.
+    - Updated `src/mana_agent/gateway/chat_gateway.py` (`transactional_action_approval_command`): Allowed `ActionState.APPROVED`, `ActionState.EXECUTING`, and `ActionState.COMMITTED` during version checks, and handled branch resumption notices gracefully so the inbox approval grant is issued reliably even if the branch controller has no active resumption claim.
+    - Updated `src/mana_agent/tui/app.py` (`_complete_computer_permission`): Added fallback to direct human inbox service resolution if gateway approval command fails, and added comprehensive idempotent error handling for already-approved, already-processed, or non-approvable states.
+  - **Regression test coverage:**
+    - Added `test_approved_action_with_checkpoint_executes_from_anywhere_without_resumed_branch_error` in `tests/gateway/test_transactional_approval.py`.
+    - Updated `test_judge_approval_request_evaluates_via_model_without_hardcoded_gate` and added `test_judge_approval_request_returns_approval_verdict_for_consequential_command`, `test_dispatcher_script_error_sends_to_judgment_and_retries_on_accept`, and `test_dispatcher_sends_approval_when_judgment_demands_human_approval` in `tests/coding/test_coding_approval_judgment.py`.
+  - **User verification commands (not run by agent):**
+    - `PYTHONPATH=src pytest tests/coding/test_coding_approval_judgment.py -v`
+    - `PYTHONPATH=src pytest tests/gateway/test_transactional_approval.py -v`
+    - `PYTHONPATH=src pytest tests/transactional_actions/test_policy_gated_actions.py -v`
+
 ## 2026-10-29
 
 - Context inspector: registered `/context` in the local shared command

@@ -165,3 +165,47 @@ def test_transactional_action_double_accept_is_idempotent(tmp_path: Path, monkey
     assert result2["approval_id"] != ""
 
 
+def test_approved_action_with_checkpoint_executes_from_anywhere_without_resumed_branch_error(tmp_path: Path, monkeypatch) -> None:
+    """Verifies that an approved action with a durable checkpoint executes from everywhere without requiring resumed running branch."""
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    gw = _build_test_gateway(tmp_path)
+
+    from mana_agent.human_inbox.models import InboxRequest, InboxRequestType, ResponseOperation, ResponseSubmission, ReviewerAssignment, ReviewerType
+    from mana_agent.transactional_actions.adapters import FileActionAdapter
+    from mana_agent.transactional_actions.gateway import ApprovalRequired
+
+    target = tmp_path / "removable.txt"
+    target.write_text("content-to-delete", encoding="utf-8")
+
+    adapter = FileActionAdapter(
+        workspace_root=tmp_path,
+        operation="delete",
+        path=target.name,
+        content="",
+        parent_task_id="branch_task_123",
+        actor="user",
+        originating_agent="agent",
+        idempotency_key="delete-with-checkpoint-test",
+        snapshot_root=tmp_path / "snapshots",
+    )
+
+    with pytest.raises(ApprovalRequired) as pending:
+        gw._transactional_runtime.gateway.execute(adapter)
+
+    # Approve the action via gateway approval command
+    item_id = pending.value.inbox_item_id
+    appr_res = gw.transactional_action_approval_command(item_id)
+    assert appr_res["status"] == "approved"
+    grant_id = appr_res["approval_id"]
+    assert grant_id
+
+    # Attach checkpoint to the approved inbox item to simulate a supervised checkpointed branch
+    gw.human_inbox_service.repository.update(item_id, lambda it: setattr(it, "checkpoint_id", "chk_supervised_999"))
+
+    # Execute from outside any running branch; must succeed without 'resumed running branch' PermissionError
+    outcome = gw._transactional_runtime.gateway.execute(adapter, approval_id=grant_id)
+    assert outcome.action.state.value == "committed"
+    assert not target.exists()
+
+
+

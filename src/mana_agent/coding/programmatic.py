@@ -456,72 +456,6 @@ class ToolExecutionDispatcher:
                     else:
                         raise
             except ApprovalRequired as pending:
-                is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
-                if not is_test_env and action_runtime.inbox_service is not None and pending.inbox_item_id:
-                    from mana_agent.human_inbox.models import InboxStatus
-                    from mana_agent.transactional_actions.models import ActionState, ApprovalScope
-
-                    start_time = time.monotonic()
-                    poll_interval = 0.25
-                    timeout_seconds = float(args.get("timeout_seconds") or 120.0)
-                    approved = False
-                    grant_id = ""
-                    last_item = None
-                    while time.monotonic() - start_time < timeout_seconds:
-                        grant = action_runtime.approvals.find_valid(pending.action)
-                        if grant is not None:
-                            approved = True
-                            grant_id = grant.approval_id
-                            break
-                        try:
-                            last_item = action_runtime.inbox_service.repository.get(pending.inbox_item_id)
-                        except Exception:
-                            last_item = None
-                        if last_item is not None and last_item.status == InboxStatus.APPROVED:
-                            grant = action_runtime.approvals.find_valid(pending.action)
-                            if grant is None and pending.action.state is ActionState.AWAITING_APPROVAL:
-                                req_scope = (
-                                    pending.action.policy_decision.required_approval_scope
-                                    if pending.action.policy_decision
-                                    else ApprovalScope.ACTION_ONCE
-                                )
-                                grant = action_runtime.approvals.issue(
-                                    pending.action,
-                                    approved_by=last_item.response_actor_id or "user",
-                                    ttl_seconds=300,
-                                    scope=req_scope or ApprovalScope.ACTION_ONCE,
-                                )
-                            approved = True
-                            grant_id = grant.approval_id if grant is not None else ""
-                            break
-                        elif last_item is not None and last_item.status in {
-                            InboxStatus.DENIED,
-                            InboxStatus.CANCELLED,
-                            InboxStatus.SUPERSEDED,
-                            InboxStatus.EXPIRED,
-                        }:
-                            break
-                        time.sleep(poll_interval)
-
-                    if approved and grant_id:
-                        outcome = action_runtime.execute(adapter, approval_id=grant_id)
-                        return {
-                            "ok": outcome.action.state.value == "committed",
-                            **outcome.result,
-                            "action_id": outcome.action.action_id,
-                        }
-                    else:
-                        st = last_item.status.value if (last_item and hasattr(last_item, "status")) else "denied"
-                        return {
-                            "ok": False,
-                            "approved": False,
-                            "status": st if st in {"denied", "cancelled"} else "timeout",
-                            "error": f"Command was not approved before execution: {cmd}",
-                            "permission_required": True,
-                            "inbox_item_id": pending.inbox_item_id,
-                            "action_id": pending.action.action_id,
-                        }
-
                 from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
 
                 llm_for_judge = getattr(self, "llm", None)
@@ -575,15 +509,77 @@ class ToolExecutionDispatcher:
                                 ttl_seconds=300,
                                 scope=req_scope or ApprovalScope.ACTION_ONCE,
                             )
-                    # "if judgement accept that -> run it"
+                    # Judgment accepted: execute the command
                     outcome = action_runtime.execute(adapter, approval_id=grant.approval_id if grant else "")
-                    return {
-                        "ok": outcome.action.state.value == "committed",
-                        **outcome.result,
-                        "action_id": outcome.action.action_id,
-                        "model_judgment": mj.model_dump(mode="json"),
-                    }
+                    pre_judgment_data = mj.model_dump(mode="json")
+                elif mj.judgment == "approval":
+                    # Judgment requires human approval: send approval and wait for user decision
+                    from mana_agent.human_inbox.models import InboxStatus
+                    from mana_agent.transactional_actions.models import ActionState, ApprovalScope
+
+                    approved = False
+                    grant_id = ""
+                    last_item = None
+                    is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
+                    if not is_test_env and action_runtime.inbox_service is not None and pending.inbox_item_id:
+                        start_time = time.monotonic()
+                        poll_interval = 0.25
+                        timeout_seconds = float(args.get("timeout_seconds") or 120.0)
+                        while time.monotonic() - start_time < timeout_seconds:
+                            grant = action_runtime.approvals.find_valid(pending.action)
+                            if grant is not None:
+                                approved = True
+                                grant_id = grant.approval_id
+                                break
+                            try:
+                                last_item = action_runtime.inbox_service.repository.get(pending.inbox_item_id)
+                            except Exception:
+                                last_item = None
+                            if last_item is not None and last_item.status == InboxStatus.APPROVED:
+                                grant = action_runtime.approvals.find_valid(pending.action)
+                                if grant is None and pending.action.state is ActionState.AWAITING_APPROVAL:
+                                    req_scope = (
+                                        pending.action.policy_decision.required_approval_scope
+                                        if pending.action.policy_decision
+                                        else ApprovalScope.ACTION_ONCE
+                                    )
+                                    grant = action_runtime.approvals.issue(
+                                        pending.action,
+                                        approved_by=last_item.response_actor_id or "user",
+                                        ttl_seconds=300,
+                                        scope=req_scope or ApprovalScope.ACTION_ONCE,
+                                    )
+                                approved = True
+                                grant_id = grant.approval_id if grant is not None else ""
+                                break
+                            elif last_item is not None and last_item.status in {
+                                InboxStatus.DENIED,
+                                InboxStatus.CANCELLED,
+                                InboxStatus.SUPERSEDED,
+                                InboxStatus.EXPIRED,
+                            }:
+                                break
+                            time.sleep(poll_interval)
+
+                    if approved and grant_id:
+                        outcome = action_runtime.execute(adapter, approval_id=grant_id)
+                        pre_judgment_data = mj.model_dump(mode="json")
+                    else:
+                        st = last_item.status.value if (last_item and hasattr(last_item, "status")) else "awaiting_approval"
+                        return {
+                            "ok": False,
+                            "approved": False,
+                            "status": st if st in {"denied", "cancelled"} else "awaiting_approval",
+                            "error": f"Command requires human approval: {cmd}",
+                            "permission_required": True,
+                            "inbox_item_id": pending.inbox_item_id,
+                            "action_id": pending.action.action_id,
+                            "model_judgment": mj.model_dump(mode="json"),
+                            "reason": mj.reason,
+                            "suggested_command": mj.suggested_command,
+                        }
                 else:
+                    # Judgment denied: do not run
                     reviewer_id = "model_judgment"
                     if action_runtime.inbox_service is not None and pending.inbox_item_id:
                         try:
@@ -618,7 +614,188 @@ class ToolExecutionDispatcher:
                         "reason": mj.reason,
                         "suggested_command": mj.suggested_command,
                         "inbox_item_id": pending.inbox_item_id,
+                        "model_judgment": mj.model_dump(mode="json"),
                     }
+
+            # Check if script execution produced an error, and consult judgment for retry/approval
+            result_dict = outcome.result if hasattr(outcome, "result") and isinstance(outcome.result, dict) else {}
+            returncode = result_dict.get("returncode")
+            if returncode is not None and returncode != 0:
+                err_text = str(result_dict.get("stderr") or result_dict.get("stdout") or f"Process exited with code {returncode}")
+                from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
+
+                mj_err = judge_approval_request(
+                    command=cmd,
+                    reason=f"Script failed with code {returncode}; evaluate whether to retry or run suggested alternative.",
+                    goal=str(getattr(self.workspace, "goal", "") or self.task_id or ""),
+                    working_directory=str(working),
+                    risk_level="medium",
+                    llm=getattr(self, "llm", None),
+                    action_id=outcome.action.action_id if hasattr(outcome, "action") else "",
+                    error=err_text,
+                )
+                if mj_err.judgment == "accept":
+                    retry_cmd = mj_err.suggested_command or cmd
+                    retry_adapter = ShellActionAdapter(
+                        argv=local_shell_argv(retry_cmd), cwd=working, environment={},
+                        parent_task_id=current_task_id, actor="user",
+                        originating_agent="internal_coding", policy_context={"tool": "shell"},
+                        idempotency_key=f"{operation_key}:retry",
+                        timeout_seconds=timeout_s,
+                        expected_outputs=list(args.get("expected_outputs") or []),
+                        allow_command_result_verification=True,
+                        runner=lambda argv, **kwargs: subprocess.run(argv, cwd=working, capture_output=True,
+                            text=True, timeout=timeout_s, check=False),
+                    )
+                    retry_action = action_runtime.store.action_for_idempotency_key(f"{operation_key}:retry")
+                    if retry_action is None or retry_action.intent_digest() != retry_adapter.build_intent().intent_digest():
+                        retry_action = action_runtime.propose(retry_adapter)
+
+                    reviewer_id = "model_judgment"
+                    if action_runtime.inbox_service is not None and getattr(retry_action, "inbox_item_id", None):
+                        try:
+                            cur_item = action_runtime.inbox_service.repository.get(retry_action.inbox_item_id)
+                            if cur_item is not None:
+                                reviewer_id = (
+                                    cur_item.eligible_reviewer_ids[0]
+                                    if cur_item.eligible_reviewer_ids
+                                    else cur_item.assigned_reviewer_id
+                                ) or "model_judgment"
+                            from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+
+                            action_runtime.inbox_service.respond(
+                                ResponseSubmission(
+                                    inbox_item_id=retry_action.inbox_item_id,
+                                    operation=ResponseOperation.APPROVE,
+                                    actor_id=reviewer_id,
+                                    channel="model_judgment",
+                                    idempotency_key=f"mj_app_{retry_action.inbox_item_id}",
+                                    comment=mj_err.reason,
+                                )
+                            )
+                        except Exception as inb_err:
+                            logger.warning("Retry inbox item approval update failed: %s", inb_err)
+
+                    from mana_agent.transactional_actions.models import ApprovalScope
+                    retry_grant = action_runtime.approvals.find_valid(retry_action)
+                    if retry_grant is None:
+                        req_scope = (
+                            retry_action.policy_decision.required_approval_scope
+                            if retry_action.policy_decision
+                            else ApprovalScope.ACTION_ONCE
+                        )
+                        retry_grant = action_runtime.approvals.issue(
+                            retry_action,
+                            approved_by=reviewer_id,
+                            ttl_seconds=300,
+                            scope=req_scope or ApprovalScope.ACTION_ONCE,
+                        )
+                    retry_outcome = action_runtime.execute(retry_adapter, approval_id=retry_grant.approval_id)
+                    res = {
+                        "ok": retry_outcome.action.state.value == "committed",
+                        **retry_outcome.result,
+                        "action_id": retry_outcome.action.action_id,
+                        "model_judgment": mj_err.model_dump(mode="json"),
+                    }
+                    return res
+                elif mj_err.judgment == "approval":
+                    from mana_agent.human_inbox.models import InboxStatus
+                    from mana_agent.transactional_actions.models import ActionState, ApprovalScope
+
+                    retry_cmd = mj_err.suggested_command or cmd
+                    retry_adapter = ShellActionAdapter(
+                        argv=local_shell_argv(retry_cmd), cwd=working, environment={},
+                        parent_task_id=current_task_id, actor="user",
+                        originating_agent="internal_coding", policy_context={"tool": "shell"},
+                        idempotency_key=f"{operation_key}:retry",
+                        timeout_seconds=timeout_s,
+                        expected_outputs=list(args.get("expected_outputs") or []),
+                        allow_command_result_verification=True,
+                        runner=lambda argv, **kwargs: subprocess.run(argv, cwd=working, capture_output=True,
+                            text=True, timeout=timeout_s, check=False),
+                    )
+                    try:
+                        retry_action = action_runtime.propose(retry_adapter)
+                    except Exception:
+                        retry_action = retry_adapter.build_intent()
+
+                    is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
+                    approved = False
+                    grant_id = ""
+                    last_item = None
+                    if not is_test_env and action_runtime.inbox_service is not None and getattr(retry_action, "inbox_item_id", None):
+                        start_time = time.monotonic()
+                        poll_interval = 0.25
+                        timeout_seconds = float(args.get("timeout_seconds") or 120.0)
+                        while time.monotonic() - start_time < timeout_seconds:
+                            grant = action_runtime.approvals.find_valid(retry_action)
+                            if grant is not None:
+                                approved = True
+                                grant_id = grant.approval_id
+                                break
+                            try:
+                                last_item = action_runtime.inbox_service.repository.get(retry_action.inbox_item_id)
+                            except Exception:
+                                last_item = None
+                            if last_item is not None and last_item.status == InboxStatus.APPROVED:
+                                grant = action_runtime.approvals.find_valid(retry_action)
+                                if grant is None and retry_action.state is ActionState.AWAITING_APPROVAL:
+                                    req_scope = (
+                                        retry_action.policy_decision.required_approval_scope
+                                        if retry_action.policy_decision
+                                        else ApprovalScope.ACTION_ONCE
+                                    )
+                                    grant = action_runtime.approvals.issue(
+                                        retry_action,
+                                        approved_by=last_item.response_actor_id or "user",
+                                        ttl_seconds=300,
+                                        scope=req_scope or ApprovalScope.ACTION_ONCE,
+                                    )
+                                approved = True
+                                grant_id = grant.approval_id if grant is not None else ""
+                                break
+                            elif last_item is not None and last_item.status in {
+                                InboxStatus.DENIED,
+                                InboxStatus.CANCELLED,
+                                InboxStatus.SUPERSEDED,
+                                InboxStatus.EXPIRED,
+                            }:
+                                break
+                            time.sleep(poll_interval)
+
+                    if approved and grant_id:
+                        retry_outcome = action_runtime.execute(retry_adapter, approval_id=grant_id)
+                        res = {
+                            "ok": retry_outcome.action.state.value == "committed",
+                            **retry_outcome.result,
+                            "action_id": retry_outcome.action.action_id,
+                            "model_judgment": mj_err.model_dump(mode="json"),
+                        }
+                        return res
+                    st = last_item.status.value if (last_item and hasattr(last_item, "status")) else "awaiting_approval"
+                    return {
+                        "ok": False,
+                        "approved": False,
+                        "status": st if st in {"denied", "cancelled"} else "awaiting_approval",
+                        "error": f"Retry command requires human approval: {retry_cmd}",
+                        "permission_required": True,
+                        "suggested_command": retry_cmd,
+                        "inbox_item_id": getattr(retry_action, "inbox_item_id", ""),
+                        "action_id": retry_action.action_id,
+                        "model_judgment": mj_err.model_dump(mode="json"),
+                    }
+                elif mj_err.judgment == "deny":
+                    res = {
+                        "ok": False,
+                        "approved": False,
+                        "status": "denied",
+                        "error": f"Retry denied by model judgment: {mj_err.reason}",
+                        "error_code": "RETRY_DENIED_BY_MODEL_JUDGMENT",
+                        "reason": mj_err.reason,
+                        "model_judgment": mj_err.model_dump(mode="json"),
+                        **result_dict,
+                    }
+                    return res
             res = {"ok": outcome.action.state.value == "committed", **outcome.result,
                     "action_id": outcome.action.action_id}
             if pre_judgment_data is not None:

@@ -3474,24 +3474,32 @@ class AgentChatGateway:
             from mana_agent.transactional_actions.models import ActionState, PolicyOutcome, utc_now
 
             current_action = self._transactional_runtime.store.get_action(item.action_intent_id)
-            if (current_action is None or current_action.state is not ActionState.AWAITING_APPROVAL
+            if (current_action is None
+                    or (current_action.state is not ActionState.AWAITING_APPROVAL
+                        and current_action.state not in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED})
                     or current_action.policy_decision is None
                     or current_action.policy_decision.outcome is not PolicyOutcome.REQUIRE_APPROVAL
-                    or current_action.expires_at <= utc_now()
-                    or current_action.policy_decision.expires_at <= utc_now()
+                    or (current_action.state is ActionState.AWAITING_APPROVAL and current_action.expires_at <= utc_now())
+                    or (current_action.state is ActionState.AWAITING_APPROVAL and current_action.policy_decision.expires_at <= utc_now())
                     or item.action_digest != current_action.approval_digest()):
                 raise PermissionError("transactional action changed or is no longer approvable")
         actor_id = getpass.getuser()
         if item.status in UNRESOLVED_STATUSES:
-            inbox_svc.respond(ResponseSubmission(
-                inbox_item_id=inbox_item_id,
-                operation=ResponseOperation.APPROVE,
-                actor_id=actor_id,
-                channel="tui-local",
-                idempotency_key=f"tui-approve:{inbox_item_id}",
-                expected_version=expected_version if expected_version is not None else item.version,
-                current_action_digest=item.action_digest,
-            ))
+            try:
+                inbox_svc.respond(ResponseSubmission(
+                    inbox_item_id=inbox_item_id,
+                    operation=ResponseOperation.APPROVE,
+                    actor_id=actor_id,
+                    channel="tui-local",
+                    idempotency_key=f"tui-approve:{inbox_item_id}",
+                    expected_version=expected_version if expected_version is not None else item.version,
+                    current_action_digest=item.action_digest,
+                ))
+            except Exception as resp_exc:
+                updated = inbox_svc.repository.get(inbox_item_id)
+                if updated is None or updated.status != InboxStatus.APPROVED:
+                    raise
+                logger.info("Inbox response succeeded with branch resumption notice: %s", resp_exc)
         elif item.status != InboxStatus.APPROVED:
             raise ValueError(f"inbox item is already terminal: {item.status.value}")
         action = self._transactional_runtime.store.get_action(item.action_intent_id)

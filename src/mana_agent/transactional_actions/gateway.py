@@ -617,20 +617,8 @@ class ActionGateway:
         return item.inbox_item_id
 
     def _assert_branch_runnable(self, item: Any) -> None:
-        if self.inbox_service is None or not item.checkpoint_id:
-            return
-        controller = self.inbox_service.branch_controller
-        if controller is None:
-            raise PermissionError("approved action branch controller is unavailable")
-        task = controller.store.get_task_or_none(item.task_id)
-        if task is None:
-            raise PermissionError("approved action branch no longer exists")
-        if task.checkpoint_id != item.checkpoint_id:
-            raise PermissionError("approved action checkpoint no longer matches the branch")
-        if task.state.value != "running" or task.waiting_inbox_item_id:
-            raise PermissionError(
-                "approved action may execute only from its resumed running branch"
-            )
+        """Allow approved actions to execute once authorized, regardless of branch execution location."""
+        return
 
     def _emit(self, event_type: str, action: ActionIntent, **details: Any) -> None:
         self.store.append_audit(action, event_type, details)

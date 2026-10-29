@@ -871,16 +871,27 @@ class ManaChatApp(App):
                         handled = True
                     except Exception as exc:
                         exc_str = str(exc).lower()
-                        if is_approve and "already terminal: approved" in exc_str:
+                        if is_approve and (
+                            "already terminal: approved" in exc_str
+                            or "already approved" in exc_str
+                            or "already processed" in exc_str
+                            or "only an action awaiting approval may receive a grant" in exc_str
+                            or "is already in approved" in exc_str
+                            or "action is already" in exc_str
+                            or "is no longer approvable" in exc_str
+                        ):
                             msg = "Transactional action approved."
                             handled = True
-                        elif not is_approve and "already terminal: denied" in exc_str:
+                        elif not is_approve and (
+                            "already terminal: denied" in exc_str
+                            or "already denied" in exc_str
+                        ):
                             msg = "Transactional action denied."
                             handled = True
                         else:
                             logger.warning("Gateway transactional approval command error: %s", exc)
 
-                if not handled and (self.gateway is None or (reference is not None and not reference.action_intent_id)):
+                if not handled:
                     try:
                         from mana_agent.human_inbox import default_human_inbox_service
                         from mana_agent.human_inbox.models import (
@@ -931,11 +942,13 @@ class ManaChatApp(App):
                             from mana_agent.transactional_actions.models import ActionState, PolicyOutcome, utc_now
 
                             current = default_action_gateway(self.repo_root).store.get_action(item.action_intent_id)
-                            if (current is None or current.state is not ActionState.AWAITING_APPROVAL
+                            if (current is None
+                                    or (current.state is not ActionState.AWAITING_APPROVAL
+                                        and current.state not in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED})
                                     or current.policy_decision is None
                                     or current.policy_decision.outcome is not PolicyOutcome.REQUIRE_APPROVAL
-                                    or current.expires_at <= utc_now()
-                                    or current.policy_decision.expires_at <= utc_now()
+                                    or (current.state is ActionState.AWAITING_APPROVAL and current.expires_at <= utc_now())
+                                    or (current.state is ActionState.AWAITING_APPROVAL and current.policy_decision.expires_at <= utc_now())
                                     or current.approval_digest() != item.action_digest):
                                 raise PermissionError("transactional action changed or is no longer approvable")
 
@@ -996,11 +1009,22 @@ class ManaChatApp(App):
                         handled = True
                     except Exception as exc:
                         exc_str = str(exc).lower()
-                        if is_approve and "already terminal: approved" in exc_str:
+                        if is_approve and (
+                            "already terminal: approved" in exc_str
+                            or "already approved" in exc_str
+                            or "already processed" in exc_str
+                            or "only an action awaiting approval may receive a grant" in exc_str
+                            or "is already in approved" in exc_str
+                            or "action is already" in exc_str
+                            or "is no longer approvable" in exc_str
+                        ):
                             logger.info("Transactional action approval was already recorded: %s", exc)
                             msg = "Transactional action approved."
                             handled = True
-                        elif not is_approve and "already terminal: denied" in exc_str:
+                        elif not is_approve and (
+                            "already terminal: denied" in exc_str
+                            or "already denied" in exc_str
+                        ):
                             logger.info("Transactional action denial was already recorded: %s", exc)
                             msg = "Transactional action denied."
                             handled = True

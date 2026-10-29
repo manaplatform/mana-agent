@@ -48,9 +48,14 @@ def test_judge_approval_request_accepts_safe_command() -> None:
     assert judgment.confidence == 0.95
 
 
-def test_judge_approval_request_denies_destructive_command_deterministically() -> None:
-    # Model should not even be called for deterministic hard-denial
-    mock_llm = _MockLLM({"judgment": "accept"})
+def test_judge_approval_request_evaluates_via_model_without_hardcoded_gate() -> None:
+    # All commands pass to model judgment without hardcoded regex bypass
+    mock_llm = _MockLLM({
+        "judgment": "deny",
+        "reason": "Destructive rm command denied by model judgment.",
+        "suggested_command": "",
+        "confidence": 1.0,
+    })
     judgment = judge_approval_request(
         command="rm -rf /tmp/important_data",
         reason="Clean up data",
@@ -58,7 +63,7 @@ def test_judge_approval_request_denies_destructive_command_deterministically() -
         llm=mock_llm,
     )
 
-    assert mock_llm.invoked is False
+    assert mock_llm.invoked is True
     assert judgment.judgment == "deny"
     assert "destructive" in judgment.reason.lower()
 
@@ -345,4 +350,97 @@ def test_dispatcher_ignores_hardcoded_or_unverified_approval_tokens(tmp_path: Pa
     assert "HARDCODED_TEST_SUCCESS" in str(result.get("stdout") or "")
     assert mock_judge_llm.invoked is True
     assert result.get("model_judgment", {}).get("judgment") == "accept"
+
+
+def test_judge_approval_request_returns_approval_verdict_for_consequential_command() -> None:
+    mock_llm = _MockLLM({
+        "judgment": "approval",
+        "reason": "Consequential command requires human approval before proceeding.",
+        "suggested_command": "",
+        "confidence": 0.95,
+        "risk_assessment": "consequential_mutation",
+    })
+    judgment = judge_approval_request(
+        command="git reset --hard HEAD~1",
+        reason="Reset branch",
+        goal="Roll back commit",
+        llm=mock_llm,
+    )
+
+    assert mock_llm.invoked is True
+    assert judgment.judgment == "approval"
+    assert "human approval" in judgment.reason.lower()
+
+
+def test_dispatcher_script_error_sends_to_judgment_and_retries_on_accept(tmp_path: Path) -> None:
+    script_fail = tmp_path / "fail_then_pass.py"
+    script_fail.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+
+    script_ok = tmp_path / "success.py"
+    script_ok.write_text("print('RETRY_FIX_SUCCESS')\n", encoding="utf-8")
+
+    mock_llm = _MockLLM({
+        "judgment": "accept",
+        "reason": "Script failed with error; retry with suggested fixed script.",
+        "suggested_command": f"python {script_ok.name}",
+        "confidence": 1.0,
+    })
+
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+    dispatcher = ToolExecutionDispatcher(
+        workspace=workspace,
+        task_id="task_retry_test",
+        llm=mock_llm,
+    )
+
+    result = dispatcher.dispatch(
+        "run_command",
+        {"command": f"python {script_fail.name}"},
+        call_id="call_retry_1",
+    )
+
+    assert result.get("ok") is True
+    assert "RETRY_FIX_SUCCESS" in str(result.get("stdout") or "")
+    assert mock_llm.invoked is True
+    assert result.get("model_judgment", {}).get("judgment") == "accept"
+
+
+def test_dispatcher_sends_approval_when_judgment_demands_human_approval(tmp_path: Path) -> None:
+    mock_llm = _MockLLM({
+        "judgment": "approval",
+        "reason": "Consequential command requires explicit human review and approval.",
+        "suggested_command": "",
+        "confidence": 0.95,
+    })
+
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+    dispatcher = ToolExecutionDispatcher(
+        workspace=workspace,
+        task_id="task_require_human_approval",
+        llm=mock_llm,
+    )
+
+    result = dispatcher.dispatch(
+        "run_command",
+        {"command": "git clean -fd"},
+        call_id="call_approval_demand_1",
+    )
+
+    assert result.get("ok") is False
+    assert result.get("permission_required") is True
+    assert result.get("status") == "awaiting_approval"
+    assert "requires human approval" in result.get("error", "").lower()
+
 

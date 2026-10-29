@@ -283,7 +283,7 @@ class ActionPolicy:
             item in inspected for item in {"--force", "--force-with-lease", "--hard", "clean"}
         )
         if any(item in dangerous for item in inspected) or "sudo" in inspected or destructive_git or action.reversibility is Reversibility.IRREVERSIBLE:
-            return PolicyOutcome.DENY, ["destructive_shell"], "The command is destructive or irreversible.", ["deny_destructive_shell"]
+            return PolicyOutcome.REQUIRE_APPROVAL, ["destructive_shell"], "The command is potentially destructive or irreversible and requires approval.", ["approve_destructive_shell"]
         is_legacy_run_command = (
             context.get("tool") == "run_command"
             or "run-command" in action.parent_task_id
@@ -338,7 +338,7 @@ class ActionPolicy:
         if context.get("kind") == "validated_queue_git" and action.actor == "tool_worker" and risk in {"LOCAL_SAFE_WRITE", "LOCAL_HISTORY_WRITE"}:
             return PolicyOutcome.ALLOW, ["validated_local_git_workflow"], "A validated task workflow may perform this exact local Git action.", ["allow_validated_local_git"]
         if risk in {"DESTRUCTIVE", "HISTORY_REWRITE"}:
-            return PolicyOutcome.DENY, ["destructive_git"], "Destructive or history-rewriting Git actions are denied by the transactional policy.", ["deny_destructive_git"]
+            return PolicyOutcome.REQUIRE_APPROVAL, ["destructive_git"], "Destructive or history-rewriting Git actions require exact approval.", ["approve_destructive_git"]
         if risk == "REMOTE_WRITE":
             return PolicyOutcome.REQUIRE_APPROVAL, ["remote_git_write"], "A remote Git mutation requires exact approval and observable post-execution evidence.", ["approve_remote_git"]
         if risk in {"LOCAL_SAFE_WRITE", "LOCAL_HISTORY_WRITE"}:
