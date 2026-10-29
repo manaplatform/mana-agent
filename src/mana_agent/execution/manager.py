@@ -242,6 +242,7 @@ class ExecutionManager:
         auto_request_approval: bool = True,
         approval_wait_timeout_seconds: float = 60.0,
         conversation_id: str = "",
+        execution_mode: str = "act",
     ) -> dict[str, Any]:
         """Lifecycle management of shell tool calls conforming to OpenAI Shell specification."""
         import uuid
@@ -274,6 +275,7 @@ class ExecutionManager:
             action,
             call_id=call_id,
             action_approval_id=action_approval_id,
+            execution_mode=execution_mode,
         )
         self._emit(
             "shell.call.completed",
@@ -294,6 +296,7 @@ class ExecutionManager:
         auto_request_approval: bool = True,
         approval_wait_timeout_seconds: float = 60.0,
         conversation_id: str = "",
+        execution_mode: str = "act",
     ) -> dict[str, Any]:
         return run_sync(
             self.execute_shell_call(
@@ -306,6 +309,7 @@ class ExecutionManager:
                 auto_request_approval=auto_request_approval,
                 approval_wait_timeout_seconds=approval_wait_timeout_seconds,
                 conversation_id=conversation_id,
+                execution_mode=execution_mode,
             )
         )
 

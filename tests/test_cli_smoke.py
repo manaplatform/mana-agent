@@ -433,11 +433,24 @@ def test_chat_blocks_edit_requests_without_coding_agent(monkeypatch, tmp_path: P
 
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None, **_kwargs: _NoCallAskService())
+    monkeypatch.setattr(
+        "mana_agent.commands.chat_cli._decide_chat_route",
+        lambda **_kwargs: AgentDecision(
+            intent="edit",
+            confidence=1.0,
+            selected_tools=["apply_patch"],
+            code_editing_needed=True,
+            requested_effect="write",
+            target_surface="repository",
+            verifier_passed=True,
+            verifier_summary="valid repository edit route",
+        ),
+    )
 
     result = runner.invoke(
         app,
         ["chat", "--agent-tools", "--no-coding-agent"],
-        input="please patch this file\nquit\n",
+        input="/act\nplease patch this file\nquit\n",
     )
     assert result.exit_code == 0
     assert "read-only for file edits" in result.stdout

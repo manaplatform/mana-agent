@@ -44,6 +44,49 @@ MUTATION_TOOLS = frozenset(
         "document_update",
         "document_delete",
         "move_file",
+        "batch_write_files",
+        "batch_apply_patches",
+        "batch_move_files",
+        "batch_delete_files",
+        "git_create_branch",
+        "git_switch",
+        "git_checkout",
+        "git_add",
+        "git_restore",
+        "git_stash",
+        "git_commit",
+        "git_push",
+        "git_pull",
+        "git_fetch",
+        "git_tag",
+        "git_merge",
+        "git_rebase",
+        "git_revert",
+        "git_reset",
+        "git_clean",
+        "git_config",
+        "git_generic",
+        "run_command",
+        "run_script_once",
+        "verify_project",
+        "email_draft_create",
+        "email_draft_update",
+        "email_draft_delete",
+        "email_send",
+        "email_draft_send",
+        "email_reply",
+        "email_reply_all",
+        "email_forward",
+        "email_trash",
+        "email_restore",
+        "email_labels_update",
+        "api_request_execute",
+        "api_integration_update",
+        "api_integration_delete",
+        "canvas_create_surface",
+        "canvas_update_components",
+        "canvas_update_data",
+        "canvas_delete_surface",
     }
 )
 READ_TOOLS = [
@@ -61,7 +104,6 @@ READ_TOOLS = [
     "git_status",
     "git_diff",
     "git_help",
-    "git_generic",
     "git_log",
     "git_branch",
     "git_remote",
@@ -78,6 +120,19 @@ EDIT_TOOLS = [
     "git_add",
     "git_commit",
     "git_push",
+    "git_checkout",
+    "git_restore",
+    "git_stash",
+    "git_pull",
+    "git_fetch",
+    "git_tag",
+    "git_merge",
+    "git_rebase",
+    "git_revert",
+    "git_reset",
+    "git_clean",
+    "git_config",
+    "git_generic",
     "edit_file",
     "multi_edit_file",
     "apply_patch",
@@ -146,6 +201,8 @@ class AutoChatSessionState:
     changed_files: list[str] = field(default_factory=list)
     verification: str = ""
     summary: str = ""
+    execution_mode: str = "plan"
+    active_plan: dict[str, Any] | None = None
 
 
 def classify_auto_chat_intent(message: str) -> AutoChatMode:
@@ -203,14 +260,20 @@ def resolve_auto_followup(message: str, state: AutoChatSessionState | None) -> s
     return "\n".join(lines)
 
 
-def mode_allows_mutation(mode: AutoChatMode | str | None) -> bool:
+def mode_allows_mutation(mode: AutoChatMode | str | Any | None) -> bool:
+    if hasattr(mode, "allows_mutation"):
+        return bool(mode.allows_mutation)
     return normalize_mode(mode) == AutoChatMode.EDIT
 
 
-def normalize_mode(mode: AutoChatMode | str | None) -> AutoChatMode:
+def normalize_mode(mode: AutoChatMode | str | Any | None) -> AutoChatMode:
     if isinstance(mode, AutoChatMode):
         return mode
-    text = str(mode or "").strip().lower()
+    text = str(getattr(mode, "value", mode) or "").strip().lower().replace("-", "_")
+    if text in {"act", "edit"}:
+        return AutoChatMode.EDIT
+    if text in {"plan", "plan_only"}:
+        return AutoChatMode.PLAN_ONLY
     for item in AutoChatMode:
         if text == item.value:
             return item
@@ -252,7 +315,16 @@ def apply_auto_chat_tool_policy(
         allowed_tools = READ_TOOLS
 
     if not mode_allows_mutation(resolved_mode):
-        allowed_tools = [tool for tool in allowed_tools if tool not in MUTATION_TOOLS]
+        # Verification is an explicit execution intent (e.g. running tests),
+        # unlike Plan Mode's PLAN_ONLY route. Keep its bounded verification
+        # commands available while excluding them from every other read-only
+        # route.
+        verification_tools = set(VERIFY_TOOLS) if resolved_mode == AutoChatMode.VERIFY else set()
+        allowed_tools = [
+            tool
+            for tool in allowed_tools
+            if tool not in MUTATION_TOOLS or tool in verification_tools
+        ]
         constrained["mutation_allowed"] = False
     else:
         constrained["mutation_allowed"] = True
@@ -287,7 +359,11 @@ def apply_auto_chat_tool_policy(
 
 
 def tool_allowed_for_mode(tool_name: str, mode: AutoChatMode | str | None) -> bool:
-    if str(tool_name or "").strip() in MUTATION_TOOLS and not mode_allows_mutation(mode):
+    tool = str(tool_name or "").strip().lower()
+    resolved_mode = normalize_mode(mode)
+    if tool in MUTATION_TOOLS and not mode_allows_mutation(resolved_mode):
+        if resolved_mode == AutoChatMode.VERIFY and tool in VERIFY_TOOLS:
+            return True
         return False
     return True
 
@@ -312,6 +388,8 @@ def load_auto_chat_state(root: str | Path) -> AutoChatSessionState:
         changed_files=[str(item) for item in payload.get("changed_files", []) if str(item).strip()][:AUTO_MAX_CANDIDATE_FILES],
         verification=str(payload.get("verification", "") or ""),
         summary=str(payload.get("summary", "") or ""),
+        execution_mode=str(payload.get("execution_mode", "plan") or "plan"),
+        active_plan=payload.get("active_plan") if isinstance(payload.get("active_plan"), dict) else None,
     )
 
 

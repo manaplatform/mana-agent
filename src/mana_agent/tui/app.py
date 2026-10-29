@@ -376,6 +376,9 @@ class ManaChatApp(App):
                 or execution_id
             )
             metadata = dict(event.get("metadata") or {})
+            backend = event.get("backend") or metadata.get("backend")
+            if backend:
+                metadata["backend"] = backend
             act_title = str(
                 event.get("title")
                 or (
@@ -393,6 +396,7 @@ class ManaChatApp(App):
                 "event_type": event_type,
                 "title": act_title,
                 "status": "waiting_approval",
+                "backend": backend or "",
                 "metadata": metadata,
             }
             self._safe_post_activity(act, target_turn_id)
@@ -606,6 +610,9 @@ class ManaChatApp(App):
             return
         if action_id and action_id in self._computer_permission_requests_shown:
             return
+        self._computer_permission_requests_shown.add(inbox_item_id)
+        if action_id:
+            self._computer_permission_requests_shown.add(action_id)
         item = None
         if self.gateway is not None:
             try:
@@ -680,6 +687,7 @@ class ManaChatApp(App):
         target_id = item.inbox_item_id if item is not None else inbox_item_id
         if target_id != inbox_item_id:
             self._saved_modal_previews[target_id] = preview_str
+            self._computer_permission_requests_shown.add(target_id)
 
         self._computer_permission_requests_shown.add(inbox_item_id)
         if action_id:
@@ -689,41 +697,68 @@ class ManaChatApp(App):
             if item.action_intent_id:
                 self._computer_permission_requests_shown.add(item.action_intent_id)
 
-        self._transactional_modal_queue.append(target_id)
+        if target_id not in self._transactional_modal_queue:
+            self._transactional_modal_queue.append(target_id)
         self._show_next_transactional_modal()
 
     def _show_next_transactional_modal(self) -> None:
         if self._transactional_modal_active or not self._transactional_modal_queue:
             return
-        inbox_item_id = self._transactional_modal_queue.pop(0)
+
+        inbox_item_id = ""
         item = None
-        if self.gateway is not None:
-            try:
-                item = self.gateway.human_inbox_service.get(inbox_item_id, actor_id=getpass.getuser())
-            except Exception:
+        while self._transactional_modal_queue:
+            candidate_id = self._transactional_modal_queue.pop(0)
+            candidate_item = None
+            if self.gateway is not None and getattr(self.gateway, "human_inbox_service", None):
                 try:
-                    item = self.gateway.human_inbox_service.repository.get(inbox_item_id)
+                    candidate_item = self.gateway.human_inbox_service.get(candidate_id, actor_id=getpass.getuser())
                 except Exception:
-                    pass
-                if item is None:
                     try:
-                        matches = self.gateway.human_inbox_service.repository.find_for_action(inbox_item_id)
-                        if matches:
-                            item = matches[0]
+                        candidate_item = self.gateway.human_inbox_service.repository.get(candidate_id)
                     except Exception:
                         pass
-        if item is None:
-            try:
-                from mana_agent.human_inbox import default_human_inbox_service
-                service = default_human_inbox_service()
+                    if candidate_item is None:
+                        try:
+                            matches = self.gateway.human_inbox_service.repository.find_for_action(candidate_id)
+                            if matches:
+                                candidate_item = matches[0]
+                        except Exception:
+                            pass
+            if candidate_item is None:
                 try:
-                    item = service.repository.get(inbox_item_id)
+                    from mana_agent.human_inbox import default_human_inbox_service
+                    service = default_human_inbox_service()
+                    try:
+                        candidate_item = service.repository.get(candidate_id)
+                    except Exception:
+                        matches = service.repository.find_for_action(candidate_id)
+                        if matches:
+                            candidate_item = matches[0]
                 except Exception:
-                    matches = service.repository.find_for_action(inbox_item_id)
-                    if matches:
-                        item = matches[0]
-            except Exception:
-                pass
+                    pass
+
+            if candidate_item is not None and candidate_item.status.value not in {"pending", "delivered"}:
+                # Item is already resolved (e.g. approved/denied), skip redundant modal
+                continue
+
+            if candidate_item is not None and candidate_item.action_intent_id:
+                try:
+                    from mana_agent.transactional_actions.runtime import default_action_gateway
+                    act_gw = default_action_gateway(self.repo_root)
+                    act = act_gw.store.get_action(candidate_item.action_intent_id)
+                    if act is not None and act.state.value not in {"awaiting_approval"}:
+                        # Action is already approved/executing/committed, skip redundant modal
+                        continue
+                except Exception:
+                    pass
+
+            inbox_item_id = candidate_id
+            item = candidate_item
+            break
+
+        if not inbox_item_id:
+            return
 
         preview_str = self._saved_modal_previews.get(inbox_item_id)
         if item is not None and hasattr(item, "card"):
@@ -731,6 +766,7 @@ class ManaChatApp(App):
         if not preview_str:
             preview_str = f"Approval required for: {inbox_item_id}"
 
+        pending_count = len(self._transactional_modal_queue) + 1
         self._transactional_modal_active = True
         from mana_agent.tui.computer_permission import ComputerPermissionRequested
 
@@ -739,6 +775,7 @@ class ManaChatApp(App):
             scope="transactional_action.once",
             preview=preview_str,
             transactional=True,
+            pending_count=pending_count,
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
@@ -759,6 +796,7 @@ class ManaChatApp(App):
                 server=event.server,
                 api=event.api,
                 transactional=event.transactional,
+                pending_count=getattr(event, "pending_count", 1),
             ),
             complete,
         )
@@ -797,12 +835,28 @@ class ManaChatApp(App):
                         msg = str(result.get("message") or "")
                         handled = True
                     except Exception as exc:
-                        logger.warning("Gateway transactional approval command error: %s", exc)
+                        exc_str = str(exc).lower()
+                        if is_approve and (
+                            "already terminal: approved" in exc_str
+                            or "only an action awaiting approval may receive a grant" in exc_str
+                        ):
+                            msg = "Transactional action approved."
+                            handled = True
+                        elif not is_approve and "already terminal: denied" in exc_str:
+                            msg = "Transactional action denied."
+                            handled = True
+                        else:
+                            logger.warning("Gateway transactional approval command error: %s", exc)
 
                 if not handled:
                     try:
                         from mana_agent.human_inbox import default_human_inbox_service
-                        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+                        from mana_agent.human_inbox.models import (
+                            InboxStatus,
+                            ResponseOperation,
+                            ResponseSubmission,
+                            UNRESOLVED_STATUSES,
+                        )
                         from mana_agent.transactional_actions.runtime import default_action_gateway
 
                         service = (
@@ -842,36 +896,121 @@ class ManaChatApp(App):
                         )
                         operation = ResponseOperation.APPROVE if is_approve else ResponseOperation.DENY
                         if item is not None:
-                            service.respond(ResponseSubmission(
-                                inbox_item_id=item.inbox_item_id,
-                                operation=operation,
-                                actor_id=actor_id,
-                                channel="tui-local",
-                                idempotency_key=f"tui-resp:{item.inbox_item_id}:{item.version}",
-                                expected_version=item.version,
-                                current_action_digest=item.action_digest,
-                            ))
+                            if item.status in UNRESOLVED_STATUSES:
+                                service.respond(ResponseSubmission(
+                                    inbox_item_id=item.inbox_item_id,
+                                    operation=operation,
+                                    actor_id=actor_id,
+                                    channel="tui-local",
+                                    idempotency_key=f"tui-resp:{item.inbox_item_id}",
+                                    expected_version=item.version,
+                                    current_action_digest=item.action_digest,
+                                ))
+                            elif (is_approve and item.status == InboxStatus.APPROVED) or (not is_approve and item.status == InboxStatus.DENIED):
+                                logger.info(
+                                    "Inbox item %s is already terminal (%s); treating as idempotent",
+                                    item.inbox_item_id,
+                                    item.status.value,
+                                )
+                            else:
+                                service.respond(ResponseSubmission(
+                                    inbox_item_id=item.inbox_item_id,
+                                    operation=operation,
+                                    actor_id=actor_id,
+                                    channel="tui-local",
+                                    idempotency_key=f"tui-resp:{item.inbox_item_id}",
+                                    expected_version=item.version,
+                                    current_action_digest=item.action_digest,
+                                ))
 
                         if is_approve:
+                            from mana_agent.transactional_actions.models import ActionState
+
                             act_gw = default_action_gateway(self.repo_root)
                             act_id = getattr(item, "action_intent_id", "") or choice.request_id
                             action = act_gw.store.get_action(act_id) if act_id else None
                             if action is not None:
-                                act_gw.approvals.issue(action, approved_by=actor_id, ttl_seconds=300)
+                                if action.state is ActionState.AWAITING_APPROVAL:
+                                    act_gw.approvals.issue(action, approved_by=actor_id, ttl_seconds=300)
+                                elif action.state in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED}:
+                                    logger.info("Action %s is already %s, approval preserved", act_id, action.state.value)
                             if self.gateway is not None and hasattr(self.gateway, "_transactional_runtime"):
                                 try:
                                     gw_runtime = self.gateway._transactional_runtime
                                     gw_act = gw_runtime.store.get_action(act_id) if act_id else None
                                     if gw_act is not None:
-                                        gw_runtime.gateway.approvals.issue(gw_act, approved_by=actor_id, ttl_seconds=300)
+                                        if gw_act.state is ActionState.AWAITING_APPROVAL:
+                                            gw_runtime.gateway.approvals.issue(gw_act, approved_by=actor_id, ttl_seconds=300)
+                                        elif gw_act.state in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED}:
+                                            logger.info("Gateway action %s is already %s", act_id, gw_act.state.value)
                                 except Exception as gw_appr_exc:
                                     logger.debug("Could not issue approval on gateway runtime: %s", gw_appr_exc)
 
                         msg = f"Transactional action {'approved' if is_approve else 'denied'}."
                         handled = True
                     except Exception as exc:
-                        logger.exception("Failed to resolve transactional action approval directly")
-                        msg = f"Failed to record approval decision: {exc}"
+                        exc_str = str(exc).lower()
+                        if is_approve and (
+                            "already terminal: approved" in exc_str
+                            or "only an action awaiting approval may receive a grant" in exc_str
+                        ):
+                            logger.info("Transactional action approval was already recorded: %s", exc)
+                            msg = "Transactional action approved."
+                            handled = True
+                        elif not is_approve and "already terminal: denied" in exc_str:
+                            logger.info("Transactional action denial was already recorded: %s", exc)
+                            msg = "Transactional action denied."
+                            handled = True
+                        else:
+                            logger.exception("Failed to resolve transactional action approval directly")
+                            msg = f"Failed to record approval decision: {exc}"
+
+                # If the user chose to approve all pending requests, approve remaining items
+                if getattr(choice, "approve_all", False) and is_approve:
+                    remaining_ids = list(self._transactional_modal_queue)
+                    self._transactional_modal_queue.clear()
+                    try:
+                        from mana_agent.human_inbox import default_human_inbox_service
+                        from mana_agent.human_inbox.models import InboxQuery, InboxStatus
+
+                        inbox_svc = (
+                            self.gateway.human_inbox_service
+                            if (self.gateway and getattr(self.gateway, "human_inbox_service", None))
+                            else default_human_inbox_service()
+                        )
+                        pending_rows = inbox_svc.list(
+                            InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
+                            actor_id=getpass.getuser(),
+                        )
+                        for r in pending_rows:
+                            if (
+                                r.request_type.value == "approval"
+                                and r.inbox_item_id not in remaining_ids
+                                and r.inbox_item_id != choice.request_id
+                            ):
+                                remaining_ids.append(r.inbox_item_id)
+                    except Exception as extra_query_err:
+                        logger.debug("Could not query extra inbox items for approve-all: %s", extra_query_err)
+
+                    extra_approved = 0
+                    from mana_agent.tui.computer_permission import ComputerPermissionChoice
+                    for rem_id in remaining_ids:
+                        try:
+                            rem_choice = ComputerPermissionChoice(
+                                request_id=rem_id,
+                                decision=choice.decision,
+                                remote=choice.remote,
+                                server=choice.server,
+                                api=choice.api,
+                                transactional=choice.transactional,
+                                approve_all=False,
+                            )
+                            await self._complete_computer_permission(rem_choice)
+                            extra_approved += 1
+                        except Exception as extra_exc:
+                            logger.debug("Failed approving additional queued item %s: %s", rem_id, extra_exc)
+                    if extra_approved > 0:
+                        msg = f"Transactional actions approved ({extra_approved + 1} total)."
 
                 decided_event = "action.approval.granted" if is_approve else "action.approval.denied"
                 self.history.add(
@@ -1032,12 +1171,20 @@ class ManaChatApp(App):
         model = self.model or "default"
         root = self.repo_root.name if self.repo_root else ""
         tokens = f"tokens: {self.token_count}"
+        mode_str = ""
+        if (
+            self.gateway is not None
+            and hasattr(self.gateway, "get_session_execution_mode")
+            and self._gateway_session_id
+        ):
+            mode = self.gateway.get_session_execution_mode(self._gateway_session_id)
+            mode_str = f"  |  [{mode.upper()}]"
         process_status = ""
         manager = getattr(self.gateway, "background_processes", None)
         if manager is not None:
             active = sum(1 for row in manager.list() if row.state in {"starting", "running"})
             process_status = f"  |  processes: {active}"
-        self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}{process_status}"
+        self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}{mode_str}{process_status}"
 
     def action_clear_log(self) -> None:
         if self.chat_log:
@@ -1257,9 +1404,94 @@ class ManaChatApp(App):
         if text.startswith("/") and self.gateway is not None and hasattr(self.gateway, "dispatch_command"):
             if not self._gateway_session_id:
                 self._gateway_session_id = self.gateway.create_session(frontend="tui")
-            result = self.gateway.dispatch_command(
-                text, session_id=self._gateway_session_id, frontend="tui"
-            )
+            command_name = text.split(maxsplit=1)[0].lower()
+            plan_command = command_name == "/plan"
+            approval_command = command_name in {"/approve", "/act"}
+            activity_turn = UserMessageEvent(content=text) if plan_command or approval_command else None
+            if activity_turn is not None:
+                self.history.add(activity_turn)
+
+            if plan_command:
+                self._turn_in_progress = True
+                self.update_status("Preparing plan…")
+                await asyncio.sleep(0)
+
+                def _plan_activity(activity: dict[str, Any]) -> None:
+                    self._safe_post_activity(activity, activity_turn.turn_id)
+                    title = str(activity.get("title") or "Preparing plan")
+                    try:
+                        self.call_from_thread(self.update_status, f"{title}…")
+                    except Exception:
+                        pass
+
+                try:
+                    result = await asyncio.to_thread(
+                        self.gateway.dispatch_command,
+                        text,
+                        session_id=self._gateway_session_id,
+                        frontend="tui",
+                        frontend_data={"activity_sink": _plan_activity},
+                    )
+                except Exception as exc:
+                    result = None
+                    self._safe_post_activity(
+                        {
+                            "event_id": f"plan-preparation-{self._gateway_session_id}",
+                            "event_type": "agent.planning",
+                            "title": "Plan preparation failed",
+                            "status": "failed",
+                            "detail": str(exc),
+                        },
+                        activity_turn.turn_id,
+                    )
+                finally:
+                    self._turn_in_progress = False
+            elif approval_command:
+                self._turn_in_progress = True
+                self.update_status("Approving plan…")
+                await asyncio.sleep(0)
+                try:
+                    result = await asyncio.to_thread(
+                        self.gateway.dispatch_command,
+                        text,
+                        session_id=self._gateway_session_id,
+                        frontend="tui",
+                    )
+                except Exception as exc:
+                    result = None
+                    self.history.add(
+                        AssistantMessageEvent(
+                            content=f"Plan approval failed: {exc}",
+                            turn_id=activity_turn.turn_id,
+                        )
+                    )
+                    self._turn_in_progress = False
+            else:
+                result = self.gateway.dispatch_command(
+                    text, session_id=self._gateway_session_id, frontend="tui"
+                )
+            if result is None and (plan_command or approval_command):
+                if plan_command:
+                    self.history.add(AssistantMessageEvent(
+                        content="Plan preparation failed. See Activity for details.",
+                        turn_id=activity_turn.turn_id,
+                    ))
+                if self.input:
+                    self.input.reset()
+                self.update_status("Ready")
+                self._turn_in_progress = False
+                return
+            if plan_command and result is not None and result.status != "success":
+                self._safe_post_activity(
+                    {
+                        "event_id": f"plan-preparation-{self._gateway_session_id}",
+                        "event_type": "agent.planning",
+                        "title": "Plan preparation failed",
+                        "status": "failed",
+                        "detail": result.message,
+                    },
+                    activity_turn.turn_id,
+                )
             if result is not None:
                 new_session_id = str(result.data.get("session_id") or "")
                 if new_session_id:
@@ -1276,11 +1508,50 @@ class ManaChatApp(App):
 
                     self.push_screen(TelegramSetupScreen(self.repo_root), self._apply_telegram_setup)
                 if result.message:
-                    self.history.add(AssistantMessageEvent(content=result.message))
+                    self.history.add(AssistantMessageEvent(
+                        content=result.message,
+                        turn_id=activity_turn.turn_id if activity_turn is not None else "",
+                    ))
+                execution_request = str(result.data.get("execution_request") or "").strip()
+                if (
+                    approval_command
+                    and result.status == "success"
+                    and result.data.get("plan_approved")
+                    and execution_request
+                ):
+                    execution_turn = UserMessageEvent(
+                        content=execution_request,
+                        turn_id=activity_turn.turn_id,
+                    )
+                    self.history.add(execution_turn)
+                    self._safe_post_activity(
+                        {
+                            "event_id": f"{activity_turn.event_id}-execution-started",
+                            "event_type": "coding_started",
+                            "title": "Starting approved plan execution",
+                            "status": "running",
+                            "backend": "internal",
+                            "metadata": {"backend": "internal", "phase": "execution"},
+                        },
+                        activity_turn.turn_id,
+                    )
+                    self._turn_in_progress = True
+                    self.update_status("Executing approved plan…")
+                    if self.input:
+                        self.input.reset()
+                    await asyncio.sleep(0)
+                    self.run_worker(
+                        self._handle_real_turn_guarded(execution_turn), exclusive=True
+                    )
+                    return
                 if self.input:
                     self.input.reset()
                 self.update_status("Ready")
+                if approval_command:
+                    self._turn_in_progress = False
                 return
+            if approval_command:
+                self._turn_in_progress = False
 
         if text.strip() == "/new" and self.gateway is not None and hasattr(self.gateway, "start_new_conversation"):
             if not self._gateway_session_id:

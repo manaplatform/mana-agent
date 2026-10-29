@@ -274,6 +274,38 @@ def _build_main_agent_routing_llm(routing_authority: Any | None = None) -> Any |
     )
 
 
+def _build_planning_llm(*, model_override: str | None = None) -> Any | None:
+    """Build the LLM used by Plan Mode for codebase exploration and plan synthesis."""
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
+    try:
+        settings = _public_symbol("Settings", Settings)()
+    except Exception as exc:  # noqa: BLE001 - missing env should not break CLI
+        logger.debug("Plan Mode model disabled (settings unavailable): %s", exc)
+        return None
+    from mana_agent.config.inference_provider import ProviderConfigurationError, resolve_inference_connection
+    try:
+        connection = resolve_inference_connection(settings)
+    except ProviderConfigurationError:
+        return None
+    model = (
+        model_override
+        or resolve_model_for_role(
+            AgentRole.HEAD_DECISION,
+            global_model=getattr(settings, "openai_chat_model", "gpt-4.1-mini"),
+            task_description="Plan Mode codebase exploration and structured plan generation.",
+        ).resolved_model
+    )
+    return create_chat_model(
+        api_key=connection.api_key,
+        model=model,
+        base_url=connection.base_url,
+        provider=connection.provider,
+        default_headers=connection.headers,
+        temperature=0.2,
+    )
+
+
 def _split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -461,87 +493,15 @@ def _project_snapshot(root: Path) -> dict[str, Any]:
     return {"root": str(root), "items": interesting}
 
 
-def _plan_markdown(*, task: str, root: Path, skills: list[Any], no_code: bool, yes: bool) -> str:
-    snapshot = _project_snapshot(root)
-    skill_names = [skill.name for skill in skills]
-    skill_summary = "\n".join(f"- {skill.name} ({skill.source})" for skill in skills) or "- No specific skills matched."
-    affected = ", ".join(snapshot["items"]) or "repository files discovered during implementation"
-    return f"""# Implementation Plan
+def _plan_markdown(*, task: str, root: Path, skills: list[Any], no_code: bool, yes: bool, model: str | None = None) -> str:
+    from mana_agent.agent.plan_service import PlanService
 
-## 1. Goal
-
-Build the requested change: {task}
-
-## 2. Current System Understanding
-
-Repository root: `{root}`
-
-Detected project anchors: {affected}
-
-## 3. Relevant Skills Loaded
-
-{skill_summary}
-
-## 4. Required Changes
-
-- Inspect the code paths related to the task before editing.
-- Reuse existing services, command wiring, tests, and conventions.
-- Keep changes focused and preserve unrelated user work.
-
-## 5. Files Likely Affected
-
-- Files will be selected after repository inspection for `{task}`.
-- `CHANGELOG.md` must be updated for the repository change.
-
-## 6. Data Model / Migration Changes
-
-No migration is assumed unless inspection finds model or schema changes are necessary.
-
-## 7. Backend Logic
-
-Update the shared service or command owner for the behavior so parallel paths do not drift.
-
-## 8. Frontend / CLI / Bot Changes
-
-Apply user-facing changes only where the task requires them, preserving existing text and flow conventions.
-
-## 9. Edge Cases
-
-- Existing user changes must not be reverted.
-- Missing configuration should fail clearly.
-- Existing public behavior should remain compatible unless the task explicitly changes it.
-
-## 10. Tests
-
-- Add focused tests for changed behavior.
-- Run existing regression tests that cover the touched subsystem.
-
-## 11. Verification Commands
-
-```bash
-PYTHONPATH=src .venv/bin/python -m compileall src
-PYTHONPATH=src .venv/bin/python -m pytest -q
-```
-
-## 12. Risks
-
-- Broad tasks may need additional clarification before implementation.
-- Over-broad edits can break CLI/chat compatibility.
-
-## 13. Implementation Order
-
-1. Inspect relevant files and tests.
-2. Make the smallest implementation change that satisfies the task.
-3. Update tests and `CHANGELOG.md`.
-4. Run focused verification, then broader tests as time allows.
-
-## 14. Approval
-
-{"Implementation is approved by `--yes`." if yes else "Plan only; implementation requires explicit approval."}
-{"`--no-code` is active, so implementation must not run." if no_code else ""}
-
-Loaded skill names: {", ".join(skill_names) or "none"}
-"""
+    llm = _build_planning_llm(model_override=model)
+    service = PlanService(root, llm=llm)
+    plan = service.generate_plan(task, skills=skills)
+    if yes:
+        plan = plan.with_approval(approved=True, approver="--yes")
+    return plan.to_markdown()
 
 
 @app.command("analyze")
@@ -665,7 +625,7 @@ def plan_command(
         console.print("[green]Loaded skills:[/green] " + ", ".join(item.name for item in loaded_skills))
     else:
         console.print("[yellow]Loaded skills:[/yellow] none")
-    plan_text = _plan_markdown(task=task, root=root, skills=loaded_skills, no_code=no_code, yes=yes)
+    plan_text = _plan_markdown(task=task, root=root, skills=loaded_skills, no_code=no_code, yes=yes, model=model)
     console.print(plan_text)
     plan_path: Path | None = None
     if save:
@@ -681,23 +641,23 @@ def plan_command(
         console.print("[yellow]No-code mode is active; implementation skipped.[/yellow]")
         return
     if yes:
-        console.print("[green]Implementation approved by --yes.[/green]")
+        console.print("[green]Implementation approved by --yes. Switching to Act Mode.[/green]")
         console.print("[yellow]Use chat full-auto for execution:[/yellow] mana-agent chat --full-auto " + repr(task))
         return
     if not sys.stdin.isatty():
-        console.print("[yellow]Plan ready. Re-run with --yes to approve implementation.[/yellow]")
+        console.print("[yellow]Plan ready. Re-run with --yes to approve implementation and enter Act Mode.[/yellow]")
         return
-    choice = input("Approve implementation? [yes/save/edit]: ").strip().lower()
+    choice = input("Approve implementation plan and enter Act Mode? [yes/save/edit]: ").strip().lower()
     if choice in {"yes", "y"}:
-        console.print("[green]Implementation approved.[/green]")
+        console.print("[green]Implementation approved! Switched to Act Mode.[/green]")
         console.print("[yellow]Use chat full-auto for execution:[/yellow] mana-agent chat --full-auto " + repr(task))
     elif choice in {"edit", "e"}:
         console.print("[yellow]Edit the task and rerun plan mode.[/yellow]")
     else:
         if plan_path:
-            console.print(f"[green]Plan saved only:[/green] {plan_path}")
+            console.print(f"[green]Plan saved only (remains in Plan Mode):[/green] {plan_path}")
         else:
-            console.print("[green]Plan generated only.[/green]")
+            console.print("[green]Plan generated only (remains in Plan Mode).[/green]")
 
 
 @app.command("api")

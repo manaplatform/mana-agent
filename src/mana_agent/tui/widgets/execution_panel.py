@@ -7,7 +7,11 @@ from typing import Any
 from textual.containers import Vertical
 from textual.widgets import Collapsible, Static
 
-from mana_agent.chat.execution_trace import ExecutionTrace, classify_activity_category
+from mana_agent.chat.execution_trace import (
+    ExecutionTrace,
+    classify_activity_category,
+    event_classification_metadata,
+)
 from mana_agent.tui.widgets.activity_boxes import CodingActivityBox, MainActivityBox
 from mana_agent.tui.widgets.selectable_text import SelectableText
 
@@ -69,7 +73,7 @@ class ExecutionPanel(Vertical):
                 category = classify_activity_category(
                     event_dict.get("event_type") or event_dict.get("type") or "",
                     event_dict.get("tool_name"),
-                    event_dict.get("metadata") or event_dict.get("payload"),
+                    event_classification_metadata(event_dict),
                 )
                 if category == "coding":
                     self.coding_box.update_event(event_dict)
@@ -92,7 +96,7 @@ class ExecutionPanel(Vertical):
         category = classify_activity_category(
             event_dict.get("event_type") or event_dict.get("type") or "",
             event_dict.get("tool_name"),
-            event_dict.get("metadata") or event_dict.get("payload"),
+            event_classification_metadata(event_dict),
         )
         if category == "coding":
             self.coding_box.update_event(event_dict)

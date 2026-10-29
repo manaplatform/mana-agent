@@ -382,3 +382,203 @@ def test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses(t
     updated_item = inbox.repository.get(item.inbox_item_id)
     assert updated_item.status == InboxStatus.APPROVED
 
+
+def test_app_complete_computer_permission_idempotent_when_action_already_committed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Verify that if an action was already committed/executed, repeat approval succeeds idempotently
+    without 'only an action awaiting approval may receive a grant' error message."""
+    import anyio
+    from mana_agent.chat.events import AssistantMessageEvent
+    from mana_agent.human_inbox.models import (
+        InboxRequest,
+        InboxRequestType,
+        InboxStatus,
+        ResponseOperation,
+        ReviewerAssignment,
+        ReviewerType,
+        RiskLevel,
+    )
+    from mana_agent.transactional_actions.adapters import ShellActionAdapter
+    from mana_agent.transactional_actions.models import ActionState
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path)
+
+    gw = default_action_gateway(tmp_path)
+    adapter = ShellActionAdapter(
+        argv=["echo", "done"],
+        cwd=tmp_path,
+        environment={},
+        parent_task_id="task-idem-1",
+        actor="user",
+        originating_agent="test",
+        policy_context={"tool": "shell"},
+        idempotency_key="key-idem-1",
+        expected_outputs=[],
+    )
+    action = gw.propose(adapter)
+    if action.state is ActionState.PROPOSED:
+        action.transition(ActionState.PREVIEWING)
+        action.transition(ActionState.AWAITING_POLICY)
+        action.transition(ActionState.AWAITING_APPROVAL)
+        action.transition(ActionState.APPROVED)
+    elif action.state is ActionState.AWAITING_APPROVAL:
+        action.transition(ActionState.APPROVED)
+    if action.state is ActionState.APPROVED:
+        action.transition(ActionState.EXECUTING)
+        action.transition(ActionState.VERIFYING)
+        action.transition(ActionState.COMMITTED)
+    gw.store.save_action(action)
+
+    inbox = default_human_inbox_service()
+    item = inbox.create(InboxRequest(
+        request_type=InboxRequestType.APPROVAL,
+        task_id="task-idem-1",
+        branch_id="task-idem-1",
+        requested_by_agent_id="agent-1",
+        action_intent_id=action.action_id,
+        action_digest=action.approval_digest(),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        title="Execute echo done",
+        summary="Mutating action already executed",
+        risk_level=RiskLevel.MEDIUM,
+        allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+    ))
+
+    choice = ComputerPermissionChoice(
+        request_id=item.inbox_item_id,
+        decision=MagicMock(),
+        transactional=True,
+    )
+
+    anyio.run(app._complete_computer_permission, choice)
+
+    messages = [e for e in history.get_events() if isinstance(e, AssistantMessageEvent)]
+    assert len(messages) >= 1
+    assert "Transactional action approved." in messages[-1].content
+    assert "Failed to record approval decision" not in messages[-1].content
+
+
+def test_app_complete_computer_permission_multi_request_approve_all(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Verify that approving with approve_all=True approves all queued and pending requests."""
+    import anyio
+    from mana_agent.human_inbox.models import (
+        InboxRequest,
+        InboxRequestType,
+        InboxStatus,
+        ResponseOperation,
+        ReviewerAssignment,
+        ReviewerType,
+        RiskLevel,
+    )
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path)
+    inbox = default_human_inbox_service()
+
+    item1 = inbox.create(InboxRequest(
+        request_type=InboxRequestType.APPROVAL,
+        task_id="task-multi-1",
+        branch_id="task-multi-1",
+        requested_by_agent_id="agent-1",
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        title="Request 1",
+        summary="Action 1",
+        risk_level=RiskLevel.HIGH,
+        allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+    ))
+    item2 = inbox.create(InboxRequest(
+        request_type=InboxRequestType.APPROVAL,
+        task_id="task-multi-2",
+        branch_id="task-multi-2",
+        requested_by_agent_id="agent-1",
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        title="Request 2",
+        summary="Action 2",
+        risk_level=RiskLevel.HIGH,
+        allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+    ))
+
+    app._transactional_modal_queue.append(item2.inbox_item_id)
+
+    choice = ComputerPermissionChoice(
+        request_id=item1.inbox_item_id,
+        decision=MagicMock(),
+        transactional=True,
+        approve_all=True,
+    )
+
+    anyio.run(app._complete_computer_permission, choice)
+
+    up1 = inbox.repository.get(item1.inbox_item_id)
+    up2 = inbox.repository.get(item2.inbox_item_id)
+    assert up1.status == InboxStatus.APPROVED
+    assert up2.status == InboxStatus.APPROVED
+    assert len(app._transactional_modal_queue) == 0
+
+
+def test_approve_chat_command_approves_multi_request(tmp_path: Path, monkeypatch) -> None:
+    """Verify that /approve chat command approves all pending human inbox approval requests."""
+    from mana_agent.chat_commands.builtins import _approve_command
+    from mana_agent.chat_commands.models import CommandContext
+    from mana_agent.human_inbox.models import (
+        InboxRequest,
+        InboxRequestType,
+        InboxStatus,
+        ResponseOperation,
+        ReviewerAssignment,
+        ReviewerType,
+        RiskLevel,
+    )
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    inbox = default_human_inbox_service()
+
+    item1 = inbox.create(InboxRequest(
+        request_type=InboxRequestType.APPROVAL,
+        task_id="task-cmd-1",
+        branch_id="task-cmd-1",
+        requested_by_agent_id="agent-1",
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        title="Command Request 1",
+        summary="Action 1",
+        risk_level=RiskLevel.MEDIUM,
+        allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+    ))
+    item2 = inbox.create(InboxRequest(
+        request_type=InboxRequestType.APPROVAL,
+        task_id="task-cmd-2",
+        branch_id="task-cmd-2",
+        requested_by_agent_id="agent-1",
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        title="Command Request 2",
+        summary="Action 2",
+        risk_level=RiskLevel.MEDIUM,
+        allowed_responses=[ResponseOperation.APPROVE, ResponseOperation.DENY],
+    ))
+
+    gateway = MagicMock()
+    gateway.get_session_active_plan.return_value = None
+    gateway.approve_session_plan.return_value = False
+    gateway.human_inbox_service = inbox
+
+    ctx = CommandContext(
+        session_id="sess-cmd-multi",
+        gateway=gateway,
+        frontend="tui",
+    )
+
+    res = _approve_command(ctx, [])
+    assert res.status == "success"
+    assert "Approved 2 pending approval request(s)" in res.message
+
+    up1 = inbox.repository.get(item1.inbox_item_id)
+    up2 = inbox.repository.get(item2.inbox_item_id)
+    assert up1.status == InboxStatus.APPROVED
+    assert up2.status == InboxStatus.APPROVED
+

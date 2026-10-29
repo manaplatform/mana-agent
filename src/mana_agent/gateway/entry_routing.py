@@ -594,6 +594,14 @@ Examples:
 
 def _routing_correction(validation_error: str) -> str:
     """Return model-only correction guidance for a bounded invalid-decision retry."""
+    if "Execution policy selected an unoffered task" in validation_error:
+        return (
+            "Return a new complete routing decision. related_task_id may only select an exact task ID "
+            "present in context.task_execution_policies. For an independent request (including a new "
+            "slash-command task such as /plan), set related_task_id to an empty string and use the "
+            "default auto execution policy unless the user explicitly requested OpenAI Batch. "
+            "Do not invent, infer, or reuse a task ID that was not offered."
+        )
     if "browser source requires target_urls" in validation_error:
         return (
             "Return a new complete routing decision. Open-ended discovery must use "

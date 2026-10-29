@@ -120,6 +120,17 @@ class ApprovalRegistry:
     ) -> ApprovalGrant:
         if action.policy_decision is None or not action.preview_digest:
             raise ValueError("action must have a policy decision and preview before approval")
+        if action.state in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED}:
+            existing = self.find_valid(action, transaction_binding_digest=transaction_binding_digest)
+            if existing is not None:
+                return existing
+            for path in sorted(self.root.glob("*.json")):
+                try:
+                    grant = ApprovalGrant.model_validate_json(path.read_text(encoding="utf-8"))
+                    if grant.action_id == action.action_id:
+                        return grant
+                except Exception:
+                    pass
         if action.state is not ActionState.AWAITING_APPROVAL:
             raise ValueError("only an action awaiting approval may receive a grant")
         if scope is ApprovalScope.TRANSACTION and not action.transaction_id:

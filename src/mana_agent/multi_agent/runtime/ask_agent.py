@@ -1640,19 +1640,65 @@ class AskAgent:
                     operation_input.update(call_id=batch_call_id, cwd=str(command_cwd))
                     wait_for_approval = False  # The durable inbox resumes deferred work.
                 operation_key = "shell:" + hashlib.sha256(json.dumps(operation_input, sort_keys=True).encode()).hexdigest()
-                if batch_call_id and action_approval_id:
+                current_parent_task_id = str(run_id or "ask-run-command")
+                validated_approval_id = ""
+                pre_approved_by_judgment = False
+                pre_judgment_data: dict[str, Any] | None = None
+
+                if action_approval_id:
                     grant = action_gateway.approvals.get(action_approval_id)
-                    if grant:
+                    approved_action = None
+                    if grant is not None:
                         approved_action = action_gateway.store.get_action(grant.action_id)
-                        if approved_action.parent_task_id != str(run_id or "ask-run-command"):
-                            raise ValueError("Command approval belongs to a different task")
-                        operation_key = approved_action.idempotency_key
+                    else:
+                        act_id = action_approval_id.removeprefix("policy_allow_")
+                        approved_action = action_gateway.store.get_action(act_id)
+
+                    if approved_action is None:
+                        logger.warning(
+                            "Ignoring unverified action_approval_id=%r in ask_agent (not in approval store)",
+                            action_approval_id,
+                        )
+                    elif approved_action.parent_task_id == current_parent_task_id:
+                        if batch_call_id:
+                            operation_key = approved_action.idempotency_key
+                        validated_approval_id = action_approval_id if grant is not None else ""
+                    else:
+                        # Command approval belongs to a different task lineage or tool wrapper.
+                        # Use model judgment to decide whether this command is genuinely related to current task.
+                        from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
+
+                        llm_for_judge = getattr(self, "llm", None) or getattr(self, "_llm", None)
+                        current_goal = str(getattr(self, "last_query", "") or current_parent_task_id)
+                        mj = judge_approval_request(
+                            command=str(cmd or " ".join(shell_argv)),
+                            reason=f"Evaluate whether command approved under task '{approved_action.parent_task_id}' is related to active task '{current_parent_task_id}'",
+                            goal=current_goal,
+                            working_directory=str(command_cwd),
+                            risk_level="medium",
+                            llm=llm_for_judge,
+                            action_id=approved_action.action_id,
+                        )
+                        if mj.judgment != "accept":
+                            return json.dumps({
+                                "ok": False,
+                                "error_code": "APPROVAL_DENIED_BY_MODEL_JUDGMENT",
+                                "permission_required": False,
+                                "error": f"Command denied by model judgment: {mj.reason}",
+                                "reason": mj.reason,
+                                "suggested_command": mj.suggested_command,
+                            })
+                        pre_approved_by_judgment = True
+                        pre_judgment_data = mj.model_dump(mode="json")
+                        if batch_call_id:
+                            operation_key = approved_action.idempotency_key
+
                 shell_adapter = ShellActionAdapter(
                     argv=shell_argv,
                     cwd=command_cwd,
                     environment={},
                     expected_outputs=list(expected_outputs or []),
-                    parent_task_id=str(run_id or "ask-run-command"),
+                    parent_task_id=current_parent_task_id,
                     actor="user",
                     originating_agent="ask_agent",
                     policy_context={"tool": "run_command"},
@@ -1661,10 +1707,43 @@ class AskAgent:
                     runner=transactional_runner,
                     allow_command_result_verification=bool(batch_call_id),
                 )
+                if pre_approved_by_judgment:
+                    proposed_action = action_gateway.store.action_for_idempotency_key(operation_key)
+                    if proposed_action is None or proposed_action.intent_digest() != shell_adapter.build_intent().intent_digest():
+                        proposed_action = action_gateway.propose(shell_adapter)
+                    from mana_agent.transactional_actions.models import ActionState, ApprovalScope
+
+                    if proposed_action.state is ActionState.AWAITING_APPROVAL:
+                        correct_grant = action_gateway.approvals.find_valid(proposed_action)
+                        if correct_grant is None:
+                            req_scope = (
+                                proposed_action.policy_decision.required_approval_scope
+                                if proposed_action.policy_decision
+                                else ApprovalScope.ACTION_ONCE
+                            )
+                            correct_grant = action_gateway.approvals.issue(
+                                proposed_action,
+                                approved_by="model_judgment",
+                                ttl_seconds=300,
+                                scope=req_scope or ApprovalScope.ACTION_ONCE,
+                            )
+                        validated_approval_id = correct_grant.approval_id
+
                 try:
-                    outcome = action_gateway.execute(
-                        shell_adapter, approval_id=action_approval_id
-                    )
+                    try:
+                        outcome = action_gateway.execute(
+                            shell_adapter, approval_id=validated_approval_id
+                        )
+                    except ApprovalRequired:
+                        raise
+                    except PermissionError as perm_err:
+                        if validated_approval_id:
+                            logger.info("Approval %r rejected with PermissionError (%s), retrying unapproved", validated_approval_id, perm_err)
+                            outcome = action_gateway.execute(
+                                shell_adapter, approval_id=""
+                            )
+                        else:
+                            raise
                 except ApprovalRequired as exc:
                     action = exc.action
                     inbox_item_id = exc.inbox_item_id or action.inbox_item_id
@@ -1804,6 +1883,8 @@ class AskAgent:
                     "action_state": outcome.action.state.value,
                     "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
                 }
+                if pre_judgment_data is not None:
+                    payload["model_judgment"] = pre_judgment_data
                 if outcome.action.state.value != "committed":
                     payload["error"] = outcome.action.error or "shell verification incomplete"
                 encoded = json.dumps(payload)

@@ -35,6 +35,7 @@ def main(
     chat_mode: bool = typer.Option(False, "--chat", help="Start Chat Mode."),
     analyze_mode: bool = typer.Option(False, "--analyze", help="Start Analyze Mode."),
     plan_mode: bool = typer.Option(False, "--plan", help="Start Plan Mode."),
+    act_mode: bool = typer.Option(False, "--act", help="Start Act Mode."),
     repo: str | None = typer.Option(None, "--repo", help="Repository root for the selected mode."),
     model: str | None = typer.Option(None, "--model", help="Model override for the selected mode."),
     no_banner: bool = typer.Option(False, "--no-banner", help="Hide the Mana Agent banner."),
@@ -91,9 +92,9 @@ def main(
             with command.make_context(name, args or [], parent=ctx) as sub_ctx:
                 command.invoke(sub_ctx)
 
-        selected_flags = [chat_mode, analyze_mode, plan_mode]
+        selected_flags = [chat_mode, analyze_mode, plan_mode, act_mode]
         if sum(1 for item in selected_flags if item) > 1:
-            raise typer.BadParameter("Choose only one of --chat, --analyze, or --plan.")
+            raise typer.BadParameter("Choose only one of --chat, --analyze, --plan, or --act.")
         if not no_banner:
             render_banner(console)
         try:
@@ -125,6 +126,20 @@ def main(
             if model:
                 args += ["--model", model]
             _invoke_with_multi_agent_route(ctx, "plan", args, root=root, request="root --plan", entrypoint="root")
+            return
+        if act_mode:
+            args = ["--root-dir", str(root), "--act"]
+            if model:
+                args += ["--model", model]
+            _invoke_with_multi_agent_route(
+                ctx,
+                "chat",
+                args,
+                root=root,
+                request="root --act",
+                entrypoint="root",
+                route_in_subcommand=True,
+            )
             return
 
         if no_interactive or not _is_interactive_terminal():

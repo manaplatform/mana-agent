@@ -53,6 +53,7 @@ class CommandDefinition(BaseModel):
     description: str
     argument_schema: str = ""
     argument_model: type[BaseModel] = CommandArguments
+    free_text_arguments: bool = False
     required_capability: str = "chat"
     frontends: frozenset[str] = frozenset({"cli", "tui", "dashboard", "api", "telegram"})
     confirmation_required: bool = False

@@ -2303,6 +2303,55 @@ def test_entry_router_correction_for_unobserved_message() -> None:
     assert "source_message_ids must select only message_id" in guidance
 
 
+def test_entry_router_repairs_unoffered_task_for_new_plan_request() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class Model:
+        def invoke(self, messages: list[Any]) -> Any:
+            payload = json.loads(messages[-1].content)
+            calls.append(payload)
+            related_task_id = "stale-task" if len(calls) == 1 else ""
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "route": "coding",
+                        "confidence": 0.98,
+                        "reason": "Create a repository implementation plan.",
+                        "required_sources": ["repository"],
+                        "runtime_capability_change": False,
+                        "related_task_id": related_task_id,
+                    }
+                )
+            )
+
+    registry = EntryRouteRegistry()
+    registry.register(
+        RouteRegistration(
+            "coding",
+            "repository coding workflows",
+            lambda: RouteAvailability(available=True),
+        )
+    )
+    registry.register(
+        RouteRegistration(
+            "repository",
+            "repository reads",
+            lambda: RouteAvailability(available=True),
+        )
+    )
+    decision = EntryRouter(llm=Model(), registry=registry).route(
+        user_prompt="/plan Fix the routing policy",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["previous_invalid_decision"]["related_task_id"] == "stale-task"
+    assert "slash-command task such as /plan" in calls[1]["correction"]
+    assert decision.route == "coding"
+    assert decision.related_task_id == ""
+    assert decision.execution_policy.mode == "auto"
+
+
 def test_context_compactor_preserves_user_message_id() -> None:
     from mana_agent.gateway.context_compactor import ContextCompactor
 

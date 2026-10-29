@@ -2,6 +2,129 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-26
+
+- Fixed approval recording errors, multi-request approval, and execution gating until approval:
+  - **Resolved `Failed to record approval decision: only an action awaiting approval may receive a grant`:**
+    - Updated `src/mana_agent/transactional_actions/approvals.py` (`ApprovalRegistry.issue`): Added idempotent handling when `action.state in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED}` to return the existing/recorded grant rather than raising `ValueError`.
+    - Updated `src/mana_agent/gateway/chat_gateway.py` (`transactional_action_approval_command`): Checked `action.state` before attempting to issue a new grant; if already in `APPROVED`, `EXECUTING`, or `COMMITTED`, logs and returns success (`"Exact shell action approved once. Shell execution is proceeding."`).
+    - Updated `src/mana_agent/tui/app.py` (`_complete_computer_permission`): Handled `"only an action awaiting approval may receive a grant"` idempotently in both gateway command execution and direct fallback resolution paths.
+  - **Multi-request approval support:**
+    - Updated `src/mana_agent/tui/computer_permission.py`: Added `approve_all: bool` to `ComputerPermissionChoice` and `pending_count: int` to `ComputerPermissionRequested` and `ComputerPermissionScreen`, adding an `Allow all (N)` button when multiple requests are pending.
+    - Updated `src/mana_agent/tui/app.py`:
+      - `_show_next_transactional_modal()` drains and skips items that are already resolved or whose actions are already approved/executing, preventing duplicate or stale modals.
+      - `_enqueue_transactional_modal()` immediately deduplicates requests.
+      - `_complete_computer_permission()` approves all remaining queued and pending inbox requests when `choice.approve_all` is True.
+    - Updated `src/mana_agent/chat_commands/builtins/__init__.py` and `src/mana_agent/commands/chat_cli.py`: Updated `/approve` command to approve all pending human inbox requests when no plan is pending or when approving batch requests.
+  - **Execution gating until approval:**
+    - Updated `src/mana_agent/coding/programmatic.py` (`ToolExecutionDispatcher`): Prevented auto-execution of policy-gated commands via model judgment during interactive sessions when human approval is required; the dispatcher waits for user approval and does not run commands until approved.
+  - **Added regression coverage:**
+    - Added `test_app_complete_computer_permission_idempotent_when_action_already_committed`, `test_app_complete_computer_permission_multi_request_approve_all`, and `test_approve_chat_command_approves_multi_request` in `tests/test_tui_approval_realtime.py`.
+  - **User verification commands:**
+    - `PYTHONPATH=src pytest tests/test_tui_approval_realtime.py -v` (not run by the agent).
+    - `PYTHONPATH=src pytest tests/gateway/test_transactional_approval.py tests/coding/test_coding_approval_judgment.py -v` (not run by the agent).
+
+- Made Plan Mode and approval transitions visible in the TUI:
+  - Repository filename searches, content searches, source-file inspection, skill checks, and plan artifact saving now publish compact in-place progress events in the consolidated Activity/Coding Activity surfaces.
+  - `/plan` runs off the Textual UI thread so activity can render during long planning/model calls; the plan remains read-only until approved.
+  - `/approve` and `/act` now start the approved plan request and immediately show a coding-activity start event before normal execution progress arrives.
+  - Verification: focused PlanService, execution-mode, and TUI approval tests.
+
+- Upgraded Plan Mode smart repository exploration and proposal planning (`PlanService`):
+  - **Smart querying and noise filtering:**
+    - Updated `src/mana_agent/agent/plan_service.py`:
+      - Added prompt filler and stop word filtering (`_IGNORE_TERMS`) and noise path filtering (`_NOISE_PATH_SUBSTRINGS` / `_is_noise_path`), eliminating false-positive matches on `.github/`, changelogs, READMEs, cache, and build directories.
+      - Added compound phrase search and glob-based matching prioritizing `src/` modules and associated `tests/`.
+      - Added AST code structure extraction to discover declared classes, functions, and dependencies in candidate files.
+      - Added model-directed search query generation (`_query_llm_for_search_terms`) and proposal plan synthesis (`_query_llm_for_proposal_plan`) with grounded fallback (`_synthesize_grounded_proposal_plan`) that builds concrete, file- and class-specific implementation steps and targeted verification commands.
+  - **Wired LLM at Plan Mode call sites:**
+    - Updated `src/mana_agent/chat_commands/builtins/__init__.py`: Passed active gateway LLM to `PlanService(repo_root, llm=llm)` in `_plan_command`.
+    - Updated `src/mana_agent/commands/cli_internal.py`: Added `_build_planning_llm` and passed resolved model to `PlanService(root, llm=llm)` in `_plan_markdown` and `plan_command`.
+    - Updated `src/mana_agent/commands/chat_cli.py`: Passed resolved `ask_service` LLM to `PlanService(root, llm=plan_llm)` in interactive `/plan` and auto-chat Plan Mode routes.
+  - **Added regression coverage:**
+    - Added `test_plan_service_smart_querying_filters_noise_and_finds_relevant_code` and `test_plan_service_with_llm_proposal_plan` in `tests/test_execution_modes.py`.
+  - **User verification commands:**
+    - `PYTHONPATH=src pytest tests/test_execution_modes.py tests/test_auto_chat.py tests/test_cli_modes_skills.py tests/test_chat_command_dispatcher.py -v` (not run by the agent).
+    - `mana-agent plan "approval request dont show in seperate box,only show in activity box and coding activity. for confirm too , dont show in seperate card." --no-code` (not run by the agent).
+
+## 2026-10-25
+
+- Fixed approval-event routing in the TUI: approval events preserve backend context, so general requests appear in Activity and coding-backend requests appear in Coding Activity while the approval dialog remains available for the authorization decision. Added regression coverage and `docs/activity-approval-rendering.md`. User verification command: `PYTHONPATH=src pytest tests/test_tui_approval_realtime.py -q` (not run by the agent).
+
+- Fixed application freeze when entering `/plan` in `mana-agent` (Textual TUI and console CLI):
+  - **TUI event loop unblocking:**
+    - Updated `src/mana_agent/chat_commands/builtins/__init__.py`:
+      - Replaced legacy `handler=_agent_command("plan")` with dedicated `_plan_command` handler and changed execution mode from `task` to inline.
+      - Previously, `_agent_command("plan")` synchronously called `gateway.process_turn()` directly on Textual's UI event loop thread, completely freezing all rendering, input events, and user interaction.
+      - `_plan_command` now executes inline using `PlanService(repo_root)` to explore context and generate a `StructuredPlan`, saves the plan artifact to `.mana/plans/<slug>.md`, registers the plan on the session via `gateway.set_session_active_plan()`, sets the execution mode to `plan`, and returns a `CommandResult` in ~30ms without calling `process_turn()` on the UI thread.
+  - **Directory-pruning performance optimization:**
+    - Updated `src/mana_agent/tools/repository.py`:
+      - Replaced unpruned `repo_root.rglob("*")` in `_iter_files` with `os.walk` that prunes directories in-place (`_is_skipped_dir`), skipping `.venv*`, `venv`, `.git`, `.mana`, `node_modules`, and cache directories during traversal.
+      - Reduced file exploration and `repo_search` execution time from >6 seconds down to <5 milliseconds (over 1000x speedup), eliminating CPU spin during plan generation.
+  - **CLI chat input argument fix:**
+    - Updated `src/mana_agent/commands/chat_cli.py`:
+      - Fixed `_read_chat_input` invocation to include required `multiline_terminator=""` argument, resolving `TypeError: _read_chat_input() missing 1 required keyword-only argument: 'multiline_terminator'`.
+      - Provided clear user prompts for approving (`/approve` or `/act`) or rejecting (`/reject`) the plan without blocking or corrupting terminal state.
+  - **TUI mode indicator:**
+    - Updated `src/mana_agent/tui/app.py`:
+      - Added dynamic execution mode indicator (`[PLAN]` / `[ACT]`) to the TUI status footer.
+  - **Added `to_dict()` helper on `StructuredPlan`:**
+    - Updated `src/mana_agent/agent/mode.py` to add `to_dict()` method wrapping `model_dump()`.
+  - **Verification:**
+    - `PYTHONPATH=src pytest tests/test_execution_modes.py tests/test_auto_chat.py tests/test_cli_modes_skills.py tests/test_chat_command_dispatcher.py -v` (28 passed)
+    - `mana-agent plan "Refactor database connection pool" --no-code` (passed with code 0)
+
+- Resolved `✗ shell — Command approval belongs to a different task` by replacing rigid parent task string equality checks with model judgment and dynamic issuance of task-scoped approvals:
+  - Updated `src/mana_agent/coding/programmatic.py` (`ToolExecutionDispatcher._execute_builtin_tool`):
+    - Removed hardcoded failure `raise ValueError("Command approval belongs to a different task")` when `approved_action.parent_task_id != current_task_id`.
+    - Integrated model judgment (`judge_approval_request` via `approval_agent`) to evaluate whether a command approved under another task ID or tool wrapper (e.g. `shell_exec`, `ask-run-command`, or parent task) is genuinely related to the active task and safe to execute.
+    - If model judgment accepts, dynamically proposes and issues the correct legitimate `ApprovalGrant` bound specifically to the active task's action and consumes it during execution.
+    - If model judgment denies, stops execution safely and returns status `denied` with the model's reason and suggested alternative command without using hardcoded or assumed approval tokens.
+    - Discards invalid, hallucinated, or unverified `action_approval_id` tokens (not found in approval store or action store) rather than allowing hardcoded bypasses.
+    - Fixed exception handling order to ensure `ApprovalRequired` is caught and processed prior to generic `PermissionError`.
+  - Updated `src/mana_agent/multi_agent/runtime/ask_agent.py` (`run_command`):
+    - Applied model judgment evaluation for cross-task approvals instead of raising `ValueError("Command approval belongs to a different task")`.
+    - Issues and consumes the correct task-bound grant upon judgment acceptance; returns structured denial on rejection.
+    - Properly nested `ApprovalRequired` handling ahead of `PermissionError`.
+  - Updated `src/mana_agent/tools/shell_exec.py` (`ShellExecutor`):
+    - Added optional `task_id` parameter to `ShellExecutor.__init__` so proposed actions inherit the active task identity instead of hardcoding `parent_task_id="shell_exec"`.
+  - Added unit test coverage:
+    - `test_dispatcher_evaluates_different_task_approval_via_judgment_and_executes_with_correct_approval` in `tests/coding/test_coding_approval_judgment.py`.
+    - `test_dispatcher_denies_unrelated_command_approval_from_different_task_via_judgment` in `tests/coding/test_coding_approval_judgment.py`.
+    - `test_dispatcher_ignores_hardcoded_or_unverified_approval_tokens` in `tests/coding/test_coding_approval_judgment.py`.
+    - `test_ask_agent_cross_task_approval_evaluated_by_judgment` in `tests/test_ask_agent.py`.
+    - `test_ask_agent_cross_task_approval_denied_by_judgment` in `tests/test_ask_agent.py`.
+  - Verification results:
+    - `PYTHONPATH=src pytest tests/coding/test_coding_approval_judgment.py -v` (10 passed)
+    - `PYTHONPATH=src pytest tests/test_ask_agent.py -v` (54 passed)
+    - `PYTHONPATH=src pytest tests/test_execution_modes.py tests/test_auto_chat.py tests/test_cli_modes_skills.py tests/gateway/test_transactional_approval.py tests/human_inbox/ -v` (63 passed)
+
+
+- Fixed idempotent handling of repeat approval decisions for human inbox and transactional actions:
+  - Updated `src/mana_agent/human_inbox/service.py` to recognize repeat submissions matching the existing terminal state (`APPROVE` on an already approved item or `DENY` on an already denied item) as idempotent replays (`_IdempotentResponseReplay`) instead of raising `InboxConcurrentUpdateError: inbox item is already terminal: approved`.
+  - Updated `src/mana_agent/gateway/chat_gateway.py` (`transactional_action_approval_command` and `deny_transactional_action_command`) to check `item.status in UNRESOLVED_STATUSES` before calling `respond()`, ensuring already approved actions return approved status without error.
+  - Updated `src/mana_agent/tui/app.py` (`_complete_computer_permission`) to idempotently handle repeat approval events (e.g. double click/accept), correctly showing `"Transactional action approved."` in the UI and activity events rather than showing `"Failed to record approval decision: inbox item is already terminal: approved"`.
+  - Added regression test `test_transactional_action_double_accept_is_idempotent` in `tests/gateway/test_transactional_approval.py` and `test_repeated_approve_submission_is_idempotent` in `tests/human_inbox/test_durable_inbox.py`.
+- Introduced Plan Mode and Act Mode with strict read-only boundary enforcement, codebase context exploration, structured plan generation, context-preserving mode transitions, and explicit user approval gating:
+  - Added `ExecutionMode` enum (`PLAN`, `ACT`), `StructuredPlan` pydantic model, `PlanApprovalState`, and mode normalization (`src/mana_agent/agent/mode.py`, `src/mana_agent/agent/__init__.py`).
+  - Added `PlanService` (`src/mana_agent/agent/plan_service.py`) for read-only codebase exploration, AST/import dependency detection, risk evaluation, and decision-complete structured plan generation in markdown and structured formats.
+  - Updated tool boundary permission gates in `src/mana_agent/multi_agent/runtime/auto_chat.py` to recognize `ExecutionMode` and strictly block mutating tools (`write_file`, `edit_file`, `apply_patch`, `batch_write_files`, `git_commit`, etc.) in Plan Mode.
+  - Updated `ShellExecutionEngine` (`src/mana_agent/tools/shell_exec.py`) to block mutating and destructive shell commands in Plan Mode with explicit `PlanModeError`, while allowing safe read-only commands (`ls`, `git status`, `git diff`, `git log`, `pwd`, `grep`).
+  - Updated `CodingTask` (`src/mana_agent/coding/models.py`) to automatically default `requires_repository_write=False` in Plan Mode.
+  - Enhanced `AgentChatGateway` (`src/mana_agent/gateway/chat_gateway.py`) with per-session execution mode tracking, active plan persistence, and approval gating (`get_session_execution_mode`, `set_session_execution_mode`, `get_session_active_plan`, `set_session_active_plan`, `approve_session_plan`).
+  - Added interactive slash command `/plan <task>` into chat sessions with rich markdown display and interactive accept/reject prompt; accepting the plan switches the session to Act Mode and immediately starts execution.
+  - Added companion chat commands `/mode [show|plan|act]`, `/act`, `/approve`, `/accept`, and `/reject` in `src/mana_agent/chat_commands/builtins/__init__.py` and `src/mana_agent/commands/chat_cli.py`.
+  - Cleaned CLI options by keeping `mana-agent chat` focused without ad-hoc plan flags and driving Plan Mode via `mana-agent plan` and in-chat `/plan <task>`.
+  - Upgraded `mana-agent plan` (`src/mana_agent/commands/cli_internal.py`) to use `PlanService`, display comprehensive plans, and prompt for user approval before entering Act Mode.
+  - Added comprehensive documentation in `docs/plan-and-act-modes.md` and updated `docs/04-commands.md`.
+  - Added comprehensive test coverage in `tests/test_execution_modes.py`.
+  - Added regression coverage for routing, AST/dependency parsing, shell policy, and tool gating: write-capable Git/generic tools are blocked in Plan Mode, explicit verification retains its bounded test tools, shell wrappers and write-capable options are rejected, and shell mode is trusted caller context.
+  - Verification run results:
+    - `PYTHONPATH=src pytest tests/test_execution_modes.py tests/test_auto_chat.py tests/test_cli_modes_skills.py -v` (24 passed)
+    - `mana-agent plan "Refactor database connection pool" --no-code` (verified plan generation and artifact save)
+
+- Fixed chat terminal rendering failures in auto-execute paths: an import scoped inside the `/plan` handler caused Python to treat `Markdown` as a local variable throughout the enclosing chat command, raising `NameError` when other handlers rendered an answer first. `Markdown` is now imported at module scope. Updated the read-only edit guard smoke test to explicitly enter Act Mode and supply a valid model-selected edit route, so it tests its stated condition rather than Plan Mode behavior. **Do not reintroduce** conditional local imports for names referenced by other chat handlers; test an edit guard only after selecting the intended session execution mode.
+
 ## 2026-10-24
 
 - Decoupled internal coding engine progress recognition and checkpointing from file creation/modification:
