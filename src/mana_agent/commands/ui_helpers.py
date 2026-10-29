@@ -888,6 +888,7 @@ _DIRECT_COMMANDS: frozenset[str] = frozenset(
         "/status",
         "/model",
         "/tokens",
+        "/context",
         "/tools",
         "/agents",
         "/subagents",
@@ -944,6 +945,7 @@ def _classify_direct_command(question: str) -> str | None:
         or text.startswith("/ui ")
         or text.startswith("/status ")
         or text.startswith("/verbose ")
+        or text.startswith("/context ")
     ):
         return text.split(None, 1)[0]
     if text in _DIRECT_COMMANDS:
@@ -1023,6 +1025,66 @@ def _render_answer_header(console: Console, title: str = "Answer") -> None:
     console.print(Rule(f"[bold cyan]{title}[/bold cyan]", style="cyan", align="left"))
 
 
+def _render_context_inspector(console: Console, state: ChatUIState, question: str) -> str:
+    governor = state.context_cost_governor
+    if governor is None:
+        console.print("Context inspector unavailable: no context governor.")
+        return "Context inspector unavailable."
+    snapshots = governor.context_inspector.history(
+        scope=(state.session_id, state.workspace_id, state.repository_id),
+    )
+    parts = question.strip().split()
+    if len(parts) == 2 and parts[1].lower() == "history":
+        if not snapshots:
+            console.print("No context snapshots available in this session.")
+        else:
+            table = Table(title="Context admission history")
+            for column in ("Invocation", "Boundary", "Status"):
+                table.add_column(column)
+            for item in snapshots:
+                table.add_row(item.invocation_id, item.boundary, item.lifecycle)
+            console.print(table)
+        return "Displayed context history."
+    if len(parts) == 3 and parts[1].lower() == "show":
+        snapshot = next((item for item in snapshots if item.invocation_id == parts[2]), None)
+    elif len(parts) == 1 or (len(parts) == 2 and parts[1].lower() == "last"):
+        snapshot = snapshots[0] if snapshots else None
+    else:
+        console.print("Usage: /context [last | history | show <invocation-id>]")
+        return "Invalid context command."
+    if snapshot is None:
+        console.print("Context snapshot not found in this session.")
+        return "Context snapshot unavailable."
+    console.print(Text(f"Context Inspector — {snapshot.invocation_id}\nBoundary: {snapshot.boundary}; status: {snapshot.lifecycle}"))
+    console.print(
+        f"Opaque session references — model: {snapshot.model_ref or 'unavailable'}; "
+        f"turn: {snapshot.turn_ref or 'unavailable'}; task: {snapshot.task_ref or 'unavailable'}; "
+        f"attempt: {snapshot.attempt_ref or 'unavailable'}"
+    )
+    console.print("Admission candidates only; actual provider payload and provider-hidden context: NOT_OBSERVABLE.")
+    if snapshot.boundary == "codex_outer":
+        console.print("Codex outer inputs only; Codex internal context is NOT_OBSERVABLE.")
+    console.print(f"Accounting input estimate (includes allowance): {snapshot.accounting_input_estimate if snapshot.accounting_input_estimate is not None else 'unknown'}; context window: {snapshot.context_window if snapshot.context_window is not None else 'unknown'}")
+    console.print(f"Admitted segment estimates: {snapshot.admitted_segment_tokens}; accounting allowance: {snapshot.accounting_allowance if snapshot.accounting_allowance is not None else 'unknown'}; provider-reported input: {snapshot.provider_input_tokens if snapshot.provider_input_tokens is not None else 'unknown'}")
+    if snapshot.provider_input_tokens is not None and snapshot.accounting_input_estimate is not None:
+        console.print(f"Provider input minus accounting estimate: {snapshot.provider_input_tokens - snapshot.accounting_input_estimate:+d}")
+    totals = Table(title="Estimated tokens by category")
+    totals.add_column("Category")
+    totals.add_column("Estimated tokens")
+    for category, count in snapshot.category_totals:
+        totals.add_row(category, str(count))
+    console.print(totals)
+    table = Table(title="Ordered admission components")
+    for column in ("Position", "Category", "Estimated tokens", "Method", "Status", "Reason"):
+        table.add_column(column)
+    for segment in snapshot.segments:
+        table.add_row(str(segment.position), segment.category, str(segment.token_estimate) if segment.token_estimate is not None else "unknown", segment.counting_method, segment.status, segment.reason)
+    console.print(table)
+    if snapshot.omitted_segments:
+        console.print(f"{snapshot.omitted_segments} additional components omitted from display.")
+    return "Displayed context inspector."
+
+
 def _render_direct_command(
     console: Console,
     command: str,
@@ -1056,6 +1118,7 @@ def _render_direct_command(
             "- /status — model, mode, repo, tools, memory, approvals, agents, tokens\n"
             "- /model — show provider/model\n"
             "- /tokens — detailed token accounting\n"
+            "- /context [last|history|show <invocation-id>] — metadata-only context admission inspector\n"
             "- /tools — available auto-chat tools (name + description) and recent runs\n"
             "- /agents or /subagents — active/completed subagent activity\n"
             "- /timeline — chronological event history\n"
@@ -1097,6 +1160,8 @@ def _render_direct_command(
     elif normalized == "tokens" and ui_state is not None:
         _print(ui_state.renderer.render_tokens(ui_state.tracker))
         return "Displayed token usage."
+    elif normalized == "context" and ui_state is not None:
+        return _render_context_inspector(console, ui_state, raw_question or "/context")
     elif normalized == "tools" and ui_state is not None:
         ui_state.active_panel = "tools"
         # Always show the available auto-chat catalog first so users can see

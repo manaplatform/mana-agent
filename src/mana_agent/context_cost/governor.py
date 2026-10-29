@@ -22,6 +22,7 @@ from mana_agent.context_cost.compression import (
     render_envelope,
 )
 from mana_agent.context_cost.estimator import breakdown_for_segments, estimate_tool_schema_tokens, estimate_value_tokens
+from mana_agent.context_cost.inspector import ContextInspector
 from mana_agent.context_cost.events import emit_context_event
 from mana_agent.context_cost.logger import ContextCostLogger
 from mana_agent.context_cost.models import (
@@ -92,6 +93,7 @@ class ContextCostGovernor:
             "unknown_pricing_calls": 0,
         }
         self._lock = threading.RLock()
+        self.context_inspector = ContextInspector((self.session_id, self.workspace_id, self.repository_id))
         self._scope = threading.local()
         self._call_snapshots: dict[str, BudgetSnapshot] = {}
         self._reservations: dict[str, BudgetReservation] = {}
@@ -262,6 +264,7 @@ class ContextCostGovernor:
             self._accounting_reservations.clear()
             self._reconciled_call_ids.clear()
             self._context_manifests.clear()
+            self.context_inspector.reset((self.session_id, self.workspace_id, self.repository_id))
             self._task_usage.clear()
             self._task_consumed.clear()
             self._task_reservations.clear()
@@ -486,7 +489,9 @@ class ContextCostGovernor:
         subagent_id: str | None = None,
         step_id: str = "",
         apply_compaction: bool = False,
+        observation_boundary: str = "admission",
     ) -> tuple[str, GovernorDecision]:
+        inspector_scope, inspector_epoch = self.context_inspector.stamp()
         identity = self._effective_identity(
             turn_id=turn_id, task_id=task_id, agent_id=agent_id,
             subagent_id=subagent_id, step_id=step_id,
@@ -621,6 +626,12 @@ class ContextCostGovernor:
                     )
                     self._call_snapshots[call_id] = snapshot
                     self._persist_context_manifest(call_id, compacted, identity=identity)
+                    self._capture_inspector(
+                        call_id, segments, compacted, scope=inspector_scope, epoch=inspector_epoch,
+                        boundary=observation_boundary, blocked=True, context_window=resolved.context_window,
+                        model_identity=f"{resolved_provider}/{model}", turn_id=turn_id, task_id=task_id,
+                        attempt_id=str(identity.get("attempt_id") or ""),
+                    )
                     self._record_decision(
                         call_id, decision, provider=provider, model=model,
                         turn_id=turn_id, task_id=task_id, agent_id=agent_id,
@@ -777,6 +788,12 @@ class ContextCostGovernor:
                 )
                 raise
         self._persist_context_manifest(call_id, compacted, identity=identity)
+        self._capture_inspector(
+            call_id, segments, compacted, scope=inspector_scope, epoch=inspector_epoch,
+            boundary=observation_boundary, blocked=blocked, estimate=token_estimate, context_window=window,
+            model_identity=f"{resolved_provider}/{model}", turn_id=turn_id, task_id=task_id,
+            attempt_id=str(identity.get("attempt_id") or ""),
+        )
         self._record_decision(call_id, decision, provider=provider, model=model, turn_id=turn_id, task_id=task_id, agent_id=agent_id, subagent_id=subagent_id, step_id=step_id)
         if blocked:
             self.accounting.release(accounting_reservation, reason=reason)
@@ -855,6 +872,17 @@ class ContextCostGovernor:
             )
         with self._lock:
             self._reconciled_call_ids.add(call_id)
+            self._finish_inspector(
+                call_id, lifecycle="completed",
+                provider_input_tokens=(
+                    normalized.input_tokens
+                    if not normalized.estimated and any(
+                        key in normalized.provider_raw_usage
+                        for key in ("input_tokens", "prompt_tokens", "inputTokens", "prompt_token_count")
+                    )
+                    else None
+                ),
+            )
             self._reservations.pop(call_id, None)
             if task_id:
                 task_res = self._task_reservations.get(task_id, {})
@@ -1033,6 +1061,7 @@ class ContextCostGovernor:
     def release_reservation(self, reservation_id: str, *, reason: str) -> None:
         """Release a failed or cancelled admission without recording usage."""
         with self._lock:
+            self._finish_inspector(reservation_id, lifecycle="released")
             reservation = self._reservations.pop(reservation_id, None)
             accounting_reservation = self._accounting_reservations.pop(reservation_id, None)
             self._reconciled_call_ids.add(str(reservation_id))
@@ -1281,6 +1310,22 @@ class ContextCostGovernor:
                 output_cost=0.0,
                 estimated=False,
             )
+
+    def _capture_inspector(
+        self, call_id: str, candidates: Sequence[ContextSegment],
+        admitted: Sequence[ContextSegment], **kwargs: Any,
+    ) -> None:
+        # Diagnostics must not change admission or prevent a provider call.
+        try:
+            self.context_inspector.capture(call_id, candidates, admitted, **kwargs)
+        except Exception:
+            logger.warning("Context inspector could not record admission metadata")
+
+    def _finish_inspector(self, call_id: str, **kwargs: Any) -> None:
+        try:
+            self.context_inspector.finish(call_id, **kwargs)
+        except Exception:
+            logger.warning("Context inspector could not record lifecycle metadata")
 
     def _persist_context_manifest(
         self,

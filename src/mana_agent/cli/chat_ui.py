@@ -561,7 +561,7 @@ def render_startup_header(console: Console, state: ChatUIState) -> None:
             f"auto tools  {tools_summary}",
             "",
             "Ready. Ask for code changes, repo analysis, debugging, or planning.",
-            "/help  /status  /tokens  /tools  /agents  /trace  /ui  /exit",
+            "/help  /status  /tokens  /context  /tools  /agents  /trace  /ui  /exit",
             "",
             "Try: \"explain this repo\"  \"fix failing tests\"  \"add a CLI command\"  \"/analyze src/mana_agent\"",
             "Enter send · Shift+Enter newline · Ctrl+C cancel · Ctrl+D exit",
@@ -597,7 +597,7 @@ def render_startup_header(console: Console, state: ChatUIState) -> None:
         )
         console.print()
         console.print("Ready. Ask for code changes, repo analysis, debugging, or planning.")
-        console.print("[dim]/help  /status  /tokens  /tools  /agents  /trace  /ui  /exit[/dim]")
+        console.print("[dim]/help  /status  /tokens  /context  /tools  /agents  /trace  /ui  /exit[/dim]")
         if width >= 100:
             console.print('[dim]Try: "explain this repo"  "fix failing tests"  "add a CLI command"  "/analyze src/mana_agent"[/dim]')
         console.print("[dim]Enter send · Shift+Enter newline · Ctrl+C cancel · Ctrl+D exit[/dim]")

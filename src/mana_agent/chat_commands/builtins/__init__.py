@@ -148,6 +148,39 @@ def _status(context: CommandContext, _args: list[str]) -> CommandResult:
     return CommandResult(status="success", message=f"Mana-Agent session status: {context.gateway.status(context.session_id)}.")
 
 
+def _context_inspector(context: CommandContext, args: list[str]) -> CommandResult:
+    """Render the local admission inspector using the caller's exact scope."""
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from mana_agent.commands.ui_helpers import _render_context_inspector
+
+    valid = (
+        not args
+        or (len(args) == 1 and args[0].lower() in {"last", "history"})
+        or (len(args) == 2 and args[0].lower() == "show" and bool(args[1]) and not any(c.isspace() for c in args[1]))
+    )
+    if not valid:
+        return CommandResult(status="error", message="Usage: /context [last | history | show <invocation-id>]")
+    if context.gateway is None or not hasattr(context.gateway, "get_stack"):
+        return CommandResult(status="error", message="Context inspector unavailable: no context governor.")
+    governor = getattr(context.gateway.get_stack(), "context_cost_governor", None)
+    if governor is None or getattr(governor, "context_inspector", None) is None:
+        return CommandResult(status="error", message="Context inspector unavailable: no context governor.")
+    state = SimpleNamespace(
+        context_cost_governor=governor,
+        session_id=context.session_id,
+        workspace_id=context.workspace_id,
+        repository_id=context.repository_id,
+    )
+    output = StringIO()
+    console = Console(file=output, width=120, color_system=None, no_color=True)
+    _render_context_inspector(console, state, " ".join(["/context", *args]))
+    return CommandResult(status="success", message=output.getvalue().strip())
+
+
 def _automations(context: CommandContext, args: list[str]) -> CommandResult:
     if context.gateway is None or not hasattr(context.gateway, "root"):
         raise RuntimeError("Automation store is unavailable. No fallback action was executed.")
@@ -670,6 +703,7 @@ def definitions() -> list[CommandDefinition]:
         CommandDefinition(canonical_name="connect", description="Configure or manage a connector.", argument_schema="[list|telegram ...]", required_capability="connectors", accepts_secrets=True, handler=_connect),
         CommandDefinition(canonical_name="disconnect", description="Remove connector configuration.", argument_schema="<name>", required_capability="connectors", confirmation_required=True, handler=lambda context, args: _connect(context, ["disconnect", *args])),
         CommandDefinition(canonical_name="status", description="Show the active chat status.", required_capability="gateway", handler=_status),
+        CommandDefinition(canonical_name="context", description="Inspect metadata-only context admissions in this session.", argument_schema="[last|history|show <invocation-id>]", required_capability="gateway", frontends=frozenset({"cli", "tui"}), handler=_context_inspector),
         CommandDefinition(canonical_name="cancel", description="Cancel the active agent turn.", required_capability="gateway", handler=_cancel),
         CommandDefinition(
             canonical_name="engine",

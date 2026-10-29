@@ -2937,6 +2937,7 @@ class AskAgent:
                 model_call_id, _decision = governor.before_model_call(
                     model_segments,
                     model=self.model,
+                    observation_boundary="ask_agent",
                     turn_id=str(run_id or flow_id or ""),
                     step_id=str(step_idx),
                     expected_output_tokens=model_max_tokens,

@@ -2,6 +2,28 @@
 
 All notable repository changes should be recorded here.
 
+## 2026-10-29
+
+- Context inspector: registered `/context` in the local shared command
+  dispatcher so Textual chat and its `/help` can access the existing scoped,
+  metadata-only inspector. Remote frontends remain unavailable. See
+  `docs/model-token-accounting.md` for the session-switch limitation and
+  regression note. User-owned verification:
+  `PYTHONPATH=src venv/bin/python -m pytest tests/context_cost/test_context_inspector.py tests/test_tui_auto_chat_tool_events.py -q`.
+
+- Versioning: bumped the project version to `0.7.0` and synchronized the
+  README version badge. User-owned verification (not run by the agent):
+  `PYTHONPATH=src pytest tests/test_package_version.py -q` and
+  `python .github/scripts/validate_release_version.py --tag v0.7.0`.
+
+- Added a bounded, metadata-only CLI `/context` admission inspector with
+  session-scope checks, category token estimates, lifecycle and provider usage.
+  It explicitly does not claim to observe final payloads or Codex internals.
+  See `docs/model-token-accounting.md` for security boundaries and limitations.
+  User-owned verification (not run by the agent):
+  `PYTHONPATH=src .venv/bin/python -m pytest tests/context_cost/test_context_inspector.py -q`,
+  followed by `PYTHONPATH=src .venv/bin/python -m pytest tests/context_cost tests/gateway/test_context_budget_retention.py -q`.
+
 ## 2026-10-26
 
 - Fixed approval recording errors, multi-request approval, and execution gating until approval:

@@ -458,6 +458,7 @@ class CompatibleChatOpenAI(ChatOpenAI):
             segments,
             model=self.model_name,
             provider=str(metadata.get("provider") or ""),
+            observation_boundary="compatible_chat",
             step_id="compatibility-retry" if self.compatibility_retry_attempted else "",
             expected_output_tokens=(
                 int(kwargs.get("max_output_tokens") or kwargs.get("max_completion_tokens") or kwargs.get("max_tokens"))
