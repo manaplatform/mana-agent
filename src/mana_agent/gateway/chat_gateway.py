@@ -3432,6 +3432,7 @@ class AgentChatGateway:
         inbox_item_id: str,
         *,
         session_id: str = "",
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
         """Approve the authoritative inbox item; branch resumption owns execution."""
         from mana_agent.human_inbox.models import (
@@ -3467,6 +3468,19 @@ class AgentChatGateway:
                     raise
         if item.request_type.value != "approval" or not item.action_intent_id:
             raise ValueError("inbox item is not an actionable transactional approval")
+        if expected_version is not None and item.version != expected_version:
+            raise ValueError("approval request changed after batch judgment")
+        if expected_version is not None:
+            from mana_agent.transactional_actions.models import ActionState, PolicyOutcome, utc_now
+
+            current_action = self._transactional_runtime.store.get_action(item.action_intent_id)
+            if (current_action is None or current_action.state is not ActionState.AWAITING_APPROVAL
+                    or current_action.policy_decision is None
+                    or current_action.policy_decision.outcome is not PolicyOutcome.REQUIRE_APPROVAL
+                    or current_action.expires_at <= utc_now()
+                    or current_action.policy_decision.expires_at <= utc_now()
+                    or item.action_digest != current_action.approval_digest()):
+                raise PermissionError("transactional action changed or is no longer approvable")
         actor_id = getpass.getuser()
         if item.status in UNRESOLVED_STATUSES:
             inbox_svc.respond(ResponseSubmission(
@@ -3475,7 +3489,7 @@ class AgentChatGateway:
                 actor_id=actor_id,
                 channel="tui-local",
                 idempotency_key=f"tui-approve:{inbox_item_id}",
-                expected_version=item.version,
+                expected_version=expected_version if expected_version is not None else item.version,
                 current_action_digest=item.action_digest,
             ))
         elif item.status != InboxStatus.APPROVED:

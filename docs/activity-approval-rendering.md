@@ -18,6 +18,24 @@ before `ExecutionPanel` selects its Activity box. Keep general approvals in
 Activity, coding-backend approvals in Coding Activity, and retain the separate
 approval dialog for the actual authorization decision.
 
+## Approving matching requests
+
+The transactional approval dialog offers **Allow all matching queued**. This
+approves the displayed request and considers only requests already queued when
+the user makes that choice; it is not a standing authorization for future
+requests or other inbox entries. Non-matching or unverified requests remain
+queued for individual review. The comparison is deterministic and fails closed:
+task, execution, reviewer, risk and request material must match. Transactional
+actions additionally require matching current action digests, policy and full
+invocation fingerprints; only adapters with sufficient fingerprints (shell and
+MCP) are automatically matched. Missing or protected data that cannot be
+compared prevents a match. Each request still goes through the usual reviewer,
+expiration, action and grant checks, with a version check against changes after
+comparison. No policy-denied action is authorized by this option.
+
+`/approve` approves a pending implementation plan; it does not silently approve
+inbox requests. Review those through the approval dialog or inbox instead.
+
 User-owned focused verification command:
 
 ```bash

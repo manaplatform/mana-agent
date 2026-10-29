@@ -2402,37 +2402,7 @@ def chat(
                         _finish_ui_turn(current_turn_id)
                         continue
                 else:
-                    inbox_svc = getattr(gateway, "human_inbox_service", None)
-                    if inbox_svc is None:
-                        try:
-                            from mana_agent.human_inbox import default_human_inbox_service
-                            inbox_svc = default_human_inbox_service()
-                        except Exception:
-                            inbox_svc = None
-                    approved_count = 0
-                    if inbox_svc is not None:
-                        try:
-                            import getpass
-                            from mana_agent.human_inbox.models import InboxQuery, InboxStatus
-                            pending = inbox_svc.list(
-                                InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
-                                actor_id=getpass.getuser(),
-                            )
-                            for r in pending:
-                                if r.request_type.value == "approval":
-                                    try:
-                                        if hasattr(gateway, "transactional_action_approval_command"):
-                                            gateway.transactional_action_approval_command(r.inbox_item_id, session_id=chat_ui_state.session_id)
-                                        approved_count += 1
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-                    if approved_count > 0:
-                        console.print(f"[green]Approved {approved_count} pending approval request(s). Execution proceeding.[/green]")
-                        _finish_ui_turn(current_turn_id)
-                        continue
-                    console.print("[yellow]No pending plan or approval requests found to approve.[/yellow]")
+                    console.print("[yellow]No pending plan. Review requests in the approval dialog or inbox.[/yellow]")
                     _finish_ui_turn(current_turn_id)
                     continue
 

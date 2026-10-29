@@ -637,60 +637,9 @@ def _approve_command(context: CommandContext, args: list[str]) -> CommandResult:
                 data={"mode": "act", "plan_approved": True, "execution_request": str((plan or {}).get("goal") or "")},
             )
 
-    inbox_svc = getattr(context.gateway, "human_inbox_service", None)
-    if inbox_svc is None:
-        try:
-            from mana_agent.human_inbox import default_human_inbox_service
-            inbox_svc = default_human_inbox_service()
-        except Exception:
-            inbox_svc = None
-
-    if inbox_svc is not None:
-        try:
-            import getpass
-            from mana_agent.human_inbox.models import InboxQuery, InboxStatus, ResponseOperation, ResponseSubmission
-
-            rows = inbox_svc.list(
-                InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
-            )
-            approval_rows = [r for r in rows if r.request_type.value == "approval"]
-            if approval_rows:
-                count = 0
-                for r in approval_rows:
-                    try:
-                        actor_id = r.assigned_reviewer_id or getpass.getuser()
-                        handled = False
-                        if r.action_intent_id and hasattr(context.gateway, "transactional_action_approval_command"):
-                            try:
-                                context.gateway.transactional_action_approval_command(r.inbox_item_id, session_id=context.session_id)
-                                handled = True
-                            except Exception:
-                                handled = False
-                        if not handled:
-                            inbox_svc.respond(ResponseSubmission(
-                                inbox_item_id=r.inbox_item_id,
-                                operation=ResponseOperation.APPROVE,
-                                actor_id=actor_id,
-                                channel="chat-command",
-                                idempotency_key=f"cmd-approve:{r.inbox_item_id}",
-                                expected_version=r.version,
-                                current_action_digest=r.action_digest,
-                            ))
-                        count += 1
-                    except Exception as inb_err:
-                        logger.debug("Failed approving pending inbox item %s: %s", r.inbox_item_id, inb_err)
-                if count > 0:
-                    return CommandResult(
-                        status="success",
-                        message=f"Approved {count} pending approval request(s). Execution proceeding.",
-                        data={"approved_requests_count": count},
-                    )
-        except Exception as exc:
-            logger.debug("Failed searching pending inbox items in /approve: %s", exc)
-
     return CommandResult(
         status="error",
-        message="No pending plan or approval requests found to approve for this session.",
+        message="No pending plan. Review and approve requests in the approval dialog or inbox.",
     )
 
 

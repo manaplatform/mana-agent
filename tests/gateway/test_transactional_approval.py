@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from mana_agent.gateway import AgentChatGateway
 from mana_agent.transactional_actions.adapters import McpActionAdapter, ShellActionAdapter
 from mana_agent.transactional_actions.runtime import create_transactional_runtime
@@ -46,6 +48,21 @@ def test_transactional_action_approval_command_shell_action(tmp_path: Path, monk
     assert "shell action approved" in result["message"].lower()
     assert "legacy mcp" not in result["message"].lower()
     assert result["approval_id"] != ""
+
+
+def test_batch_version_rejects_changed_transactional_approval(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    gw = _build_test_gateway(tmp_path)
+    adapter = ShellActionAdapter(
+        argv=["nmap", "-p", "443", "manadev.net"], cwd=tmp_path, environment={}, expected_outputs=[],
+        parent_task_id="task", actor="user", originating_agent="agent",
+        idempotency_key="stale-version-test",
+    )
+    action = gw._transactional_runtime.gateway.propose(adapter)
+    item = gw.human_inbox_service.repository.get(action.inbox_item_id)
+    with pytest.raises(ValueError, match="changed after batch judgment"):
+        gw.transactional_action_approval_command(item.inbox_item_id, expected_version=item.version + 1)
+    assert gw.human_inbox_service.repository.get(item.inbox_item_id).status.value != "approved"
 
 
 def test_transactional_action_approval_command_mcp_action_executes(tmp_path: Path, monkeypatch) -> None:
