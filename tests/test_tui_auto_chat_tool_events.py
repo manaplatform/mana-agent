@@ -219,6 +219,48 @@ def test_tui_new_command_deletes_active_session_and_clears_mounted_log(tmp_path:
     asyncio.run(run())
 
 
+def test_tui_context_command_uses_registered_scoped_inspector(tmp_path: Path) -> None:
+    from mana_agent.chat_commands import CommandDispatcher, build_default_registry
+    from mana_agent.chat_commands.models import CommandContext
+    from mana_agent.context_cost.inspector import ContextInspector
+    from mana_agent.context_cost.models import ContextSegment
+
+    scope = ("session_old", "workspace", "repository")
+    inspector = ContextInspector(scope)
+    segment = ContextSegment("user", "private prompt", 5)
+    inspector.capture("call", [segment], [segment], scope=scope, boundary="admission", blocked=False)
+
+    class Gateway:
+        config = SimpleNamespace(session_id=scope[0])
+
+        def create_session(self, *, frontend: str, session_id: str | None = None) -> str:
+            return session_id or scope[0]
+
+        def get_stack(self):
+            return SimpleNamespace(context_cost_governor=SimpleNamespace(context_inspector=inspector))
+
+        def dispatch_command(self, text: str, *, session_id: str, frontend: str):
+            context = CommandContext(frontend=frontend, session_id=session_id, workspace_id=scope[1], repository_id=scope[2], capabilities={"chat", "gateway"}, gateway=self)
+            return CommandDispatcher(build_default_registry()).dispatch(text, context)
+
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path, model="gpt-test", gateway=Gateway())
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            composer = app.query_one(MessageInput)
+            composer.value = "/context"
+            await pilot.press("enter")
+            await pilot.pause()
+            messages = [event.content for event in history.get_events() if isinstance(event, AssistantMessageEvent)]
+            assert "Context Inspector" in messages[-1]
+            assert "NOT_OBSERVABLE" in messages[-1]
+            assert "private prompt" not in messages[-1]
+            assert "Unsupported command" not in messages[-1]
+
+    asyncio.run(run())
+
+
 def test_tui_records_api_approval_failure_as_terminal_assistant_message(
     tmp_path: Path,
 ) -> None:

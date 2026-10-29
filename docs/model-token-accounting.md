@@ -51,6 +51,82 @@ measured models or their token profiles.
 
 ## Reservation and reconciliation
 
+### CLI context admission inspector
+
+The CLI's opt-in `/context` or `/context last` displays the most recent
+governor admission, `/context history` lists retained invocation identifiers,
+and `/context show <invocation-id>` selects one. These commands work in the
+classic chat CLI and local Textual chat, not remote API, dashboard, or Telegram
+frontends. The display is quiet until requested. Recording occurs in memory
+while the governor is enabled; the classic CLI clears it on a session switch.
+The local Textual command only reads snapshots matching the active session,
+workspace and repository; its shared governor does not currently re-scope on
+session switches, so snapshots may be unavailable after switching. It keeps at
+most 50 snapshots and 100 displayed segments per snapshot. Category totals
+still include components beyond the display limit.
+
+The Textual chat uses the shared command registry, unlike the classic CLI's
+direct-command path. Previously `/context` was implemented only in the latter,
+so the Textual dispatcher returned `Unsupported command` and omitted it from
+`/help`. The registry now exposes the same scoped renderer locally. **Do not
+reintroduce:** advertise or implement this local command in only one dispatch
+path, or expose its process-local snapshots to remote frontends without an
+authenticated authorization design. Regression coverage exercises the registry,
+Textual input path, and scope and privacy boundaries.
+
+The version 1 snapshot contains opaque, random invocation and segment IDs,
+ordered categories, admission/removal and call lifecycle status, fixed safe
+explanations, segment estimates, category totals, model context window,
+accounting input estimate and allowance, and provider-reported input when
+available. Model, turn, task and attempt correlation references are keyed,
+session-local hashes, not the original identifiers; the key rotates on reset.
+Snapshot access checks the exact nonempty session, workspace and
+repository scope before returning data. This is a process-local diagnostic,
+not an authenticated remote access API or role-authorization system. It stores
+no prompt text, source identifiers, paths, user-supplied reason strings, or
+tool payloads, and does not provide raw-content viewing or export. The existing
+governor's separately persisted manifests and accounting records retain their
+existing storage and retention behavior; this feature does not migrate them.
+
+The inspector is an **admission view**, not an execution trace or proof of the
+final request: downstream callers may submit a different payload. Marked
+removals are governor admission compaction/fitting decisions, not evidence of
+provider-side truncation. Upstream selection reasons are not currently exposed.
+The compatible-chat and AskAgent adapters supply admission candidates; the
+Codex boundary exposes only Mana's outer inputs. Codex internals, hidden
+provider instructions, provider framing and unavailable multimodal costs are
+`NOT_OBSERVABLE`. Calls that bypass this governor have no snapshot. Do not
+infer missing segments or instructions from an absent snapshot.
+
+In particular, AskAgent's fallback admission supplies tool names as schema
+proxies rather than the complete bound schemas. Codex's admission includes a
+contract placeholder, goal and outer prompt, which may overlap and are not a
+breakdown of Codex's real model request. Neither boundary's category totals
+should be interpreted as exact tool-schema or provider-input costs.
+
+Token counts reuse the existing accounting tokenizer's component estimates;
+when no estimate is available, caller estimates are labeled as such. The
+accounting input estimate includes policy safety margin and possibly historical
+allowances, shown separately from segment totals. Framing and multimodal costs
+may be incomplete. Provider-reported aggregate input is not attributed to
+segments, and its difference from the estimate is not a measurement of a
+specific component. Unknown model/tokenizer behavior follows the existing
+accounting fallback; none of these numbers is presented as exact. No extra model
+calls or extra tokenization are performed.
+
+This initial feature does not implement persisted snapshots, diff, exports,
+content expansion, privilege levels, or future-context exclusion. It does not
+change context selection, approval, routing, or provider request content. A
+future implementation of those controls needs separate authorization, stable
+source identity, dependency validation and retention design.
+
+**Regression invariant:** Never label an admitted candidate as submitted, or
+serialize raw segment content/source metadata into the inspector. The observed
+gap was that the existing manifest recorded admitted sources, which do not prove
+what a caller ultimately sent; the metadata-only admission view keeps that
+distinction explicit. This invariant remains unverified until the user runs the
+focused tests.
+
 Each model call follows this lifecycle:
 
 ```text

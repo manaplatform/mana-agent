@@ -469,6 +469,7 @@ class CodexCodingBackend:
                             ),
                         ),
                         model=self.settings.model or "app-server-default",
+                        observation_boundary="codex_outer",
                         provider=self.settings.provider,  # real inference provider, not the bridge
                         turn_id=task.task_id,
                         task_id=task.task_id,

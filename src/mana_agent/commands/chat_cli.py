@@ -2569,6 +2569,11 @@ def chat(
                     ui_state=chat_ui_state,
                     raw_question=question,
                 )
+                # Inspection is not conversational context for later model calls.
+                # Do not persist the command or its opaque selection in chat history.
+                if direct_command == "/context":
+                    _finish_ui_turn(current_turn_id)
+                    continue
                 chat_ui_state.record_event(
                     make_event(
                         "agent.decision",
