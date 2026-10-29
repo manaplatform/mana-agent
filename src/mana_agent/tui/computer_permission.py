@@ -22,6 +22,7 @@ class ComputerPermissionChoice:
     api: bool = False
     transactional: bool = False
     approve_all: bool = False
+    expected_version: int | None = None
 
 
 class ComputerPermissionRequested(Message):
@@ -107,9 +108,9 @@ class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
             with Horizontal(classes="computer-permission-actions"):
                 yield Button("Deny", id="permission-deny", variant="error")
                 yield Button("Allow once", id="permission-once", variant="primary")
-                if self.pending_count > 1 or (self.transactional and self.pending_count > 1):
-                    yield Button(f"Allow all ({self.pending_count})", id="permission-all", variant="success")
-                elif not self.server and not self.api and not self.transactional:
+                if self.transactional:
+                    yield Button("Allow all matching queued", id="permission-all", variant="success")
+                if not self.server and not self.api and not self.transactional:
                     yield Button("This session", id="permission-session", variant="success")
                     yield Button("Always", id="permission-always", variant="warning")
 

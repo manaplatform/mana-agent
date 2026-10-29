@@ -782,7 +782,7 @@ class ManaChatApp(App):
         from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
         def complete(choice: Any) -> None:
-            if event.transactional:
+            if choice is None and event.transactional:
                 self._transactional_modal_active = False
                 self.call_after_refresh(self._show_next_transactional_modal)
             self._apply_computer_permission(choice)
@@ -804,12 +804,23 @@ class ManaChatApp(App):
     def _apply_computer_permission(self, choice: Any) -> None:
         if choice is None:
             return
+
+        batch_ids = list(self._transactional_modal_queue) if getattr(choice, "approve_all", False) else []
+
+        async def complete_and_advance() -> None:
+            try:
+                await self._complete_computer_permission(choice, batch_ids=batch_ids)
+            finally:
+                if choice.transactional:
+                    self._transactional_modal_active = False
+                    self.call_after_refresh(self._show_next_transactional_modal)
+
         self.run_worker(
-            self._complete_computer_permission(choice),
+            complete_and_advance(),
             name=f"computer-permission-{choice.request_id}",
         )
 
-    async def _complete_computer_permission(self, choice: Any) -> None:
+    async def _complete_computer_permission(self, choice: Any, *, batch_ids: list[str] | None = None) -> None:
         from mana_agent.integrations.computer_control.cancellation import (
             decide_computer_permission,
             deny_computer_permission,
@@ -820,6 +831,26 @@ class ManaChatApp(App):
                 is_approve = choice.decision is not None
                 handled = False
                 msg = ""
+                # Snapshot only requests already queued when the user decided.
+                if batch_ids is None:
+                    batch_ids = list(self._transactional_modal_queue) if getattr(choice, "approve_all", False) and is_approve else []
+                from mana_agent.human_inbox import default_human_inbox_service
+                service = (getattr(self.gateway, "human_inbox_service", None) if self.gateway else None) or default_human_inbox_service()
+                try:
+                    reference = service.repository.get(choice.request_id)
+                except Exception:
+                    try:
+                        matches = service.repository.find_for_action(choice.request_id)
+                        reference = matches[0] if matches else None
+                    except Exception:
+                        reference = None
+                if reference is None:
+                    fallback = default_human_inbox_service()
+                    try:
+                        reference = fallback.repository.get(choice.request_id)
+                        service = fallback
+                    except Exception:
+                        pass
                 if self.gateway is not None:
                     command = (
                         self.gateway.transactional_action_approval_command
@@ -827,19 +858,20 @@ class ManaChatApp(App):
                         else self.gateway.deny_transactional_action_command
                     )
                     try:
+                        extra_args = {}
+                        if getattr(choice, "expected_version", None) is not None:
+                            extra_args["expected_version"] = choice.expected_version
                         result = await asyncio.to_thread(
                             command,
                             choice.request_id,
                             session_id=self._gateway_session_id or "",
+                            **extra_args,
                         )
                         msg = str(result.get("message") or "")
                         handled = True
                     except Exception as exc:
                         exc_str = str(exc).lower()
-                        if is_approve and (
-                            "already terminal: approved" in exc_str
-                            or "only an action awaiting approval may receive a grant" in exc_str
-                        ):
+                        if is_approve and "already terminal: approved" in exc_str:
                             msg = "Transactional action approved."
                             handled = True
                         elif not is_approve and "already terminal: denied" in exc_str:
@@ -848,7 +880,7 @@ class ManaChatApp(App):
                         else:
                             logger.warning("Gateway transactional approval command error: %s", exc)
 
-                if not handled:
+                if not handled and (self.gateway is None or (reference is not None and not reference.action_intent_id)):
                     try:
                         from mana_agent.human_inbox import default_human_inbox_service
                         from mana_agent.human_inbox.models import (
@@ -890,10 +922,24 @@ class ManaChatApp(App):
                                 except Exception:
                                     pass
 
-                        actor_id = (
-                            getattr(item, "assigned_reviewer_id", "")
-                            or getpass.getuser()
-                        )
+                        if item is None:
+                            raise LookupError("Approval request not found")
+                        expected_version = getattr(choice, "expected_version", None)
+                        if expected_version is not None and item.version != expected_version:
+                            raise ValueError("approval request changed after batch judgment")
+                        if expected_version is not None and item.action_intent_id:
+                            from mana_agent.transactional_actions.models import ActionState, PolicyOutcome, utc_now
+
+                            current = default_action_gateway(self.repo_root).store.get_action(item.action_intent_id)
+                            if (current is None or current.state is not ActionState.AWAITING_APPROVAL
+                                    or current.policy_decision is None
+                                    or current.policy_decision.outcome is not PolicyOutcome.REQUIRE_APPROVAL
+                                    or current.expires_at <= utc_now()
+                                    or current.policy_decision.expires_at <= utc_now()
+                                    or current.approval_digest() != item.action_digest):
+                                raise PermissionError("transactional action changed or is no longer approvable")
+
+                        actor_id = getpass.getuser()
                         operation = ResponseOperation.APPROVE if is_approve else ResponseOperation.DENY
                         if item is not None:
                             if item.status in UNRESOLVED_STATUSES:
@@ -903,7 +949,7 @@ class ManaChatApp(App):
                                     actor_id=actor_id,
                                     channel="tui-local",
                                     idempotency_key=f"tui-resp:{item.inbox_item_id}",
-                                    expected_version=item.version,
+                                    expected_version=expected_version if expected_version is not None else item.version,
                                     current_action_digest=item.action_digest,
                                 ))
                             elif (is_approve and item.status == InboxStatus.APPROVED) or (not is_approve and item.status == InboxStatus.DENIED):
@@ -919,7 +965,7 @@ class ManaChatApp(App):
                                     actor_id=actor_id,
                                     channel="tui-local",
                                     idempotency_key=f"tui-resp:{item.inbox_item_id}",
-                                    expected_version=item.version,
+                                    expected_version=expected_version if expected_version is not None else item.version,
                                     current_action_digest=item.action_digest,
                                 ))
 
@@ -950,10 +996,7 @@ class ManaChatApp(App):
                         handled = True
                     except Exception as exc:
                         exc_str = str(exc).lower()
-                        if is_approve and (
-                            "already terminal: approved" in exc_str
-                            or "only an action awaiting approval may receive a grant" in exc_str
-                        ):
+                        if is_approve and "already terminal: approved" in exc_str:
                             logger.info("Transactional action approval was already recorded: %s", exc)
                             msg = "Transactional action approved."
                             handled = True
@@ -965,37 +1008,21 @@ class ManaChatApp(App):
                             logger.exception("Failed to resolve transactional action approval directly")
                             msg = f"Failed to record approval decision: {exc}"
 
-                # If the user chose to approve all pending requests, approve remaining items
-                if getattr(choice, "approve_all", False) and is_approve:
-                    remaining_ids = list(self._transactional_modal_queue)
-                    self._transactional_modal_queue.clear()
-                    try:
-                        from mana_agent.human_inbox import default_human_inbox_service
-                        from mana_agent.human_inbox.models import InboxQuery, InboxStatus
-
-                        inbox_svc = (
-                            self.gateway.human_inbox_service
-                            if (self.gateway and getattr(self.gateway, "human_inbox_service", None))
-                            else default_human_inbox_service()
-                        )
-                        pending_rows = inbox_svc.list(
-                            InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
-                            actor_id=getpass.getuser(),
-                        )
-                        for r in pending_rows:
-                            if (
-                                r.request_type.value == "approval"
-                                and r.inbox_item_id not in remaining_ids
-                                and r.inbox_item_id != choice.request_id
-                            ):
-                                remaining_ids.append(r.inbox_item_id)
-                    except Exception as extra_query_err:
-                        logger.debug("Could not query extra inbox items for approve-all: %s", extra_query_err)
-
+                # Match only the queued snapshot, never the entire inbox or future requests.
+                if (handled and is_approve and reference is not None and batch_ids
+                        and service.repository.get(reference.inbox_item_id).status.value == "approved"):
+                    from mana_agent.human_inbox.equivalence import same_approval_request
+                    from mana_agent.human_inbox.models import UNRESOLVED_STATUSES
+                    from mana_agent.transactional_actions.runtime import default_action_gateway
+                    runtime = getattr(self.gateway, "_transactional_runtime", None) if self.gateway else None
+                    store = runtime.store if runtime is not None else default_action_gateway(self.repo_root).store
                     extra_approved = 0
                     from mana_agent.tui.computer_permission import ComputerPermissionChoice
-                    for rem_id in remaining_ids:
+                    for rem_id in batch_ids:
                         try:
+                            candidate = service.repository.get(rem_id)
+                            if candidate.status not in UNRESOLVED_STATUSES or not same_approval_request(reference, candidate, action_store=store):
+                                continue
                             rem_choice = ComputerPermissionChoice(
                                 request_id=rem_id,
                                 decision=choice.decision,
@@ -1004,14 +1031,21 @@ class ManaChatApp(App):
                                 api=choice.api,
                                 transactional=choice.transactional,
                                 approve_all=False,
+                                expected_version=candidate.version,
                             )
                             await self._complete_computer_permission(rem_choice)
-                            extra_approved += 1
+                            if service.repository.get(rem_id).status.value == "approved":
+                                if rem_id in self._transactional_modal_queue:
+                                    self._transactional_modal_queue.remove(rem_id)
+                                extra_approved += 1
                         except Exception as extra_exc:
                             logger.debug("Failed approving additional queued item %s: %s", rem_id, extra_exc)
                     if extra_approved > 0:
                         msg = f"Transactional actions approved ({extra_approved + 1} total)."
 
+                if not handled:
+                    self.notify(msg or "Failed to record approval decision.", severity="warning")
+                    return
                 decided_event = "action.approval.granted" if is_approve else "action.approval.denied"
                 self.history.add(
                     CodingActivityEvent(

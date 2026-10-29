@@ -90,6 +90,34 @@ def test_tool_card_approval_header_badge() -> None:
     assert "approval_request" in header
 
 
+def test_transactional_permission_screen_offers_matching_batch() -> None:
+    import anyio
+    from textual.app import App
+
+    class TestApp(App):
+        choice = None
+
+        def on_mount(self) -> None:
+            self.push_screen(ComputerPermissionScreen(
+                request_id="request-1", scope="transactional_action.once",
+                preview="Preview", transactional=True, pending_count=1,
+            ), self.record_choice)
+
+        def record_choice(self, choice) -> None:
+            self.choice = choice
+
+    async def exercise() -> None:
+        app = TestApp()
+        async with app.run_test() as pilot:
+            assert app.screen.query_one("#permission-all").label.plain == "Allow all matching queued"
+            await pilot.click("#permission-all")
+            await pilot.pause()
+            assert app.choice.approve_all is True
+            assert app.choice.request_id == "request-1"
+
+    anyio.run(exercise)
+
+
 def test_execution_panel_renders_waiting_approval() -> None:
     panel = ExecutionPanel(turn_id="turn-3")
     panel.update_event({
@@ -155,7 +183,7 @@ def test_app_complete_computer_permission_fallback(tmp_path: Path, monkeypatch) 
         task_id="task-1",
         branch_id="task-1",
         requested_by_agent_id="agent-1",
-        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id=getpass.getuser()),
         title="Approve deploy",
         summary="Deploy to prod",
         risk_level=RiskLevel.HIGH,
@@ -364,7 +392,7 @@ def test_app_complete_computer_permission_falls_back_when_gateway_inbox_misses(t
         task_id="task-isolated-1",
         branch_id="task-isolated-1",
         requested_by_agent_id="agent-1",
-        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id=getpass.getuser()),
         title="Approve isolated task action",
         summary="Action created outside gateway inbox",
         risk_level=RiskLevel.HIGH,
@@ -440,7 +468,7 @@ def test_app_complete_computer_permission_idempotent_when_action_already_committ
         requested_by_agent_id="agent-1",
         action_intent_id=action.action_id,
         action_digest=action.approval_digest(),
-        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id=getpass.getuser()),
         title="Execute echo done",
         summary="Mutating action already executed",
         risk_level=RiskLevel.MEDIUM,
@@ -464,7 +492,7 @@ def test_app_complete_computer_permission_idempotent_when_action_already_committ
 def test_app_complete_computer_permission_multi_request_approve_all(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Verify that approving with approve_all=True approves all queued and pending requests."""
+    """An unrelated queued request is not approved by approve-all."""
     import anyio
     from mana_agent.human_inbox.models import (
         InboxRequest,
@@ -486,7 +514,7 @@ def test_app_complete_computer_permission_multi_request_approve_all(
         task_id="task-multi-1",
         branch_id="task-multi-1",
         requested_by_agent_id="agent-1",
-        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id=getpass.getuser()),
         title="Request 1",
         summary="Action 1",
         risk_level=RiskLevel.HIGH,
@@ -497,7 +525,7 @@ def test_app_complete_computer_permission_multi_request_approve_all(
         task_id="task-multi-2",
         branch_id="task-multi-2",
         requested_by_agent_id="agent-1",
-        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id=getpass.getuser()),
         title="Request 2",
         summary="Action 2",
         risk_level=RiskLevel.HIGH,
@@ -518,12 +546,12 @@ def test_app_complete_computer_permission_multi_request_approve_all(
     up1 = inbox.repository.get(item1.inbox_item_id)
     up2 = inbox.repository.get(item2.inbox_item_id)
     assert up1.status == InboxStatus.APPROVED
-    assert up2.status == InboxStatus.APPROVED
-    assert len(app._transactional_modal_queue) == 0
+    assert up2.status in {InboxStatus.PENDING, InboxStatus.DELIVERED}
+    assert app._transactional_modal_queue == [item2.inbox_item_id]
 
 
-def test_approve_chat_command_approves_multi_request(tmp_path: Path, monkeypatch) -> None:
-    """Verify that /approve chat command approves all pending human inbox approval requests."""
+def test_approve_chat_command_does_not_approve_unrelated_requests(tmp_path: Path, monkeypatch) -> None:
+    """A plan approval command must not silently approve inbox requests."""
     from mana_agent.chat_commands.builtins import _approve_command
     from mana_agent.chat_commands.models import CommandContext
     from mana_agent.human_inbox.models import (
@@ -544,7 +572,7 @@ def test_approve_chat_command_approves_multi_request(tmp_path: Path, monkeypatch
         task_id="task-cmd-1",
         branch_id="task-cmd-1",
         requested_by_agent_id="agent-1",
-        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id=getpass.getuser()),
         title="Command Request 1",
         summary="Action 1",
         risk_level=RiskLevel.MEDIUM,
@@ -555,7 +583,7 @@ def test_approve_chat_command_approves_multi_request(tmp_path: Path, monkeypatch
         task_id="task-cmd-2",
         branch_id="task-cmd-2",
         requested_by_agent_id="agent-1",
-        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="user"),
+        reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id=getpass.getuser()),
         title="Command Request 2",
         summary="Action 2",
         risk_level=RiskLevel.MEDIUM,
@@ -574,11 +602,10 @@ def test_approve_chat_command_approves_multi_request(tmp_path: Path, monkeypatch
     )
 
     res = _approve_command(ctx, [])
-    assert res.status == "success"
-    assert "Approved 2 pending approval request(s)" in res.message
+    assert res.status == "error"
 
     up1 = inbox.repository.get(item1.inbox_item_id)
     up2 = inbox.repository.get(item2.inbox_item_id)
-    assert up1.status == InboxStatus.APPROVED
-    assert up2.status == InboxStatus.APPROVED
+    assert up1.status in {InboxStatus.PENDING, InboxStatus.DELIVERED}
+    assert up2.status in {InboxStatus.PENDING, InboxStatus.DELIVERED}
 
