@@ -4,6 +4,20 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-30
 
+- Supervisor cancellation fencing and Git commit index isolation:
+  - Fenced action execution against cancelled tasks and cancelled ancestor branches via `ActionGateway._assert_branch_runnable`.
+  - Atomically claimed execution in the supervisor store under `_claim_branch_execution`, setting `irreversible_side_effect_started = True` so subsequent supervisor `cancel()` attempts are blocked (`BLOCKED_BY_SIDE_EFFECT`).
+  - Isolated Git commit execution into dedicated fenced index snapshots (`_fenced_commit_index`) using `GIT_INDEX_FILE`, preventing concurrent index mutations and hooks from altering approved commit contents while preserving concurrent modifications in the working index.
+  - Added regression test suites in `tests/coding/test_approval_binding_regressions.py`. User verification command:
+    `./venv/bin/python -m pytest tests/test_shell_executor.py tests/coding/test_approval_binding_regressions.py tests/coding/test_git_approval_propagation.py -q`.
+
+
+- Add Anthropic (Claude) inference provider using the official `anthropic` SDK,
+  supporting `claude-sonnet-5-5` (default), `claude-opus-5-5`, and `claude-haiku-5-5`,
+  isolated `ANTHROPIC_API_KEY` credential resolution, top-level system prompts,
+  tool calling with `tool_use`/`tool_result` content blocks, streaming, and
+  provider failure classification.
+
 - Standalone shell approval now binds and consumes an exact transactional action
   instead of trusting arbitrary tokens or callback booleans. Automatic waits
   validate the durable human decision. See `docs/approval-action-binding-incident.md`

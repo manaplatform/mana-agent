@@ -525,7 +525,7 @@ def create_chat_model(
     default_headers: dict[str, str] | None = None,
     model_configuration: dict[str, Any] | None = None,
     **kwargs: Any,
-) -> CompatibleChatOpenAI:
+) -> Any:
     """Create the shared compatibility-aware LLM client used by every runtime role."""
 
     configuration = model_configuration
@@ -546,6 +546,31 @@ def create_chat_model(
         elif "/" in model:
             from mana_agent.config.provider_registry import split_qualified_model_id
             resolved_provider, _ = split_qualified_model_id(model)
+
+    if resolved_provider == "anthropic":
+        from mana_agent.multi_agent.runtime.anthropic_provider import (
+            CompatibleChatAnthropic,
+            DEFAULT_ANTHROPIC_MODEL,
+        )
+
+        bare_model = model
+        if bare_model.startswith("anthropic/"):
+            bare_model = bare_model.split("/", 1)[1]
+        anthropic_kwargs: dict[str, Any] = {
+            "anthropic_api_key": api_key,
+            "model_name": bare_model or DEFAULT_ANTHROPIC_MODEL,
+            "selected_provider": "anthropic",
+            **kwargs,
+        }
+        if base_url:
+            anthropic_kwargs["anthropic_api_url"] = base_url
+        if default_headers:
+            anthropic_kwargs["default_headers"] = default_headers
+        if isinstance(configuration, dict):
+            for k in ("max_tokens", "max_output_tokens", "max_completion_tokens", "temperature", "top_p"):
+                if k in configuration and configuration[k] is not None:
+                    anthropic_kwargs[k] = configuration[k]
+        return CompatibleChatAnthropic(**anthropic_kwargs)
 
     reasoning_effort = str(get_setting("MANA_LLM_REASONING_EFFORT", "") or "").strip() or None
     init_kwargs: dict[str, Any] = {
@@ -609,6 +634,8 @@ def format_provider_error(exc: BaseException, *, provider: str | None = None, mo
         isolation = (
             " NVIDIA credentials are isolated from OPENAI_API_KEY."
             if provider_id == "nvidia"
+            else " Anthropic credentials are isolated from OPENAI_API_KEY."
+            if provider_id == "anthropic"
             else ""
         )
         return (
@@ -622,6 +649,8 @@ def format_provider_error(exc: BaseException, *, provider: str | None = None, mo
         )
     if code == 429:
         return f"{label} rate limit or quota exceeded (HTTP 429).{model_part}"
+    if code == 529 or "overloaded" in text.lower():
+        return f"{label} is currently overloaded (HTTP 529).{model_part}"
     if code is not None and code >= 500:
         return f"{label} service failure (HTTP {code}).{model_part}"
     lowered = text.lower()

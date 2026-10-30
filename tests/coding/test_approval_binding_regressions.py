@@ -411,3 +411,209 @@ def test_git_commit_approval_invalidated_when_staged_content_changes(tmp_path, m
     subprocess.run(["git", "add", "sample.txt"], cwd=tmp_path, check=True)
     with pytest.raises(ActionInvalidatedError):
         git_tools.commit(message="test approval", repo_path=tmp_path)
+
+
+def test_supervisor_cancellation_fences_approved_action(tmp_path, monkeypatch):
+    from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+    from mana_agent.execution_supervisor.models import CheckpointRecord, ExecutionState, TaskRecord
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+    from mana_agent.transactional_actions.gateway import ActionGateway
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig(root=tmp_path / "supervisor"))
+    task = supervisor.store.create_task(
+        TaskRecord(task_id="task-sup-1", attempt_id="att-1", checkpoint_id="cp-1", state=ExecutionState.RUNNING)
+    )
+    supervisor.store.save_checkpoint(
+        CheckpointRecord(checkpoint_id="cp-1", task_id="task-sup-1", attempt_id="att-1", state_version=0)
+    )
+    inbox = default_human_inbox_service(branch_controller=supervisor)
+    gateway = default_action_gateway(tmp_path)
+    gateway.inbox_service = inbox
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+
+    agent = dispatcher(tmp_path, task="task-sup-1")
+    pending = agent.dispatch("run_command", {"command": "python -c 'print(456)'"})
+    assert pending["permission_required"]
+
+    item = inbox.repository.get(pending["inbox_item_id"])
+    inbox.respond(
+        ResponseSubmission(
+            inbox_item_id=pending["inbox_item_id"],
+            operation=ResponseOperation.APPROVE,
+            actor_id=getpass.getuser(),
+            channel="test",
+            idempotency_key=f"app_{pending['inbox_item_id']}",
+            expected_version=item.version,
+            current_action_digest=gateway.store.get_action(pending["action_id"]).approval_digest(),
+        )
+    )
+
+    grant = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
+
+    # Cancel the supervisor task
+    supervisor.cancel("task-sup-1", reason="user cancelled")
+    assert supervisor.store.get_task("task-sup-1").state is ExecutionState.CANCELLED
+
+    # Attempt to execute through dispatcher
+    result = agent.dispatch("run_command", {"command": "python -c 'print(456)'", "action_approval_id": grant})
+    assert not result["ok"]
+    assert "cancelled" in result["error"].lower()
+
+
+def test_supervisor_cancellation_fences_ancestor_task(tmp_path, monkeypatch):
+    from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+    from mana_agent.execution_supervisor.models import CheckpointRecord, ExecutionState, TaskRecord
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig(root=tmp_path / "supervisor"))
+    parent = supervisor.store.create_task(
+        TaskRecord(task_id="task-parent", attempt_id="att-p", checkpoint_id="cp-p", state=ExecutionState.RUNNING)
+    )
+    supervisor.store.save_checkpoint(
+        CheckpointRecord(checkpoint_id="cp-p", task_id="task-parent", attempt_id="att-p", state_version=0)
+    )
+    child = supervisor.store.create_task(
+        TaskRecord(
+            task_id="task-child",
+            parent_task_id="task-parent",
+            attempt_id="att-c",
+            checkpoint_id="cp-c",
+            state=ExecutionState.RUNNING,
+        )
+    )
+    supervisor.store.save_checkpoint(
+        CheckpointRecord(checkpoint_id="cp-c", task_id="task-child", attempt_id="att-c", state_version=0)
+    )
+    inbox = default_human_inbox_service(branch_controller=supervisor)
+    gateway = default_action_gateway(tmp_path)
+    gateway.inbox_service = inbox
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+
+    agent = dispatcher(tmp_path, task="task-child")
+    pending = agent.dispatch("run_command", {"command": "python -c 'print(789)'"})
+    assert pending["permission_required"]
+
+    item = inbox.repository.get(pending["inbox_item_id"])
+    inbox.respond(
+        ResponseSubmission(
+            inbox_item_id=pending["inbox_item_id"],
+            operation=ResponseOperation.APPROVE,
+            actor_id=getpass.getuser(),
+            channel="test",
+            idempotency_key=f"app_{pending['inbox_item_id']}",
+            expected_version=item.version,
+            current_action_digest=gateway.store.get_action(pending["action_id"]).approval_digest(),
+        )
+    )
+
+    grant = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
+
+    # Cancel the parent task
+    supervisor.cancel("task-parent", reason="parent aborted", propagate=False)
+    assert supervisor.store.get_task("task-parent").state is ExecutionState.CANCELLED
+
+    # Child execution must be fenced
+    result = agent.dispatch("run_command", {"command": "python -c 'print(789)'", "action_approval_id": grant})
+    assert not result["ok"]
+    assert "ancestor" in result["error"].lower() or "cancelled" in result["error"].lower()
+
+
+def test_supervisor_atomic_execution_claim_blocks_cancellation(tmp_path, monkeypatch):
+    from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+    from mana_agent.execution_supervisor.models import CancellationStatus, CheckpointRecord, ExecutionState, TaskRecord
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig(root=tmp_path / "supervisor"))
+    task = supervisor.store.create_task(
+        TaskRecord(task_id="task-side-effect", attempt_id="att-se", checkpoint_id="cp-se", state=ExecutionState.RUNNING)
+    )
+    supervisor.store.save_checkpoint(
+        CheckpointRecord(checkpoint_id="cp-se", task_id="task-side-effect", attempt_id="att-se", state_version=0)
+    )
+    inbox = default_human_inbox_service(branch_controller=supervisor)
+    gateway = default_action_gateway(tmp_path)
+    gateway.inbox_service = inbox
+
+    agent = dispatcher(tmp_path, task="task-side-effect")
+    pending = agent.dispatch("run_command", {"command": "python -c 'print(101)'"})
+    assert pending["permission_required"]
+
+    item = inbox.repository.get(pending["inbox_item_id"])
+    inbox.respond(
+        ResponseSubmission(
+            inbox_item_id=pending["inbox_item_id"],
+            operation=ResponseOperation.APPROVE,
+            actor_id=getpass.getuser(),
+            channel="test",
+            idempotency_key=f"app_{pending['inbox_item_id']}",
+            expected_version=item.version,
+            current_action_digest=gateway.store.get_action(pending["action_id"]).approval_digest(),
+        )
+    )
+
+    # Claim branch execution in supervisor atomically
+    gateway._claim_branch_execution(item)
+    updated_task = supervisor.store.get_task("task-side-effect")
+    assert updated_task.irreversible_side_effect_started is True
+
+    # Cancellation during side effect must be blocked
+    supervisor.cancel("task-side-effect", reason="late cancellation")
+    cancelled_task = supervisor.store.get_task("task-side-effect")
+    assert cancelled_task.cancellation_status is CancellationStatus.BLOCKED_BY_SIDE_EFFECT
+    assert cancelled_task.state is not ExecutionState.CANCELLED
+
+
+def test_git_commit_fenced_index_isolates_concurrent_git_add(tmp_path, monkeypatch):
+    import subprocess
+    from mana_agent.multi_agent.tools import git_tools
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "original.txt").write_text("first\n")
+    subprocess.run(["git", "add", "original.txt"], cwd=repo, check=True)
+
+    agent = dispatcher(repo, task="task-git-1")
+    pending = agent.dispatch("git_commit", {"message": "approved commit"})
+    assert pending["permission_required"]
+
+    gateway = default_action_gateway(repo)
+    grant = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
+
+    original_run_direct = git_tools._run_git_direct
+
+    def concurrent_git_direct(args, **kwargs):
+        if args[0] == "commit":
+            # Simulate another process/thread modifying the main index concurrently
+            (repo / "concurrent.txt").write_text("concurrent content\n")
+            subprocess.run(["git", "add", "concurrent.txt"], cwd=repo, check=True)
+        return original_run_direct(args, **kwargs)
+
+    monkeypatch.setattr(git_tools, "_run_git_direct", concurrent_git_direct)
+
+    result = agent.dispatch("git_commit", {"message": "approved commit", "action_approval_id": grant})
+    assert result["ok"]
+
+    # Verify that the commit contains ONLY original.txt, NOT concurrent.txt
+    show = subprocess.run(["git", "show", "--name-only", "--oneline", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+    committed_files = [line.strip() for line in show.stdout.strip().splitlines()[1:] if line.strip()]
+    assert committed_files == ["original.txt"]
+
+    # Verify that concurrent.txt remains staged in the working index
+    st = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True)
+    assert "A  concurrent.txt" in st.stdout
+

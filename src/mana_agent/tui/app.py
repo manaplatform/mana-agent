@@ -321,8 +321,8 @@ class ManaChatApp(App):
                 else str(metadata.get("preview") or activity.get("title") or "")
             ),
             remote=bool(metadata.get("remote_permission")),
-            server=bool(metadata.get("server_approval")),
-            api=bool(metadata.get("api_approval")),
+            server=bool(metadata.get("server_approval") or activity.get("event_type") == "server.waiting_approval"),
+            api=bool(metadata.get("api_approval") or activity.get("event_type") == "api.waiting_approval"),
             transactional=bool(metadata.get("transactional_action_approval")),
         ))
 
@@ -790,6 +790,9 @@ class ManaChatApp(App):
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
+        if event.transactional or event.server or event.api:
+            self._show_inline_approval(event)
+            return
         from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
         def complete(choice: Any) -> None:
@@ -812,17 +815,65 @@ class ManaChatApp(App):
             complete,
         )
 
-    def _apply_computer_permission(self, choice: Any) -> None:
+    def _show_inline_approval(self, event: Any) -> None:
+        """Attach approval controls to the request's existing activity box."""
+        from mana_agent.tui.computer_permission import InlineApproval
+
+        if self.chat_log is None:
+            return
+        panel = box = None
+        for candidate in reversed(list(self.chat_log._execution_panels.values())):
+            for candidate_box in (candidate.main_box, candidate.coding_box):
+                for activity in candidate_box.events:
+                    metadata = activity.get("metadata") or {}
+                    if event.request_id in {str(metadata.get("inbox_item_id") or ""), str(metadata.get("permission_request_id") or "")}:
+                        panel, box = candidate, candidate_box
+                        break
+                if box is not None:
+                    break
+            if box is not None:
+                break
+        if panel is None:
+            panel = self.chat_log._get_or_create_execution_panel(self._current_frontend_turn_id or "pending-approvals")
+            panel.update_event({
+                "event_type": "action.approval.required" if event.transactional else "server.waiting_approval" if event.server else "api.waiting_approval",
+                "title": "Approval required",
+                "status": "waiting_approval",
+                "metadata": {"permission_request_id": event.request_id},
+            })
+            box = panel.main_box
+        if any(isinstance(child, InlineApproval) and child.request.request_id == event.request_id for child in box.children):
+            return
+        controls = InlineApproval(event, lambda choice: self._apply_computer_permission(choice, controls=controls))
+        box.mount(controls)
+        box.display = True
+        self.chat_log._scroll_to_latest()
+
+    def _apply_computer_permission(self, choice: Any, *, controls: Any = None) -> None:
         if choice is None:
             return
 
         batch_ids = list(self._transactional_modal_queue) if getattr(choice, "approve_all", False) else []
 
         async def complete_and_advance() -> None:
+            success = False
             try:
-                await self._complete_computer_permission(choice, batch_ids=batch_ids)
+                success = await self._complete_computer_permission(choice, batch_ids=batch_ids)
             finally:
-                if choice.transactional:
+                if controls is not None:
+                    if success:
+                        box = controls.parent
+                        if box is not None:
+                            box.update_event({
+                                "event_type": "action.approval.granted" if choice.decision is not None else "action.approval.denied",
+                                "title": "Approval granted" if choice.decision is not None else "Approval denied",
+                                "status": "completed" if choice.decision is not None else "failed",
+                                "metadata": {"permission_request_id": choice.request_id, "decision": "approve" if choice.decision is not None else "deny"},
+                            })
+                        controls.remove()
+                    else:
+                        controls.enable_choices()
+                if choice.transactional and (success or controls is None):
                     self._transactional_modal_active = False
                     self.call_after_refresh(self._show_next_transactional_modal)
 
@@ -831,7 +882,7 @@ class ManaChatApp(App):
             name=f"computer-permission-{choice.request_id}",
         )
 
-    async def _complete_computer_permission(self, choice: Any, *, batch_ids: list[str] | None = None) -> None:
+    async def _complete_computer_permission(self, choice: Any, *, batch_ids: list[str] | None = None) -> bool:
         from mana_agent.integrations.computer_control.cancellation import (
             decide_computer_permission,
             deny_computer_permission,
@@ -1080,10 +1131,11 @@ class ManaChatApp(App):
 
                 if not handled:
                     self.notify(msg or "Failed to record approval decision.", severity="warning")
-                    return
+                    return False
                 decided_event = "action.approval.granted" if is_approve else "action.approval.denied"
                 self.history.add(
                     CodingActivityEvent(
+                        turn_id=self._current_frontend_turn_id or "",
                         activity={
                             "event_type": decided_event,
                             "title": f"Transactional action {'approved' if is_approve else 'denied'}",
@@ -1102,8 +1154,7 @@ class ManaChatApp(App):
                         self.chat_log._scroll_to_latest()
                 else:
                     self.notify("Denied", severity="warning")
-                    self.history.add(AssistantMessageEvent(content=msg or "Transactional action denied."))
-                return
+                return True
             if choice.server:
                 command = (
                     self.gateway.server_approval_command
@@ -1117,7 +1168,9 @@ class ManaChatApp(App):
                     client_type="tui",
                 )
                 self._record_server_approval_completion(choice.request_id, result)
-                return
+                if choice.decision is not None and self.chat_log is not None:
+                    self.chat_log._scroll_to_latest()
+                return True
             if choice.api:
                 command = (
                     self.gateway.api_approval_command
@@ -1130,15 +1183,17 @@ class ManaChatApp(App):
                     session_id=self._gateway_session_id or "",
                 )
                 self._record_api_approval_completion(choice.request_id, result)
-                return
+                if choice.decision is not None and self.chat_log is not None:
+                    self.chat_log._scroll_to_latest()
+                return True
             if choice.remote:
                 if choice.decision is None:
                     self.notify("Remote SSH request denied.", severity="warning")
-                    return
+                    return True
                 result = await asyncio.to_thread(self.gateway.remote_permission_command, choice.request_id)
                 self.notify(result["message"])
                 self.history.add(AssistantMessageEvent(content=result["message"]))
-                return
+                return True
             if choice.decision is None:
                 await asyncio.to_thread(
                     deny_computer_permission,
@@ -1146,7 +1201,7 @@ class ManaChatApp(App):
                     client_type="tui",
                 )
                 self.notify("Computer action denied.", severity="warning")
-                return
+                return True
             result = await asyncio.to_thread(
                 decide_computer_permission,
                 choice.request_id,
@@ -1157,6 +1212,7 @@ class ManaChatApp(App):
             self.history.add(AssistantMessageEvent(
                 content=f"Computer action completed after permission approval: {result.message}"
             ))
+            return True
         except Exception as exc:
             action_name = (
                 "Server approval"
@@ -1176,6 +1232,7 @@ class ManaChatApp(App):
                     content=f"Server approval action failed: {exc}",
                     turn_id=choice.request_id,
                 ))
+            return False
 
     def _record_server_approval_completion(
         self,

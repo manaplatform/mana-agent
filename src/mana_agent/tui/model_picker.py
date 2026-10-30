@@ -250,7 +250,10 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
     except KeyError as exc:
         raise ModelListFetchFailedError(str(exc)) from exc
 
-    headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
+    if provider == "anthropic":
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", **dict(definition.default_headers)}
+    else:
+        headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
     base = (base_url or definition.default_base_url).rstrip("/")
 
     def _fetch(endpoint: str) -> dict[str, Any]:
@@ -322,7 +325,10 @@ def fetch_provider_model_detail(
     except KeyError:
         return None
 
-    headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
+    if provider == "anthropic":
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", **dict(definition.default_headers)}
+    else:
+        headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
     base = (base_url or definition.default_base_url).rstrip("/")
     endpoint = f"/models/{urllib.parse.quote(model_id, safe='')}"
     request = urllib.request.Request(base + endpoint, headers=headers)

@@ -207,7 +207,8 @@ def test_direct_tool_calling_fallback_for_unsupported_models(tmp_path: Path) -> 
     assert "direct tool" in res.summary.lower()
 
 
-def test_tool_execution_dispatcher_approval_request_and_shell(tmp_path: Path) -> None:
+def test_tool_execution_dispatcher_approval_request_and_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MANA_TRANSACTIONAL_ALWAYS_APPROVE", "true")
     ws = WorkspaceContext(
         repository_path=tmp_path,
         worktree_path=tmp_path,

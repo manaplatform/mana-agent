@@ -34,6 +34,20 @@ def _safe_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _resolve_approval(events: list[dict[str, Any]], decision_event: dict[str, Any]) -> None:
+    """Update only the request named by a decision, never other pending requests."""
+    metadata = _safe_dict(decision_event.get("metadata"))
+    request_ids = {str(metadata.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} - {""}
+    if not request_ids:
+        return
+    approved = decision_event.get("event_type") == "action.approval.granted" or metadata.get("decision") == "approve"
+    for existing in events:
+        existing_meta = _safe_dict(existing.get("metadata"))
+        existing_ids = {str(existing_meta.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} - {""}
+        if request_ids & existing_ids and str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}:
+            existing["status"] = "completed" if approved else "failed"
+
+
 class MainActivityBox(Vertical):
     """Unified, chronological stream for all general agent activities.
 
@@ -155,11 +169,7 @@ class MainActivityBox(Vertical):
         event_id = str(ev.get("event_id") or ev.get("id") or ev.get("call_id") or "").strip()
         ev_type = str(ev.get("event_type") or "")
         if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
-            decision = ev.get("metadata", {}).get("decision") if isinstance(ev.get("metadata"), dict) else ""
-            is_approved = "granted" in ev_type or decision == "approve"
-            for existing in self.events:
-                if str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}:
-                    existing["status"] = "completed" if is_approved else "failed"
+            _resolve_approval(self.events, ev)
 
         if event_id and event_id in self._event_ids:
             for i, existing in enumerate(self.events):
@@ -434,11 +444,7 @@ class CodingActivityBox(Vertical):
             self.context_meter.update(ev.get("payload") or ev.get("metadata") or {})
 
         if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
-            decision = ev.get("metadata", {}).get("decision") if isinstance(ev.get("metadata"), dict) else ""
-            is_approved = "granted" in ev_type or decision == "approve"
-            for existing in self.events:
-                if str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}:
-                    existing["status"] = "completed" if is_approved else "failed"
+            _resolve_approval(self.events, ev)
 
         backend_val = ev.get("backend")
         if backend_val:

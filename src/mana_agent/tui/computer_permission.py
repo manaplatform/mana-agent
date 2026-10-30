@@ -51,6 +51,49 @@ class ComputerPermissionRequested(Message):
         self.pending_count = pending_count
 
 
+class InlineApproval(Vertical):
+    """Action controls embedded in an existing activity box, not a dialog."""
+
+    DEFAULT_CSS = """
+    InlineApproval { height: auto; }
+    InlineApproval .inline-approval-actions { height: auto; }
+    InlineApproval Button { margin-right: 1; }
+    """
+
+    def __init__(self, request: ComputerPermissionRequested, callback) -> None:
+        super().__init__()
+        self.request = request
+        self.callback = callback
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.request.preview, markup=False)
+        yield Static(f"Scope: {self.request.scope}", markup=False)
+        with Horizontal(classes="inline-approval-actions"):
+            yield Button("Deny", classes="inline-deny", variant="error")
+            yield Button("Allow once", classes="inline-once", variant="primary")
+            if self.request.transactional:
+                yield Button("Allow all matching queued", classes="inline-all", variant="success")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if not any(event.button.has_class(name) for name in ("inline-deny", "inline-once", "inline-all")):
+            return
+        event.stop()
+        for button in self.query(Button):
+            button.disabled = True
+        self.callback(ComputerPermissionChoice(
+            self.request.request_id,
+            None if event.button.has_class("inline-deny") else PermissionDecision.ALLOW_ONCE,
+            server=self.request.server,
+            api=self.request.api,
+            transactional=self.request.transactional,
+            approve_all=event.button.has_class("inline-all"),
+        ))
+
+    def enable_choices(self) -> None:
+        for button in self.query(Button):
+            button.disabled = False
+
+
 class ComputerPermissionScreen(ModalScreen[ComputerPermissionChoice]):
     CSS = """
     ComputerPermissionScreen { align: center middle; }

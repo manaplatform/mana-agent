@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -99,7 +102,7 @@ _DEFAULT_TIMEOUT_SECONDS = 120
 _GIT_DISPATCH_CONTEXT: ContextVar[tuple[dict[str, Any], str]] = ContextVar(
     "git_dispatch_context", default=({}, "")
 )
-_READ_ONLY = {"status", "diff", "log", "show", "branch", "remote", "config", "help", "rev-parse"}
+_READ_ONLY = {"status", "diff", "log", "show", "branch", "remote", "config", "help", "rev-parse", "rev-list", "ls-files"}
 _LOCAL_SAFE_WRITE = {"add", "restore", "stash", "switch", "checkout", "fetch"}
 _LOCAL_HISTORY_WRITE = {"commit", "merge", "revert", "tag"}
 _REMOTE_WRITE = {"push", "pull"}
@@ -150,7 +153,17 @@ def _redact_text(text: str) -> str:
     return redact_json_line(str(text or ""))
 
 
-def _run_raw_git(args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+def _run_raw_git(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 30,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    merged_env = None
+    if env is not None:
+        merged_env = dict(os.environ)
+        merged_env.update(env)
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -160,6 +173,7 @@ def _run_raw_git(args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess
         capture_output=True,
         timeout=timeout,
         check=False,
+        env=merged_env,
     )
 
 
@@ -225,15 +239,42 @@ def observe_git_state(repo_path: str | Path | None = None) -> GitObservation:
     )
 
 
-def _staged_index_digest(repo_root: Path) -> str:
+def _staged_index_digest(repo_root: Path, *, index_file: Path | None = None) -> str:
     """Fingerprint every index entry, independent of diff presentation config."""
     try:
-        index = _run_raw_git(["ls-files", "--stage", "--full-name", "-z"], cwd=repo_root, timeout=30)
+        env = {"GIT_INDEX_FILE": str(index_file)} if index_file is not None else None
+        index = _run_raw_git(["ls-files", "--stage", "--full-name", "-z"], cwd=repo_root, timeout=30, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("could not inspect the Git index for commit approval") from exc
     if index.returncode != 0:
         raise RuntimeError("could not inspect the Git index for commit approval")
     return hashlib.sha256(index.stdout.encode("utf-8", errors="surrogateescape")).hexdigest()
+
+
+@contextmanager
+def _fenced_commit_index(repo_root: Path, action_id: str):
+    """Snapshot the approved staged index so concurrent mutations or hooks cannot taint the commit."""
+    git_dir = repo_root / ".git"
+    if not git_dir.is_dir():
+        res = _run_raw_git(["rev-parse", "--git-dir"], cwd=repo_root, timeout=10)
+        if res.returncode == 0 and res.stdout.strip():
+            p = Path(res.stdout.strip())
+            git_dir = p if p.is_absolute() else (repo_root / p).resolve()
+    main_index = git_dir / "index"
+    if not main_index.is_file():
+        yield None, None
+        return
+    fenced_name = f"fenced_index_{action_id}"
+    fenced_index = git_dir / fenced_name
+    shutil.copy2(main_index, fenced_index)
+    try:
+        yield fenced_index, main_index
+    finally:
+        if fenced_index.exists():
+            try:
+                fenced_index.unlink()
+            except OSError:
+                pass
 
 
 def classify_git_risk(args: list[str]) -> GitRiskLevel:
@@ -252,7 +293,12 @@ def classify_git_risk(args: list[str]) -> GitRiskLevel:
             return GitRiskLevel.READ_ONLY
         return GitRiskLevel.LOCAL_SAFE_WRITE
     if command == "branch":
-        if all(item in {"-a", "--all", "-r", "--remotes", "--list", "--show-current", "-v", "-vv", "--verbose"} for item in args[1:]):
+        if all(
+            item in {"-a", "--all", "-r", "--remotes", "--list", "-l", "--show-current", "-v", "-vv", "--verbose"}
+            or item.startswith("--format")
+            or item.startswith("--sort")
+            for item in args[1:]
+        ):
             return GitRiskLevel.READ_ONLY
         return GitRiskLevel.LOCAL_SAFE_WRITE
     if command == "remote":
@@ -307,6 +353,7 @@ def _run_git_direct(
     timeout: int | None = None,
     allow_protected: bool = False,
     memory: GitStateMemory | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     normalized = _validate_args(args)
     repo_root = resolve_repo_root(repo_path)
@@ -329,6 +376,7 @@ def _run_git_direct(
             normalized,
             cwd=repo_root,
             timeout=max(1, min(int(timeout or _DEFAULT_TIMEOUT_SECONDS), 900)),
+            env=env,
         )
         duration = round((time.perf_counter() - started) * 1000.0, 3)
         observation = observe_git_state(repo_root)
@@ -450,6 +498,28 @@ def run_git(
                     or digest != before["staged_index_sha256"]
                     or current.get("fingerprint") != before.get("fingerprint")):
                     raise ActionInvalidatedError("repository or staged changes changed after commit preview")
+
+                with _fenced_commit_index(repo_root, action.action_id) as (fenced_idx, main_idx):
+                    if fenced_idx is not None:
+                        try:
+                            fenced_digest = _staged_index_digest(repo_root, index_file=fenced_idx)
+                        except RuntimeError as exc:
+                            raise ActionInvalidatedError("could not verify fenced Git index for commit") from exc
+                        if fenced_digest != before["staged_index_sha256"]:
+                            raise ActionInvalidatedError("repository or staged changes changed during index fencing")
+                        env = {"GIT_INDEX_FILE": str(fenced_idx)}
+                        result = _run_git_direct(
+                            normalized, repo_path=repo_root, timeout=timeout,
+                            allow_protected=allow_protected, memory=memory, env=env,
+                        )
+                        if result.get("ok") and main_idx is not None and fenced_idx.exists():
+                            try:
+                                current_main = _staged_index_digest(repo_root, index_file=main_idx)
+                                if current_main == before["staged_index_sha256"]:
+                                    shutil.copy2(fenced_idx, main_idx)
+                            except Exception:
+                                pass
+                        return result
             return _run_git_direct(
                 normalized, repo_path=repo_root, timeout=timeout,
                 allow_protected=allow_protected, memory=memory,

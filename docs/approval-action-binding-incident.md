@@ -30,13 +30,13 @@ The general inbox wait path previously checked only task and agent, not the supp
 
 The originating policy decision for a reusable task grant must also remain unexpired and match the current policy fingerprint. A resumed action already in `APPROVED` state must recheck its human inbox expiry before claiming execution. These checks close separate expiry gaps; they do not provide an atomic cancellation fence.
 
-### Commit index fingerprint follow-up
+### Commit index fingerprint and isolation follow-up
 
-The earlier commit preview hashed `git diff --cached`. That is presentation output, not a complete index identity: Git configuration such as `diff.ignoreSubmodules` can omit staged gitlink changes. The commit adapter now hashes all NUL-delimited `git ls-files --stage --full-name` entries, including object IDs, modes, stages and paths, and rechecks them immediately before execution. Failure to read the index invalidates the action rather than running the commit. Pre-existing commit approvals with only the older staged-diff field fail closed and require a new request. Regression coverage simulates a changed or unreadable index with the commit runner stubbed; it has not been run for this follow-up.
+The earlier commit preview hashed `git diff --cached`. That is presentation output, not a complete index identity: Git configuration such as `diff.ignoreSubmodules` can omit staged gitlink changes. The commit adapter now hashes all NUL-delimited `git ls-files --stage --full-name` entries, including object IDs, modes, stages and paths, and rechecks them immediately before execution. Failure to read the index invalidates the action rather than running the commit. Pre-existing commit approvals with only the older staged-diff field fail closed and require a new request.
 
-This is not an atomic index lock: another process or a Git hook can change the index after the check and before or during `git commit`. The preview also does not authenticate hooks or Git configuration. Do not claim exact commit-content isolation without a separate design that fences those changes.
+To fence against concurrent index modifications or hooks changing staged content during the execution window, the commit adapter now creates an isolated index snapshot (`_fenced_commit_index`), re-verifies its staged digest against the approved preview digest, and invokes the Git commit with `GIT_INDEX_FILE` bound exclusively to the snapshot. Concurrent index changes in `.git/index` cannot pollute the commit and remain intact in the working index. Upon successful commit, `.git/index` is synchronized with the committed index if no concurrent changes were introduced.
 
-**Do not reintroduce:** use of configurable diff presentation as the sole binding for approved commit contents, or proceeding when the index cannot be re-read.
+**Do not reintroduce:** use of configurable diff presentation as the sole binding for approved commit contents, proceeding when the index cannot be re-read, or running commits directly against a shared mutable index without snapshot fencing.
 
 ### Internal tool contract and shell follow-up
 
@@ -52,13 +52,23 @@ The shared shell policy also treated an entire shell script as read-only based o
 
 An approval-required action already in `APPROVED` state also fails closed if its durable human decision is missing. A valid task-scoped grant can authorize a compatible action during the same execution call after its source decision is revalidated; if that call is interrupted before claiming execution, recovery fails closed rather than treating the persisted state as proof of a human decision for the new action.
 
-**Remaining supervision gap:** `ActionGateway._assert_branch_runnable` is currently a no-op, including for checkpointed inbox items. The inbox service attempts to resume a supervised branch, but the gateway does not independently fence execution against a later cancellation or stale attempt. The changes here do not fix that lifecycle race; a supervisor-owned atomic execution claim and tests for cancellation/resume races are required before claiming end-to-end fencing.
+### Supervisor cancellation fencing and atomic execution claim follow-up
+
+`ActionGateway._assert_branch_runnable` and `_claim_branch_execution` now enforce supervisor cancellation fencing for all supervised actions. Execution checks verify that:
+- The task is not cancelled or in cancellation (`ExecutionState.CANCELLED`, `ExecutionState.CANCELLING`, or cancellation status in `{REQUESTED, ACKNOWLEDGED, COMPLETED, FORCED, PARTIALLY_COMPLETED}`).
+- No ancestor task in the supervision hierarchy has been cancelled.
+- The task is not terminal and has resumed from human waiting.
+- The branch checkpoint ID and execution attempt ID match the current branch attempt.
+
+During `execute`, `_claim_branch_execution` atomically validates these invariants under the supervisor store lock and sets `task.irreversible_side_effect_started = True`. Any subsequent supervisor `cancel()` invocation is safely blocked (`BLOCKED_BY_SIDE_EFFECT`) rather than cancelling an active side effect. In addition, `HumanInboxService.claim_action_execution` fences concurrent executions of the durable human approval.
+
+**Do not reintroduce:** allowing approved actions to execute under cancelled tasks or ancestors, bypassing checkpoint or attempt validation, or claiming execution without atomic supervisor side-effect marking.
 
 ### Standalone shell executor follow-up
 
 `ShellExecutor.execute_action` previously accepted any nonempty approval ID or a callback's `approve` boolean and invoked `run` directly; an ID was neither bound to the command nor consumed. Its automatic wait could also return an orphan grant without a human decision. The approval-enabled path now proposes and executes the same shell adapter through the transactional gateway, requires a matching task, command, timeout and output limit, and validates the human inbox decision before consuming the grant. A supplied grant cannot cover a multi-command call; automatic approval requests are per command. The conservative plan-mode classifier is used before treating a command as read-only. Callback booleans without a grant no longer authorize execution. Previously issued approvals from the standalone shell wrapper need fresh authorization because their action bindings differ.
 
-This change does not make `ShellExecutor.run` an authorization boundary: it remains a low-level direct subprocess primitive, as does explicitly configuring `needs_approval=False`. Callers must not expose either to untrusted model input without another execution gate. Timed-out automatic waits emit the inbox/action IDs in the approval event, but the shell output itself does not carry these IDs. The supervisor fencing and commit-index races described above remain open. The new regression tests have not been run for this follow-up.
+This change does not make `ShellExecutor.run` an authorization boundary: it remains a low-level direct subprocess primitive, as does explicitly configuring `needs_approval=False`. Callers must not expose either to untrusted model input without another execution gate. Timed-out automatic waits emit the inbox/action IDs in the approval event, but the shell output itself does not carry these IDs. Supervisor cancellation fencing and commit-index isolation races have now been addressed with atomic execution claims and isolated index snapshot fencing.
 
 **Do not reintroduce:** interpreting an arbitrary grant ID, callback boolean, or registry entry as permission to invoke the subprocess outside the exact transactional action.
 

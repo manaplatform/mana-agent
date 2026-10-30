@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from mana_agent.execution_supervisor.models import (
+    CancellationStatus,
+    ExecutionState,
+    TERMINAL_STATES,
+)
 from mana_agent.human_inbox.models import (
     InboxRequest,
     InboxRequestType,
@@ -300,6 +305,8 @@ class ActionGateway:
             self._emit("action.policy.revalidated", action, approval_id=approval_id)
         if action.state is not ActionState.APPROVED:
             raise PermissionError(f"action is not executable in state {action.state.value}")
+        claim_id: str | None = None
+        approved_item = None
         if self.inbox_service is not None:
             approved_items = [
                 item
@@ -323,6 +330,8 @@ class ActionGateway:
                     raise PermissionError("approved action digest no longer matches execution intent")
                 self.inbox_service.assert_response_actor_is_currently_authorized(approved_item)
                 self._assert_branch_runnable(approved_item)
+                self._claim_branch_execution(approved_item)
+                claim_id = self.inbox_service.claim_action_execution(approved_item.inbox_item_id)
         action = self.store.claim_execution(action.action_id)
         self._emit("action.execution.started", action)
         try:
@@ -343,6 +352,17 @@ class ActionGateway:
             action.transition(ActionState.COMMITTED)
             self.store.save_action(action)
             self._emit("action.committed", action)
+            if claim_id and self.inbox_service is not None and approved_item is not None:
+                import hashlib
+                import json
+                result_digest = hashlib.sha256(
+                    json.dumps(action.execution_result, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()
+                self.inbox_service.complete_action_execution(
+                    approved_item.inbox_item_id,
+                    execution_claim_id=claim_id,
+                    result_digest=result_digest,
+                )
             return ActionOutcome(action=action, result=result)
         except Exception as exc:
             side_effect_status_unknown = (
@@ -688,8 +708,113 @@ class ActionGateway:
         return item.inbox_item_id
 
     def _assert_branch_runnable(self, item: Any) -> None:
-        """Allow approved actions to execute once authorized, regardless of branch execution location."""
-        return
+        if self.inbox_service is None:
+            return
+        controller = getattr(self.inbox_service, "branch_controller", None)
+        checkpoint_id = item.get("checkpoint_id", "") if isinstance(item, dict) else getattr(item, "checkpoint_id", "")
+        if controller is None:
+            if checkpoint_id:
+                raise PermissionError("approved action branch controller is unavailable")
+            return
+        task_id = item.get("task_id") if isinstance(item, dict) else getattr(item, "task_id", None)
+        if not task_id or not hasattr(controller, "store"):
+            return
+        task = controller.store.get_task_or_none(task_id)
+        if task is None:
+            return
+        _CANCEL_STATUSES = {
+            CancellationStatus.REQUESTED,
+            CancellationStatus.ACKNOWLEDGED,
+            CancellationStatus.COMPLETED,
+            CancellationStatus.FORCED,
+            CancellationStatus.PARTIALLY_COMPLETED,
+        }
+        if (
+            task.state in {ExecutionState.CANCELLED, ExecutionState.CANCELLING}
+            or getattr(task, "cancellation_status", None) in _CANCEL_STATUSES
+        ):
+            raise PermissionError("approved action branch was cancelled")
+        ancestor_id = getattr(task, "parent_task_id", None)
+        while ancestor_id:
+            ancestor = controller.store.get_task_or_none(ancestor_id)
+            if ancestor is not None and (
+                ancestor.state in {ExecutionState.CANCELLED, ExecutionState.CANCELLING}
+                or getattr(ancestor, "cancellation_status", None) in _CANCEL_STATUSES
+            ):
+                raise PermissionError(f"approved action ancestor branch was cancelled: {ancestor.task_id}")
+            ancestor_id = getattr(ancestor, "parent_task_id", None) if ancestor else None
+        if task.state in TERMINAL_STATES:
+            raise PermissionError(f"approved action branch is terminal ({task.state.value})")
+        if checkpoint_id and task.checkpoint_id != checkpoint_id:
+            raise PermissionError("approved action checkpoint no longer matches the branch")
+        attempt_id = item.get("execution_attempt_id", "") if isinstance(item, dict) else getattr(item, "execution_attempt_id", "")
+        if attempt_id and task.attempt_id != attempt_id:
+            raise PermissionError("approved action attempt no longer matches the branch attempt")
+        inbox_item_id = item.get("inbox_item_id", "") if isinstance(item, dict) else getattr(item, "inbox_item_id", "")
+        if task.state is ExecutionState.WAITING or (
+            task.waiting_inbox_item_id and task.waiting_inbox_item_id == inbox_item_id
+        ):
+            raise PermissionError("approved action branch has not resumed from human wait")
+
+    def _claim_branch_execution(self, item: Any) -> None:
+        if self.inbox_service is None:
+            return
+        controller = getattr(self.inbox_service, "branch_controller", None)
+        if controller is None:
+            return
+        task_id = item.get("task_id") if isinstance(item, dict) else getattr(item, "task_id", None)
+        if not task_id or not hasattr(controller, "store") or not hasattr(controller.store, "update_task"):
+            return
+
+        checkpoint_id = item.get("checkpoint_id", "") if isinstance(item, dict) else getattr(item, "checkpoint_id", "")
+        task = controller.store.get_task_or_none(task_id) if hasattr(controller.store, "get_task_or_none") else None
+        if task is None:
+            return
+
+        attempt_id = item.get("execution_attempt_id", "") if isinstance(item, dict) else getattr(item, "execution_attempt_id", "")
+        inbox_item_id = item.get("inbox_item_id", "") if isinstance(item, dict) else getattr(item, "inbox_item_id", "")
+
+        _CANCEL_STATUSES = {
+            CancellationStatus.REQUESTED,
+            CancellationStatus.ACKNOWLEDGED,
+            CancellationStatus.COMPLETED,
+            CancellationStatus.FORCED,
+            CancellationStatus.PARTIALLY_COMPLETED,
+        }
+
+        def fence_claim(task: Any) -> None:
+            if (
+                task.state in {ExecutionState.CANCELLED, ExecutionState.CANCELLING}
+                or getattr(task, "cancellation_status", None) in _CANCEL_STATUSES
+            ):
+                raise PermissionError("approved action branch was cancelled")
+            ancestor_id = getattr(task, "parent_task_id", None)
+            while ancestor_id:
+                ancestor = controller.store.get_task_or_none(ancestor_id)
+                if ancestor is not None and (
+                    ancestor.state in {ExecutionState.CANCELLED, ExecutionState.CANCELLING}
+                    or getattr(ancestor, "cancellation_status", None) in _CANCEL_STATUSES
+                ):
+                    raise PermissionError(f"approved action ancestor branch was cancelled: {ancestor.task_id}")
+                ancestor_id = getattr(ancestor, "parent_task_id", None) if ancestor else None
+            if task.state in TERMINAL_STATES:
+                raise PermissionError(f"approved action branch is terminal ({task.state.value})")
+            if checkpoint_id and task.checkpoint_id != checkpoint_id:
+                raise PermissionError("approved action checkpoint no longer matches the branch")
+            if attempt_id and task.attempt_id != attempt_id:
+                raise PermissionError("approved action attempt no longer matches the branch attempt")
+            if task.state is ExecutionState.WAITING or (
+                task.waiting_inbox_item_id and task.waiting_inbox_item_id == inbox_item_id
+            ):
+                raise PermissionError("approved action branch has not resumed from human wait")
+            task.irreversible_side_effect_started = True
+
+        try:
+            controller.store.update_task(task_id, fence_claim)
+        except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
+            pass
 
     def _emit(self, event_type: str, action: ActionIntent, **details: Any) -> None:
         self.store.append_audit(action, event_type, details)

@@ -103,6 +103,58 @@ def test_approval_tools_do_not_create_separate_cards(tool_name: str) -> None:
     panel.main_box.add_tool_call.assert_not_called()
 
 
+@pytest.mark.parametrize("backend,box_name", [("", "main_box"), ("internal", "coding_box")])
+def test_approval_controls_live_inside_activity_and_retry(tmp_path: Path, monkeypatch, backend: str, box_name: str) -> None:
+    import anyio
+    from mana_agent.tui.computer_permission import InlineApproval
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
+    decisions = []
+
+    async def decide(choice, *, batch_ids=None):
+        decisions.append(choice)
+        return len(decisions) > 1
+
+    app._complete_computer_permission = decide
+
+    async def exercise() -> None:
+        async with app.run_test(size=(140, 45)) as pilot:
+            app._current_frontend_turn_id = "turn-approval"
+            app.history.add(CodingActivityEvent(turn_id="turn-approval", activity={
+                "event_type": "action.approval.required", "title": "Review commit", "status": "waiting_approval",
+                "backend": backend, "metadata": {"inbox_item_id": "item-1", "preview": "git commit"},
+            }))
+            await pilot.pause()
+            panel = app.chat_log.get_execution_panel("turn-approval")
+            box = getattr(panel, box_name)
+            controls = box.query_one(InlineApproval)
+            assert controls.request.preview.find("git commit") >= 0
+            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert not decisions
+            controls.query_one(".inline-once").press()
+            await pilot.pause()
+            assert len(decisions) == 1
+            assert not controls.query_one(".inline-once").disabled
+            controls.query_one(".inline-deny").press()
+            await pilot.pause()
+            assert len(decisions) == 2 and decisions[-1].decision is None
+            assert not list(box.query(InlineApproval))
+            assert any(e.get("status") == "failed" for e in box.events)
+
+    anyio.run(exercise)
+
+
+@pytest.mark.parametrize("box_class", [MainActivityBox, CodingActivityBox])
+def test_approval_decision_does_not_resolve_other_requests(box_class) -> None:
+    box = box_class(turn_id="turn")
+    for request_id in ("one", "two"):
+        box.update_event({"event_type": "action.approval.required", "status": "waiting_approval", "metadata": {"inbox_item_id": request_id}})
+    box.update_event({"event_type": "action.approval.granted", "status": "completed", "metadata": {"inbox_item_id": "one", "decision": "approve"}})
+    assert box.events[0]["status"] == "completed"
+    assert box.events[1]["status"] == "waiting_approval"
+
+
 def test_transactional_permission_screen_offers_matching_batch() -> None:
     import anyio
     from textual.app import App

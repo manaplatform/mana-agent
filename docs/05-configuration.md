@@ -203,6 +203,14 @@ When no saved user config exists, the CLI prints the Mana banner first, then sta
 - Configure web and GitHub search providers.
 - Save a masked config summary for review.
 
+### Anthropic (Claude)
+
+1. Create an API key at [Anthropic Console](https://console.anthropic.com/).
+2. Run `mana-agent configure` (or `mana-agent --configure`) and select **Anthropic**.
+3. Set `ANTHROPIC_API_KEY` (never `OPENAI_API_KEY`) and optional `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`).
+4. Default model is `claude-sonnet-5-5`. Other valid models include `claude-opus-5-5` and `claude-haiku-5-5`.
+5. Start Mana-Agent normally; chat, tools, streaming, and multi-agent workflows use the native Messages API with top-level system prompts, `tool_use`/`tool_result` content blocks, and alternating message validation.
+
 ### NVIDIA Build / NVIDIA NIM
 
 1. Create an API key at [NVIDIA Build](https://build.nvidia.com/).
@@ -298,7 +306,7 @@ Use `--no-interactive` in CI or scripts:
 mana-agent --no-interactive chat --root-dir .
 ```
 
-In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if the selected provider's key is missing (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `NVIDIA_API_KEY`).
+In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if the selected provider's key is missing (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `NVIDIA_API_KEY`, or `ANTHROPIC_API_KEY`).
 
 ## Memory providers
 
