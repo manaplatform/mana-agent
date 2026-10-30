@@ -22,7 +22,7 @@ from .models import (
     utc_now,
 )
 from .task_scope import computer_task_wide_eligible
-from mana_agent.tools.shell_exec import is_read_only_command
+from mana_agent.tools.shell_exec import is_plan_mode_read_only_command, is_read_only_command
 
 
 class PolicyScope(StrictModel):
@@ -57,7 +57,12 @@ class PolicyConfig(StrictModel):
     approval_reviewer_id: str = Field(default_factory=getpass.getuser)
 
     def fingerprint(self) -> str:
-        encoded = json.dumps(self.model_dump(mode="json"), sort_keys=True, default=str)
+        # A change in classification logic must invalidate pending approvals
+        # even when all user-supplied policy settings are unchanged.
+        encoded = json.dumps(
+            {"config": self.model_dump(mode="json"), "implementation_revision": "shell-read-only-v2"},
+            sort_keys=True, default=str,
+        )
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -267,7 +272,9 @@ class ActionPolicy:
         context = context if isinstance(context, dict) else {}
         executable = Path(argv[0]).name
         inspected = list(argv)
-        if executable in {"sh", "bash", "zsh", "dash", "cmd.exe", "powershell", "pwsh"}:
+        nested_shell = executable in {"sh", "bash", "zsh", "dash", "cmd.exe", "powershell", "pwsh"}
+        command_text = ""
+        if nested_shell:
             command_text = str(argv[-1]) if len(argv) >= 3 else ""
             try:
                 lexer = shlex.shlex(command_text, posix=True, punctuation_chars=True)
@@ -282,13 +289,20 @@ class ActionPolicy:
         destructive_git = executable == "git" and any(
             item in inspected for item in {"--force", "--force-with-lease", "--hard", "clean"}
         )
-        if any(item in dangerous for item in inspected) or "sudo" in inspected or destructive_git or action.reversibility is Reversibility.IRREVERSIBLE:
-            return PolicyOutcome.REQUIRE_APPROVAL, ["destructive_shell"], "The command is potentially destructive or irreversible and requires approval.", ["approve_destructive_shell"]
+        if any(item in dangerous for item in inspected) or "sudo" in inspected or action.reversibility is Reversibility.IRREVERSIBLE:
+            return PolicyOutcome.DENY, ["destructive_shell"], "The command is destructive or irreversible.", ["deny_destructive_shell"]
+        if destructive_git:
+            return PolicyOutcome.REQUIRE_APPROVAL, ["destructive_git"], "Destructive git actions require exact approval.", ["approve_destructive_git"]
         is_legacy_run_command = (
             context.get("tool") == "run_command"
             or "run-command" in action.parent_task_id
         )
-        if not is_legacy_run_command and is_read_only_command(inspected):
+        # A shell interprets operators, substitutions and write-capable Git
+        # flags after tokenization. A safe-looking first command is not proof
+        # that the whole shell script is read-only.
+        read_only = (is_plan_mode_read_only_command(command_text) if nested_shell
+                     else is_read_only_command(inspected))
+        if not is_legacy_run_command and read_only:
             return PolicyOutcome.ALLOW, ["read_only_shell"], "A safe read-only shell command is allowed without human approval.", ["allow_read_only_shell"]
         if (
             context.get("kind") == "validated_verification"
@@ -335,8 +349,6 @@ class ActionPolicy:
             if operation_matches and context.get("explicit_user_intent") is True:
                 return PolicyOutcome.ALLOW, ["managed_workspace_explicit_action"], "The workspace coordinator supplied validated explicit intent for this exact managed-workspace action.", ["allow_explicit_managed_workspace"]
             return PolicyOutcome.DENY, ["invalid_managed_workspace_context"], "Managed-workspace policy context was incomplete or did not match the Git operation.", ["managed_workspace_shape"]
-        if context.get("kind") == "validated_queue_git" and action.actor == "tool_worker" and risk in {"LOCAL_SAFE_WRITE", "LOCAL_HISTORY_WRITE"}:
-            return PolicyOutcome.ALLOW, ["validated_local_git_workflow"], "A validated task workflow may perform this exact local Git action.", ["allow_validated_local_git"]
         if risk in {"DESTRUCTIVE", "HISTORY_REWRITE"}:
             return PolicyOutcome.REQUIRE_APPROVAL, ["destructive_git"], "Destructive or history-rewriting Git actions require exact approval.", ["approve_destructive_git"]
         if risk == "REMOTE_WRITE":

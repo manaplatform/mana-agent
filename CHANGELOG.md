@@ -4,6 +4,104 @@ All notable repository changes should be recorded here.
 
 ## 2026-10-30
 
+- Standalone shell approval now binds and consumes an exact transactional action
+  instead of trusting arbitrary tokens or callback booleans. Automatic waits
+  validate the durable human decision. See `docs/approval-action-binding-incident.md`
+  for compatibility and remaining low-level/supervision limitations. User
+  verification (not run by this agent): `./venv/bin/python -m pytest
+  tests/test_shell_executor.py tests/coding/test_approval_binding_regressions.py
+  tests/coding/test_git_approval_propagation.py -q`.
+
+- Approval lookup now confines internal coding to its assigned workspace and
+  validates supplied task, agent and decision provenance before returning
+  pending status or a grant. See `docs/approval-action-binding-incident.md`.
+  User verification (not run by this agent): `./venv/bin/python -m pytest
+  tests/coding/test_approval_binding_regressions.py tests/coding/test_git_approval_propagation.py
+  tests/human_inbox/test_approval_tools.py -q`.
+
+- Internal coding approval follow-up: expose pending action identifiers and exact
+  grant inputs in direct/programmatic command and Git contracts; bind command
+  grants to their wrapper and handle the documented single-command shell array
+  without silently dropping it. Multiple shell commands are rejected. Nested
+  shell read-only policy is more conservative and its revision invalidates
+  pre-change pending policy decisions across action types. See
+  `docs/approval-action-binding-incident.md`. User verification (not run by
+  this agent): `./venv/bin/python -m pytest tests/coding/test_approval_binding_regressions.py tests/coding/test_git_approval_propagation.py tests/test_programmatic_tool_calling.py -q`.
+
+- Git commit approval previews now fingerprint complete index entries instead
+  of configurable cached-diff output, and fail closed if the index cannot be
+  rechecked. Old diff-only commit approvals require fresh authorization. This
+  does not fence concurrent index or hook changes; see
+  `docs/approval-action-binding-incident.md`. User verification (not run by
+  this agent): `./venv/bin/python -m pytest tests/coding/test_git_approval_propagation.py tests/coding/test_approval_binding_regressions.py -q`.
+
+- Approval expiry follow-up: reusable task grants now require a current source
+  policy decision, and resumed approved actions recheck human inbox expiry.
+  Regression coverage and remaining fencing limitations are documented in
+  `docs/approval-action-binding-incident.md`. User verification:
+  `./venv/bin/python -m pytest tests/coding/test_approval_binding_regressions.py tests/coding/test_git_approval_propagation.py tests/human_inbox/test_approval_tools.py tests/gateway/test_transactional_approval.py tests/transactional_actions/test_policy_gated_actions.py -q`
+  (host reported 225 passed, with model-judgment metadata attached).
+
+- Git approval propagation follow-up: AskAgent Git mutations and queued Git
+  calls retain task provenance and carry exact action grants to the gateway.
+  Named queue tools do not inherit the generic queue policy exception. Verify
+  with `./venv/bin/python -m pytest tests/coding/test_git_approval_propagation.py tests/test_ask_agent.py::test_ask_git_commit_resumes_only_exact_task_action tests/test_git_tools.py::test_queue_tools_manager_executes_git_namespace -q`.
+  See `docs/approval-action-binding-incident.md` for limitations.
+
+- Approval regression follow-up: task-wide grants require a current human
+  decision on their originating action; missing approved actions fail closed,
+  and Git show rejects option-like revisions. Focused verification command:
+  `./venv/bin/pytest tests/coding/test_approval_binding_regressions.py tests/coding/test_git_approval_propagation.py tests/human_inbox/test_approval_tools.py tests/gateway/test_transactional_approval.py -q`
+  (subprocess reported 29 passed; host model-judgment behavior remains under investigation).
+
+- Approval/action binding investigation (local, partially verified): human inbox
+  requests are no longer resolved by model judgment, shell retries require the
+  original task and exact intent, and Git commit previews fingerprint staged
+  changes. Legacy model-reviewed inbox decisions are rejected. See
+  `docs/approval-action-binding-incident.md` for remaining gaps and compatibility
+  impact. Verification: `./venv/bin/pytest tests/coding/test_approval_binding_regressions.py -q`
+  (7 passed); `./venv/bin/pytest tests/transactional_actions/test_policy_gated_actions.py -q`
+  (194 passed). Broader legacy approval tests require updating and verification.
+
+- Live Steer Mode end-to-end integration, lease fencing, and terminal status:
+  - Fixed the stale-lease identity hazard in supervisor lease acquisition, heartbeats, checkpoints, and controller lifecycle. Fenced operations by active attempt ID and attempt generation, made terminal state transitions and release idempotent, and resolved the token hash mismatch.
+  - Wired chat coding turns into the autonomous continuation loop via `autonomous_controller.execute_goal`, preserving supervisor leases and preventing duplicate side-effects.
+  - Integrated `Ctrl+S` nonblocking modal shortcut (`SteerModal`) and `/steer <instruction>` fallback in Textual TUI with `ChatGateway.submit_steering`.
+  - Added live steering delivery at safe execution boundaries supporting `EXECUTION`, `TASK`, and `WORKER` scopes and plan change reapproval gates.
+  - Fixed contradictory terminal status in TUI and execution traces so failed executions never show `✓ Completed`.
+  - Added comprehensive end-to-end integration coverage in `tests/execution/test_live_steering_integration.py`. User-owned verification commands:
+    `./venv/bin/pytest tests/execution/test_live_steering_integration.py -q`
+    `./venv/bin/pytest tests/execution/ tests/test_tui_approval_realtime.py tests/execution_supervisor/ -q`
+
+- Dashboard transactional, server and API approvals now appear with their decision controls in
+  Activity or Coding Activity instead of a separate timeline card; successful
+  approval scrolls to the conversation end. TUI approval tool cards are
+  suppressed and approval scrolls to the end, but the TUI still uses its separate
+  authorization dialog. Approval gates remain unchanged. See
+  `docs/activity-approval-rendering.md`. User-owned verification (not run):
+  `node --test tests/dashboard/live_chat_approval_ui.test.mjs tests/dashboard/live_chat_reducer.test.mjs`
+  and `PYTHONPATH=src pytest tests/test_tui_approval_realtime.py -q`.
+
+- Versioning: bumped the project version to `0.8.0` and synchronized the
+  README version badge. Local changes only; no release has been published.
+  User-owned verification (not run by the agent):
+  `PYTHONPATH=src pytest tests/test_package_version.py -q` and
+  `python .github/scripts/validate_release_version.py --tag v0.8.0`.
+
+- Added a read-only, lease- and generation-fenced controller steering snapshot
+  and an atomic checkpoint audit snapshot. This is groundwork, not delivery or
+  recovery: Ctrl+S and chat/controller integration remain unavailable. The
+  controller's current lease-identity hazard is documented in
+  `docs/live-steering-design.md`. Verification command:
+  `PYTHONPATH=src venv/bin/python -m pytest tests/execution/test_steering_admission.py tests/execution/test_steering_ledger.py tests/execution_supervisor/test_supervisor_core.py -q`.
+
+- Steering admission groundwork: serialize pending execution-scoped input with
+  supervisor task updates, checking session, current attempt/generation, lease
+  and cancellation. The caller must authenticate the session; task/worker scope
+  and interrupts remain unsupported. This does not deliver steering or enable
+  Ctrl+S. See `docs/live-steering-design.md`. User verification:
+  `PYTHONPATH=src venv/bin/python -m pytest tests/execution/test_steering_admission.py tests/execution/test_steering_ledger.py -q`.
+
 - Live steering groundwork: added an isolated typed SQLite input ledger with
   per-execution ordering and idempotency. It is not connected to the TUI,
   dashboard, execution controller, approvals, or recovery and does not enable
@@ -20,8 +118,8 @@ All notable repository changes should be recorded here.
       - Removed hardcoded regex filters (`_DANGEROUS_COMMAND_PATTERNS`) so that all commands pass to model judgment without being preemptively short-circuited.
       - Added `error: str = ""` parameter to `judge_approval_request` so command execution errors are evaluated by judgment for potential retry or alternative suggestions.
       - Defaulted to `judgment="approval"` when no LLM engine is configured, allowing human review rather than failing closed with hardcoded denial.
-    - Updated `src/mana_agent/transactional_actions/policy.py` (`ActionPolicy._shell`, `ActionPolicy._git`):
-      - Changed hardcoded `PolicyOutcome.DENY` for destructive shell and git actions to `PolicyOutcome.REQUIRE_APPROVAL`, ensuring requests pass to judgment and human approval rather than static hard denial.
+    - Updated `src/mana_agent/transactional_actions/policy.py` (`ActionPolicy._shell`):
+      - Retained `PolicyOutcome.DENY` for dangerous system commands (`rm`, `sudo`, `dd`, `mkfs`, `reboot`, etc.) to prevent destructive host corruption (e.g. `rm -rf /`), while routing destructive git operations (`git clean`, `git push --force`) to `PolicyOutcome.REQUIRE_APPROVAL` so developers can explicitly review and authorize them.
     - Updated `src/mana_agent/coding/programmatic.py` (`ToolExecutionDispatcher._execute_builtin_tool`):
       - Removed the hardcoded polling loop that bypassed model judgment in non-test environments.
       - Routed approval-required actions through `judge_approval_request`: auto-executing on `accept`, creating/dispatching durable human approval on `approval`, and blocking on `deny`.
@@ -30,6 +128,10 @@ All notable repository changes should be recorded here.
     - Updated `src/mana_agent/transactional_actions/approvals.py` (`ApprovalGrant.valid_for`, `ApprovalRegistry.issue`): Allowed grants and grant issuing when actions are already in `ActionState.APPROVED`, `ActionState.EXECUTING`, or `ActionState.COMMITTED`, preventing `ValueError: only an action awaiting approval may receive a grant` when repeat or concurrent approval calls occur.
     - Updated `src/mana_agent/gateway/chat_gateway.py` (`transactional_action_approval_command`): Allowed `ActionState.APPROVED`, `ActionState.EXECUTING`, and `ActionState.COMMITTED` during version checks, and handled branch resumption notices gracefully so the inbox approval grant is issued reliably even if the branch controller has no active resumption claim.
     - Updated `src/mana_agent/tui/app.py` (`_complete_computer_permission`): Added fallback to direct human inbox service resolution if gateway approval command fails, and added comprehensive idempotent error handling for already-approved, already-processed, or non-approvable states.
+  - **Hidden redundant approval message box in TUI chat:**
+    - Updated `src/mana_agent/tui/app.py` (`_complete_computer_permission`): Suppressed adding the assistant message box (`"Exact action approved once. The matching durable branch is resuming the stored action."`) to chat history upon approval, showing only a clean toast notification (`Approved`).
+    - Updated `src/mana_agent/tui/widgets/activity_boxes.py` (`MainActivityBox.update_event`, `CodingActivityBox.update_event`): Cleared `waiting_approval` status indicators upon receiving `action.approval.granted`.
+    - Updated `tests/test_tui_approval_realtime.py` to assert that no redundant approval message card is mounted into the chat log on approval.
   - **Regression test coverage:**
     - Added `test_approved_action_with_checkpoint_executes_from_anywhere_without_resumed_branch_error` in `tests/gateway/test_transactional_approval.py`.
     - Updated `test_judge_approval_request_evaluates_via_model_without_hardcoded_gate` and added `test_judge_approval_request_returns_approval_verdict_for_consequential_command`, `test_dispatcher_script_error_sends_to_judgment_and_retries_on_accept`, and `test_dispatcher_sends_approval_when_judgment_demands_human_approval` in `tests/coding/test_coding_approval_judgment.py`.

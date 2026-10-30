@@ -338,6 +338,8 @@ class CheckpointRecord(StrictModel):
     state_version: int = Field(ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     resume_payload: dict[str, Any] = Field(default_factory=dict)
+    # Audit snapshot, not an instruction to overwrite the authoritative task log.
+    steering_inputs: list[dict[str, Any]] = Field(default_factory=list)
     completed_steps: list[str] = Field(default_factory=list)
     pending_steps: list[str] = Field(default_factory=list)
     tool_results: list[dict[str, Any]] = Field(default_factory=list)
@@ -563,6 +565,9 @@ class TaskRecord(StrictModel):
     attempt_id: str = ""
     attempt_ids: list[str] = Field(default_factory=list)
     attempt_generation: int = Field(default=0, ge=0)
+    # Admission-only steering records, serialized with lease/cancellation updates.
+    # These are not an indication that a running agent has applied guidance.
+    steering_inputs: list[dict[str, Any]] = Field(default_factory=list)
     child_task_ids: list[str] = Field(default_factory=list)
     dependency_task_ids: list[str] = Field(default_factory=list)
     task_type: str = "task"

@@ -153,6 +153,14 @@ class MainActivityBox(Vertical):
         """Append or update a general agent activity event in the stream."""
         ev = dict(event)
         event_id = str(ev.get("event_id") or ev.get("id") or ev.get("call_id") or "").strip()
+        ev_type = str(ev.get("event_type") or "")
+        if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
+            decision = ev.get("metadata", {}).get("decision") if isinstance(ev.get("metadata"), dict) else ""
+            is_approved = "granted" in ev_type or decision == "approve"
+            for existing in self.events:
+                if str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}:
+                    existing["status"] = "completed" if is_approved else "failed"
+
         if event_id and event_id in self._event_ids:
             for i, existing in enumerate(self.events):
                 ex_id = str(existing.get("event_id") or existing.get("id") or existing.get("call_id") or "").strip()
@@ -424,6 +432,13 @@ class CodingActivityBox(Vertical):
         # Context meter
         if ev_type.startswith(("context.", "cost.", "budget.")):
             self.context_meter.update(ev.get("payload") or ev.get("metadata") or {})
+
+        if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
+            decision = ev.get("metadata", {}).get("decision") if isinstance(ev.get("metadata"), dict) else ""
+            is_approved = "granted" in ev_type or decision == "approve"
+            for existing in self.events:
+                if str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}:
+                    existing["status"] = "completed" if is_approved else "failed"
 
         backend_val = ev.get("backend")
         if backend_val:

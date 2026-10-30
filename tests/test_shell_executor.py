@@ -502,6 +502,81 @@ def test_shell_executor_auto_request_approval_disabled(tmp_path: Path) -> None:
     assert "requires explicit approval before execution" in res["output"][0]["stderr"]
 
 
+def test_shell_executor_grant_is_consumed_only_for_exact_action(tmp_path: Path, monkeypatch) -> None:
+    import getpass
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+    from mana_agent.tools.shell_exec import ShellCommandOutput, ShellOutcome
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    executor = ShellExecutor(workspace_root=tmp_path, task_id="task-a", auto_request_approval=True)
+    calls = []
+    grants = []
+    gateway = default_action_gateway(tmp_path)
+
+    def approve_exact(cmd, adapter, **kwargs):
+        action = gateway.propose(adapter)
+        grant = gateway.approve(action.action_id, approved_by=getpass.getuser())
+        grants.append(grant)
+        return True, grant
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return ShellCommandOutput(command=cmd, stdout="ok", stderr="", outcome=ShellOutcome(type="exit", exit_code=0))
+
+    monkeypatch.setattr(executor, "_request_approval_and_wait", approve_exact)
+    monkeypatch.setattr(executor, "run", fake_run)
+    result = executor.execute(commands=["python -c 'print(1)'"])
+    assert result["output"][0]["stdout"] == "ok" and len(calls) == 1
+    assert gateway.approvals.get(grants[0]).consumed_at is not None
+    replay = executor.execute(commands=["python -c 'print(2)'"], action_approval_id=grants[0])
+    assert replay["output"][0]["outcome"]["exit_code"] == 1 and len(calls) == 1
+
+
+def test_shell_executor_rejects_untrusted_token_callback_and_multi_command(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    executor = ShellExecutor(workspace_root=tmp_path, auto_request_approval=False,
+                             on_approval=lambda _: {"approve": True})
+    monkeypatch.setattr(executor, "run", lambda *args, **kwargs: pytest.fail("must not execute"))
+    for kwargs in (
+        {"commands": ["python -c 'print(1)'"], "action_approval_id": "unknown"},
+        {"commands": ["python -c 'print(1)'"]},
+        {"commands": ["git status", "python -c 'print(1)'"], "action_approval_id": "unknown"},
+    ):
+        result = executor.execute(**kwargs)
+        assert result["output"][0]["outcome"]["exit_code"] == 1
+        assert "HumanApprovalRequired" in result["output"][0]["stderr"]
+
+
+def test_shell_executor_rejects_orphan_and_foreign_grants(tmp_path: Path, monkeypatch) -> None:
+    import getpass
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    gateway = default_action_gateway(tmp_path)
+    executor = ShellExecutor(workspace_root=tmp_path, task_id="task-a")
+    pending = []
+
+    def capture(cmd, adapter, **kwargs):
+        pending.append(gateway.propose(adapter))
+        return False, "pending"
+
+    monkeypatch.setattr(executor, "_request_approval_and_wait", capture)
+    monkeypatch.setattr(executor, "run", lambda *args, **kwargs: pytest.fail("must not execute"))
+    command = "python -c 'print(1)'"
+    executor.execute(commands=[command])
+    orphan = gateway.approvals.issue(pending[0], approved_by="model_judgment")
+    result = executor.execute(commands=[command], action_approval_id=orphan.approval_id)
+    assert result["output"][0]["outcome"]["exit_code"] == 1
+    assert gateway.approvals.get(orphan.approval_id).consumed_at is None
+    gateway.approve(pending[0].action_id, approved_by=getpass.getuser())
+    for target, options in ((executor, {"commands": [command], "timeout_ms": 5000}),
+                            (ShellExecutor(workspace_root=tmp_path, task_id="task-b"), {"commands": [command]})):
+        monkeypatch.setattr(target, "run", lambda *args, **kwargs: pytest.fail("must not execute"))
+        result = target.execute(**options, action_approval_id=orphan.approval_id)
+        assert result["output"][0]["outcome"]["exit_code"] == 1
+    assert gateway.approvals.get(orphan.approval_id).consumed_at is None
+
+
 def test_split_windows_command_preserves_paths_and_unquotes_args() -> None:
     from mana_agent.tools.shell_exec import split_windows_command
 

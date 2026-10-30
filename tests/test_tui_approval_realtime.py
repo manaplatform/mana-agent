@@ -90,6 +90,19 @@ def test_tool_card_approval_header_badge() -> None:
     assert "approval_request" in header
 
 
+@pytest.mark.parametrize("tool_name", ["approval_request", "request_user_approval", "wait_for_approval"])
+def test_approval_tools_do_not_create_separate_cards(tool_name: str) -> None:
+    from mana_agent.tui.widgets.chat_log import ChatLog
+
+    log = ChatLog(history=ChatHistory())
+    panel = MagicMock()
+    log._get_or_create_execution_panel = MagicMock(return_value=panel)
+    event = ToolCallEvent(call_id="call-1", tool_name=tool_name, args={}, turn_id="turn-1")
+    assert log._add_tool_call(event) is panel
+    panel.update_event.assert_called_once()
+    panel.main_box.add_tool_call.assert_not_called()
+
+
 def test_transactional_permission_screen_offers_matching_batch() -> None:
     import anyio
     from textual.app import App
@@ -168,6 +181,7 @@ def test_app_complete_computer_permission_fallback(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     history = ChatHistory()
     app = ManaChatApp(history=history, repo_root=tmp_path)
+    app.chat_log = MagicMock()
 
     inbox = default_human_inbox_service()
     from mana_agent.human_inbox.models import (
@@ -200,6 +214,8 @@ def test_app_complete_computer_permission_fallback(tmp_path: Path, monkeypatch) 
 
     updated_item = inbox.repository.get(item.inbox_item_id)
     assert updated_item.status == InboxStatus.APPROVED
+
+    app.chat_log._scroll_to_latest.assert_called_once()
 
     # Verify event was posted to history
     events = history.get_events()
@@ -483,10 +499,17 @@ def test_app_complete_computer_permission_idempotent_when_action_already_committ
 
     anyio.run(app._complete_computer_permission, choice)
 
+    # When approved, no redundant assistant message box is added to chat history (only a toast is shown)
     messages = [e for e in history.get_events() if isinstance(e, AssistantMessageEvent)]
-    assert len(messages) >= 1
-    assert "Transactional action approved." in messages[-1].content
-    assert "Failed to record approval decision" not in messages[-1].content
+    assert len(messages) == 0
+
+    # Verify that the approval grant event was recorded in CodingActivityEvent without failure
+    granted_events = [
+        e for e in history.get_events()
+        if isinstance(e, CodingActivityEvent) and e.activity.get("event_type") == "action.approval.granted"
+    ]
+    assert len(granted_events) == 1
+    assert granted_events[0].activity["status"] == "completed"
 
 
 def test_app_complete_computer_permission_multi_request_approve_all(

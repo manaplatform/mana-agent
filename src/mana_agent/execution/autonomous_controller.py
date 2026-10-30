@@ -303,6 +303,8 @@ class AutonomousExecutionController:
         session_id: str | None = None,
         workspace_root: str | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        attempt_id: str | None = None,
+        lease_token: str | None = None,
     ) -> AutonomousExecutionResult:
         """Convenience method running the universal continuation loop."""
         return self.execute_goal(
@@ -316,6 +318,8 @@ class AutonomousExecutionController:
             session_id=session_id,
             workspace_root=workspace_root,
             event_sink=event_sink,
+            attempt_id=attempt_id,
+            lease_token=lease_token,
         )
 
     def advance_batch_task(self, **kwargs: Any) -> dict[str, Any]:
@@ -327,6 +331,28 @@ class AutonomousExecutionController:
         lease_token = kwargs.pop("lease_token")
         return BatchTaskLoop(self.batch_manager, supervisor=self.supervisor, config=self.config,
                              attempt_id=attempt_id, lease_token=lease_token).advance(**kwargs)
+
+    def pending_steering(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        generation: int,
+        lease_token: str,
+        scope: Any = None,
+        target_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Inspect steering at a boundary without acknowledging or applying it."""
+        from mana_agent.execution.steering import SteeringCoordinator
+
+        return SteeringCoordinator(self.supervisor).pending_for_attempt(
+            task_id,
+            attempt_id=attempt_id,
+            generation=generation,
+            lease_token=lease_token,
+            scope=scope,
+            target_id=target_id,
+        )
 
     def execute_goal(
         self,
@@ -342,6 +368,8 @@ class AutonomousExecutionController:
         session_id: str | None = None,
         workspace_root: str | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        attempt_id: str | None = None,
+        lease_token: str | None = None,
     ) -> AutonomousExecutionResult:
         """Run the universal model-directed autonomous continuation loop."""
         runner = step_runner or step_executor
@@ -368,18 +396,33 @@ class AutonomousExecutionController:
                 normalized_intent=user_goal,
             )
 
+        active_attempt_id = attempt_id
+        active_lease_token = lease_token or ""
+
         if task.state == ExecutionState.CREATED:
             task = self.supervisor.queue(task.task_id)
         if task.state == ExecutionState.QUEUED:
             task, token = self.supervisor.acquire_lease(task.task_id, owner="autonomous_controller")
-            self.supervisor.start(task.task_id, attempt_id=task.attempt_id, lease_token=token)
+            active_attempt_id = task.attempt_id
+            active_lease_token = token
+            self.supervisor.start(task.task_id, attempt_id=active_attempt_id, lease_token=active_lease_token)
             task = self.supervisor.get_task(task.task_id)
         elif task.state == ExecutionState.LEASED:
-            token = task.lease_token
-            if not token:
+            if not active_lease_token:
                 task, token = self.supervisor.acquire_lease(task.task_id, owner="autonomous_controller")
-            self.supervisor.start(task.task_id, attempt_id=task.attempt_id, lease_token=token)
+                active_attempt_id = task.attempt_id
+                active_lease_token = token
+            else:
+                active_attempt_id = task.attempt_id
+            self.supervisor.start(task.task_id, attempt_id=active_attempt_id, lease_token=active_lease_token)
             task = self.supervisor.get_task(task.task_id)
+        elif task.state == ExecutionState.RUNNING:
+            if not active_attempt_id:
+                active_attempt_id = task.attempt_id
+            if not active_lease_token:
+                active_lease_token = task.lease_token
+
+        active_generation = task.attempt_generation
 
         root_task_id = task.root_task_id or task_id
 
@@ -503,9 +546,88 @@ class AutonomousExecutionController:
                     completed_steps=completed_steps,
                 ))
 
+            # Live steering check at safe execution boundary
+            if active_attempt_id and active_lease_token:
+                try:
+                    pending_items = self.pending_steering(
+                        task_id,
+                        attempt_id=active_attempt_id,
+                        generation=active_generation,
+                        lease_token=active_lease_token,
+                    )
+                except Exception as steer_exc:
+                    logger.debug("Failed to check pending steering: %s", steer_exc)
+                    pending_items = []
+
+                if pending_items:
+                    from mana_agent.execution.steering import SteeringCoordinator
+                    steering_coord = SteeringCoordinator(self.supervisor)
+                    applied_ids = []
+                    for item in pending_items:
+                        text = item.get("text", "")
+                        kind = item.get("kind", "guidance")
+                        scope = item.get("scope", "execution")
+                        req_id = item["request_id"]
+                        steering_msg = f"[Live Steering ({kind.upper()})]: {text}"
+                        existing_guidance = ctx.get("live_steering_guidance", "")
+                        ctx["live_steering_guidance"] = (
+                            f"{existing_guidance}\n{steering_msg}".strip()
+                            if existing_guidance
+                            else steering_msg
+                        )
+                        if event_sink:
+                            try:
+                                event_sink({
+                                    "event_type": "steering.applied",
+                                    "request_id": req_id,
+                                    "kind": kind,
+                                    "scope": scope,
+                                    "text": text,
+                                    "applied_at": self.supervisor.clock().isoformat(),
+                                })
+                            except Exception:
+                                pass
+                        applied_ids.append(req_id)
+                        if kind in {"replan", "scope_change"}:
+                            consecutive_no_progress = 0
+
+                    try:
+                        steering_coord.apply_steering(
+                            task_id,
+                            attempt_id=active_attempt_id,
+                            generation=active_generation,
+                            lease_token=active_lease_token,
+                            request_ids=applied_ids,
+                        )
+                    except Exception as apply_err:
+                        logger.warning("Failed to mark steering applied: %s", apply_err)
+
+                    if any(item.get("requires_approval") for item in pending_items):
+                        self.supervisor.transition(
+                            task_id,
+                            ExecutionState.WAITING,
+                            reason="waiting_for_approval",
+                            attempt_id=active_attempt_id,
+                            generation=active_generation,
+                        )
+                        return _finish(AutonomousExecutionResult(
+                            task_id=task_id,
+                            status="waiting",
+                            goal_satisfied=False,
+                            answer="Live steering requires human approval before proceeding.",
+                            metrics=metrics,
+                            error="waiting_for_approval",
+                            completed_steps=completed_steps,
+                        ))
+
             # 2. Checkpoint before execution step
             current_task = self.supervisor.get_task(task_id)
-            if current_task.state == ExecutionState.RUNNING and current_task.attempt_id and current_task.lease_token:
+            if (
+                current_task.state == ExecutionState.RUNNING
+                and active_attempt_id
+                and active_lease_token
+                and current_task.attempt_id == active_attempt_id
+            ):
                 try:
                     batch_job_ids: list[str] = []
                     if self.batch_manager is not None:
@@ -515,8 +637,9 @@ class AutonomousExecutionController:
                             pass
                     self.supervisor.checkpoint(
                         task_id,
-                        attempt_id=current_task.attempt_id,
-                        lease_token=current_task.lease_token,
+                        attempt_id=active_attempt_id,
+                        lease_token=active_lease_token,
+                        generation=active_generation,
                         resume_payload={
                             "step_index": step_index,
                             "metrics": metrics.model_dump(mode="json"),
@@ -525,6 +648,15 @@ class AutonomousExecutionController:
                         resume_cursor=f"step_{step_index}",
                         completed_steps=[str(s.get("summary", "")) for s in completed_steps],
                         pending_steps=["execute_step", "evaluate_continuation"],
+                    )
+                except StaleLeaseError:
+                    logger.warning("Controller lease became stale during checkpoint; aborting turn.")
+                    return AutonomousExecutionResult(
+                        task_id=task_id,
+                        status="stale_lease",
+                        metrics=metrics,
+                        error="lease token is stale or invalid",
+                        completed_steps=completed_steps,
                     )
                 except Exception as cp_exc:
                     logger.warning("Checkpoint before step %d failed: %s", step_index, cp_exc)
@@ -540,7 +672,12 @@ class AutonomousExecutionController:
             except Exception as exc:
                 logger.exception("Step runner execution failed on task %s step %d", task_id, step_index)
                 try:
-                    self.supervisor.transition(task_id, ExecutionState.FAILED)
+                    self.supervisor.transition(
+                        task_id,
+                        ExecutionState.FAILED,
+                        attempt_id=active_attempt_id,
+                        generation=active_generation,
+                    )
                 except Exception:
                     pass
                 return _finish(AutonomousExecutionResult(
@@ -670,9 +807,15 @@ class AutonomousExecutionController:
             # 6. Check for Pending Human Approval Gate
             if step_result.get("is_approval_pending"):
                 current_task = self.supervisor.get_task(task_id)
-                if current_task.state == ExecutionState.RUNNING:
+                if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
                     try:
-                        self.supervisor.transition(task_id, ExecutionState.WAITING, reason="waiting_for_approval")
+                        self.supervisor.transition(
+                            task_id,
+                            ExecutionState.WAITING,
+                            reason="waiting_for_approval",
+                            attempt_id=active_attempt_id,
+                            generation=active_generation,
+                        )
                     except Exception:
                         pass
                 if self.taskboard is not None:
@@ -708,9 +851,15 @@ class AutonomousExecutionController:
                     "produced no observable progress toward the goal."
                 )
                 current_task = self.supervisor.get_task(task_id)
-                if current_task.state == ExecutionState.RUNNING:
+                if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
                     try:
-                        self.supervisor.transition(task_id, ExecutionState.FAILED, reason="no_progress_stopped")
+                        self.supervisor.transition(
+                            task_id,
+                            ExecutionState.FAILED,
+                            reason="no_progress_stopped",
+                            attempt_id=active_attempt_id,
+                            generation=active_generation,
+                        )
                     except Exception:
                         pass
                 if self.taskboard is not None:
@@ -770,9 +919,15 @@ class AutonomousExecutionController:
                         # Cannot renew due to budget, max renewals, or no progress
                         if self.config.auto_renew.require_approval_above_budget and "budget" in renewal_reason:
                             current_task = self.supervisor.get_task(task_id)
-                            if current_task.state == ExecutionState.RUNNING:
+                            if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
                                 try:
-                                    self.supervisor.transition(task_id, ExecutionState.WAITING, reason="waiting_for_approval")
+                                    self.supervisor.transition(
+                                        task_id,
+                                        ExecutionState.WAITING,
+                                        reason="waiting_for_approval",
+                                        attempt_id=active_attempt_id,
+                                        generation=active_generation,
+                                    )
                                 except Exception:
                                     pass
                             return _finish(AutonomousExecutionResult(
@@ -788,9 +943,14 @@ class AutonomousExecutionController:
                             ))
                         # Mark budget exhausted
                         current_task = self.supervisor.get_task(task_id)
-                        if current_task.state == ExecutionState.RUNNING:
+                        if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
                             try:
-                                self.supervisor.transition(task_id, ExecutionState.BUDGET_EXHAUSTED)
+                                self.supervisor.transition(
+                                    task_id,
+                                    ExecutionState.BUDGET_EXHAUSTED,
+                                    attempt_id=active_attempt_id,
+                                    generation=active_generation,
+                                )
                             except Exception:
                                 pass
                         return _finish(AutonomousExecutionResult(
@@ -806,9 +966,14 @@ class AutonomousExecutionController:
                         ))
                 else:
                     current_task = self.supervisor.get_task(task_id)
-                    if current_task.state == ExecutionState.RUNNING:
+                    if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
                         try:
-                            self.supervisor.transition(task_id, ExecutionState.BUDGET_EXHAUSTED)
+                            self.supervisor.transition(
+                                task_id,
+                                ExecutionState.BUDGET_EXHAUSTED,
+                                attempt_id=active_attempt_id,
+                                generation=active_generation,
+                            )
                         except Exception:
                             pass
                     return _finish(AutonomousExecutionResult(
@@ -825,7 +990,12 @@ class AutonomousExecutionController:
 
             # 8. Checkpoint state after step
             current_task = self.supervisor.get_task(task_id)
-            if current_task.state == ExecutionState.RUNNING and current_task.attempt_id and current_task.lease_token:
+            if (
+                current_task.state == ExecutionState.RUNNING
+                and active_attempt_id
+                and active_lease_token
+                and current_task.attempt_id == active_attempt_id
+            ):
                 try:
                     post_batch_job_ids: list[str] = []
                     if self.batch_manager is not None:
@@ -835,8 +1005,9 @@ class AutonomousExecutionController:
                             pass
                     self.supervisor.checkpoint(
                         task_id,
-                        attempt_id=current_task.attempt_id,
-                        lease_token=current_task.lease_token,
+                        attempt_id=active_attempt_id,
+                        lease_token=active_lease_token,
+                        generation=active_generation,
                         resume_payload={
                             "step_index": step_index,
                             "metrics": metrics.model_dump(mode="json"),
@@ -946,12 +1117,18 @@ class AutonomousExecutionController:
                 final_answer = decision.user_message or last_answer or "Task completed successfully."
 
                 # If task is RUNNING, submit result to escrow (which internally triggers completion verification)
-                if current_task.state == ExecutionState.RUNNING and current_task.attempt_id and current_task.lease_token:
+                if (
+                    current_task.state == ExecutionState.RUNNING
+                    and active_attempt_id
+                    and active_lease_token
+                    and current_task.attempt_id == active_attempt_id
+                ):
                     try:
                         verified_task = self.supervisor.submit_result(
                             task_id,
-                            attempt_id=current_task.attempt_id,
-                            lease_token=current_task.lease_token,
+                            attempt_id=active_attempt_id,
+                            lease_token=active_lease_token,
+                            generation=active_generation,
                             payload={
                                 "answer": final_answer,
                                 "goal_satisfied": True,
@@ -1028,9 +1205,14 @@ class AutonomousExecutionController:
                     )
                 else:
                     current_task = self.supervisor.get_task(task_id)
-                    if current_task.state == ExecutionState.COMPLETED_PENDING_VERIFICATION:
+                    if current_task.state == ExecutionState.COMPLETED_PENDING_VERIFICATION and current_task.attempt_id == active_attempt_id:
                         try:
-                            self.supervisor.transition(task_id, ExecutionState.COMPLETED)
+                            self.supervisor.transition(
+                                task_id,
+                                ExecutionState.COMPLETED,
+                                attempt_id=active_attempt_id,
+                                generation=active_generation,
+                            )
                         except Exception:
                             pass
                     if self.taskboard is not None:
@@ -1073,9 +1255,15 @@ class AutonomousExecutionController:
 
             if decision.action == ContinuationAction.WAIT_FOR_USER:
                 current_task = self.supervisor.get_task(task_id)
-                if current_task.state == ExecutionState.RUNNING:
+                if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
                     try:
-                        self.supervisor.transition(task_id, ExecutionState.WAITING, reason="waiting_for_clarification")
+                        self.supervisor.transition(
+                            task_id,
+                            ExecutionState.WAITING,
+                            reason="waiting_for_clarification",
+                            attempt_id=active_attempt_id,
+                            generation=active_generation,
+                        )
                     except Exception:
                         pass
                 if self.taskboard is not None:
@@ -1097,9 +1285,15 @@ class AutonomousExecutionController:
 
             if decision.action == ContinuationAction.BLOCKED:
                 current_task = self.supervisor.get_task(task_id)
-                if current_task.state == ExecutionState.RUNNING:
+                if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
                     try:
-                        self.supervisor.transition(task_id, ExecutionState.FAILED, reason=decision.reason)
+                        self.supervisor.transition(
+                            task_id,
+                            ExecutionState.FAILED,
+                            reason=decision.reason,
+                            attempt_id=active_attempt_id,
+                            generation=active_generation,
+                        )
                     except Exception:
                         pass
                 if self.taskboard is not None:

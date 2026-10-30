@@ -148,25 +148,23 @@ class ToolsManager:
                 )
             if job.job_type == QueueJobType.GIT:
                 tool_name = str(job.payload.get("tool") or job.payload.get("tool_name") or "git.generic")
-                tool_args = job.payload.get("args") if isinstance(job.payload.get("args"), dict) else dict(job.payload)
-                if tool_name.replace("_", ".") == "git.generic":
-                    argv = [str(item) for item in (tool_args.get("args") or [])]
-                    result = git_tools.run_git(
-                        argv,
-                        repo_path=root,
-                        timeout=tool_args.get("timeout"),
-                        allow_protected=bool(tool_args.get("allow_protected", False)),
-                        action_context={
-                            "kind": "validated_queue_git",
-                            "actor": "tool_worker",
-                            "originating_agent": str(job.requested_by_agent_id or "tool_worker"),
-                            "parent_task_id": job.task_id,
-                            "queue_job_id": job.job_id,
-                            "verification": bool(job.payload.get("verification")),
-                        },
-                    )
-                else:
-                    result = git_tools.execute_tool(tool_name, tool_args, repo_path=root)
+                tool_args = (job.payload["args"] if isinstance(job.payload.get("args"), dict)
+                             else {key: value for key, value in job.payload.items()
+                                   if key not in {"tool", "tool_name", "verification"}})
+                context = {
+                    "actor": "tool_worker",
+                    "originating_agent": str(job.requested_by_agent_id or "tool_worker"),
+                    "parent_task_id": job.task_id,
+                    "queue_job_id": job.job_id,
+                    "verification": bool(job.payload.get("verification")),
+                }
+                # The queue owns the repository target; caller-supplied paths
+                # cannot redirect a grant or the execution to another checkout.
+                requested_root = tool_args.get("repo_path")
+                if requested_root and Path(str(requested_root)).expanduser().resolve() != root.resolve():
+                    raise ValueError("Git repository differs from the assigned workspace")
+                tool_args = {**tool_args, "repo_path": root}
+                result = git_tools.execute_tool(tool_name, tool_args, repo_path=root, action_context=context)
                 if isinstance(result, dict):
                     result = {**result, "execution_repo_root": str(root)}
                 return ToolResult(

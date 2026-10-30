@@ -70,6 +70,41 @@ def submit_decision(
     )
 
 
+def test_wait_binds_approval_to_source_decision(tmp_path: Path) -> None:
+    clock = Clock()
+    inbox = create_test_inbox_service(tmp_path, clock)
+    item_id = request_user_approval(source_decision_id="decision-a", task_id="task",
+                                    agent_id="agent", inbox_service=inbox)
+    submit_decision(inbox, item_id, ResponseOperation.APPROVE)
+    with pytest.raises(PermissionError, match="different decision"):
+        wait_for_approval(item_id, "decision-b", "task", "agent", inbox_service=inbox)
+
+
+@pytest.mark.parametrize("invalid", ["model", "expired", "missing_actor"])
+def test_general_approval_cannot_report_untrusted_or_stale_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str
+) -> None:
+    clock = Clock()
+    inbox = create_test_inbox_service(tmp_path, clock)
+    item_id = request_user_approval(source_decision_id="decision", task_id="task",
+                                    agent_id="agent", inbox_service=inbox)
+    submit_decision(inbox, item_id, ResponseOperation.APPROVE)
+    item = inbox.repository.get(item_id)
+    if invalid == "model":
+        item.response_channel = "model_judgment"
+    elif invalid == "expired":
+        clock.advance(8 * 24 * 60 * 60)
+    else:
+        item.response_actor_id = ""
+    original_get = inbox.repository.get
+    monkeypatch.setattr(inbox.repository, "get", lambda key: item if key == item_id else original_get(key))
+    with pytest.raises(PermissionError):
+        wait_for_approval(item_id, "decision", "task", "agent", inbox_service=inbox)
+    with pytest.raises(PermissionError):
+        approval_request(inbox_item_id=item_id, workspace_root=tmp_path, inbox_service=inbox,
+                         timeout_seconds=0.01)
+
+
 def test_pending_then_approved_returns_may_continue(tmp_path: Path) -> None:
     clock = Clock()
     inbox = create_test_inbox_service(tmp_path, clock)

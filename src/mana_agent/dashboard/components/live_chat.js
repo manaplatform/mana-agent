@@ -379,7 +379,8 @@
     if (!event || typeof event !== "object") return;
     const type = eventType(event);
     if (!type) return;
-    const meta = metaOf(event);
+    const meta = { ...metaOf(event) };
+    if (event.backend && !meta.backend) meta.backend = event.backend;
     const status = eventStatus(event);
     const rawStatus = status.toLowerCase();
     const title = text(event.title);
@@ -834,7 +835,7 @@
     if (type.startsWith("context.") || type.startsWith("cost.") || type.startsWith("budget.")) {
       state.contextBudget = { ...state.contextBudget, ...metadata, event_type: type, status: eventStatus(event) };
     }
-    const permissionRequestId = text(metadata.permission_request_id);
+    const permissionRequestId = text((type.startsWith("action.approval.") && metadata.inbox_item_id) || metadata.permission_request_id);
     const inboxItemId = text(metadata.inbox_item_id);
     if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
       const authorityId = type === "action.approval.required" && inboxItemId ? inboxItemId : permissionRequestId;
@@ -1151,8 +1152,28 @@
       parent.appendChild(node);
       return node;
     };
+    let forceScrollAfterApproval = false;
     const activityBoxState = new Map();
     const activityStreamScrollState = new Map();
+    const surfacedApprovalIds = new Set();
+    const isActionApproval = (ev) => ["action.approval.required", "server.waiting_approval", "api.waiting_approval"].includes(ev.type);
+    const approvalId = (ev) => {
+      const meta = ev.metadata || {};
+      return text((ev.type === "action.approval.required" && meta.inbox_item_id) || meta.permission_request_id);
+    };
+
+    const newPendingApproval = (box) => {
+      let found = false;
+      for (const ev of box.events) {
+        if (!isActionApproval(ev)) continue;
+        const id = approvalId(ev);
+        const request = state.permissionRequests.get(id);
+        if (!id || !request || request.status !== "pending" || surfacedApprovalIds.has(id)) continue;
+        surfacedApprovalIds.add(id);
+        found = true;
+      }
+      return found;
+    };
 
     const rememberActivityStreamPosition = (stream, key) => {
       if (stream.dataset.scrollPositionReady !== "true") return;
@@ -1181,6 +1202,68 @@
       }
     };
 
+    const renderActionApproval = (event, row) => {
+      const id = approvalId(event);
+      const request = state.permissionRequests.get(id);
+      if (!id || !request) return;
+      addText(row, "div", request.preview || event.title, "logs");
+      addText(row, "div", `Scope: ${request.scope || ""}`, "meta");
+      if (["completed", "approved", "denied", "decided"].includes(request.status)) {
+        addText(row, "div", `Decision: ${request.decision || request.status}`, "permission-state");
+        if (request.result) addText(row, "div", request.result, "logs");
+        return;
+      }
+      if (request.status === "resuming" || permissionBusy.has(id)) {
+        addText(row, "div", "Approving & Resuming...", "permission-state");
+        return;
+      }
+      const actions = document.createElement("div");
+      actions.className = "permission-actions";
+      for (const [label, decision] of [["Deny", "deny"], ["Approve once", "approve"]]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        if (decision === "deny") button.className = "deny";
+        button.addEventListener("click", async () => {
+          if (permissionBusy.has(id)) return;
+          permissionBusy.add(id);
+          permissionErrors.delete(id);
+          render();
+          try {
+            const permissionPath = request.kind === "server" ? "server-approvals" : request.kind === "api" ? "api-approvals" : "transactional-actions";
+            const response = await fetch(
+              `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/${permissionPath}/${encodeURIComponent(id)}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}) },
+                body: JSON.stringify({ decision, root: config.root }),
+              },
+            );
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+            if (payload.assistant_message) applyMessage(state, payload.assistant_message);
+            state.permissionRequests.set(id, {
+              ...request, requestId: id,
+              status: payload.status || (payload.approved ? "completed" : "denied"),
+              decision,
+              result: text(payload.answer || (payload.result && (payload.result.answer || payload.result.message))),
+            });
+            if (decision === "approve" && payload.approved !== false && payload.status !== "denied") {
+              forceScrollAfterApproval = true;
+            }
+          } catch (error) {
+            permissionErrors.set(id, error.message || String(error));
+          } finally {
+            permissionBusy.delete(id);
+            render();
+          }
+        });
+        actions.appendChild(button);
+      }
+      row.appendChild(actions);
+      if (permissionErrors.has(id)) addText(row, "div", permissionErrors.get(id), "permission-error");
+    };
+
     const renderMainActivityBox = (trace) => {
       if (!trace || !trace.mainBox || trace.mainBox.events.length === 0) return null;
       const box = trace.mainBox;
@@ -1190,6 +1273,10 @@
       const isRunning = box.status === "running" || (!trace.isCompleted && !trace.isFailed && !trace.isCancelled);
 
       const getBoxOpen = () => {
+        if (newPendingApproval(box)) {
+          setBoxOpen(true);
+          return true;
+        }
         if (activityBoxState.has(key)) {
           return activityBoxState.get(key);
         }
@@ -1200,7 +1287,7 @@
           }
         }
         // First render: initialize from isRunning and persist so new activities don't close it
-        const initial = isRunning;
+        const initial = isRunning || box.events.some((ev) => isActionApproval(ev) && (state.permissionRequests.get(approvalId(ev)) || {}).status === "pending");
         setBoxOpen(initial);
         return initial;
       };
@@ -1247,7 +1334,10 @@
       const showAll = activityBoxState.get(showAllKey) === true;
       const maxEvents = 100;
       const allEvents = box.events;
-      const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(allEvents.length - maxEvents);
+      const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.filter((ev, index) => {
+        const request = state.permissionRequests.get(approvalId(ev));
+        return index >= allEvents.length - maxEvents || (isActionApproval(ev) && request && request.status === "pending");
+      });
 
       if (allEvents.length > maxEvents && !showAll) {
         const expandBtn = document.createElement("button");
@@ -1268,7 +1358,7 @@
       for (const ev of eventsToRender) {
         const lastGroup = groups[groups.length - 1];
         const evTitle = ev.tool_name || ev.title || ev.type;
-        if (lastGroup && lastGroup.title === evTitle && lastGroup.status === ev.status) {
+        if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.title === evTitle && lastGroup.status === ev.status) {
           lastGroup.events.push(ev);
         } else {
           groups.push({ title: evTitle, status: ev.status, events: [ev] });
@@ -1332,6 +1422,9 @@
           row.appendChild(det);
         }
 
+        for (const ev of grp.events) {
+          if (isActionApproval(ev)) renderActionApproval(ev, row);
+        }
         stream.appendChild(row);
       }
       node.appendChild(stream);
@@ -1358,6 +1451,10 @@
       const isRunning = box.status === "running" || (!trace.isCompleted && !trace.isFailed && !trace.isCancelled);
 
       const getBoxOpen = () => {
+        if (newPendingApproval(box)) {
+          setBoxOpen(true);
+          return true;
+        }
         if (activityBoxState.has(key)) {
           return activityBoxState.get(key);
         }
@@ -1368,7 +1465,7 @@
           }
         }
         // First render: initialize from isRunning and persist so new activities don't close it
-        const initial = isRunning;
+        const initial = isRunning || box.events.some((ev) => isActionApproval(ev) && (state.permissionRequests.get(approvalId(ev)) || {}).status === "pending");
         setBoxOpen(initial);
         return initial;
       };
@@ -1431,7 +1528,10 @@
         const showAll = activityBoxState.get(showAllKey) === true;
         const maxEvents = 100;
         const allEvents = box.events;
-        const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(allEvents.length - maxEvents);
+        const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.filter((ev, index) => {
+          const request = state.permissionRequests.get(approvalId(ev));
+          return index >= allEvents.length - maxEvents || (isActionApproval(ev) && request && request.status === "pending");
+        });
 
         if (allEvents.length > maxEvents && !showAll) {
           const expandBtn = document.createElement("button");
@@ -1451,7 +1551,7 @@
         for (const ev of eventsToRender) {
           const lastGroup = groups[groups.length - 1];
           const evTitle = ev.tool_name || ev.title || ev.type;
-          if (lastGroup && lastGroup.title === evTitle && lastGroup.status === ev.status) {
+          if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.title === evTitle && lastGroup.status === ev.status) {
             lastGroup.events.push(ev);
           } else {
             groups.push({ title: evTitle, status: ev.status, events: [ev] });
@@ -1516,6 +1616,9 @@
             row.appendChild(det);
           }
 
+          for (const ev of grp.events) {
+            if (isActionApproval(ev)) renderActionApproval(ev, row);
+          }
           stream.appendChild(row);
         }
         node.appendChild(stream);
@@ -1560,7 +1663,7 @@
         const type = eventType(activity);
         const metadata = metaOf(activity);
         const permissionRequestId = text(metadata.permission_request_id);
-        if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
+        if (type === "computer.waiting_permission" && permissionRequestId) {
           rows.push({ kind: "permission", time: eventTime(activity), sequence: activity.sequence || 0, value: activity });
         } else if (type.startsWith("media_generation_") || type === "canvas.createSurface") {
           rows.push({ kind: "activity", time: eventTime(activity), sequence: activity.sequence || 0, value: activity });
@@ -1741,7 +1844,8 @@
       contextMeter.textContent = budget.context_window
         ? `ctx ${budget.used_tokens || 0}/${budget.context_window} (${percent}%) · schema ${breakdown.schema_tokens || budget.schema_tokens || 0} · ${exact} $${Number(budget.cumulative_cost || 0).toFixed(4)}${budget.remaining_cost == null ? "" : ` · $${Number(budget.remaining_cost).toFixed(4)} left`}`
         : "";
-      if (nearBottom) {
+      if (nearBottom || forceScrollAfterApproval) {
+        forceScrollAfterApproval = false;
         timeline.scrollTop = timeline.scrollHeight;
         if (typeof requestAnimationFrame === "function") {
           requestAnimationFrame(() => {
@@ -1762,6 +1866,7 @@
       state.tools.clear();
       state.activities.clear();
       state.permissionRequests.clear();
+      surfacedApprovalIds.clear();
       state.seenSequences.clear();
       state.seenUnsequenced.clear();
       state.lastSequence = 0;

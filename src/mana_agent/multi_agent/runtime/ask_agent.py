@@ -354,6 +354,7 @@ class _GitGenericInput(BaseModel):
     repo_path: str | None = None
     timeout: int | None = None
     allow_protected: bool = False
+    action_approval_id: str = ""
 
 class _GitHelpInput(BaseModel):
     command: str | None = None
@@ -368,22 +369,27 @@ class _GitBranchInput(BaseModel):
 class _GitCreateBranchInput(BaseModel):
     branch_name: str
     switch_to: bool = True
+    action_approval_id: str = ""
 
 class _GitSwitchInput(BaseModel):
     branch_name: str
+    action_approval_id: str = ""
 
 class _GitAddInput(BaseModel):
     paths: list[str]
+    action_approval_id: str = ""
 
 class _GitCommitInput(BaseModel):
     message: str
     amend: bool = False
+    action_approval_id: str = ""
 
 class _GitPushInput(BaseModel):
     remote: str = ""
     branch_name: str = ""
     set_upstream: bool = False
     force: bool = False
+    action_approval_id: str = ""
 
 class _GitRemoteInput(BaseModel):
     verbose: bool = True
@@ -1642,56 +1648,16 @@ class AskAgent:
                 operation_key = "shell:" + hashlib.sha256(json.dumps(operation_input, sort_keys=True).encode()).hexdigest()
                 current_parent_task_id = str(run_id or "ask-run-command")
                 validated_approval_id = ""
-                pre_approved_by_judgment = False
-                pre_judgment_data: dict[str, Any] | None = None
-
+                approved_action = None
                 if action_approval_id:
                     grant = action_gateway.approvals.get(action_approval_id)
-                    approved_action = None
-                    if grant is not None:
-                        approved_action = action_gateway.store.get_action(grant.action_id)
-                    else:
-                        act_id = action_approval_id.removeprefix("policy_allow_")
-                        approved_action = action_gateway.store.get_action(act_id)
-
-                    if approved_action is None:
-                        logger.warning(
-                            "Ignoring unverified action_approval_id=%r in ask_agent (not in approval store)",
-                            action_approval_id,
-                        )
-                    elif approved_action.parent_task_id == current_parent_task_id:
-                        if batch_call_id:
-                            operation_key = approved_action.idempotency_key
-                        validated_approval_id = action_approval_id if grant is not None else ""
-                    else:
-                        # Command approval belongs to a different task lineage or tool wrapper.
-                        # Use model judgment to decide whether this command is genuinely related to current task.
-                        from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
-
-                        llm_for_judge = getattr(self, "llm", None) or getattr(self, "_llm", None)
-                        current_goal = str(getattr(self, "last_query", "") or current_parent_task_id)
-                        mj = judge_approval_request(
-                            command=str(cmd or " ".join(shell_argv)),
-                            reason=f"Evaluate whether command approved under task '{approved_action.parent_task_id}' is related to active task '{current_parent_task_id}'",
-                            goal=current_goal,
-                            working_directory=str(command_cwd),
-                            risk_level="medium",
-                            llm=llm_for_judge,
-                            action_id=approved_action.action_id,
-                        )
-                        if mj.judgment != "accept":
-                            return json.dumps({
-                                "ok": False,
-                                "error_code": "APPROVAL_DENIED_BY_MODEL_JUDGMENT",
-                                "permission_required": False,
-                                "error": f"Command denied by model judgment: {mj.reason}",
-                                "reason": mj.reason,
-                                "suggested_command": mj.suggested_command,
-                            })
-                        pre_approved_by_judgment = True
-                        pre_judgment_data = mj.model_dump(mode="json")
-                        if batch_call_id:
-                            operation_key = approved_action.idempotency_key
+                    if grant is None:
+                        return json.dumps({"ok": False, "error_code": "INVALID_APPROVAL", "error": "Unknown approval grant."})
+                    approved_action = action_gateway.store.get_action(grant.action_id)
+                    if approved_action is None or approved_action.parent_task_id != current_parent_task_id:
+                        return json.dumps({"ok": False, "error_code": "INVALID_APPROVAL", "error": "Approval belongs to a different task or action."})
+                    operation_key = approved_action.idempotency_key
+                    validated_approval_id = action_approval_id
 
                 shell_adapter = ShellActionAdapter(
                     argv=shell_argv,
@@ -1707,28 +1673,8 @@ class AskAgent:
                     runner=transactional_runner,
                     allow_command_result_verification=bool(batch_call_id),
                 )
-                if pre_approved_by_judgment:
-                    proposed_action = action_gateway.store.action_for_idempotency_key(operation_key)
-                    if proposed_action is None or proposed_action.intent_digest() != shell_adapter.build_intent().intent_digest():
-                        proposed_action = action_gateway.propose(shell_adapter)
-                    from mana_agent.transactional_actions.models import ActionState, ApprovalScope
-
-                    if proposed_action.state is ActionState.AWAITING_APPROVAL:
-                        correct_grant = action_gateway.approvals.find_valid(proposed_action)
-                        if correct_grant is None:
-                            req_scope = (
-                                proposed_action.policy_decision.required_approval_scope
-                                if proposed_action.policy_decision
-                                else ApprovalScope.ACTION_ONCE
-                            )
-                            correct_grant = action_gateway.approvals.issue(
-                                proposed_action,
-                                approved_by="model_judgment",
-                                ttl_seconds=300,
-                                scope=req_scope or ApprovalScope.ACTION_ONCE,
-                            )
-                        validated_approval_id = correct_grant.approval_id
-
+                if action_approval_id and approved_action.intent_digest() != shell_adapter.build_intent().intent_digest():
+                    return json.dumps({"ok": False, "error_code": "INVALID_APPROVAL", "error": "Approval does not match the exact command and execution context."})
                 try:
                     try:
                         outcome = action_gateway.execute(
@@ -1736,14 +1682,8 @@ class AskAgent:
                         )
                     except ApprovalRequired:
                         raise
-                    except PermissionError as perm_err:
-                        if validated_approval_id:
-                            logger.info("Approval %r rejected with PermissionError (%s), retrying unapproved", validated_approval_id, perm_err)
-                            outcome = action_gateway.execute(
-                                shell_adapter, approval_id=""
-                            )
-                        else:
-                            raise
+                    except PermissionError:
+                        raise
                 except ApprovalRequired as exc:
                     action = exc.action
                     inbox_item_id = exc.inbox_item_id or action.inbox_item_id
@@ -1813,21 +1753,10 @@ class AskAgent:
                         approved = False
                         grant_id = ""
                         while time.monotonic() - start_time < approval_wait_timeout_seconds:
-                            grant = gateway.approvals.find_valid(action)
-                            if grant is not None:
-                                approved = True
-                                grant_id = grant.approval_id
-                                break
                             if inbox_item_id:
                                 item = inbox_service.repository.get(inbox_item_id)
                                 if item is not None and item.status == InboxStatus.APPROVED:
-                                    grant = gateway.approvals.find_valid(action)
-                                    if grant is None:
-                                        grant = gateway.approvals.issue(
-                                            action,
-                                            approved_by=item.response_actor_id or "user",
-                                            ttl_seconds=300,
-                                        )
+                                    grant = gateway.grant_for_approved_inbox(action, item)
                                     approved = True
                                     grant_id = grant.approval_id
                                     break
@@ -1883,8 +1812,6 @@ class AskAgent:
                     "action_state": outcome.action.state.value,
                     "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
                 }
-                if pre_judgment_data is not None:
-                    payload["model_judgment"] = pre_judgment_data
                 if outcome.action.state.value != "committed":
                     payload["error"] = outcome.action.error or "shell verification incomplete"
                 encoded = json.dumps(payload)
@@ -2033,8 +1960,20 @@ class AskAgent:
         def git_help(command: str | None = None, all: bool = False, refresh: bool = False, repo_path: str | None = None, timeout: int | None = None) -> str:
             return dumps_tool_result(git_tools.git_help(command=command, all=all, refresh=refresh, repo_path=repo_path or self.project_root, timeout=timeout))
 
-        def git_generic(args: list[str], repo_path: str | None = None, timeout: int | None = None, allow_protected: bool = False) -> str:
-            return dumps_tool_result(git_tools.generic(args=args, repo_path=repo_path or self.project_root, timeout=timeout, allow_protected=allow_protected))
+        def _execute_git(name: str, arguments: dict[str, Any]) -> str:
+            return dumps_tool_result(git_tools.execute_tool(
+                name, arguments, repo_path=self.project_root,
+                action_context={
+                    "parent_task_id": str(run_id or "ask-agent-git"),
+                    "actor": "user",
+                    "originating_agent": "ask_agent",
+                },
+            ))
+
+        def git_generic(args: list[str], repo_path: str | None = None, timeout: int | None = None, allow_protected: bool = False, action_approval_id: str = "") -> str:
+            if repo_path and Path(repo_path).expanduser().resolve() != self.project_root.resolve():
+                raise ValueError("Git repository differs from the assigned workspace")
+            return _execute_git("git_generic", {"args": args, "timeout": timeout, "allow_protected": allow_protected, "action_approval_id": action_approval_id})
 
         def git_log(limit: int = 10, oneline: bool = True) -> str:
             return dumps_tool_result(git_tools.log(repo_path=self.project_root, limit=limit, oneline=oneline))
@@ -2042,20 +1981,20 @@ class AskAgent:
         def git_branch(all: bool = False) -> str:
             return dumps_tool_result(git_tools.branch(repo_path=self.project_root, all=all))
 
-        def git_create_branch(branch_name: str, switch_to: bool = True) -> str:
-            return dumps_tool_result(git_tools.create_branch(repo_path=self.project_root, branch_name=branch_name, switch_to=switch_to))
+        def git_create_branch(branch_name: str, switch_to: bool = True, action_approval_id: str = "") -> str:
+            return _execute_git("git_create_branch", {"branch_name": branch_name, "switch_to": switch_to, "action_approval_id": action_approval_id})
 
-        def git_switch(branch_name: str) -> str:
-            return dumps_tool_result(git_tools.switch(repo_path=self.project_root, branch_name=branch_name))
+        def git_switch(branch_name: str, action_approval_id: str = "") -> str:
+            return _execute_git("git_switch", {"branch_name": branch_name, "action_approval_id": action_approval_id})
 
-        def git_add(paths: list[str]) -> str:
-            return dumps_tool_result(git_tools.add(repo_path=self.project_root, paths=paths))
+        def git_add(paths: list[str], action_approval_id: str = "") -> str:
+            return _execute_git("git_add", {"paths": paths, "action_approval_id": action_approval_id})
 
-        def git_commit(message: str, amend: bool = False) -> str:
-            return dumps_tool_result(git_tools.commit(repo_path=self.project_root, message=message, amend=amend))
+        def git_commit(message: str, amend: bool = False, action_approval_id: str = "") -> str:
+            return _execute_git("git_commit", {"message": message, "amend": amend, "action_approval_id": action_approval_id})
 
-        def git_push(remote: str = "", branch_name: str = "", set_upstream: bool = False, force: bool = False) -> str:
-            return dumps_tool_result(git_tools.push(repo_path=self.project_root, remote=remote, branch_name=branch_name, set_upstream=set_upstream, force=force))
+        def git_push(remote: str = "", branch_name: str = "", set_upstream: bool = False, force: bool = False, action_approval_id: str = "") -> str:
+            return _execute_git("git_push", {"remote": remote, "branch_name": branch_name, "set_upstream": set_upstream, "force": force, "action_approval_id": action_approval_id})
 
         def git_remote(verbose: bool = True) -> str:
             return dumps_tool_result(git_tools.remote(repo_path=self.project_root, verbose=verbose))
@@ -2446,7 +2385,10 @@ class AskAgent:
         from mana_agent.human_inbox.approval_tools import build_approval_tools
 
         inbox_service = getattr(self, "human_inbox_service", None)
-        approval_tools = build_approval_tools(inbox_service=inbox_service)
+        approval_tools = build_approval_tools(
+            inbox_service=inbox_service, workspace_root=self.project_root,
+            task_id=str(run_id or ""), agent_id="ask_agent",
+        )
 
         from mana_agent.batch.tools import build_batch_langchain_tools
 

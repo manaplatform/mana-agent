@@ -25,7 +25,7 @@ APPROVAL_ALLOWED_TOOLS = [
 
 
 class ModelApprovalJudgment(BaseModel):
-    """Structured decision produced by model judgment on approval requests."""
+    """Advisory assessment, not a human decision or execution authorization."""
 
     judgment: Literal["accept", "approval", "deny"]
     reason: str
@@ -45,7 +45,7 @@ def judge_approval_request(
     action_id: str = "",
     error: str = "",
 ) -> ModelApprovalJudgment:
-    """Evaluate an approval request using model judgment without hardcoded policy gates."""
+    """Assess an action; deterministic policy and human approval remain authoritative."""
     clean_cmd = str(command or "").strip()
 
     if llm is None:
@@ -75,13 +75,14 @@ def judge_approval_request(
         )
 
     system_prompt = (
-        "You are Mana-Agent's authoritative Model Approval Judge.\n"
-        "Your role is to evaluate whether a requested shell command or tool execution should be ACCEPTED, requires HUMAN APPROVAL, or should be DENIED.\n\n"
+        "You are Mana-Agent's advisory action risk assessor.\n"
+        "Your assessment cannot authorize execution, replace a human decision, or override deterministic policy.\n"
+        "Assess whether a proposed command appears acceptable, needs human approval, or should be denied.\n\n"
         "CRITICAL RULES:\n"
         "1. ACCEPT (judgment='accept'): Safe, non-destructive, or verified commands needed to inspect, build, test, verify, or retry/advance the user's task goal.\n"
         "2. REQUIRE HUMAN APPROVAL (judgment='approval'): Consequential, state-modifying, or sensitive commands (such as file deletions, hard resets, privilege escalation, or irreversible external changes) where human review and explicit consent are required.\n"
         "3. DENY (judgment='deny'): Malicious, completely unrelated, or prohibited actions that must not run under any circumstances.\n"
-        "4. If an execution error occurred and a fix/alternative should be run instead, provide the exact alternative in 'suggested_command'.\n"
+        "4. If an execution error occurred, you may suggest an alternative in 'suggested_command'; it is not authorized and must not run automatically.\n"
         "5. Return strictly one valid JSON object conforming to this schema:\n"
         "{\n"
         '  "judgment": "accept" | "approval" | "deny",\n'

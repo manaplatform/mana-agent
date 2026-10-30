@@ -439,9 +439,6 @@ class ExecutionTrace:
         """Apply an event to this turn's trace idempotently."""
         ev = dict(event)
         event_type = str(ev.get("event_type") or ev.get("type") or "").strip()
-        raw_status = str(ev.get("status") or "running").strip().lower()
-        title = str(ev.get("title") or "").strip()
-        detail = str(ev.get("detail") or ev.get("summary") or ev.get("output_preview") or ev.get("message") or ev.get("error") or "").strip()
         meta = event_classification_metadata(ev)
         duration_ms = ev.get("duration_ms")
         event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
@@ -450,7 +447,12 @@ class ExecutionTrace:
         if phase == "lifecycle":
             # Lifecycle events update turn-level metadata without creating spurious steps
             return None
+        title = str(ev.get("title") or "").strip()
+        detail = str(ev.get("detail") or ev.get("summary") or ev.get("output_preview") or ev.get("message") or ev.get("error") or "").strip()
         step_title = title or default_title
+
+        default_status = "failed" if (event_type.endswith(".failed") or event_type.endswith(".error") or phase == "failure" or bool(ev.get("error"))) else "running"
+        raw_status = str(ev.get("status") or default_status).strip().lower()
 
         # Track categorized events and changed files for persistent activity boxes
         category = classify_activity_category(event_type, ev.get("tool_name") or meta.get("tool_name"), meta)
@@ -509,12 +511,22 @@ class ExecutionTrace:
             step_id = f"{self.turn_id}:{phase}"
 
         # Status normalization
+        if not raw_status and (event_type.endswith(".failed") or event_type.endswith(".error") or phase == "failure"):
+            raw_status = "failed"
         is_terminal_step = raw_status in {"success", "completed", "done", "failed", "error", "cancelled"}
         is_approval_waiting = phase == "approval" or raw_status in {"waiting_approval", "pending_approval", "approval_required"}
+
+        if raw_status in {"failed", "error"}:
+            self.is_failed = True
+        elif raw_status in {"cancelled", "interrupted"}:
+            self.is_cancelled = True
 
         # If turn finished or failed, mark previous running steps
         if phase in {"completion", "failure"}:
             if phase == "completion":
+                if self.is_failed or self.is_cancelled:
+                    # Cannot complete an execution that has already failed or been cancelled
+                    return None
                 self.is_completed = True
             elif raw_status in {"cancelled", "interrupted"}:
                 self.is_cancelled = True
@@ -526,6 +538,9 @@ class ExecutionTrace:
                 if st.status in {"running", "waiting_approval"}:
                     st.finish(status="completed" if self.is_completed else ("cancelled" if self.is_cancelled else "failed"))
             self.active_step_id = None
+
+        if self.is_failed and (phase == "completion" or raw_status in {"completed", "success"}):
+            return None
 
         existing = self._step_by_id.get(step_id)
 

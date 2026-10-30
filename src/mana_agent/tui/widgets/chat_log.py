@@ -305,12 +305,28 @@ class ChatLog(VerticalScroll):
         if event.turn_id:
             panel = self._execution_panels.get(event.turn_id)
             if panel is not None:
-                panel.update_event({
-                    "event_type": "turn.completed",
-                    "title": "Completed",
-                    "status": "success",
-                    "detail": "Response generated",
-                })
+                is_failed = bool(
+                    getattr(event, "error", None)
+                    or getattr(event, "status", "") in {"failed", "error", "cancelled"}
+                    or (getattr(event, "metadata", None) and getattr(event, "metadata", {}).get("status") in {"failed", "error", "cancelled"})
+                    or "Gateway execution failed" in content
+                    or "Execution failed" in content
+                    or getattr(panel.trace, "is_failed", False)
+                )
+                if not is_failed:
+                    panel.update_event({
+                        "event_type": "turn.completed",
+                        "title": "Completed",
+                        "status": "success",
+                        "detail": "Response generated",
+                    })
+                else:
+                    panel.update_event({
+                        "event_type": "turn.failed",
+                        "title": "Failed",
+                        "status": "failed",
+                        "detail": getattr(event, "error", None) or "Execution failed",
+                    })
             for existing_id, w in list(self._assistant_widgets.items()):
                 if getattr(w, "_turn_id", None) == event.turn_id and existing_id != event.event_id:
                     try:
@@ -356,9 +372,8 @@ class ChatLog(VerticalScroll):
                 "backend": "coding" if coding else "",
                 "payload": {"args": event.args},
             })
-        if coding:
-            # Coding tools are displayed exclusively in the ExecutionPanel (activity code),
-            # never as separate individual cards mounted in the timeline one by one.
+        if coding or tool_name in {"approval_request", "request_user_approval", "wait_for_approval"}:
+            # Coding and approval tools stay in the activity stream, not a separate card.
             return panel
 
         # General agent activities route inside MainActivityBox within ExecutionPanel

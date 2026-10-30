@@ -2,9 +2,20 @@
 
 Approval-required lifecycle events are rendered in the existing consolidated
 execution panel: general approvals belong in **Activity**, while approvals
-associated with a coding backend belong in **Coding Activity**. The approval
-dialog remains the interaction surface for the user to approve or deny; it is
-not a replacement for the activity record.
+associated with a coding backend belong in **Coding Activity**. Dashboard
+transactional, server and API approval decisions are made inside that activity
+row rather than on a separate timeline card. Computer permission requests retain
+their existing separate controls. The TUI still uses a separate approval dialog for
+the decision; removing that dialog requires an accessible inline replacement
+and is not implemented here. Approval tools do not create separate TUI cards.
+
+Previously the dashboard independently rendered the same transactional event
+as both an activity row and a timeline card. The card contained the only
+approval controls, so removing it without moving those controls would strand the
+request. The controls now use the same durable inbox ID and endpoint as before;
+rendering an event does not authorize execution. A successful explicit approval
+scrolls the conversation to its end; a denied or failed request does not force
+the scroll. Pending requests remain in the truncated activity history.
 
 Runtime event producers may provide `backend` and `tool_name` at the event's
 top level or inside `metadata`, `details`, or `payload`. Classification must
@@ -15,8 +26,10 @@ approval tool name itself is not a coding tool.
 
 **Do not reintroduce:** do not discard top-level backend classification context
 before `ExecutionPanel` selects its Activity box. Keep general approvals in
-Activity, coding-backend approvals in Coding Activity, and retain the separate
-approval dialog for the actual authorization decision.
+Activity and coding-backend approvals in Coding Activity. Do not restore a
+separate dashboard transactional approval card or grant approval during render;
+the inline controls must still submit an explicit decision to the guarded
+endpoint. Keep the TUI dialog until an equivalent safe inline decision UI exists.
 
 ## Approving matching requests
 
@@ -40,4 +53,5 @@ User-owned focused verification command:
 
 ```bash
 PYTHONPATH=src pytest tests/test_tui_approval_realtime.py -q
+node --test tests/dashboard/live_chat_approval_ui.test.mjs tests/dashboard/live_chat_reducer.test.mjs
 ```

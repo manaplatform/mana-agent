@@ -80,6 +80,7 @@ class ManaChatApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("q", "quit", "Quit", show=False),
+        Binding("ctrl+s", "steer_execution", "Steer", show=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+r", "simulate_response", "Simulate Agent", show=True),
         Binding("ctrl+o", "attach_file", "Attach File", show=True),
@@ -752,6 +753,16 @@ class ManaChatApp(App):
                         continue
                 except Exception:
                     pass
+                if self.gateway is not None and hasattr(self.gateway, "_transactional_runtime"):
+                    try:
+                        gw_act = self.gateway._transactional_runtime.store.get_action(candidate_item.action_intent_id)
+                        if gw_act is not None and gw_act.state.value not in {"awaiting_approval"}:
+                            continue
+                    except Exception:
+                        pass
+
+            if candidate_item is None and candidate_id not in self._saved_modal_previews:
+                continue
 
             inbox_item_id = candidate_id
             item = candidate_item
@@ -1085,8 +1096,13 @@ class ManaChatApp(App):
                         }
                     )
                 )
-                self.notify(msg, severity="information" if is_approve else "warning")
-                self.history.add(AssistantMessageEvent(content=msg))
+                if is_approve:
+                    self.notify("Approved", severity="information")
+                    if self.chat_log is not None:
+                        self.chat_log._scroll_to_latest()
+                else:
+                    self.notify("Denied", severity="warning")
+                    self.history.add(AssistantMessageEvent(content=msg or "Transactional action denied."))
                 return
             if choice.server:
                 command = (
@@ -1347,6 +1363,41 @@ class ManaChatApp(App):
 
         self.push_screen(FileAttachmentModal(self.repo_root), self._apply_file_attachment)
 
+    def action_steer_execution(self) -> None:
+        """Open modal to steer currently active execution."""
+        from mana_agent.tui.steer_modal import SteerModal
+
+        self.push_screen(SteerModal(), self._handle_steer_modal_result)
+
+    def _handle_steer_modal_result(self, result: str | None) -> None:
+        if not result or not result.strip():
+            return
+        asyncio.create_task(self._submit_live_steering(result.strip()))
+
+    async def _submit_live_steering(self, instruction: str) -> None:
+        try:
+            if not self.gateway or not hasattr(self.gateway, "submit_steering"):
+                self.notify("Steering unavailable: gateway not connected.", severity="warning")
+                return
+            if not self._gateway_session_id:
+                self._gateway_session_id = self.gateway.create_session(frontend="tui")
+            sid = self._gateway_session_id or "tui_session"
+            res = await asyncio.to_thread(
+                self.gateway.submit_steering,
+                session_id=sid,
+                text=instruction,
+                scope="execution",
+            )
+            status = str(res.get("status", "received")).upper()
+            seq = res.get("sequence", 0)
+            self.history.add(AssistantMessageEvent(
+                content=f"⚡ Live Steering submitted (#{seq} {status}): {instruction}",
+            ))
+            self.notify(f"Steering submitted [{status}]: {instruction[:35]}", severity="information")
+        except Exception as exc:
+            logger.warning("Failed to submit live steering: %s", exc)
+            self.notify(f"Steering failed: {exc}", severity="error")
+
     def _apply_file_attachment_path(self, target_path: Path | str) -> None:
         p = Path(target_path).expanduser()
         if not p.is_absolute():
@@ -1431,6 +1482,16 @@ class ManaChatApp(App):
 
         pending_atts = self.attachment_bar.attachments if self.attachment_bar else []
         if not text.strip() and not pending_atts:
+            return
+
+        if text == "/steer" or text.startswith("/steer "):
+            instruction = text[len("/steer"):].strip()
+            if not instruction:
+                self.action_steer_execution()
+            else:
+                asyncio.create_task(self._submit_live_steering(instruction))
+            if self.input:
+                self.input.reset()
             return
 
         if self._turn_in_progress:
@@ -2149,7 +2210,11 @@ class ManaChatApp(App):
                     return
                 except Exception as exc:
                     answer = f"Gateway execution failed: {exc}. No direct model fallback was executed."
-                    self.history.add(AssistantMessageEvent(content=answer, turn_id=turn_id))
+                    self.history.add(AssistantMessageEvent(
+                        content=answer,
+                        turn_id=turn_id,
+                        metadata={"status": "failed", "error": str(exc)},
+                    ))
                     self.update_status("Gateway routing failed")
                     return
 

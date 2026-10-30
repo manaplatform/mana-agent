@@ -85,6 +85,16 @@ class ProviderRegistry:
                 codex_transport=CodexTransport.RESPONSES_BRIDGE,
             ),
             ProviderDefinition(
+                id="anthropic",
+                display_name="Anthropic",
+                auth_method=AuthenticationMethod.API_KEY,
+                default_base_url="https://api.anthropic.com",
+                api_key_env="ANTHROPIC_API_KEY",
+                supports_responses_api=False,
+                supports_decisions_api=False,
+                codex_transport=CodexTransport.UNSUPPORTED,
+            ),
+            ProviderDefinition(
                 id="custom",
                 display_name="OpenAI-compatible provider",
                 auth_method=AuthenticationMethod.API_KEY,

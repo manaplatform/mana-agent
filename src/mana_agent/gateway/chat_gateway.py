@@ -5202,6 +5202,66 @@ class AgentChatGateway:
             "decision_id": decision.decision_id,
         }
 
+    def submit_steering(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        kind: str = "guidance",
+        scope: str = "execution",
+        target_id: str = "",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        """Submit a live steering instruction to the active execution in this session."""
+        from mana_agent.execution.steering import (
+            SteeringCoordinator,
+            SteeringKind,
+            SteeringScope,
+            SteeringSubmission,
+        )
+
+        active = self._lane_coordinator.list_tasks(active_only=True, session_id=session_id)
+        if not active:
+            active = self._lane_coordinator.list_tasks(active_only=True)
+        if not active:
+            raise RuntimeError("No active execution found to steer.")
+        execution = active[-1]
+        supervisor = self._lane_coordinator.execution_supervisor
+        task = supervisor.get_task(execution.task_id)
+
+        req_id = request_id or f"steer_{uuid.uuid4().hex[:12]}"
+        kind_enum = SteeringKind(kind) if kind in SteeringKind._value2member_map_ else SteeringKind.GUIDANCE
+        scope_enum = SteeringScope(scope) if scope in SteeringScope._value2member_map_ else SteeringScope.EXECUTION
+
+        effective_session_id = session_id or task.session_id or "session"
+        submission = SteeringSubmission(
+            execution_id=execution.task_id,
+            session_id=effective_session_id,
+            attempt_id=task.attempt_id,
+            generation=task.attempt_generation,
+            request_id=req_id,
+            text=text,
+            kind=kind_enum,
+            scope=scope_enum,
+            target_id=target_id if scope_enum != SteeringScope.EXECUTION else "",
+        )
+        coordinator = SteeringCoordinator(supervisor)
+        sequence, duplicate = coordinator.submit(
+            submission,
+            authenticated_session_id=effective_session_id,
+            allow_scoped=True,
+            allow_interrupt=True,
+        )
+        return {
+            "request_id": req_id,
+            "sequence": sequence,
+            "duplicate": duplicate,
+            "execution_id": execution.task_id,
+            "attempt_id": task.attempt_id,
+            "generation": task.attempt_generation,
+            "status": "pending",
+        }
+
     def _resolve_task_control_id(
         self,
         *,
@@ -10770,11 +10830,15 @@ class AgentChatGateway:
                 )
 
         integration_parent_task_id = ""
+        supervisor_attempt_id = ""
+        supervisor_lease_token = ""
         if lane_task_id:
             lane_execution = self._lane_coordinator.inspect_task(lane_task_id)
             integration_parent_task_id = str(
                 getattr(lane_execution, "taskboard_task_id", "") or lane_task_id
             )
+            supervisor_attempt_id = str(getattr(lane_execution, "supervisor_attempt_id", "") or "")
+            supervisor_lease_token = str(getattr(lane_execution, "supervisor_lease_token", "") or "")
 
         try:
             result = process_chat_turn(
@@ -10830,6 +10894,8 @@ class AgentChatGateway:
                 dispatch_source="entry_route",
                 autonomous_controller=getattr(self, "_autonomous_controller", None),
                 continuation_evaluator=getattr(self, "_continuation_evaluator", None),
+                supervisor_attempt_id=supervisor_attempt_id,
+                supervisor_lease_token=supervisor_lease_token,
             )
         except BatchPending as pending:
             result = ChatTurnResult(answer=str(pending), mode="batch-waiting", payload={

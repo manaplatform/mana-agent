@@ -28,6 +28,23 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
     }
 
 
+def _command_action_output() -> dict[str, Any]:
+    return {
+        "ok": {"type": "boolean"},
+        "approved": {"type": "boolean"},
+        "status": {"type": "string"},
+        "permission_required": {"type": "boolean"},
+        "action_id": {"type": "string"},
+        "inbox_item_id": {"type": "string"},
+        "preview": {"type": "object"},
+        "error": {"type": "string"},
+        "error_code": {"type": "string"},
+        "returncode": {"type": "integer"},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+    }
+
+
 def _excel_cell_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -173,6 +190,15 @@ def _git_tool_contracts(common_error: dict[str, Any]) -> list[ToolContract]:
             "duration_ms": {"type": "number"},
             "blocked": {"type": "boolean"},
             "state": {"type": "object"},
+            "permission_required": {"type": "boolean"},
+            "permission_request_id": {"type": "string"},
+            "action_id": {"type": "string"},
+            "inbox_item_id": {"type": "string"},
+            "preview": {"type": "object"},
+            "preview_digest": {"type": "string"},
+            "policy_decision": {"type": "object"},
+            "error": {"type": "string"},
+            "error_code": {"type": "string"},
         }
     )
     safety = [
@@ -213,7 +239,7 @@ def _git_tool_contracts(common_error: dict[str, Any]) -> list[ToolContract]:
         ToolContract(
             name=name,
             description=description,
-            input_schema=_schema(properties, required),
+            input_schema=_schema({**properties, "action_approval_id": {"type": "string", "description": "Grant for the exact pending Git action, if approved."}}, required),
             output_schema=base_output,
             error_format=common_error,
             safety_rules=safety,
@@ -852,8 +878,8 @@ def coding_tool_contracts() -> list[ToolContract]:
         ToolContract(
             name="run_command",
             description="Run a non-destructive command in the project root.",
-            input_schema=_schema({"cmd": {"type": "string"}}, ["cmd"]),
-            output_schema=_schema({"returncode": {"type": "integer"}, "stdout": {"type": "string"}, "stderr": {"type": "string"}}),
+            input_schema=_schema({"cmd": {"type": "string"}, "action_approval_id": {"type": "string", "description": "Grant for this exact pending command action."}}, ["cmd"]),
+            output_schema=_schema(_command_action_output()),
             error_format=common_error,
             safety_rules=["Block destructive shell patterns.", "Use project root as cwd.", "Return stdout/stderr and exit code."],
             examples=[{"input": {"cmd": "pytest -q"}}],
@@ -861,9 +887,10 @@ def coding_tool_contracts() -> list[ToolContract]:
         ToolContract(
             name="run_script_once",
             description="Run one grouped, non-destructive shell script in the repository and return exit code/output/duration.",
-            input_schema=_schema({"script": {"type": "string"}, "cwd": {"type": "string"}}, ["script"]),
+            input_schema=_schema({"script": {"type": "string"}, "cwd": {"type": "string"}, "action_approval_id": {"type": "string", "description": "Grant for this exact pending script action."}}, ["script"]),
             output_schema=_schema(
                 {
+                    **_command_action_output(),
                     "returncode": {"type": "integer"},
                     "stdout": {"type": "string"},
                     "stderr": {"type": "string"},
@@ -949,7 +976,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="shell",
-            description="Run non-interactive shell commands in local workspace following OpenAI Shell tool specification.",
+            description="Run one non-interactive shell command in the local workspace. Multiple commands in one call are not supported.",
             input_schema=_schema(
                 {
                     "action": {
@@ -992,6 +1019,7 @@ def coding_tool_contracts() -> list[ToolContract]:
             ),
             output_schema=_schema(
                 {
+                    **_command_action_output(),
                     "type": {"type": "string", "enum": ["shell_call_output"]},
                     "call_id": {"type": "string"},
                     "max_output_length": {"type": "integer"},
@@ -1065,8 +1093,10 @@ def coding_tool_contracts() -> list[ToolContract]:
             ),
             output_schema=_schema(
                 {
+                    "ok": {"type": "boolean"},
                     "approved": {"type": "boolean"},
                     "approval_id": {"type": "string"},
+                    "action_id": {"type": "string"},
                     "inbox_item_id": {"type": "string"},
                     "status": {"type": "string"},
                     "command": {"type": "string"},

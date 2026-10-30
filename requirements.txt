@@ -22,6 +22,9 @@ langchain-openai>=1.1.14,<2.0.0
 # OpenAI SDK (required by langchain-openai >=1.1.14)
 openai>=2.26.0,<3.0.0
 
+# Anthropic SDK
+anthropic>=0.40.0,<1.0.0
+
 # Vector store
 faiss-cpu>=1.7.3,<2.0.0
 

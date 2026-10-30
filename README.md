@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-3776AB?logo=python&logoColor=white" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-22A06B" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/Version-v0.7.0-8B5CF6" />
+  <img alt="Version" src="https://img.shields.io/badge/Version-v0.8.0-8B5CF6" />
   <a href="https://github.com/manaplatform/mana-agent"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Mana--Agent-181717?logo=github" /></a>
 </p>
 
@@ -26,6 +26,11 @@
 </p>
 
 ---
+
+**Live steering status:** Steering an ongoing execution, including Ctrl+S, is
+not available yet. Plan Mode remains separate and its approval requirements
+continue to apply. See [the steering design](docs/live-steering-design.md) for
+the safety work and integration still required.
 
 OpenAI Batch is used only when explicitly requested. Other batching uses Mana's
 internal parallel execution. Required Batch tasks pause durably and resume with
