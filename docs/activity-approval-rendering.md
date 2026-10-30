@@ -4,10 +4,11 @@ Approval-required lifecycle events are rendered in the existing consolidated
 execution panel: general approvals belong in **Activity**, while approvals
 associated with a coding backend belong in **Coding Activity**. Dashboard
 transactional, server and API approval decisions are made inside that activity
-row rather than on a separate timeline card. Computer permission requests retain
-their existing separate controls. The TUI still uses a separate approval dialog for
-the decision; removing that dialog requires an accessible inline replacement
-and is not implemented here. Approval tools do not create separate TUI cards.
+row rather than on a separate timeline card. The TUI places the request preview,
+scope and decision buttons inside the matching Activity or Coding Activity box.
+Computer and remote SSH permission requests retain their existing separate
+dialog because their permission scopes differ. Approval tools do not create
+separate TUI cards.
 
 Previously the dashboard independently rendered the same transactional event
 as both an activity row and a timeline card. The card contained the only
@@ -29,11 +30,13 @@ before `ExecutionPanel` selects its Activity box. Keep general approvals in
 Activity and coding-backend approvals in Coding Activity. Do not restore a
 separate dashboard transactional approval card or grant approval during render;
 the inline controls must still submit an explicit decision to the guarded
-endpoint. Keep the TUI dialog until an equivalent safe inline decision UI exists.
+endpoint. The TUI inline buttons use the same guarded decision handler and
+leave failed decisions available for retry. A decision for one request must not
+mark other pending requests resolved.
 
 ## Approving matching requests
 
-The transactional approval dialog offers **Allow all matching queued**. This
+The transactional approval controls offer **Allow all matching queued**. This
 approves the displayed request and considers only requests already queued when
 the user makes that choice; it is not a standing authorization for future
 requests or other inbox entries. Non-matching or unverified requests remain
@@ -47,7 +50,7 @@ expiration, action and grant checks, with a version check against changes after
 comparison. No policy-denied action is authorized by this option.
 
 `/approve` approves a pending implementation plan; it does not silently approve
-inbox requests. Review those through the approval dialog or inbox instead.
+inbox requests. Review those through the activity controls or inbox instead.
 
 User-owned focused verification command:
 

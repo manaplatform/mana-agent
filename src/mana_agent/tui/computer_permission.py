@@ -51,6 +51,15 @@ class ComputerPermissionRequested(Message):
         self.pending_count = pending_count
 
 
+class InlineApprovalDecided(Message):
+    """Deliver an externally recorded decision to the UI thread."""
+
+    def __init__(self, request_ids: set[str], approved: bool) -> None:
+        super().__init__()
+        self.request_ids = request_ids
+        self.approved = approved
+
+
 class InlineApproval(Vertical):
     """Action controls embedded in an existing activity box, not a dialog."""
 

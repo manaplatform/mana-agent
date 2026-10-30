@@ -185,6 +185,8 @@ class ManaChatApp(App):
         self._computer_permission_requests_shown: set[str] = set()
         self._transactional_modal_queue: list[str] = []
         self._transactional_modal_active = False
+        self._active_transactional_id = ""
+        self._resolved_inline_approvals: set[str] = set()
         self._saved_modal_previews: dict[str, str] = {}
         self._unsubscribe_computer_permissions = None
         self._unsubscribe_session_events = None
@@ -456,6 +458,10 @@ class ManaChatApp(App):
                 except Exception:
                     pass
             decision = str(metadata.get("decision") or "")
+            from mana_agent.tui.computer_permission import InlineApprovalDecided
+            request_ids = {str(metadata.get(key) or "") for key in ("permission_request_id", "approval_request_id", "inbox_item_id", "action_id")} - {""}
+            if request_ids:
+                self.post_message(InlineApprovalDecided(request_ids, event_type == "action.approval.granted" or decision == "approve"))
             if decision == "deny" or event_type == "action.approval.denied":
                 self.update_status(
                     "Server action denied"
@@ -541,6 +547,8 @@ class ManaChatApp(App):
         self._computer_permission_requests_shown.clear()
         self._transactional_modal_queue.clear()
         self._transactional_modal_active = False
+        self._active_transactional_id = ""
+        self._resolved_inline_approvals.clear()
         self.active_flow_id = None
         self._tool_cid_map.clear()
 
@@ -779,6 +787,7 @@ class ManaChatApp(App):
 
         pending_count = len(self._transactional_modal_queue) + 1
         self._transactional_modal_active = True
+        self._active_transactional_id = inbox_item_id
         from mana_agent.tui.computer_permission import ComputerPermissionRequested
 
         self.post_message(ComputerPermissionRequested(
@@ -791,7 +800,7 @@ class ManaChatApp(App):
 
     def on_computer_permission_requested(self, event: Any) -> None:
         if event.transactional or event.server or event.api:
-            self._show_inline_approval(event)
+            self.call_after_refresh(lambda: self._show_inline_approval(event))
             return
         from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
@@ -819,7 +828,7 @@ class ManaChatApp(App):
         """Attach approval controls to the request's existing activity box."""
         from mana_agent.tui.computer_permission import InlineApproval
 
-        if self.chat_log is None:
+        if self.chat_log is None or event.request_id in self._resolved_inline_approvals:
             return
         panel = box = None
         for candidate in reversed(list(self.chat_log._execution_panels.values())):
@@ -842,12 +851,41 @@ class ManaChatApp(App):
                 "metadata": {"permission_request_id": event.request_id},
             })
             box = panel.main_box
+        if not box.is_mounted:
+            self.call_after_refresh(lambda: self._show_inline_approval(event))
+            return
         if any(isinstance(child, InlineApproval) and child.request.request_id == event.request_id for child in box.children):
             return
         controls = InlineApproval(event, lambda choice: self._apply_computer_permission(choice, controls=controls))
         box.mount(controls)
         box.display = True
         self.chat_log._scroll_to_latest()
+
+    def on_inline_approval_decided(self, event: Any) -> None:
+        from mana_agent.tui.computer_permission import InlineApproval
+
+        self._resolved_inline_approvals.update(event.request_ids)
+        self._transactional_modal_queue[:] = [item for item in self._transactional_modal_queue if item not in event.request_ids]
+        advance = self._active_transactional_id in event.request_ids
+        if advance:
+            self._transactional_modal_active = False
+            self._active_transactional_id = ""
+        if self.chat_log is None:
+            return
+        for controls in list(self.chat_log.query(InlineApproval)):
+            if controls.request.request_id not in event.request_ids:
+                continue
+            box = controls.parent
+            if box is not None:
+                box.update_event({
+                    "event_type": "action.approval.granted" if event.approved else "action.approval.denied",
+                    "title": "Approval granted" if event.approved else "Approval denied",
+                    "status": "completed" if event.approved else "failed",
+                    "metadata": {"permission_request_id": controls.request.request_id, "decision": "approve" if event.approved else "deny"},
+                })
+            controls.remove()
+        if advance:
+            self.call_after_refresh(self._show_next_transactional_modal)
 
     def _apply_computer_permission(self, choice: Any, *, controls: Any = None) -> None:
         if choice is None:
@@ -873,8 +911,9 @@ class ManaChatApp(App):
                         controls.remove()
                     else:
                         controls.enable_choices()
-                if choice.transactional and (success or controls is None):
+                if choice.transactional and (success or controls is None) and self._active_transactional_id == choice.request_id:
                     self._transactional_modal_active = False
+                    self._active_transactional_id = ""
                     self.call_after_refresh(self._show_next_transactional_modal)
 
         self.run_worker(

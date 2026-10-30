@@ -155,6 +155,40 @@ def test_approval_decision_does_not_resolve_other_requests(box_class) -> None:
     assert box.events[1]["status"] == "waiting_approval"
 
 
+@pytest.mark.parametrize("kind", ["server", "api"])
+def test_inline_approval_fallback_and_external_decision(tmp_path: Path, monkeypatch, kind: str) -> None:
+    import anyio
+    from mana_agent.tui.computer_permission import InlineApproval, InlineApprovalDecided
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
+
+    async def exercise() -> None:
+        async with app.run_test(size=(140, 45)) as pilot:
+            app.post_message(ComputerPermissionRequested(
+                request_id="recovered", scope="once", preview="Exact preview",
+                server=kind == "server", api=kind == "api",
+            ))
+            await pilot.pause()
+            panel = app.chat_log.get_execution_panel("pending-approvals")
+            controls = panel.main_box.query_one(InlineApproval)
+            assert controls.request.preview == "Exact preview"
+            assert not isinstance(app.screen, ComputerPermissionScreen)
+            app.post_message(InlineApprovalDecided({"recovered"}, approved=True))
+            await pilot.pause()
+            assert not list(panel.main_box.query(InlineApproval))
+            assert panel.main_box.events[0]["status"] == "completed"
+            # A late request delivery must not resurrect resolved controls.
+            app.post_message(ComputerPermissionRequested(
+                request_id="recovered", scope="once", preview="Exact preview",
+                server=kind == "server", api=kind == "api",
+            ))
+            await pilot.pause()
+            assert not list(panel.main_box.query(InlineApproval))
+
+    anyio.run(exercise)
+
+
 def test_transactional_permission_screen_offers_matching_batch() -> None:
     import anyio
     from textual.app import App
