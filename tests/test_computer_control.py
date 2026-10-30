@@ -62,7 +62,7 @@ from mana_agent.services.execution_event_hub import (
     reset_execution_event_hub_for_tests,
 )
 from mana_agent.tui.app import ManaChatApp
-from mana_agent.tui.computer_permission import ComputerPermissionScreen
+from mana_agent.tui.computer_permission import ComputerPermissionScreen, InlineApproval
 from mana_agent.transactional_actions.computer import ComputerActionAdapter
 from mana_agent.transactional_actions.gateway import ActionGateway, ApprovalRequired
 from mana_agent.transactional_actions.approvals import ApprovalRegistry
@@ -955,9 +955,21 @@ def test_tui_chat_opens_permission_decision_screen() -> None:
     run(exercise())
 
 
-def test_tui_chat_opens_server_approval_screen() -> None:
+@pytest.mark.parametrize(
+    ("button", "expected_decision"),
+    [(".inline-once", PermissionDecision.ALLOW_ONCE), (".inline-deny", None)],
+)
+def test_tui_chat_shows_inline_server_approval(button, expected_decision, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana-home"))
     history = ChatHistory()
     app = ManaChatApp(history=history)
+    decisions = []
+
+    async def complete(choice, *, batch_ids=None):
+        decisions.append(choice)
+        return True
+
+    app._complete_computer_permission = complete
 
     async def exercise() -> None:
         async with app.run_test() as pilot:
@@ -974,8 +986,20 @@ def test_tui_chat_opens_server_approval_screen() -> None:
                 },
             }))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            assert app.screen.server is True
-            assert app.screen.scope == "server.action.execute"
+            assert not isinstance(app.screen, ComputerPermissionScreen)
+            controls = app.query_one(InlineApproval)
+            assert controls.request.request_id == "server-approval-test"
+            assert controls.request.server is True
+            assert controls.request.scope == "server.action.execute"
+            assert controls.request.preview == "sudo apt-get install -y -- nginx"
+            assert {b.label.plain for b in controls.query("Button")} == {"Deny", "Allow once"}
+            assert not decisions
+            controls.query_one(button).press()
+            await pilot.pause()
+            assert len(decisions) == 1
+            assert decisions[0].request_id == "server-approval-test"
+            assert decisions[0].server is True
+            assert decisions[0].decision == expected_decision
+            assert not list(app.query(InlineApproval))
 
     run(exercise())

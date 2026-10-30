@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased
+
+- Correct the stale TUI server-approval regression test to check the existing
+  inline controls, exact preview, and approve/deny dispatch instead of expecting
+  a modal. Clarify the current UI in `docs/28-server-management.md`.
+  User verification: `./venv/bin/python -m pytest tests/test_computer_control.py tests/test_tui_approval_realtime.py -q`.
+
 ## 2026-10-30
 
 - Supervisor cancellation fencing and Git commit index isolation:
