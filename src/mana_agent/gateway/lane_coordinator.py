@@ -1015,6 +1015,9 @@ class LaneCoordinator:
 
     def can_checkpoint(self, task_id: str) -> bool:
         """Check whether the authoritative execution supervisor permits checkpointing."""
+        execution = self._executions.get(task_id)
+        if execution is not None and execution.state == LaneTaskState.WAITING:
+            return False
         return self.execution_supervisor.can_checkpoint(task_id)
 
     def checkpoint(
@@ -1029,6 +1032,8 @@ class LaneCoordinator:
         execution = self._executions.get(task_id)
         if execution is None:
             return ""
+        if not self.can_checkpoint(task_id):
+            return execution.checkpoint_id or ""
         checkpoint = self.execution_supervisor.checkpoint(
             task_id,
             attempt_id=execution.supervisor_attempt_id,
@@ -1115,6 +1120,8 @@ class LaneCoordinator:
             effective_provider_metadata = verification_state.get("codex_metadata")
         with self._condition:
             execution = self._executions[task_id]
+            if execution.state == LaneTaskState.WAITING and state in {LaneTaskState.WAITING, LaneTaskState.RUNNING}:
+                return execution
             if getattr(execution, "waiter_id", ""):
                 self._claiming_waiters.pop(execution.waiter_id, None)
             if state == LaneTaskState.COMPLETED and execution.heartbeat_failure:

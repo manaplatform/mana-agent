@@ -4,6 +4,19 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-10-31 — Live Steer Mode & Supervisor Lease Fencing:
+  - Fix stale lease identity hazard on tasks suspended in `WAITING` state (waiting for human approval): removed `ExecutionState.WAITING` from `VALID_CHECKPOINT_STATES`, gracefully skip checkpointing on waiting tasks in `ExecutionSupervisor.checkpoint` and `LaneCoordinator.checkpoint`, and re-bind lease credentials in `resume_running` upon approval resume to prevent `StaleLeaseError`.
+  - Prevent premature lane termination in `ChatGateway` and `LaneCoordinator.finish` when a task is waiting for user approval.
+  - In `AutonomousExecutionController`: ensure a command failure in a step runner does not abort the task or reject the token budget; capture the error in step context, report mistake to `GlobalMemory`, and continue the autonomous continuation loop until goal satisfaction or true budget exhaustion.
+  - In `src/mana_agent/tui/app.py`: fix `TypeError` in gateway routing exception handler by removing unexpected `metadata` keyword argument from `AssistantMessageEvent`.
+  - Added regression test suite in `tests/execution/test_live_steering_integration.py`. User-owned verification (not run by the agent): `./venv/bin/pytest tests/execution/test_live_steering_integration.py tests/execution/test_autonomous_accounting_renewal.py tests/execution_supervisor/test_checkpoint_lifecycle_races.py -q`.
+
+- 2026-10-30 — TUI approvals: show transactional, server, API, computer and
+  remote requests in a shared scrollable drawer instead of activity controls or
+  a modal; hide recorded decisions and retain failed requests for retry. See
+  `docs/activity-approval-rendering.md`. User-owned verification (not run by
+  the agent): `PYTHONPATH=src pytest tests/test_tui_approval_realtime.py tests/test_computer_control.py -q`.
+
 - 2026-10-30 — Dashboard approvals: consolidate pending transactional, server,
   API and computer requests in one drawer; hide resolved requests, retain
   failures for retry, and prevent replay from reopening a decision. Existing

@@ -931,7 +931,7 @@ def test_dashboard_chat_permission_decision_executes_and_emits_result(
     assert any(event["type"] == "computer.permission_decided" for event in events)
 
 
-def test_tui_chat_opens_permission_decision_screen() -> None:
+def test_tui_chat_shows_permission_in_drawer() -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
 
@@ -949,8 +949,10 @@ def test_tui_chat_opens_permission_decision_screen() -> None:
                 },
             }))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            assert app.screen.scope == "computer.screenshot.capture"
+            assert not isinstance(app.screen, ComputerPermissionScreen)
+            controls = app.query_one("#approval-drawer").query_one(InlineApproval)
+            assert controls.request.scope == "computer.screenshot.capture"
+            assert {b.label.plain for b in controls.query("Button")} == {"Deny", "Allow once", "This session", "Always"}
 
     run(exercise())
 

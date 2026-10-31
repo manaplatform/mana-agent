@@ -7722,6 +7722,10 @@ class AgentChatGateway:
                                 status = "blocked"
                                 result.payload["pending_required_work"] = False
                                 result.payload["resume_required"] = False
+                        elif reservation.execution.state == LaneTaskState.WAITING or status == "waiting":
+                            # The task is waiting for user approval or human response.
+                            # Do not checkpoint or finish the suspended branch.
+                            pass
                         else:
                             if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server", "shell"} and not result.error:
                                 actual_tools = [

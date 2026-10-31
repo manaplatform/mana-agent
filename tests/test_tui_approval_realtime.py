@@ -104,7 +104,7 @@ def test_approval_tools_do_not_create_separate_cards(tool_name: str) -> None:
 
 
 @pytest.mark.parametrize("backend,box_name", [("", "main_box"), ("internal", "coding_box")])
-def test_approval_controls_live_inside_activity_and_retry(tmp_path: Path, monkeypatch, backend: str, box_name: str) -> None:
+def test_approval_drawer_and_retry(tmp_path: Path, monkeypatch, backend: str, box_name: str) -> None:
     import anyio
     from mana_agent.tui.computer_permission import InlineApproval
 
@@ -128,7 +128,10 @@ def test_approval_controls_live_inside_activity_and_retry(tmp_path: Path, monkey
             await pilot.pause()
             panel = app.chat_log.get_execution_panel("turn-approval")
             box = getattr(panel, box_name)
-            controls = box.query_one(InlineApproval)
+            drawer = app.query_one("#approval-drawer")
+            controls = drawer.query_one(InlineApproval)
+            assert drawer.display
+            assert not list(box.query(InlineApproval))
             assert controls.request.preview.find("git commit") >= 0
             assert not isinstance(app.screen, ComputerPermissionScreen)
             assert not decisions
@@ -139,8 +142,10 @@ def test_approval_controls_live_inside_activity_and_retry(tmp_path: Path, monkey
             controls.query_one(".inline-deny").press()
             await pilot.pause()
             assert len(decisions) == 2 and decisions[-1].decision is None
-            assert not list(box.query(InlineApproval))
+            assert not list(drawer.query(InlineApproval))
+            assert not drawer.display
             assert any(e.get("status") == "failed" for e in box.events)
+            assert "Review commit" not in box.activity_log.text
 
     anyio.run(exercise)
 
@@ -156,7 +161,7 @@ def test_approval_decision_does_not_resolve_other_requests(box_class) -> None:
 
 
 @pytest.mark.parametrize("kind", ["server", "api"])
-def test_inline_approval_fallback_and_external_decision(tmp_path: Path, monkeypatch, kind: str) -> None:
+def test_approval_drawer_external_decision_and_replay(tmp_path: Path, monkeypatch, kind: str) -> None:
     import anyio
     from mana_agent.tui.computer_permission import InlineApproval, InlineApprovalDecided
 
@@ -170,21 +175,104 @@ def test_inline_approval_fallback_and_external_decision(tmp_path: Path, monkeypa
                 server=kind == "server", api=kind == "api",
             ))
             await pilot.pause()
-            panel = app.chat_log.get_execution_panel("pending-approvals")
-            controls = panel.main_box.query_one(InlineApproval)
+            drawer = app.query_one("#approval-drawer")
+            controls = drawer.query_one(InlineApproval)
             assert controls.request.preview == "Exact preview"
             assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app.chat_log.get_execution_panel("pending-approvals") is None
             app.post_message(InlineApprovalDecided({"recovered"}, approved=True))
             await pilot.pause()
-            assert not list(panel.main_box.query(InlineApproval))
-            assert panel.main_box.events[0]["status"] == "completed"
+            assert not list(drawer.query(InlineApproval))
+            assert not drawer.display
             # A late request delivery must not resurrect resolved controls.
             app.post_message(ComputerPermissionRequested(
                 request_id="recovered", scope="once", preview="Exact preview",
                 server=kind == "server", api=kind == "api",
             ))
             await pilot.pause()
-            assert not list(panel.main_box.query(InlineApproval))
+            assert not list(drawer.query(InlineApproval))
+
+    anyio.run(exercise)
+
+
+def test_drawer_keeps_other_requests_and_clears_on_session_change(tmp_path: Path, monkeypatch) -> None:
+    import anyio
+    from mana_agent.tui.computer_permission import InlineApproval, InlineApprovalDecided
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            for request_id in ("one", "two"):
+                app.post_message(ComputerPermissionRequested(request_id=request_id, scope="once", preview=request_id, api=True))
+            await pilot.pause()
+            drawer = app.query_one("#approval-drawer")
+            assert {item.request.request_id for item in drawer.query(InlineApproval)} == {"one", "two"}
+            app.post_message(InlineApprovalDecided({"one"}, approved=False))
+            await pilot.pause()
+            assert drawer.display
+            assert [item.request.request_id for item in drawer.query(InlineApproval)] == ["two"]
+            app._handle_session_replacement("new-session", clear_view=False)
+            await pilot.pause()
+            assert not drawer.display
+            assert not list(drawer.query(InlineApproval))
+
+    anyio.run(exercise)
+
+
+@pytest.mark.parametrize("button,decision", [
+    (".inline-once", "allow_once"),
+    (".inline-session", "allow_session"),
+    (".inline-always", "always_allow"),
+    (".inline-deny", None),
+])
+def test_computer_drawer_preserves_scoped_choices(tmp_path: Path, monkeypatch, button: str, decision: str | None) -> None:
+    import anyio
+    from mana_agent.tui.computer_permission import InlineApproval
+    from mana_agent.integrations.computer_control.models import PermissionDecision
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
+    choices = []
+
+    async def complete(choice, *, batch_ids=None):
+        choices.append(choice)
+        return True
+
+    app._complete_computer_permission = complete
+
+    async def exercise() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            app.post_message(ComputerPermissionRequested(request_id="computer", scope="screen", preview="Capture"))
+            await pilot.pause()
+            app.query_one(InlineApproval).query_one(button).press()
+            await pilot.pause()
+            expected = {"allow_once": PermissionDecision.ALLOW_ONCE, "allow_session": PermissionDecision.ALLOW_SESSION,
+                        "always_allow": PermissionDecision.ALWAYS_ALLOW, None: None}[decision]
+            assert choices[0].decision == expected
+            assert not app.query_one("#approval-drawer").display
+
+    anyio.run(exercise)
+
+
+def test_computer_external_decision_closes_drawer(tmp_path: Path, monkeypatch) -> None:
+    import anyio
+    from mana_agent.tui.computer_permission import InlineApproval
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            app.post_message(ComputerPermissionRequested(request_id="computer", scope="screen", preview="Capture"))
+            await pilot.pause()
+            app._handle_hub_session_event({"type": "computer.permission_decided", "metadata": {
+                "permission_request_id": "computer", "decision": "allow_once",
+            }})
+            await pilot.pause()
+            assert not list(app.query(InlineApproval))
+            assert not app.query_one("#approval-drawer").display
 
     anyio.run(exercise)
 

@@ -83,7 +83,6 @@ VALID_CHECKPOINT_STATES = frozenset(
         ExecutionState.CHECKPOINTING,
         ExecutionState.COMPLETED_PENDING_VERIFICATION,
         ExecutionState.PENDING_BUDGET_DECISION,
-        ExecutionState.WAITING,
     }
 )
 
@@ -1294,7 +1293,15 @@ class ExecutionSupervisor:
         """Resume an existing, still-valid leased attempt without creating a rival attempt."""
 
         def resume(task: TaskRecord) -> None:
-            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.attempt_id != attempt_id:
+                raise StaleLeaseError("attempt no longer owns the task")
+            if task.state == ExecutionState.WAITING:
+                # Re-acquire lease for the resuming attempt since it was released while waiting
+                task.lease_owner = task.lease_owner or f"resumed:{attempt_id}"
+                task.lease_token = _token_hash(lease_token)
+                task.lease_expires_at = self.clock() + timedelta(seconds=self.config.lease_seconds)
+            else:
+                self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             if task.state == ExecutionState.RUNNING:
                 task.heartbeat_at = task.updated_at = self.clock()
                 return
@@ -1311,6 +1318,9 @@ class ExecutionSupervisor:
         attempt = self.store.get_attempt(attempt_id)
         if attempt is not None:
             attempt.state = "running"
+            attempt.lease_owner = task.lease_owner
+            attempt.lease_token = task.lease_token
+            attempt.lease_expires_at = task.lease_expires_at
             attempt.started_at = attempt.started_at or task.started_at
             self.store.save_attempt(attempt)
         self._emit("task_resumed", task, reused_attempt=True)
@@ -1361,19 +1371,19 @@ class ExecutionSupervisor:
             caller=caller,
         )
 
-        if current_state in TERMINAL_STATES:
+        if current_state in TERMINAL_STATES or current_state == ExecutionState.WAITING:
             self._emit(
                 "checkpoint.skipped",
                 task_before,
                 checkpoint_boundary=boundary,
                 current_state=current_state.value,
                 expected_state=ExecutionState.RUNNING.value,
-                terminal_reason=task_before.failure_reason,
+                terminal_reason=task_before.failure_reason or task_before.waiting_reason,
                 attempt_id=attempt_id,
                 caller=caller,
-                reason="checkpoint_skipped_terminal_state",
+                reason="checkpoint_skipped_waiting_state" if current_state == ExecutionState.WAITING else "checkpoint_skipped_terminal_state",
             )
-            return None
+            return self.store.get_checkpoint(task_before.checkpoint_id) if (task_before.checkpoint_id and current_state == ExecutionState.WAITING) else None
 
         if current_state not in VALID_CHECKPOINT_STATES:
             self._emit(
@@ -1401,7 +1411,7 @@ class ExecutionSupervisor:
         original_state = current_state
 
         def begin(task: TaskRecord) -> None:
-            if task.state in TERMINAL_STATES:
+            if task.state in TERMINAL_STATES or task.state == ExecutionState.WAITING:
                 return
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             if generation is not None and task.attempt_generation != generation:
@@ -1411,24 +1421,24 @@ class ExecutionSupervisor:
             task.updated_at = self.clock()
 
         checkpointing, _ = self.store.update_task(task_id, begin)
-        if checkpointing.state in TERMINAL_STATES:
+        if checkpointing.state in TERMINAL_STATES or checkpointing.state == ExecutionState.WAITING:
             self._emit(
                 "checkpoint.skipped",
                 checkpointing,
                 checkpoint_boundary=boundary,
                 current_state=checkpointing.state.value,
                 expected_state=ExecutionState.RUNNING.value,
-                terminal_reason=checkpointing.failure_reason,
+                terminal_reason=checkpointing.failure_reason or checkpointing.waiting_reason,
                 attempt_id=attempt_id,
                 caller=caller,
-                reason="checkpoint_skipped_terminal_state",
+                reason="checkpoint_skipped_waiting_state" if checkpointing.state == ExecutionState.WAITING else "checkpoint_skipped_terminal_state",
             )
-            return None
+            return self.store.get_checkpoint(checkpointing.checkpoint_id) if (checkpointing.checkpoint_id and checkpointing.state == ExecutionState.WAITING) else None
 
         self._emit("task_checkpointing", checkpointing)
 
         def persist(task: TaskRecord) -> CheckpointRecord | None:
-            if task.state in TERMINAL_STATES:
+            if task.state in TERMINAL_STATES or task.state == ExecutionState.WAITING:
                 return None
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             if generation is not None and task.attempt_generation != generation:
@@ -1514,7 +1524,11 @@ class ExecutionSupervisor:
             return False
         if task is None:
             return False
-        return task.state in VALID_CHECKPOINT_STATES and task.state not in TERMINAL_STATES
+        return (
+            task.state in VALID_CHECKPOINT_STATES
+            and task.state not in TERMINAL_STATES
+            and task.state != ExecutionState.WAITING
+        )
 
     def suspend_for_human_input(
         self,

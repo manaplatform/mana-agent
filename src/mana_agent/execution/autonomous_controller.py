@@ -670,27 +670,45 @@ class AutonomousExecutionController:
                     raw_step_result = runner(step_index)
                 step_result = raw_step_result if isinstance(raw_step_result, dict) else {"output": raw_step_result}
             except Exception as exc:
-                logger.exception("Step runner execution failed on task %s step %d", task_id, step_index)
-                try:
-                    self.supervisor.transition(
-                        task_id,
-                        ExecutionState.FAILED,
-                        attempt_id=active_attempt_id,
-                        generation=active_generation,
-                    )
-                except Exception:
-                    pass
-                return _finish(AutonomousExecutionResult(
-                    task_id=task_id,
-                    status="failed",
-                    goal_satisfied=False,
-                    answer="",
-                    metrics=metrics,
-                    error=f"Step execution error: {exc}",
-                    trace=overall_trace,
-                    warnings=warnings,
-                    completed_steps=completed_steps,
-                ))
+                from mana_agent.context_cost.accounting import ModelContextLimitError
+                from mana_agent.context_cost.models import ContextBudgetExceeded
+                from mana_agent.gateway.lane_coordinator import LaneBudgetError
+                from mana_agent.execution_supervisor.supervisor import BudgetExceededError
+
+                if isinstance(exc, (BudgetExceededError, ContextBudgetExceeded, ModelContextLimitError, LaneBudgetError)):
+                    logger.warning("Step runner budget exhausted on task %s step %d: %s", task_id, step_index, exc)
+                    current_task = self.supervisor.get_task(task_id)
+                    if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
+                        try:
+                            self.supervisor.transition(
+                                task_id,
+                                ExecutionState.BUDGET_EXHAUSTED,
+                                attempt_id=active_attempt_id,
+                                generation=active_generation,
+                            )
+                        except Exception:
+                            pass
+                    return _finish(AutonomousExecutionResult(
+                        task_id=task_id,
+                        status="budget_exhausted",
+                        goal_satisfied=False,
+                        answer=f"Autonomous execution budget exhausted: {exc}",
+                        metrics=metrics,
+                        error="budget_exhausted",
+                        trace=overall_trace,
+                        warnings=warnings,
+                        completed_steps=completed_steps,
+                    ))
+
+                logger.warning("Step runner command failed on task %s step %d: %s", task_id, step_index, exc)
+                step_result = {
+                    "error": str(exc),
+                    "output": f"Command error: {exc}",
+                    "answer": f"Command execution failed: {exc}",
+                    "tool_results": [{"tool_name": "command", "success": False, "error": str(exc)}],
+                }
+                ctx.setdefault("errors", []).append(str(exc))
+                ctx["last_error"] = str(exc)
 
             step_duration_ms = (time.perf_counter() - step_t0) * 1000.0
 
@@ -1043,6 +1061,15 @@ class AutonomousExecutionController:
                         reason="Task execution completed and verified",
                         evidence_summary=evidence_summary,
                         user_message=step_answer,
+                    )
+                elif metrics.model_turns < effective_max_turns:
+                    decision = ContinuationDecision(
+                        task_id=task_id,
+                        action=ContinuationAction.CONTINUE,
+                        goal_satisfied=False,
+                        safe_to_continue=True,
+                        reason="Continuing execution until goal satisfaction or budget limit",
+                        evidence_summary=evidence_summary,
                     )
                 else:
                     raise ContinuationDecisionError(

@@ -26,7 +26,7 @@ class Element {
 
 function fixture(events, response) {
   const selectors = new Map();
-  for (const selector of [".timeline", ".approval-drawer", ".approval-drawer > summary", ".approval-drawer-items", "form", "textarea", ".attachment-preview-bar", ".dot", ".statusText", ".contextMeter", "button[type=submit]", ".attach-btn", "#mana-file-input"]) {
+  for (const selector of [".timeline", ".permission-notice", ".approval-drawer", ".approval-drawer > summary", ".approval-drawer-items", "form", "textarea", ".attachment-preview-bar", ".dot", ".statusText", ".contextMeter", "button[type=submit]", ".attach-btn", "#mana-file-input"]) {
     selectors.set(selector, new Element());
   }
   const mount = new Element();
@@ -39,7 +39,7 @@ function fixture(events, response) {
   const calls = [];
   globalThis.fetch = async (url, options) => { calls.push({ url, options }); return response; };
   const chat = init({ mountId: "chat", sessionId: "session", apiBase: "", wsBase: "", root: "/repo", messages: [], events });
-  return { chat, timeline: selectors.get(".timeline"), drawer: selectors.get(".approval-drawer"), items: selectors.get(".approval-drawer-items"), calls,
+  return { chat, timeline: selectors.get(".timeline"), notice: selectors.get(".permission-notice"), drawer: selectors.get(".approval-drawer"), items: selectors.get(".approval-drawer-items"), calls,
     emit: (event) => socket.onmessage({ data: JSON.stringify({ type: "event", event }) }) };
 }
 
@@ -62,6 +62,19 @@ test("computer permissions retain their scopes in the drawer and disappear after
     assert.equal(JSON.parse(calls[0].options.body).decision, "allow_session");
     assert.equal(drawer.hidden, true);
     assert.ok(!descendants(items).some((n) => n.textContent === "Capture screen"));
+  } finally { chat.close(); }
+});
+
+test("computer approval does not hide a separate exact-action confirmation requirement", async () => {
+  const event = { event_id: "computer", sequence: 1, type: "computer.waiting_permission", execution_id: "run",
+    metadata: { permission_request_id: "pc-1", preview: "Permission" } };
+  const { chat, notice, drawer, items } = fixture([event], { ok: true, json: async () => ({ ok: true, executed: false,
+    result: { error_code: "confirmation_required", message: "Confirm the action", preview: "Exact action", confirmation_request_id: "confirm-1" } }) });
+  try {
+    await descendants(items).find((n) => n.textContent === "Allow once").handlers.click();
+    assert.equal(drawer.hidden, true);
+    assert.equal(notice.hidden, false);
+    assert.match(notice.textContent, /Confirm the action.*\nExact action\nConfirmation request: confirm-1/);
   } finally { chat.close(); }
 });
 

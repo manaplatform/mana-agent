@@ -44,8 +44,9 @@ def _resolve_approval(events: list[dict[str, Any]], decision_event: dict[str, An
     for existing in events:
         existing_meta = _safe_dict(existing.get("metadata"))
         existing_ids = {str(existing_meta.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} - {""}
-        if request_ids & existing_ids and str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}:
+        if request_ids & existing_ids and str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required", "waiting_permission"}:
             existing["status"] = "completed" if approved else "failed"
+            existing["_approval_resolved"] = True
 
 
 class MainActivityBox(Vertical):
@@ -232,6 +233,8 @@ class MainActivityBox(Vertical):
         # Consecutive operation grouping
         grouped: list[dict[str, Any]] = []
         for ev in visible_events:
+            if ev.get("_approval_resolved"):
+                continue
             tool_name = str(ev.get("tool_name") or ev.get("title") or ev.get("type") or "operation").strip()
             summary = str(ev.get("summary") or ev.get("detail") or ev.get("message") or "").strip()
             status = str(ev.get("status") or "running").lower()
@@ -498,6 +501,8 @@ class CodingActivityBox(Vertical):
         # Activity log (terminal commands, patches, outputs, parallel events)
         lines: list[str] = []
         for row in self.events[-30:]:
+            if row.get("_approval_resolved"):
+                continue
             row_status = str(row.get("status") or "running").lower()
             row_type = str(row.get("event_type") or row.get("type") or "")
             row_tool = str(row.get("tool_name") or "")

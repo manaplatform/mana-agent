@@ -1032,6 +1032,7 @@
         .approval-drawer>summary{cursor:pointer;font-weight:600;color:#fcd34d}
         .approval-drawer-item{padding:8px 0;border-top:1px solid #ffffff18;overflow-wrap:anywhere}
         .approval-drawer-item .logs{max-height:160px;overflow:auto}
+        .permission-notice{padding:8px 12px;color:#fcd34d;white-space:pre-wrap;overflow-wrap:anywhere}
         .error{color:#fca5a5}.logs{font-size:12px;color:#aeb4bd;white-space:pre-wrap}
         .execution-trace{display:flex;flex-direction:column;gap:4px;margin:6px 0 10px 8px;padding:8px 12px;background:#13161c;border-left:2px solid #3b82f644;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px}
         .trace-step{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:2px 0;line-height:1.4}
@@ -1054,9 +1055,11 @@
         @media(max-width:520px){.message{max-width:96%}.shell{border-radius:7px}.timeline{padding:8px}}
       </style>
       <div class="shell"><div class="status"><span class="dot"></span><span class="statusText">Connecting to live events…</span><span class="contextMeter"></span></div>
+      <div class="permission-notice" role="status" hidden></div>
       <details class="approval-drawer" aria-label="Pending approvals" hidden><summary></summary><div class="approval-drawer-items"></div></details>
       <div class="timeline"></div><div class="attachment-preview-bar"></div><form><input type="file" id="mana-file-input" multiple style="display:none" /><button type="button" class="attach-btn" title="Attach file" aria-label="Attach file">📎</button><textarea aria-label="Chat message" placeholder="Message this conversation"></textarea><button type="submit">Send</button></form></div>`;
     const timeline = mount.querySelector(".timeline");
+    const permissionNotice = mount.querySelector(".permission-notice");
     const approvalDrawer = mount.querySelector(".approval-drawer");
     const approvalDrawerSummary = mount.querySelector(".approval-drawer > summary");
     const approvalDrawerItems = mount.querySelector(".approval-drawer-items");
@@ -1267,6 +1270,10 @@
               if (!response.ok || payload.ok === false) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
               if (config.sessionId !== sessionId) return;
               if (payload.assistant_message) applyMessage(state, payload.assistant_message);
+              if (request.kind === "computer" && payload.result && payload.result.error_code === "confirmation_required") {
+                permissionNotice.textContent = [payload.result.message, payload.result.preview, payload.result.confirmation_request_id && `Confirmation request: ${payload.result.confirmation_request_id}`].filter(Boolean).join("\n");
+                permissionNotice.hidden = false;
+              }
               const current = state.permissionRequests.get(id);
               if (current && (current.status === "pending" || current.status === "resuming")) {
                 state.permissionRequests.set(id, { ...current, status: "decided", decision: text(payload.decision || decision) });
@@ -1805,6 +1812,8 @@
       surfacedApprovalIds.clear();
       drawerSeenIds.clear();
       permissionErrors.clear();
+      permissionNotice.hidden = true;
+      permissionNotice.textContent = "";
       state.seenSequences.clear();
       state.seenUnsequenced.clear();
       state.lastSequence = 0;

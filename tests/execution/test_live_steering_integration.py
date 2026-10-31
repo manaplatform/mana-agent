@@ -19,6 +19,7 @@ from mana_agent.chat.events import (
 )
 from mana_agent.chat.execution_trace import ExecutionTrace
 from mana_agent.chat.history import ChatHistory
+from mana_agent.config.autonomous_config import AutoRenewConfig
 from mana_agent.execution.autonomous_controller import (
     AutonomousExecutionConfig,
     AutonomousExecutionController,
@@ -27,6 +28,7 @@ from mana_agent.execution.continuation_decision import (
     ContinuationAction,
     ContinuationDecision,
 )
+from mana_agent.execution.continuation_evaluator import ContinuationEvaluator
 from mana_agent.execution.steering import (
     SteeringCoordinator,
     SteeringKind,
@@ -489,3 +491,164 @@ async def _tui_slash_steer_fallback_during_turn() -> None:
             text="Run edge-case tests",
             scope="execution",
         )
+
+
+class FakeLLM:
+    """Mock LLM that returns pre-configured ContinuationDecisions."""
+
+    def __init__(self, responses: list[Any]) -> None:
+        self.responses = list(responses)
+        self.invocations: list[Any] = []
+
+    def invoke(self, messages: Any, **kwargs: Any) -> Any:
+        self.invocations.append(messages)
+        if not self.responses:
+            raise RuntimeError("No more responses in FakeLLM")
+        resp = self.responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
+
+
+def test_resume_from_waiting_rebinds_lease_without_stale_token_error(
+    supervisor: ExecutionSupervisor,
+) -> None:
+    """Verify that a task waiting for approval/input can be safely resumed without StaleLeaseError."""
+    task = supervisor.create_task(
+        session_id="sess_wait",
+        requested_operation="test_wait_resume",
+    )
+    leased, token = supervisor.acquire_lease(task.task_id, owner="test_worker")
+    supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
+
+    # Initial checkpoint before waiting
+    cp = supervisor.checkpoint(
+        task.task_id,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+        resume_payload={"step": 1},
+    )
+    assert cp is not None
+
+    # Task transitions into WAITING (e.g. for human approval)
+    # Lease is suspended and cleared
+    suspended = supervisor.suspend_for_human_input(
+        task.task_id,
+        inbox_item_id="inbox_test_123",
+        checkpoint_id=cp.checkpoint_id,
+        request_type="approval",
+    )
+    assert suspended.state == ExecutionState.WAITING
+    assert suspended.lease_token == ""
+    assert suspended.lease_owner == ""
+
+    # 1. can_checkpoint returns False while WAITING
+    assert supervisor.can_checkpoint(task.task_id) is False
+
+    # 2. Checkpoint while WAITING is safely skipped without raising StaleLeaseError
+    skipped_cp = supervisor.checkpoint(
+        task.task_id,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+        resume_payload={"step": "late_attempt"},
+    )
+    assert skipped_cp is not None  # Returns existing checkpoint
+
+    # 3. resume_running safely re-binds lease without StaleLeaseError
+    resumed = supervisor.resume_running(
+        task.task_id,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+    )
+    assert resumed.state == ExecutionState.RUNNING
+    assert resumed.lease_token != ""
+
+    # 4. Subsequent heartbeat and checkpoint succeed
+    renewed = supervisor.heartbeat(
+        task.task_id,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+    )
+    assert renewed.heartbeat_at is not None
+
+    post_resume_cp = supervisor.checkpoint(
+        task.task_id,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+        resume_payload={"step": 2},
+    )
+    assert post_resume_cp is not None
+
+
+def test_autonomous_loop_continues_on_wrong_command_without_budget_rejection(
+    supervisor: ExecutionSupervisor,
+) -> None:
+    """Verify that a single wrong command does not reject token budget and the autonomous loop continues to success."""
+    task = supervisor.create_task(
+        session_id="sess_cont",
+        requested_operation="test_continue_after_wrong_command",
+    )
+    leased, token = supervisor.acquire_lease(task.task_id, owner="test_worker")
+    supervisor.start(task.task_id, attempt_id=leased.attempt_id, lease_token=token)
+
+    # Fake LLM evaluator: on step 1 (error), it decides to CONTINUE with a fixed plan.
+    # On step 2 (success), it FINALIZEs the execution.
+    llm = FakeLLM([
+        ContinuationDecision(
+            task_id=task.task_id,
+            action=ContinuationAction.CONTINUE,
+            goal_satisfied=False,
+            safe_to_continue=True,
+            reason="Command had error; retrying with corrected command syntax",
+            evidence_summary="syntax_error_observed",
+        ),
+        ContinuationDecision(
+            task_id=task.task_id,
+            action=ContinuationAction.FINALIZE,
+            goal_satisfied=True,
+            safe_to_continue=True,
+            reason="Corrected command succeeded and verified",
+            evidence_summary="job_success",
+            user_message="Work completed successfully after recovery.",
+        ),
+    ])
+    evaluator = ContinuationEvaluator(llm)
+
+    controller = AutonomousExecutionController(
+        config=AutonomousExecutionConfig(
+            max_model_turns=10,
+            auto_renew=AutoRenewConfig(enabled=True, require_progress=True),
+        ),
+        supervisor=supervisor,
+        evaluator=evaluator,
+    )
+
+    steps_called: list[int] = []
+
+    def flaky_step_runner(step_idx: int, ctx: dict[str, Any]) -> dict[str, Any]:
+        steps_called.append(step_idx)
+        if step_idx == 0:
+            # Simulate a wrong command / tool failure on step 0
+            raise RuntimeError("zsh: command not found: tui-tool-invalid")
+        # Step 1: corrected command succeeds
+        return {
+            "output": "Command succeeded: correct output produced",
+            "tool_calls": [{"name": "shell_command", "args": {"cmd": "valid_command"}}],
+            "goal_satisfied": True,
+        }
+
+    res = controller.execute_goal(
+        task_id=task.task_id,
+        user_goal="Run utility tool to finish job",
+        step_runner=flaky_step_runner,
+        attempt_id=leased.attempt_id,
+        lease_token=token,
+    )
+
+    # Autonomous loop did not abort on wrong command in step 0!
+    # It continued to step 1 and successfully finished!
+    assert steps_called == [0, 1]
+    assert res.status == "completed"
+    assert res.goal_satisfied is True
+    assert "completed successfully" in res.answer
+

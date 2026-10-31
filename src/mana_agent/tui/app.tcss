@@ -60,6 +60,21 @@ Footer {
     height: 1fr;
 }
 
+/* One bounded, scrollable queue outside the conversation. */
+#approval-drawer {
+    display: none;
+    height: auto;
+    max-height: 50%;
+    border: round #f59e0b;
+    background: #111827;
+    padding: 0 1;
+}
+
+#approval-drawer-title {
+    text-style: bold;
+    color: #f59e0b;
+}
+
 #main {
     height: 1fr;
 }

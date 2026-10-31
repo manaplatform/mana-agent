@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, HorizontalScroll, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
@@ -61,7 +61,7 @@ class InlineApprovalDecided(Message):
 
 
 class InlineApproval(Vertical):
-    """Action controls embedded in an existing activity box, not a dialog."""
+    """One request's controls in the shared approval drawer."""
 
     DEFAULT_CSS = """
     InlineApproval { height: auto; }
@@ -77,21 +77,30 @@ class InlineApproval(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(self.request.preview, markup=False)
         yield Static(f"Scope: {self.request.scope}", markup=False)
-        with Horizontal(classes="inline-approval-actions"):
+        with HorizontalScroll(classes="inline-approval-actions"):
             yield Button("Deny", classes="inline-deny", variant="error")
             yield Button("Allow once", classes="inline-once", variant="primary")
             if self.request.transactional:
                 yield Button("Allow all matching queued", classes="inline-all", variant="success")
+            if not self.request.server and not self.request.api and not self.request.transactional:
+                yield Button("This session", classes="inline-session", variant="success")
+                yield Button("Always", classes="inline-always", variant="warning")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if not any(event.button.has_class(name) for name in ("inline-deny", "inline-once", "inline-all")):
+        if not any(event.button.has_class(name) for name in ("inline-deny", "inline-once", "inline-all", "inline-session", "inline-always")):
             return
         event.stop()
         for button in self.query(Button):
             button.disabled = True
+        decision = None if event.button.has_class("inline-deny") else (
+            PermissionDecision.ALLOW_SESSION if event.button.has_class("inline-session") else
+            PermissionDecision.ALWAYS_ALLOW if event.button.has_class("inline-always") else
+            PermissionDecision.ALLOW_ONCE
+        )
         self.callback(ComputerPermissionChoice(
             self.request.request_id,
-            None if event.button.has_class("inline-deny") else PermissionDecision.ALLOW_ONCE,
+            decision,
+            remote=self.request.remote,
             server=self.request.server,
             api=self.request.api,
             transactional=self.request.transactional,
