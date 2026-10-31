@@ -394,8 +394,11 @@ def test_failed_execution_never_displays_completed_terminal_status() -> None:
     assert not trace.is_completed
 
 
-@pytest.mark.asyncio
-async def test_tui_steer_modal_and_ctrl_s_interaction() -> None:
+def test_tui_steer_modal_and_ctrl_s_interaction() -> None:
+    asyncio.run(_tui_steer_modal_and_ctrl_s_interaction())
+
+
+async def _tui_steer_modal_and_ctrl_s_interaction() -> None:
     """Requirement 4 & 10.3-10.4: Ctrl+S and /steer trigger non-blocking steering in TUI."""
     mock_gateway = MagicMock()
     mock_gateway.create_session.return_value = "session_tui_1"
@@ -448,8 +451,11 @@ async def test_tui_steer_modal_and_ctrl_s_interaction() -> None:
         assert "Prioritize security checks" in steering_events[0].content
 
 
-@pytest.mark.asyncio
-async def test_tui_slash_steer_fallback_during_turn() -> None:
+def test_tui_slash_steer_fallback_during_turn() -> None:
+    asyncio.run(_tui_slash_steer_fallback_during_turn())
+
+
+async def _tui_slash_steer_fallback_during_turn() -> None:
     """Requirement 4: Fallback /steer <instruction> works while turn is in progress."""
     mock_gateway = MagicMock()
     mock_gateway.create_session.return_value = "session_tui_2"

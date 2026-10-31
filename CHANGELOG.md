@@ -4,6 +4,18 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-10-30 — Dashboard approvals: consolidate pending transactional, server,
+  API and computer requests in one drawer; hide resolved requests, retain
+  failures for retry, and prevent replay from reopening a decision. Existing
+  guarded endpoints and permission scopes remain unchanged. See
+  `docs/activity-approval-rendering.md`. User-owned verification (not run by
+  the agent): `node --test tests/dashboard/live_chat_approval_ui.test.mjs tests/dashboard/live_chat_reducer.test.mjs`.
+
+- 2026-10-30 — CI / live steering: run both async TUI integration scenarios through
+  `asyncio.run` so the CI `dev` extra does not require an undeclared pytest
+  plugin. See `docs/12-testing.md`. User-owned verification (not run by the
+  agent): `python -m pytest tests/execution/test_live_steering_integration.py -q`.
+
 - Correct the stale TUI server-approval regression test to check the existing
   inline controls, exact preview, and approve/deny dispatch instead of expecting
   a modal. Clarify the current UI in `docs/28-server-management.md`.

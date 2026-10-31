@@ -3,20 +3,25 @@
 Approval-required lifecycle events are rendered in the existing consolidated
 execution panel: general approvals belong in **Activity**, while approvals
 associated with a coding backend belong in **Coding Activity**. Dashboard
-transactional, server and API approval decisions are made inside that activity
-row rather than on a separate timeline card. The TUI places the request preview,
-scope and decision buttons inside the matching Activity or Coding Activity box.
-Computer and remote SSH permission requests retain their existing separate
-dialog because their permission scopes differ. Approval tools do not create
-separate TUI cards.
+transactional, server, API and computer decisions are made in a single
+collapsible **Pending approvals** drawer above the conversation. It opens for
+new requests, retains each preview and scope, and hides a request after its
+decision is recorded. The TUI continues to place transactional, server and API
+controls inside the matching Activity or Coding Activity box. TUI computer and
+remote SSH permission requests retain their scoped dialog. Approval tools do
+not create separate TUI cards.
 
-Previously the dashboard independently rendered the same transactional event
-as both an activity row and a timeline card. The card contained the only
-approval controls, so removing it without moving those controls would strand the
-request. The controls now use the same durable inbox ID and endpoint as before;
-rendering an event does not authorize execution. A successful explicit approval
-scrolls the conversation to its end; a denied or failed request does not force
-the scroll. Pending requests remain in the truncated activity history.
+Previously the dashboard rendered transactional controls inside activity rows
+and computer permission controls on separate timeline cards. Resolved requests
+could remain visible as if they still required attention. The drawer replaces
+both control locations, trading inline controls for one consistently visible
+queue. Activity retains lifecycle events, but resolved request rows are hidden;
+the reducer retains decision state to prevent replay from reopening them. The
+drawer uses the same durable inbox IDs, endpoints and computer permission
+choices as before; rendering never authorizes execution. Failed requests remain
+available for retry. A successful explicit approval scrolls the conversation to
+its end; a denied or failed request does not force the scroll. The queue does
+not depend on the truncated activity history.
 
 Runtime event producers may provide `backend` and `tool_name` at the event's
 top level or inside `metadata`, `details`, or `payload`. Classification must
@@ -26,13 +31,13 @@ preserve this context when projecting events into the TUI. In particular, an
 approval tool name itself is not a coding tool.
 
 **Do not reintroduce:** do not discard top-level backend classification context
-before `ExecutionPanel` selects its Activity box. Keep general approvals in
-Activity and coding-backend approvals in Coding Activity. Do not restore a
-separate dashboard transactional approval card or grant approval during render;
-the inline controls must still submit an explicit decision to the guarded
-endpoint. The TUI inline buttons use the same guarded decision handler and
-leave failed decisions available for retry. A decision for one request must not
-mark other pending requests resolved.
+before `ExecutionPanel` selects its Activity box. Keep general events in
+Activity and coding-backend events in Coding Activity. Do not restore separate
+dashboard request cards, grant approval during render, resurrect resolved
+requests on replay, or hide failures that need retry. Drawer controls must submit
+an explicit decision to the guarded endpoint. The TUI inline buttons use the
+same guarded decision handler and leave failed decisions available for retry.
+A decision for one request must not mark other pending requests resolved.
 
 ## Approving matching requests
 
