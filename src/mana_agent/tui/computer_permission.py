@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, HorizontalScroll, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
@@ -39,6 +40,7 @@ class ComputerPermissionRequested(Message):
         api: bool = False,
         transactional: bool = False,
         pending_count: int = 1,
+        expires_at: datetime | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -49,9 +51,10 @@ class ComputerPermissionRequested(Message):
         self.api = api
         self.transactional = transactional
         self.pending_count = pending_count
+        self.expires_at = expires_at
 
 
-class InlineApprovalDecided(Message):
+class ApprovalDecided(Message):
     """Deliver an externally recorded decision to the UI thread."""
 
     def __init__(self, request_ids: set[str], approved: bool) -> None:
@@ -60,28 +63,83 @@ class InlineApprovalDecided(Message):
         self.approved = approved
 
 
-class InlineApproval(Vertical):
-    """One request's controls in the shared approval drawer."""
+class ApprovalToast(Vertical):
+    """One pending request rendered as a floating toast.
+
+    The toast is the only approval surface: it shows the request preview and
+    scope and carries the decision buttons. It never expires on a timer —
+    a pending approval must stay actionable until its own decision is
+    recorded.
+    """
 
     DEFAULT_CSS = """
-    InlineApproval { height: auto; }
-    InlineApproval .inline-approval-actions { height: auto; }
-    InlineApproval Button { margin-right: 1; }
+    ApprovalToast {
+        width: 60;
+        max-width: 90%;
+        height: auto;
+        margin-bottom: 1;
+        padding: 1 2;
+        border: round #f59e0b;
+        background: #111827;
+    }
+    ApprovalToast .approval-toast-title {
+        text-style: bold;
+        color: #fcd34d;
+        width: 100%;
+    }
+    ApprovalToast .approval-toast-preview {
+        width: 100%;
+        height: auto;
+        max-height: 8;
+        color: #e5e7eb;
+    }
+    ApprovalToast .approval-toast-scope {
+        width: 100%;
+        color: #93c5fd;
+    }
+    ApprovalToast .approval-toast-actions { height: auto; width: 100%; }
+    ApprovalToast Button { margin-right: 1; }
     """
 
     def __init__(self, request: ComputerPermissionRequested, callback) -> None:
         super().__init__()
         self.request = request
         self.callback = callback
+        self.add_class("approval-toast")
+
+    def on_mount(self) -> None:
+        if getattr(self.request, "expires_at", None):
+            now = datetime.now(timezone.utc)
+            remaining = (self.request.expires_at - now).total_seconds()
+            if remaining <= 0:
+                self.post_message(ApprovalDecided({self.request.request_id}, approved=False))
+            elif remaining <= 86400:
+                self.set_timer(remaining, self._on_expired)
+
+    def _on_expired(self) -> None:
+        self.post_message(ApprovalDecided({self.request.request_id}, approved=False))
+
+    def _title(self) -> str:
+        request = self.request
+        if request.transactional:
+            return "Transactional action approval required"
+        if request.server:
+            return "Server action approval required"
+        if request.api:
+            return "API request approval required"
+        if request.remote:
+            return "Mana-Agent needs remote SSH permission"
+        return "Mana-Agent needs computer permission"
 
     def compose(self) -> ComposeResult:
-        yield Static(self.request.preview, markup=False)
-        yield Static(f"Scope: {self.request.scope}", markup=False)
-        with HorizontalScroll(classes="inline-approval-actions"):
-            yield Button("Deny", classes="inline-deny", variant="error")
-            yield Button("Allow once", classes="inline-once", variant="primary")
+        yield Static(self._title(), classes="approval-toast-title")
+        yield Static(self.request.preview, markup=False, classes="approval-toast-preview")
+        yield Static(f"Scope: {self.request.scope}", markup=False, classes="approval-toast-scope")
+        with Horizontal(classes="approval-toast-actions"):
+            yield Button("Reject", classes="inline-deny", variant="error")
+            yield Button("Approve", classes="inline-once", variant="primary")
             if self.request.transactional:
-                yield Button("Allow all matching queued", classes="inline-all", variant="success")
+                yield Button("Approve all matching queued", classes="inline-all", variant="success")
             if not self.request.server and not self.request.api and not self.request.transactional:
                 yield Button("This session", classes="inline-session", variant="success")
                 yield Button("Always", classes="inline-always", variant="warning")

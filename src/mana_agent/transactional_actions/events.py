@@ -73,6 +73,13 @@ def event_payload(event_type: str, action: ActionIntent, **details: Any) -> dict
             "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else None,
             "verification": action.verification.model_dump(mode="json") if action.verification else None,
             "compensation": action.compensation.model_dump(mode="json") if action.compensation else None,
+            "expires_at": (
+                min(
+                    [d for d in [action.expires_at, action.policy_decision.expires_at if action.policy_decision else None] if d is not None]
+                ).isoformat()
+                if getattr(action, "expires_at", None)
+                else ""
+            ),
             **details,
         },
     }

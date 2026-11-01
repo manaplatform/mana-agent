@@ -49,6 +49,29 @@ def _resolve_approval(events: list[dict[str, Any]], decision_event: dict[str, An
             existing["_approval_resolved"] = True
 
 
+_TERMINAL_STATUSES = {"success", "completed", "done", "failed", "error", "cancelled"}
+
+
+def _is_pending_approval(event: dict[str, Any]) -> bool:
+    """True while an approval request still needs a decision.
+
+    A pending request is shown only as a toast, so the activity stream must
+    not repeat it as a row. Once a decision is recorded the request is no
+    longer pending and remains visible as an ordinary outcome.
+    """
+    status = str(event.get("status") or "running").lower()
+    if status in _TERMINAL_STATUSES:
+        return False
+    event_type = str(event.get("event_type") or event.get("type") or "")
+    tool_name = str(event.get("tool_name") or "")
+    return (
+        status in {"waiting_approval", "pending_approval", "approval_required", "waiting_permission"}
+        or event_type.startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval", "computer.waiting_permission"))
+        or tool_name in {"approval_request", "request_user_approval", "wait_for_approval"}
+        or "approval.required" in tool_name
+    )
+
+
 class MainActivityBox(Vertical):
     """Unified, chronological stream for all general agent activities.
 
@@ -235,6 +258,10 @@ class MainActivityBox(Vertical):
         for ev in visible_events:
             if ev.get("_approval_resolved"):
                 continue
+            if _is_pending_approval(ev):
+                # Pending approvals are surfaced as a toast only; the activity
+                # stream must not duplicate them as a separate row.
+                continue
             tool_name = str(ev.get("tool_name") or ev.get("title") or ev.get("type") or "operation").strip()
             summary = str(ev.get("summary") or ev.get("detail") or ev.get("message") or "").strip()
             status = str(ev.get("status") or "running").lower()
@@ -254,31 +281,16 @@ class MainActivityBox(Vertical):
 
         for item in grouped:
             st = item["status"]
-            is_item_approval = (
-                st in {"waiting_approval", "pending_approval", "approval_required"}
-                or item["tool_name"] in {"approval_request", "request_user_approval"}
-                or "approval.required" in item["tool_name"]
-            ) and st not in {"success", "completed", "done", "failed", "error", "cancelled"}
-
             is_sub = bool(item["latest_ev"].get("sub_operation") or item["latest_ev"].get("indent"))
             prefix = "  ↳ " if is_sub else ""
-
-            if is_item_approval:
-                st_icon = "⚠️ "
-            elif is_sub:
-                st_icon = ""
-            else:
-                st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌") + " "
+            st_icon = "" if is_sub else {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌") + " "
 
             count_suffix = f" (x{item['count']})" if item["count"] > 1 else ""
             dur = item["latest_ev"].get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
             summary_part = f" — {item['summary']}" if item["summary"] and item["summary"] != item["tool_name"] else ""
 
-            if is_item_approval:
-                lines.append(f"{prefix}{st_icon}{item['tool_name']}{count_suffix} [WAITING FOR APPROVAL]{summary_part}")
-            else:
-                lines.append(f"{prefix}{st_icon}{item['tool_name']}{count_suffix}{dur_str}{summary_part}")
+            lines.append(f"{prefix}{st_icon}{item['tool_name']}{count_suffix}{dur_str}{summary_part}")
 
             err = item["latest_ev"].get("error")
             if err:
@@ -503,19 +515,13 @@ class CodingActivityBox(Vertical):
         for row in self.events[-30:]:
             if row.get("_approval_resolved"):
                 continue
+            if _is_pending_approval(row):
+                # Pending approvals are surfaced as a toast only; the coding
+                # activity stream must not duplicate them as a separate row.
+                continue
             row_status = str(row.get("status") or "running").lower()
             row_type = str(row.get("event_type") or row.get("type") or "")
-            row_tool = str(row.get("tool_name") or "")
-            row_is_approval = (
-                row_status in {"waiting_approval", "pending_approval", "approval_required"}
-                or row_type.startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
-                or row_tool in {"approval_request", "request_user_approval"}
-            ) and row_status not in {"success", "completed", "done", "failed", "error", "cancelled"}
-
-            if row_is_approval:
-                row_icon = "⚠️"
-            else:
-                row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
+            row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
             r_title = str(row.get("title") or row_type or "code")
             dur = row.get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
@@ -527,8 +533,6 @@ class CodingActivityBox(Vertical):
             elif row_type.startswith("batch."):
                 b_badge = " [50% off]" if "discount" in row or "50%" in str(detail) or "50%" in str(row) else ""
                 lines.append(f"📦 {r_title}{b_badge}" + (f" — {detail}" if detail else ""))
-            elif row_is_approval:
-                lines.append(f"⚠️ {r_title} [WAITING FOR APPROVAL]" + (f" — {detail}" if detail else ""))
             elif cmd:
                 lines.append(f"{row_icon} $ {cmd}{dur_str}")
             else:

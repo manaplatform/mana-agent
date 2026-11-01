@@ -835,10 +835,13 @@
     if (type.startsWith("context.") || type.startsWith("cost.") || type.startsWith("budget.")) {
       state.contextBudget = { ...state.contextBudget, ...metadata, event_type: type, status: eventStatus(event) };
     }
-    const permissionRequestId = text((type.startsWith("action.approval.") && metadata.inbox_item_id) || metadata.permission_request_id);
+    const permissionRequestId = text((type.startsWith("action.approval.") && metadata.inbox_item_id) || metadata.permission_request_id || metadata.inbox_item_id || metadata.action_id);
     const inboxItemId = text(metadata.inbox_item_id);
     if ((type === "computer.waiting_permission" || type === "server.waiting_approval" || type === "api.waiting_approval" || type === "action.approval.required") && permissionRequestId) {
       const authorityId = type === "action.approval.required" && inboxItemId ? inboxItemId : permissionRequestId;
+      const rawExpiresAt = metadata.expires_at || metadata.expiresAt || null;
+      const expiresAt = rawExpiresAt ? String(rawExpiresAt) : null;
+      const isExpired = expiresAt && !isNaN(new Date(expiresAt).getTime()) && new Date(expiresAt).getTime() <= Date.now();
       const request = {
         requestId: authorityId,
         scope: text(metadata.permission_scope),
@@ -846,9 +849,12 @@
           ? JSON.stringify(metadata.approval_display || metadata.preview, null, 2)
           : text(metadata.approval_display || metadata.preview || event.title || eventSummary(event)),
         kind: type === "server.waiting_approval" ? "server" : type === "api.waiting_approval" ? "api" : type === "action.approval.required" ? "transactional" : "computer",
-        status: "pending",
-        decision: "",
+        status: isExpired ? "expired" : "pending",
+        decision: isExpired ? "expired" : "",
       };
+      if (expiresAt) {
+        request.expiresAt = expiresAt;
+      }
       if (type === "action.approval.required") {
         request.actionId = text(metadata.action_id);
       }
@@ -857,14 +863,15 @@
       if (!previous || previous.status === "pending") {
         state.permissionRequests.set(authorityId, { ...previous, ...request });
       }
-    } else if ((type === "computer.permission_decided" || type === "server.approval_decided" || type === "api.approval_decided" || type === "action.approval.granted" || type === "action.approval.denied") && permissionRequestId) {
+    } else if ((type === "computer.permission_decided" || type === "server.approval_decided" || type === "api.approval_decided" || type === "action.approval.granted" || type === "action.approval.denied" || type === "action.approval.expired" || type === "action.approval.invalidated" || type === "inbox.item.expired") && permissionRequestId) {
       const previous = state.permissionRequests.get(permissionRequestId) || {
         requestId: permissionRequestId,
       };
+      const isExpired = type === "action.approval.expired" || type === "action.approval.invalidated" || type === "inbox.item.expired" || text(metadata.decision) === "expired";
       state.permissionRequests.set(permissionRequestId, {
         ...previous,
-        status: "decided",
-        decision: text(metadata.decision),
+        status: isExpired ? "expired" : "decided",
+        decision: text(metadata.decision || (isExpired ? "expired" : "")),
       });
     } else if (type === "turn.resume_requested") {
       const reqId = text(metadata.approval_request_id) || permissionRequestId;
@@ -1028,10 +1035,11 @@
         .permission{border-color:#f59e0b88}.permission-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
         .permission-actions button{min-height:34px;padding:6px 12px}.permission-actions .deny{background:#b91c1c}
         .permission-state{margin-top:7px;color:#aeb4bd}.permission-error{margin-top:7px;color:#fca5a5}
-        .approval-drawer{flex:none;background:#1b202b;border-bottom:1px solid #f59e0b88;max-height:45%;overflow:auto;padding:8px 12px}
-        .approval-drawer>summary{cursor:pointer;font-weight:600;color:#fcd34d}
-        .approval-drawer-item{padding:8px 0;border-top:1px solid #ffffff18;overflow-wrap:anywhere}
-        .approval-drawer-item .logs{max-height:160px;overflow:auto}
+        .approval-toast-stack{position:fixed;right:16px;bottom:76px;z-index:40;display:flex;flex-direction:column;gap:10px;max-width:min(420px,calc(100vw - 32px));pointer-events:none}
+        .approval-toast{pointer-events:auto;background:#1b202b;border:1px solid #f59e0b88;border-left:3px solid #f59e0b;border-radius:8px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,0.45);overflow-wrap:anywhere}
+        .approval-toast-title{font-weight:600;color:#fcd34d}
+        .approval-toast .logs{max-height:160px;overflow:auto}
+        .approval-toast .meta{margin-top:4px;color:#aeb4bd;font-size:11px}
         .permission-notice{padding:8px 12px;color:#fcd34d;white-space:pre-wrap;overflow-wrap:anywhere}
         .error{color:#fca5a5}.logs{font-size:12px;color:#aeb4bd;white-space:pre-wrap}
         .execution-trace{display:flex;flex-direction:column;gap:4px;margin:6px 0 10px 8px;padding:8px 12px;background:#13161c;border-left:2px solid #3b82f644;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px}
@@ -1056,13 +1064,11 @@
       </style>
       <div class="shell"><div class="status"><span class="dot"></span><span class="statusText">Connecting to live events…</span><span class="contextMeter"></span></div>
       <div class="permission-notice" role="status" hidden></div>
-      <details class="approval-drawer" aria-label="Pending approvals" hidden><summary></summary><div class="approval-drawer-items"></div></details>
+      <div class="approval-toast-stack" role="region" aria-label="Pending approvals" hidden></div>
       <div class="timeline"></div><div class="attachment-preview-bar"></div><form><input type="file" id="mana-file-input" multiple style="display:none" /><button type="button" class="attach-btn" title="Attach file" aria-label="Attach file">📎</button><textarea aria-label="Chat message" placeholder="Message this conversation"></textarea><button type="submit">Send</button></form></div>`;
     const timeline = mount.querySelector(".timeline");
     const permissionNotice = mount.querySelector(".permission-notice");
-    const approvalDrawer = mount.querySelector(".approval-drawer");
-    const approvalDrawerSummary = mount.querySelector(".approval-drawer > summary");
-    const approvalDrawerItems = mount.querySelector(".approval-drawer-items");
+    const approvalToastStack = mount.querySelector(".approval-toast-stack");
     const form = mount.querySelector("form");
     const input = mount.querySelector("textarea");
     const submitButton = form.querySelector("button[type=submit]");
@@ -1177,6 +1183,14 @@
       const meta = ev.metadata || {};
       return text((ev.type === "action.approval.required" && meta.inbox_item_id) || meta.permission_request_id);
     };
+    // A request's own toast is its only approval surface, so the activity
+    // streams must not repeat it as a row. A request with no recorded state
+    // has no toast to act on, so its row is kept rather than silently hiding
+    // the request.
+    const isHiddenApprovalRow = (ev) => {
+      if (!isPermissionRequest(ev)) return false;
+      return state.permissionRequests.has(approvalId(ev));
+    };
 
     const newPendingApproval = (box) => {
       let found = false;
@@ -1218,36 +1232,54 @@
       }
     };
 
-    const drawerSeenIds = new Set();
-    let drawerSignature = "";
-    const renderApprovalDrawer = () => {
-      const pending = [...state.permissionRequests.values()].filter((request) => request.status === "pending");
+    let toastSignature = "";
+    const isRequestExpired = (request) => {
+      if (!request) return true;
+      if (request.status !== "pending") return true;
+      if (request.expiresAt) {
+        const time = new Date(request.expiresAt).getTime();
+        if (!isNaN(time) && time <= Date.now()) return true;
+      }
+      return false;
+    };
+
+    const renderApprovalToasts = () => {
+      const pending = [...state.permissionRequests.values()].filter((request) => !isRequestExpired(request));
       const signature = JSON.stringify([config.sessionId, pending, pending.map((request) => [
         permissionBusy.has(`${config.sessionId}\u0000${request.requestId}`), permissionErrors.get(request.requestId) || "",
       ])]);
-      // Preserve focus and manual drawer state during unrelated streaming updates.
-      if (signature === drawerSignature) return;
-      drawerSignature = signature;
-      approvalDrawer.hidden = pending.length === 0;
-      approvalDrawerItems.replaceChildren();
+      // Preserve focus and button state during unrelated streaming updates.
+      if (signature === toastSignature) return;
+      toastSignature = signature;
+      approvalToastStack.replaceChildren();
+      approvalToastStack.hidden = pending.length === 0;
       if (!pending.length) return;
-      if (pending.some((request) => !drawerSeenIds.has(request.requestId))) approvalDrawer.open = true;
-      for (const request of pending) drawerSeenIds.add(request.requestId);
-      approvalDrawerSummary.textContent = `Pending approvals (${pending.length})`;
       for (const request of pending) {
+        if (request.expiresAt) {
+          const remaining = new Date(request.expiresAt).getTime() - Date.now();
+          if (remaining > 0 && remaining < 86400000) {
+            setTimeout(() => {
+              const current = state.permissionRequests.get(request.requestId);
+              if (current && current.status === "pending") {
+                state.permissionRequests.set(request.requestId, { ...current, status: "expired", decision: "expired" });
+                render();
+              }
+            }, remaining + 50);
+          }
+        }
         const id = request.requestId;
         const busyKey = `${config.sessionId}\u0000${id}`;
         const row = document.createElement("section");
-        row.className = "approval-drawer-item";
+        row.className = "approval-toast";
         const titles = { transactional: "Transactional action approval required", server: "Server action approval required", api: "API request approval required", computer: "Computer permission required" };
-        addText(row, "div", titles[request.kind] || "Approval required");
+        addText(row, "div", titles[request.kind] || "Approval required", "approval-toast-title");
         addText(row, "div", request.preview, "logs");
         addText(row, "div", `Scope: ${request.scope || ""}`, "meta");
         const actions = document.createElement("div");
         actions.className = "permission-actions";
         const choices = request.kind === "computer"
-          ? [["Deny", "deny"], ["Allow once", "allow_once"], ["This session", "allow_session"], ["Always", "always"]]
-          : [["Deny", "deny"], ["Approve once", "approve"]];
+          ? [["Reject", "deny"], ["Approve", "allow_once"], ["This session", "allow_session"], ["Always", "always"]]
+          : [["Reject", "deny"], ["Approve", "approve"]];
         for (const [label, decision] of choices) {
           const button = document.createElement("button");
           button.type = "button";
@@ -1280,7 +1312,26 @@
               }
               if (decision === "approve" && payload.approved !== false && payload.status !== "denied") forceScrollAfterApproval = true;
             } catch (error) {
-              if (config.sessionId === sessionId) permissionErrors.set(id, error.message || String(error));
+              const msg = error.message || String(error);
+              const lowered = msg.toLowerCase();
+              if (
+                lowered.includes("terminal") ||
+                lowered.includes("expired") ||
+                lowered.includes("no longer approvable") ||
+                lowered.includes("no longer accepts")
+              ) {
+                const current = state.permissionRequests.get(id);
+                if (current) {
+                  state.permissionRequests.set(id, {
+                    ...current,
+                    status: "expired",
+                    decision: "expired",
+                  });
+                }
+                permissionErrors.delete(id);
+              } else if (config.sessionId === sessionId) {
+                permissionErrors.set(id, msg);
+              }
             } finally {
               permissionBusy.delete(busyKey);
               render();
@@ -1290,7 +1341,7 @@
         }
         row.appendChild(actions);
         if (permissionErrors.has(id)) addText(row, "div", permissionErrors.get(id), "permission-error");
-        approvalDrawerItems.appendChild(row);
+        approvalToastStack.appendChild(row);
       }
     };
 
@@ -1363,14 +1414,10 @@
       const showAllKey = `${key}:show_all`;
       const showAll = activityBoxState.get(showAllKey) === true;
       const maxEvents = 100;
-      const allEvents = box.events.filter((ev) => {
-        const request = state.permissionRequests.get(approvalId(ev));
-        return !isPermissionRequest(ev) || !request || request.status === "pending";
-      });
-      const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.filter((ev, index) => {
-        const request = state.permissionRequests.get(approvalId(ev));
-        return index >= allEvents.length - maxEvents || (isActionApproval(ev) && request && request.status === "pending");
-      });
+      // The request's toast is its only approval surface; the stream must not
+      // repeat it as a row. Decision events stay visible as ordinary rows.
+      const allEvents = box.events.filter((ev) => !isHiddenApprovalRow(ev));
+      const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(-maxEvents);
 
       if (allEvents.length > maxEvents && !showAll) {
         const expandBtn = document.createElement("button");
@@ -1557,14 +1604,10 @@
         const showAllKey = `${key}:show_all`;
         const showAll = activityBoxState.get(showAllKey) === true;
         const maxEvents = 100;
-        const allEvents = box.events.filter((ev) => {
-          const request = state.permissionRequests.get(approvalId(ev));
-          return !isPermissionRequest(ev) || !request || request.status === "pending";
-        });
-        const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.filter((ev, index) => {
-          const request = state.permissionRequests.get(approvalId(ev));
-          return index >= allEvents.length - maxEvents || (isActionApproval(ev) && request && request.status === "pending");
-        });
+        // The request's toast is its only approval surface; the stream must not
+        // repeat it as a row. Decision events stay visible as ordinary rows.
+        const allEvents = box.events.filter((ev) => !isHiddenApprovalRow(ev));
+        const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(-maxEvents);
 
         if (allEvents.length > maxEvents && !showAll) {
           const expandBtn = document.createElement("button");
@@ -1682,7 +1725,7 @@
     };
 
     const render = () => {
-      renderApprovalDrawer();
+      renderApprovalToasts();
       const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
       for (const stream of timeline.querySelectorAll(".activity-stream[data-activity-stream-key]")) {
         rememberActivityStreamPosition(stream, stream.dataset.activityStreamKey);
@@ -1810,7 +1853,6 @@
       state.activities.clear();
       state.permissionRequests.clear();
       surfacedApprovalIds.clear();
-      drawerSeenIds.clear();
       permissionErrors.clear();
       permissionNotice.hidden = true;
       permissionNotice.textContent = "";

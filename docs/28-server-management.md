@@ -60,18 +60,18 @@ typed tool catalog and asks for confirmation unless `--yes` is supplied.
 
 Consequential chat actions return a session-bound one-time approval request
 with the exact command preview. The TUI and dashboard render approval controls
-in their shared pending-approvals drawers; both offer only
-**Deny** and **Approve once**.
+in their shared pending-approval toasts; both offer only
+**Reject** and **Approve**.
 Before either prompt is emitted, the gateway persists a durable inbox item whose
 protected context contains the exact validated decision and argv. The legacy
-request ID, TUI controls, dashboard drawer, and `/inbox` command all delegate to that
+request ID, TUI toast, dashboard toast, and `/inbox` command all delegate to that
 item; a gateway restart reconstructs the pending intent from it. Approval resumes
 only that exact decision and cannot be reused or submitted from another session.
 
 Regression note: an older computer-control test expected server approvals to open
-`ComputerPermissionScreen`. The drawer regression checks the preview,
+`ComputerPermissionScreen`. The toast regression checks the preview,
 one-time/deny controls, and submitted decision; computer permissions now also
-use the drawer while retaining their scoped choices. Do not reintroduce a modal
+use a toast while retaining their scoped choices. Do not reintroduce a modal
 expectation for server approvals or weaken the exact-decision approval boundary.
 User verification: `./venv/bin/python -m pytest tests/test_computer_control.py tests/test_tui_approval_realtime.py -q`.
 

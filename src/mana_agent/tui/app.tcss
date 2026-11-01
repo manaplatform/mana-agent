@@ -6,6 +6,7 @@
 Screen {
     background: #0f1117;
     color: #e6e6e6;
+    layers: default overlay;
 }
 
 Header {
@@ -60,19 +61,19 @@ Footer {
     height: 1fr;
 }
 
-/* One bounded, scrollable queue outside the conversation. */
-#approval-drawer {
-    display: none;
+/* Floating layer for pending approval toasts. It docks above the input bar
+   so a pending request is always visible and actionable. The layer lives on
+   the overlay layer, so it floats over the conversation without shrinking
+   it, and it is displayed only while a request is pending. */
+#approval-toast-layer {
+    layer: overlay;
+    dock: bottom;
+    width: 1fr;
     height: auto;
-    max-height: 50%;
-    border: round #f59e0b;
-    background: #111827;
-    padding: 0 1;
-}
-
-#approval-drawer-title {
-    text-style: bold;
-    color: #f59e0b;
+    margin: 0 1 6 0;
+    padding: 0;
+    background: transparent;
+    align-horizontal: right;
 }
 
 #main {

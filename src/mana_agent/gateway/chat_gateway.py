@@ -10439,6 +10439,7 @@ class AgentChatGateway:
                     "affected_resources": list(
                         redact_secrets(server_decision.affected_resources)
                     ),
+                    "expires_at": inbox_item.expires_at.isoformat() if getattr(inbox_item, "expires_at", None) else "",
                 }
                 from mana_agent.chat.events import CodingActivityEvent
                 from mana_agent.chat.history import get_history

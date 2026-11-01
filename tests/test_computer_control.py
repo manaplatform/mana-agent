@@ -62,7 +62,7 @@ from mana_agent.services.execution_event_hub import (
     reset_execution_event_hub_for_tests,
 )
 from mana_agent.tui.app import ManaChatApp
-from mana_agent.tui.computer_permission import ComputerPermissionScreen, InlineApproval
+from mana_agent.tui.computer_permission import ApprovalToast, ComputerPermissionScreen
 from mana_agent.transactional_actions.computer import ComputerActionAdapter
 from mana_agent.transactional_actions.gateway import ActionGateway, ApprovalRequired
 from mana_agent.transactional_actions.approvals import ApprovalRegistry
@@ -931,7 +931,7 @@ def test_dashboard_chat_permission_decision_executes_and_emits_result(
     assert any(event["type"] == "computer.permission_decided" for event in events)
 
 
-def test_tui_chat_shows_permission_in_drawer() -> None:
+def test_tui_chat_shows_permission_in_toast() -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
 
@@ -950,9 +950,9 @@ def test_tui_chat_shows_permission_in_drawer() -> None:
             }))
             await pilot.pause()
             assert not isinstance(app.screen, ComputerPermissionScreen)
-            controls = app.query_one("#approval-drawer").query_one(InlineApproval)
+            controls = app.query_one("#approval-toast-layer").query_one(ApprovalToast)
             assert controls.request.scope == "computer.screenshot.capture"
-            assert {b.label.plain for b in controls.query("Button")} == {"Deny", "Allow once", "This session", "Always"}
+            assert {b.label.plain for b in controls.query("Button")} == {"Reject", "Approve", "This session", "Always"}
 
     run(exercise())
 
@@ -989,12 +989,12 @@ def test_tui_chat_shows_inline_server_approval(button, expected_decision, tmp_pa
             }))
             await pilot.pause()
             assert not isinstance(app.screen, ComputerPermissionScreen)
-            controls = app.query_one(InlineApproval)
+            controls = app.query_one(ApprovalToast)
             assert controls.request.request_id == "server-approval-test"
             assert controls.request.server is True
             assert controls.request.scope == "server.action.execute"
             assert controls.request.preview == "sudo apt-get install -y -- nginx"
-            assert {b.label.plain for b in controls.query("Button")} == {"Deny", "Allow once"}
+            assert {b.label.plain for b in controls.query("Button")} == {"Reject", "Approve"}
             assert not decisions
             controls.query_one(button).press()
             await pilot.pause()
@@ -1002,6 +1002,6 @@ def test_tui_chat_shows_inline_server_approval(button, expected_decision, tmp_pa
             assert decisions[0].request_id == "server-approval-test"
             assert decisions[0].server is True
             assert decisions[0].decision == expected_decision
-            assert not list(app.query(InlineApproval))
+            assert not list(app.query(ApprovalToast))
 
     run(exercise())

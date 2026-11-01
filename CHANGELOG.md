@@ -4,6 +4,35 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-01 — Suppress expired and terminal items in approval toasts:
+  - TUI & Dashboard: filter out expired approval requests and items in terminal states (`EXPIRED`, `CANCELLED`, `APPROVED`, `DENIED`) so they are never displayed in the toast layer or drawer.
+  - Automatically dismiss toasts on expiration: `ApprovalToast` monitors `expires_at` and cancels out when the expiration deadline passes. The Dashboard schedules timers for pending approvals with `expiresAt` deadlines and reacts to `inbox.item.expired`, `action.approval.expired`, and `action.approval.invalidated` events.
+  - Graceful terminal error handling: when an action approval returns a terminal or expired error (`inbox item is already terminal: expired`), the toast is cleanly dismissed and recorded as expired rather than leaving the user stuck in an error loop.
+  - See `docs/activity-approval-rendering.md`.
+
+- 2026-10-31 — Approval toasts replace the approval drawer:
+  - Dashboard: replaced the collapsible **Pending approvals** drawer with a
+    floating toast stack above the conversation. Each toast carries the request
+    preview, scope and its decision buttons and stays visible until its own
+    decision is recorded. Guarded endpoints, request IDs and permission scopes
+    are unchanged; rendering still never authorizes execution.
+  - Dashboard: a pending approval is no longer repeated as an activity row.
+    The Main Activity and Coding Activity streams hide the request row while
+    it is pending and show it again as an ordinary outcome once the decision is
+    recorded. A request that was never registered keeps its row, so a request
+    without a toast is never silently hidden.
+  - TUI: replaced the `#approval-drawer` container with an `#approval-toast-layer`
+    overlay that floats over the conversation without shrinking it; the request
+    widget is now `ApprovalToast` (formerly `InlineApproval`). The layer is
+    displayed only while a request is pending and is cleared on session change.
+  - TUI: Main Activity and Coding Activity streams hide the pending approval row
+    the same way, keeping the waiting-approval header status.
+  - See `docs/activity-approval-rendering.md`. User-owned verification (not run
+    by the agent): `PYTHONPATH=src pytest tests/test_tui_approval_realtime.py
+    tests/test_computer_control.py -q` and `node --test
+    tests/dashboard/live_chat_approval_ui.test.mjs
+    tests/dashboard/live_chat_reducer.test.mjs`.
+
 - 2026-10-31 — Live Steer Mode & Supervisor Lease Fencing:
   - Fix stale lease identity hazard on tasks suspended in `WAITING` state (waiting for human approval): removed `ExecutionState.WAITING` from `VALID_CHECKPOINT_STATES`, gracefully skip checkpointing on waiting tasks in `ExecutionSupervisor.checkpoint` and `LaneCoordinator.checkpoint`, and re-bind lease credentials in `resume_running` upon approval resume to prevent `StaleLeaseError`.
   - Prevent premature lane termination in `ChatGateway` and `LaneCoordinator.finish` when a task is waiting for user approval.

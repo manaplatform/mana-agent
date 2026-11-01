@@ -42,6 +42,7 @@ This guarantees tool visibility on *every* turn, not just the first message.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import getpass
 import json
 import logging
@@ -53,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Static
@@ -186,9 +187,9 @@ class ManaChatApp(App):
         self._transactional_modal_queue: list[str] = []
         self._transactional_modal_active = False
         self._active_transactional_id = ""
-        self._resolved_inline_approvals: set[str] = set()
-        self._drawer_request_ids: set[str] = set()
-        self._approval_drawer_generation = 0
+        self._resolved_approvals: set[str] = set()
+        self._toast_request_ids: set[str] = set()
+        self._approval_toast_generation = 0
         self._saved_modal_previews: dict[str, str] = {}
         self._unsubscribe_computer_permissions = None
         self._unsubscribe_session_events = None
@@ -205,8 +206,6 @@ class ManaChatApp(App):
         # Log gets 1fr, input bar is fixed at the bottom of the body so it cannot
         # go below the footer.
         with Vertical(id="body"):
-            with VerticalScroll(id="approval-drawer"):
-                yield Static("Pending approvals", id="approval-drawer-title")
             self.chat_log = ChatLog(history=self.history, id="chat-log")
             yield self.chat_log
 
@@ -224,6 +223,12 @@ class ManaChatApp(App):
                     id="input-help",
                 )
 
+        # Floating layer for pending approval toasts. It sits above the
+        # conversation and the input bar so a pending request is always
+        # visible and actionable without scrolling. It is hidden until a
+        # request is pending.
+        with Vertical(id="approval-toast-layer"):
+            pass
 
         yield Footer()
 
@@ -236,6 +241,7 @@ class ManaChatApp(App):
             self.input.set_command_completions(cmd_names)
             self.input.focus()
         self._ui_thread_id = threading.get_ident()
+        self._sync_approval_toast_layer()
         self._unsubscribe_computer_permissions = self.history.subscribe(
             self._handle_computer_permission_event
         )
@@ -290,7 +296,20 @@ class ManaChatApp(App):
         if not isinstance(event, CodingActivityEvent):
             return
         activity = event.activity
-        if activity.get("event_type") not in {
+        event_type = activity.get("event_type")
+        if event_type in {
+            "action.approval.expired",
+            "action.approval.invalidated",
+            "inbox.item.expired",
+        }:
+            metadata = activity.get("metadata") or {}
+            request_ids = {str(metadata.get(key) or "") for key in ("permission_request_id", "approval_request_id", "inbox_item_id", "action_id")} - {""}
+            if request_ids:
+                from mana_agent.tui.computer_permission import ApprovalDecided
+                self.post_message(ApprovalDecided(request_ids, approved=False))
+                self.update_status("Approval request expired or invalidated")
+            return
+        if event_type not in {
             "computer.waiting_permission",
             "remote_execution.waiting_permission",
             "server.waiting_approval",
@@ -299,6 +318,18 @@ class ManaChatApp(App):
         }:
             return
         metadata = activity.get("metadata") or {}
+        exp = metadata.get("expires_at")
+        expires_at_dt = None
+        if isinstance(exp, datetime):
+            expires_at_dt = exp
+        elif isinstance(exp, str) and exp:
+            try:
+                expires_at_dt = datetime.fromisoformat(exp)
+            except Exception:
+                pass
+        if expires_at_dt and expires_at_dt <= datetime.now(timezone.utc):
+            return
+
         request_id = str(metadata.get("permission_request_id") or "")
         if bool(metadata.get("transactional_action_approval")) or activity.get("event_type") == "action.approval.required":
             inbox_item_id = str(metadata.get("inbox_item_id") or request_id)
@@ -330,6 +361,7 @@ class ManaChatApp(App):
             server=bool(metadata.get("server_approval") or activity.get("event_type") == "server.waiting_approval"),
             api=bool(metadata.get("api_approval") or activity.get("event_type") == "api.waiting_approval"),
             transactional=bool(metadata.get("transactional_action_approval")),
+            expires_at=expires_at_dt,
         ))
 
     def _subscribe_session_events(self, session_id: str = "") -> None:
@@ -383,6 +415,18 @@ class ManaChatApp(App):
                 or execution_id
             )
             metadata = dict(event.get("metadata") or {})
+            exp = metadata.get("expires_at")
+            expires_at_dt = None
+            if isinstance(exp, datetime):
+                expires_at_dt = exp
+            elif isinstance(exp, str) and exp:
+                try:
+                    expires_at_dt = datetime.fromisoformat(exp)
+                except Exception:
+                    pass
+            if expires_at_dt and expires_at_dt <= datetime.now(timezone.utc):
+                return
+
             backend = event.get("backend") or metadata.get("backend")
             if backend:
                 metadata["backend"] = backend
@@ -429,6 +473,7 @@ class ManaChatApp(App):
                     preview=preview_str,
                     server=bool(event_type == "server.waiting_approval" or metadata.get("server_approval")),
                     api=bool(event_type == "api.waiting_approval" or metadata.get("api_approval")),
+                    expires_at=expires_at_dt,
                 ))
             return
 
@@ -438,6 +483,9 @@ class ManaChatApp(App):
             "computer.permission_decided",
             "action.approval.granted",
             "action.approval.denied",
+            "action.approval.expired",
+            "action.approval.invalidated",
+            "inbox.item.expired",
         }:
             metadata = dict(event.get("metadata") or {})
             req_id = str(
@@ -463,11 +511,25 @@ class ManaChatApp(App):
                 except Exception:
                     pass
             decision = str(metadata.get("decision") or "")
-            from mana_agent.tui.computer_permission import InlineApprovalDecided
+            is_expired = (
+                event_type in {"action.approval.expired", "action.approval.invalidated", "inbox.item.expired"}
+                or decision == "expired"
+            )
+            from mana_agent.tui.computer_permission import ApprovalDecided
             request_ids = {str(metadata.get(key) or "") for key in ("permission_request_id", "approval_request_id", "inbox_item_id", "action_id")} - {""}
             if request_ids:
-                self.post_message(InlineApprovalDecided(request_ids, event_type == "action.approval.granted" or decision in {"approve", "allow_once", "allow_session", "always"}))
-            if decision == "deny" or event_type == "action.approval.denied":
+                self.post_message(
+                    ApprovalDecided(
+                        request_ids,
+                        not is_expired and (
+                            event_type == "action.approval.granted"
+                            or decision in {"approve", "allow_once", "allow_session", "always"}
+                        ),
+                    )
+                )
+            if is_expired:
+                self.update_status("Approval request expired or invalidated")
+            elif decision == "deny" or event_type == "action.approval.denied":
                 self.update_status(
                     "Server action denied"
                     if event_type == "server.approval_decided"
@@ -557,14 +619,14 @@ class ManaChatApp(App):
         self._transactional_modal_queue.clear()
         self._transactional_modal_active = False
         self._active_transactional_id = ""
-        self._resolved_inline_approvals.clear()
-        self._approval_drawer_generation += 1
-        self._drawer_request_ids.clear()
+        self._resolved_approvals.clear()
+        self._approval_toast_generation += 1
+        self._toast_request_ids.clear()
         if self.chat_log is not None and self.chat_log.is_mounted:
-            from mana_agent.tui.computer_permission import InlineApproval
-            for controls in list(self.query(InlineApproval)):
+            from mana_agent.tui.computer_permission import ApprovalToast
+            for controls in list(self.query(ApprovalToast)):
                 controls.remove()
-            self.query_one("#approval-drawer", VerticalScroll).display = False
+            self._sync_approval_toast_layer()
         self.active_flow_id = None
         self._tool_cid_map.clear()
 
@@ -608,10 +670,15 @@ class ManaChatApp(App):
             logger.debug("Failed to replay durable events for session %s", session_id, exc_info=True)
 
     def _queue_outstanding_transactional_approvals(self) -> None:
-        if self.gateway is None:
+        if self.gateway is None or not getattr(self.gateway, "human_inbox_service", None):
             return
         try:
             from mana_agent.human_inbox.models import InboxQuery, InboxStatus
+
+            try:
+                self.gateway.human_inbox_service.expire_due()
+            except Exception:
+                pass
 
             rows = self.gateway.human_inbox_service.list(
                 InboxQuery(statuses={InboxStatus.PENDING, InboxStatus.DELIVERED}),
@@ -619,8 +686,13 @@ class ManaChatApp(App):
             )
         except Exception:
             return
+        now = datetime.now(timezone.utc)
         for item in rows:
             if item.request_type.value == "approval" and item.action_intent_id:
+                if item.status.value not in {"pending", "delivered"}:
+                    continue
+                if item.expires_at and item.expires_at <= now:
+                    continue
                 self._enqueue_transactional_modal(item.inbox_item_id)
 
     def _enqueue_transactional_modal(
@@ -688,7 +760,12 @@ class ManaChatApp(App):
             except Exception:
                 pass
 
-        if item is not None and (item.request_type.value != "approval" or item.status.value not in {"pending", "delivered"}):
+        now = datetime.now(timezone.utc)
+        if item is not None and (
+            item.request_type.value != "approval"
+            or item.status.value not in {"pending", "delivered"}
+            or (item.expires_at and item.expires_at <= now)
+        ):
             return
 
         preview_data = None
@@ -763,8 +840,12 @@ class ManaChatApp(App):
                 except Exception:
                     pass
 
-            if candidate_item is not None and candidate_item.status.value not in {"pending", "delivered"}:
-                # Item is already resolved (e.g. approved/denied), skip redundant modal
+            now = datetime.now(timezone.utc)
+            if candidate_item is not None and (
+                candidate_item.status.value not in {"pending", "delivered"}
+                or (candidate_item.expires_at and candidate_item.expires_at <= now)
+            ):
+                # Item is already resolved or expired, skip redundant modal
                 continue
 
             if candidate_item is not None and candidate_item.action_intent_id:
@@ -772,15 +853,27 @@ class ManaChatApp(App):
                     from mana_agent.transactional_actions.runtime import default_action_gateway
                     act_gw = default_action_gateway(self.repo_root)
                     act = act_gw.store.get_action(candidate_item.action_intent_id)
-                    if act is not None and act.state.value not in {"awaiting_approval"}:
-                        # Action is already approved/executing/committed, skip redundant modal
+                    from mana_agent.transactional_actions.models import utc_now
+                    u_now = utc_now()
+                    if act is not None and (
+                        act.state.value not in {"awaiting_approval"}
+                        or (act.expires_at and act.expires_at <= u_now)
+                        or (act.policy_decision and act.policy_decision.expires_at and act.policy_decision.expires_at <= u_now)
+                    ):
+                        # Action is already approved/executing/committed or expired, skip redundant modal
                         continue
                 except Exception:
                     pass
                 if self.gateway is not None and hasattr(self.gateway, "_transactional_runtime"):
                     try:
                         gw_act = self.gateway._transactional_runtime.store.get_action(candidate_item.action_intent_id)
-                        if gw_act is not None and gw_act.state.value not in {"awaiting_approval"}:
+                        from mana_agent.transactional_actions.models import utc_now
+                        u_now = utc_now()
+                        if gw_act is not None and (
+                            gw_act.state.value not in {"awaiting_approval"}
+                            or (gw_act.expires_at and gw_act.expires_at <= u_now)
+                            or (gw_act.policy_decision and gw_act.policy_decision.expires_at and gw_act.policy_decision.expires_at <= u_now)
+                        ):
                             continue
                     except Exception:
                         pass
@@ -806,46 +899,98 @@ class ManaChatApp(App):
         self._active_transactional_id = inbox_item_id
         from mana_agent.tui.computer_permission import ComputerPermissionRequested
 
+        expires_at_dt = getattr(item, "expires_at", None) if item is not None else None
         self.post_message(ComputerPermissionRequested(
             request_id=inbox_item_id,
             scope="transactional_action.once",
             preview=preview_str,
             transactional=True,
             pending_count=pending_count,
+            expires_at=expires_at_dt,
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
-        generation = self._approval_drawer_generation
-        self.call_after_refresh(lambda: self._show_inline_approval(event) if generation == self._approval_drawer_generation else None)
+        generation = self._approval_toast_generation
+        self.call_after_refresh(lambda: self._show_approval_toast(event) if generation == self._approval_toast_generation else None)
 
-    def _show_inline_approval(self, event: Any) -> None:
-        """Show a request in the shared drawer without creating a chat card."""
-        from mana_agent.tui.computer_permission import InlineApproval
+    def _show_approval_toast(self, event: Any) -> None:
+        """Show a request as a floating toast without creating a chat card."""
+        from mana_agent.tui.computer_permission import ApprovalToast
 
-        if event.request_id in self._resolved_inline_approvals or event.request_id in self._drawer_request_ids:
+        if event.request_id in self._resolved_approvals or event.request_id in self._toast_request_ids:
             return
-        drawer = self.query_one("#approval-drawer", VerticalScroll)
-        self._drawer_request_ids.add(event.request_id)
-        controls = InlineApproval(event, lambda choice: self._apply_computer_permission(choice, controls=controls))
-        drawer.mount(controls)
-        drawer.display = True
 
-    def on_inline_approval_decided(self, event: Any) -> None:
-        from mana_agent.tui.computer_permission import InlineApproval
+        now = datetime.now(timezone.utc)
+        if getattr(event, "expires_at", None) and event.expires_at <= now:
+            self._resolved_approvals.add(event.request_id)
+            return
 
-        self._resolved_inline_approvals.update(event.request_ids)
+        item = None
+        try:
+            from mana_agent.human_inbox import default_human_inbox_service
+            service = (getattr(self.gateway, "human_inbox_service", None) if self.gateway else None) or default_human_inbox_service()
+            try:
+                item = service.repository.get(event.request_id)
+            except Exception:
+                matches = service.repository.find_for_action(event.request_id)
+                if matches:
+                    item = matches[0]
+        except Exception:
+            pass
+
+        if item is not None:
+            if item.status.value not in {"pending", "delivered"}:
+                self._resolved_approvals.add(event.request_id)
+                return
+            if item.expires_at and item.expires_at <= now:
+                self._resolved_approvals.add(event.request_id)
+                return
+            if item.action_intent_id:
+                try:
+                    from mana_agent.transactional_actions.runtime import default_action_gateway
+                    act_gw = default_action_gateway(self.repo_root)
+                    act = act_gw.store.get_action(item.action_intent_id)
+                    from mana_agent.transactional_actions.models import utc_now
+                    u_now = utc_now()
+                    if act is not None and (
+                        act.state.value not in {"awaiting_approval"}
+                        or (act.expires_at and act.expires_at <= u_now)
+                        or (act.policy_decision and act.policy_decision.expires_at and act.policy_decision.expires_at <= u_now)
+                    ):
+                        self._resolved_approvals.add(event.request_id)
+                        return
+                except Exception:
+                    pass
+
+        layer = self.query_one("#approval-toast-layer", Vertical)
+        self._toast_request_ids.add(event.request_id)
+        controls = ApprovalToast(event, lambda choice: self._apply_computer_permission(choice, controls=controls))
+        layer.mount(controls)
+        self._sync_approval_toast_layer()
+
+    def _sync_approval_toast_layer(self) -> None:
+        """Keep the toast layer visible exactly while a request is pending."""
+        try:
+            layer = self.query_one("#approval-toast-layer", Vertical)
+        except Exception:
+            return
+        layer.display = bool(self._toast_request_ids)
+
+    def on_approval_decided(self, event: Any) -> None:
+        from mana_agent.tui.computer_permission import ApprovalToast
+
+        self._resolved_approvals.update(event.request_ids)
         self._transactional_modal_queue[:] = [item for item in self._transactional_modal_queue if item not in event.request_ids]
         advance = self._active_transactional_id in event.request_ids
         if advance:
             self._transactional_modal_active = False
             self._active_transactional_id = ""
-        for controls in list(self.query(InlineApproval)):
+        for controls in list(self.query(ApprovalToast)):
             if controls.request.request_id not in event.request_ids:
                 continue
             controls.remove()
-        self._drawer_request_ids.difference_update(event.request_ids)
-        if not self._drawer_request_ids:
-            self.query_one("#approval-drawer", VerticalScroll).display = False
+        self._toast_request_ids.difference_update(event.request_ids)
+        self._sync_approval_toast_layer()
         if self.chat_log is not None:
             for panel in self.chat_log._execution_panels.values():
                 for box in (panel.main_box, panel.coding_box):
@@ -865,18 +1010,18 @@ class ManaChatApp(App):
             return
 
         batch_ids = list(self._transactional_modal_queue) if getattr(choice, "approve_all", False) else []
-        generation = self._approval_drawer_generation
+        generation = self._approval_toast_generation
 
         async def complete_and_advance() -> None:
             success = False
             try:
                 success = await self._complete_computer_permission(choice, batch_ids=batch_ids)
             finally:
-                if generation == self._approval_drawer_generation:
+                if generation == self._approval_toast_generation:
                     if controls is not None:
                         if success:
-                            from mana_agent.tui.computer_permission import InlineApprovalDecided
-                            self.on_inline_approval_decided(InlineApprovalDecided({choice.request_id}, choice.decision is not None))
+                            from mana_agent.tui.computer_permission import ApprovalDecided
+                            self.on_approval_decided(ApprovalDecided({choice.request_id}, choice.decision is not None))
                         else:
                             controls.enable_choices()
                     if choice.transactional and (success or controls is None) and self._active_transactional_id == choice.request_id:
@@ -920,6 +1065,17 @@ class ManaChatApp(App):
                         service = fallback
                     except Exception:
                         pass
+                now = datetime.now(timezone.utc)
+                if reference is not None and (
+                    reference.status.value not in {"pending", "delivered"}
+                    or (reference.expires_at and reference.expires_at <= now)
+                ):
+                    is_expired = reference.status.value == "expired" or bool(reference.expires_at and reference.expires_at <= now)
+                    logger.info("Inbox item %s is already terminal/expired (%s)", reference.inbox_item_id, reference.status.value)
+                    self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
+                    from mana_agent.tui.computer_permission import ApprovalDecided
+                    self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                    return True
                 if self.gateway is not None:
                     command = (
                         self.gateway.transactional_action_approval_command
@@ -957,6 +1113,19 @@ class ManaChatApp(App):
                         ):
                             msg = "Transactional action denied."
                             handled = True
+                        elif (
+                            "already terminal" in exc_str
+                            or "is terminal" in exc_str
+                            or "expired" in exc_str
+                            or "no longer approvable" in exc_str
+                            or "no longer accepts" in exc_str
+                        ):
+                            is_expired = "expired" in exc_str
+                            logger.info("Gateway transactional approval command error (terminal/expired): %s", exc)
+                            self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
+                            from mana_agent.tui.computer_permission import ApprovalDecided
+                            self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                            return True
                         else:
                             logger.warning("Gateway transactional approval command error: %s", exc)
 
@@ -1097,6 +1266,19 @@ class ManaChatApp(App):
                             logger.info("Transactional action denial was already recorded: %s", exc)
                             msg = "Transactional action denied."
                             handled = True
+                        elif (
+                            "already terminal" in exc_str
+                            or "is terminal" in exc_str
+                            or "expired" in exc_str
+                            or "no longer approvable" in exc_str
+                            or "no longer accepts" in exc_str
+                        ):
+                            is_expired = "expired" in exc_str
+                            logger.info("Transactional action approval was terminal/expired: %s", exc)
+                            self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
+                            from mana_agent.tui.computer_permission import ApprovalDecided
+                            self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                            return True
                         else:
                             logger.exception("Failed to resolve transactional action approval directly")
                             msg = f"Failed to record approval decision: {exc}"
@@ -1221,6 +1403,19 @@ class ManaChatApp(App):
             ))
             return True
         except Exception as exc:
+            exc_str = str(exc).lower()
+            if "expired" in exc_str or "already terminal" in exc_str or "is terminal" in exc_str:
+                action_name = (
+                    "Server approval"
+                    if choice.server
+                    else "API approval"
+                    if choice.api
+                    else "Computer permission"
+                )
+                self.notify(f"{action_name} request expired.", severity="information")
+                from mana_agent.tui.computer_permission import ApprovalDecided
+                self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                return True
             action_name = (
                 "Server approval"
                 if choice.server
