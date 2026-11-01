@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-01 — CI & Testing: fix Windows CI command quoting in approval binding regression tests:
+  - In `tests/coding/test_approval_binding_regressions.py` (`test_human_approval_resumes_exact_pending_action` and `test_failed_approved_command_does_not_run_model_suggested_retry`): use cross-platform double quotes (`python -c "print(123)"` and `python -c "import sys; sys.exit(7)"`) rather than single quotes. On Windows `cmd.exe`, single quotes are not string delimiters, which caused Python's `-c` flag to parse `'print(123)'` as a discarded string literal and `'import sys; ...'` to fail with `SyntaxError: unterminated string literal` (exit code 1 instead of 7).
+  - User-owned verification (not run by the agent): `pytest tests/coding/test_approval_binding_regressions.py -k "test_human_approval_resumes_exact_pending_action or test_failed_approved_command_does_not_run_model_suggested_retry" -v`.
+
 - 2026-11-01 — TUI & Lifecycle: guard screen stack access in unmounted TUI instances and isolate test history:
   - TUI: added `_active_permission_screen` safe property to `ManaChatApp` guarding against `textual.app.ScreenStackError: No screens on stack` when checking or dismissing active permission modals on unmounted/unrunning instances (such as during test sessions and headless lifecycle replacements).
   - Lifecycle tests: isolated global `ChatHistory` via autouse fixture in `tests/test_codex_tui_lifecycle.py` and explicit fresh history instance in `test_internal_reasoning_and_deltas_remain_hidden` so test cases never inherit dirty events from preceding tests.

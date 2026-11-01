@@ -23,7 +23,7 @@ def dispatcher(root: Path, task: str = "task-one") -> ToolExecutionDispatcher:
 def test_human_approval_resumes_exact_pending_action(tmp_path, monkeypatch):
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     agent = dispatcher(tmp_path)
-    args = {"command": "python -c 'print(123)'"}
+    args = {"command": 'python -c "print(123)"'}
     pending = agent.dispatch("run_command", args, call_id="first")
     assert pending["permission_required"] and pending["action_id"]
     gateway = default_action_gateway(tmp_path)
@@ -169,7 +169,7 @@ def test_failed_approved_command_does_not_run_model_suggested_retry(tmp_path, mo
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     agent = dispatcher(tmp_path)
     agent.llm = SimpleNamespace(invoke=lambda _: pytest.fail("failure must not invoke model judgment"))
-    args = {"command": "python -c 'import sys; sys.exit(7)'"}
+    args = {"command": 'python -c "import sys; sys.exit(7)"'}
     pending = agent.dispatch("run_command", args)
     grant = default_action_gateway(tmp_path).approve(pending["action_id"], approved_by=getpass.getuser())
     result = agent.dispatch("run_command", {**args, "action_approval_id": grant})
@@ -436,7 +436,7 @@ def test_supervisor_cancellation_fences_approved_action(tmp_path, monkeypatch):
     monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
 
     agent = dispatcher(tmp_path, task="task-sup-1")
-    pending = agent.dispatch("run_command", {"command": "python -c 'print(456)'"})
+    pending = agent.dispatch("run_command", {"command": 'python -c "print(456)"'})
     assert pending["permission_required"]
 
     item = inbox.repository.get(pending["inbox_item_id"])
@@ -459,7 +459,7 @@ def test_supervisor_cancellation_fences_approved_action(tmp_path, monkeypatch):
     assert supervisor.store.get_task("task-sup-1").state is ExecutionState.CANCELLED
 
     # Attempt to execute through dispatcher
-    result = agent.dispatch("run_command", {"command": "python -c 'print(456)'", "action_approval_id": grant})
+    result = agent.dispatch("run_command", {"command": 'python -c "print(456)"', "action_approval_id": grant})
     assert not result["ok"]
     assert "cancelled" in result["error"].lower()
 
@@ -498,7 +498,7 @@ def test_supervisor_cancellation_fences_ancestor_task(tmp_path, monkeypatch):
     monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
 
     agent = dispatcher(tmp_path, task="task-child")
-    pending = agent.dispatch("run_command", {"command": "python -c 'print(789)'"})
+    pending = agent.dispatch("run_command", {"command": 'python -c "print(789)"'})
     assert pending["permission_required"]
 
     item = inbox.repository.get(pending["inbox_item_id"])
@@ -521,7 +521,7 @@ def test_supervisor_cancellation_fences_ancestor_task(tmp_path, monkeypatch):
     assert supervisor.store.get_task("task-parent").state is ExecutionState.CANCELLED
 
     # Child execution must be fenced
-    result = agent.dispatch("run_command", {"command": "python -c 'print(789)'", "action_approval_id": grant})
+    result = agent.dispatch("run_command", {"command": 'python -c "print(789)"', "action_approval_id": grant})
     assert not result["ok"]
     assert "ancestor" in result["error"].lower() or "cancelled" in result["error"].lower()
 
@@ -547,7 +547,7 @@ def test_supervisor_atomic_execution_claim_blocks_cancellation(tmp_path, monkeyp
     gateway.inbox_service = inbox
 
     agent = dispatcher(tmp_path, task="task-side-effect")
-    pending = agent.dispatch("run_command", {"command": "python -c 'print(101)'"})
+    pending = agent.dispatch("run_command", {"command": 'python -c "print(101)"'})
     assert pending["permission_required"]
 
     item = inbox.repository.get(pending["inbox_item_id"])
