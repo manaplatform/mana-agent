@@ -376,7 +376,7 @@ class ToolExecutionDispatcher:
             from mana_agent.transactional_actions.adapters import ShellActionAdapter
             from mana_agent.transactional_actions.gateway import ApprovalRequired
             from mana_agent.transactional_actions.runtime import default_action_gateway
-            from mana_agent.utils.shell_argv import local_shell_argv, windows_safe_subprocess_argv
+            from mana_agent.utils.shell_argv import local_shell_argv
             import subprocess
             working = (self.repo_root / str(cwd or ".")).resolve()
             if not working.is_relative_to(self.repo_root) or not working.is_dir():
@@ -402,10 +402,8 @@ class ToolExecutionDispatcher:
                 idempotency_key=operation_key, timeout_seconds=timeout_s,
                 expected_outputs=list(args.get("expected_outputs") or []),
                 allow_command_result_verification=True,
-                runner=lambda argv, **kwargs: subprocess.run(
-                    windows_safe_subprocess_argv(argv), cwd=working, capture_output=True,
-                    text=True, timeout=timeout_s, check=False,
-                ),
+                runner=lambda argv, **kwargs: subprocess.run(argv, cwd=working, capture_output=True,
+                    text=True, timeout=timeout_s, check=False),
             )
             if approved_action is not None and approved_action.intent_digest() != safe_adapter.build_intent().intent_digest():
                 return {"ok": False, "error_code": "INVALID_APPROVAL", "error": "Approval does not match the exact command and execution context."}

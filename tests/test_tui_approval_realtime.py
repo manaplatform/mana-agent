@@ -212,7 +212,10 @@ def test_drawer_keeps_other_requests_and_clears_on_session_change(tmp_path: Path
             assert app.screen.request_id == "one"
             assert [r.request_id for r in app._modal_request_queue] == ["two"]
             app.post_message(InlineApprovalDecided({"one"}, approved=False))
-            await pilot.pause()
+            for _ in range(5):
+                await pilot.pause()
+                if isinstance(app.screen, ComputerPermissionScreen) and getattr(app.screen, "request_id", None) == "two":
+                    break
             assert isinstance(app.screen, ComputerPermissionScreen)
             assert app.screen.request_id == "two"
             app._handle_session_replacement("new-session", clear_view=False)

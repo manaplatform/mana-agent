@@ -1608,18 +1608,15 @@ class AskAgent:
                 if not command_cwd.is_dir():
                     raise FileNotFoundError("command cwd does not exist")
                 execution_manager = getattr(self, "execution_manager", None)
-                from mana_agent.utils.shell_argv import local_shell_argv, windows_safe_subprocess_argv
+                from mana_agent.utils.shell_argv import local_shell_argv
 
                 # Non-login shell: preserve PATH (SWE-bench python3 shims). Never use -lc.
                 shell_argv = local_shell_argv(executed_cmd)
 
                 def transactional_runner(argv, **_kwargs):  # noqa: ANN001
                     if execution_manager is None:
-                        target = windows_safe_subprocess_argv(argv)
-                        if not isinstance(target, str):
-                            target = list(target)
                         return subprocess.run(
-                            target, cwd=command_cwd, shell=False, check=False,
+                            list(argv), cwd=command_cwd, shell=False, check=False,
                             timeout=timeout_seconds, capture_output=True, text=True,
                         )
                     execution = execution_manager.execute_once_sync(

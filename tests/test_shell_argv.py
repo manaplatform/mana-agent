@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mana_agent.utils.shell_argv import local_shell_argv, windows_safe_subprocess_argv
+from mana_agent.utils.shell_argv import local_shell_argv
 
 
 def test_local_shell_argv_uses_non_login_shell_on_posix() -> None:
@@ -76,28 +76,3 @@ def test_python3_compileall_prefix_is_allowlisted() -> None:
     assert_shell_allowed("python3 -m compileall .")
     assert_shell_allowed("python3 -m compileall src")
     assert_shell_allowed("python -m compileall src")
-
-
-def test_windows_safe_subprocess_argv_wraps_cmd_exe_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(os, "name", "nt")
-    argv = ["cmd.exe", "/d", "/s", "/c", 'python -c "print(123)"']
-    assert windows_safe_subprocess_argv(argv) == '"cmd.exe" /d /s /c "python -c "print(123)""'
-
-
-def test_windows_safe_subprocess_argv_preserves_posix(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(os, "name", "posix")
-    argv = ["/bin/sh", "-c", 'python -c "print(123)"']
-    assert windows_safe_subprocess_argv(argv) == argv
-
-
-def test_windows_safe_subprocess_argv_leaves_non_cmd_executables_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(os, "name", "nt")
-    argv = ["python", "-c", "print(123)"]
-    assert windows_safe_subprocess_argv(argv) == argv
-
-
-def test_windows_safe_subprocess_argv_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(os, "name", "nt")
-    formatted = '"cmd.exe" /d /s /c "python -c "print(123)""'
-    assert windows_safe_subprocess_argv(formatted) == formatted
-

@@ -423,11 +423,8 @@ class ShellActionAdapter(ActionAdapter):
         return ActionPreview(summary="execute shell argv", resources=[{"cwd": str(self.cwd), "network_access": "unknown"}, *[{"path": item, "change": "declared output"} for item in self.expected_outputs]], exact_invocation=action.normalized_arguments, expected_side_effects=action.expected_side_effects, risks=["destructive executable"] if destructive else ["process effects may exceed declared outputs", "network access requirements are unknown"], supports_native_idempotency=False)
 
     def execute(self, action: ActionIntent) -> dict[str, Any]:
-        from mana_agent.utils.shell_argv import windows_safe_subprocess_argv
-
         environment = {**os.environ, **self.environment}
-        run_argv = windows_safe_subprocess_argv(self.argv)
-        completed = self.runner(run_argv, cwd=self.cwd, env=environment, capture_output=True, text=True, shell=False, timeout=self.timeout_seconds, check=False)
+        completed = self.runner(self.argv, cwd=self.cwd, env=environment, capture_output=True, text=True, shell=False, timeout=self.timeout_seconds, check=False)
         return {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
 
     def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:

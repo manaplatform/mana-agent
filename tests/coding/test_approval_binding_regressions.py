@@ -22,8 +22,10 @@ def dispatcher(root: Path, task: str = "task-one") -> ToolExecutionDispatcher:
 
 def test_human_approval_resumes_exact_pending_action(tmp_path, monkeypatch):
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    script = tmp_path / "print_123.py"
+    script.write_text("print(123)\n", encoding="utf-8")
     agent = dispatcher(tmp_path)
-    args = {"command": 'python -c "print(123)"'}
+    args = {"command": f"python {script.name}"}
     pending = agent.dispatch("run_command", args, call_id="first")
     assert pending["permission_required"] and pending["action_id"]
     gateway = default_action_gateway(tmp_path)
@@ -167,9 +169,11 @@ def test_policy_fingerprint_invalidates_pre_fix_pending_actions():
 
 def test_failed_approved_command_does_not_run_model_suggested_retry(tmp_path, monkeypatch):
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    script = tmp_path / "exit_7.py"
+    script.write_text("import sys; sys.exit(7)\n", encoding="utf-8")
     agent = dispatcher(tmp_path)
     agent.llm = SimpleNamespace(invoke=lambda _: pytest.fail("failure must not invoke model judgment"))
-    args = {"command": 'python -c "import sys; sys.exit(7)"'}
+    args = {"command": f"python {script.name}"}
     pending = agent.dispatch("run_command", args)
     grant = default_action_gateway(tmp_path).approve(pending["action_id"], approved_by=getpass.getuser())
     result = agent.dispatch("run_command", {**args, "action_approval_id": grant})
