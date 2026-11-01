@@ -1,5 +1,8 @@
 # Mana-Agent
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/manaplatform/mana-agent/refs/heads/main/logo.png" alt="Mana-Agent" width="100%" />
+</p>
 [English](README.md) · [العربية](README.ar.md) · [বাংলা](README.bn.md) · [Brezhoneg](README.br.md) · [Bosanski](README.bs.md) · [Dansk](README.da.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [فارسی](README.fa.md) · [Français](README.fr.md) · [Ελληνικά](README.gr.md) · [Italiano](README.it.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Norsk](README.no.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [Tiếng Việt](README.vi.md) · [简体中文](README.zh.md) · [繁體中文](README.zht.md)
 
 Mana-Agent は、AI エージェントを連携させる Python 製のオープンソースプラットフォームです。自律実行ループ、専門エージェント、永続的なタスク管理、監督下でのツール実行、拡張可能な連携機能を組み合わせています。ユーザーが目標を定め、Mana-Agent が実際のツールを使い、結果を確認しながら達成を支援します。

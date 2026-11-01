@@ -1,5 +1,8 @@
 # Mana-Agent
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/manaplatform/mana-agent/refs/heads/main/logo.png" alt="Mana-Agent" width="100%" />
+</p>
 [English](README.md) · [العربية](README.ar.md) · [বাংলা](README.bn.md) · [Brezhoneg](README.br.md) · [Bosanski](README.bs.md) · [Dansk](README.da.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [فارسی](README.fa.md) · [Français](README.fr.md) · [Ελληνικά](README.gr.md) · [Italiano](README.it.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Norsk](README.no.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [Tiếng Việt](README.vi.md) · [简体中文](README.zh.md) · [繁體中文](README.zht.md)
 
 Ur bladenn digor diazezet war Python eo Mana-Agent evit aozañ ajanted skiant artificiel ha kas labourioù da benn. Kinnig a ra ur c'helc'h erounit emren, ajanted arbennikaet, merañ padus an trevelloù, ostilhoù dindan evezh hag etrekewerioù ledanadus. Lakaat a rit ur pal; Mana-Agent a skoazell ac'hanoc'h da vont war-raok ha da wiriañ an disoc'hoù.
