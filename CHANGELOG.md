@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-02 — Execution & Windows Compatibility: prevent Windows `cmd.exe /c` quote mangling in subprocess execution:
+  - Added `windows_safe_subprocess_argv()` in `src/mana_agent/utils/shell_argv.py` to format `cmd.exe /d /s /c` argv sequences as single outer-quoted strings on Windows (`os.name == "nt"`). When `subprocess.run` receives a list starting with `cmd.exe /c`, Python's `subprocess.list2cmdline()` escapes embedded double quotes with backslashes (`\"`), which `cmd.exe` does not unescape, resulting in literal quotes passed to child processes (e.g. `python -c "print(123)"` evaluating `"print(123)"` as a no-op string literal with empty stdout, and `python -c "import sys; sys.exit(7)"` failing argument tokenization with `SyntaxError` exit code 1 instead of 7).
+  - Integrated `windows_safe_subprocess_argv()` into `ShellActionAdapter.execute()`, `ToolExecutionDispatcher` command runner in `src/mana_agent/coding/programmatic.py`, and `AskAgent` transactional runner in `src/mana_agent/multi_agent/runtime/ask_agent.py`.
+  - Added regression test suite in `tests/test_shell_argv.py` covering Windows command formatting, POSIX preservation, direct executable preservation, and idempotency.
+  - User-owned verification (not run by the agent): `pytest tests/test_shell_argv.py tests/coding/test_approval_binding_regressions.py -k "test_windows_safe_subprocess_argv or test_human_approval_resumes_exact_pending_action or test_failed_approved_command_does_not_run_model_suggested_retry" -v`.
+
 - 2026-11-01 — CI & Testing: fix Windows CI command quoting in approval binding regression tests:
   - In `tests/coding/test_approval_binding_regressions.py` (`test_human_approval_resumes_exact_pending_action` and `test_failed_approved_command_does_not_run_model_suggested_retry`): use cross-platform double quotes (`python -c "print(123)"` and `python -c "import sys; sys.exit(7)"`) rather than single quotes. On Windows `cmd.exe`, single quotes are not string delimiters, which caused Python's `-c` flag to parse `'print(123)'` as a discarded string literal and `'import sys; ...'` to fail with `SyntaxError: unterminated string literal` (exit code 1 instead of 7).
   - User-owned verification (not run by the agent): `pytest tests/coding/test_approval_binding_regressions.py -k "test_human_approval_resumes_exact_pending_action or test_failed_approved_command_does_not_run_model_suggested_retry" -v`.
