@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Static
@@ -187,10 +187,13 @@ class ManaChatApp(App):
         self._transactional_modal_queue: list[str] = []
         self._transactional_modal_active = False
         self._active_transactional_id = ""
-        self._resolved_approvals: set[str] = set()
-        self._toast_request_ids: set[str] = set()
-        self._approval_toast_generation = 0
+        self._resolved_inline_approvals: set[str] = set()
+        self._drawer_request_ids: set[str] = set()
+        self._approval_drawer_generation = 0
         self._saved_modal_previews: dict[str, str] = {}
+        self._modal_screen_active: bool = False
+        self._active_modal_request_id: str = ""
+        self._modal_request_queue: list[Any] = []
         self._unsubscribe_computer_permissions = None
         self._unsubscribe_session_events = None
         self._unsubscribe_api_approval_events = None
@@ -198,6 +201,22 @@ class ManaChatApp(App):
         self._execution_to_frontend_turn: dict[str, str] = {}
         self._current_frontend_turn_id: str | None = None
         self._ui_thread_id: int | None = None
+
+    @property
+    def _resolved_approvals(self) -> set[str]:
+        return self._resolved_inline_approvals
+
+    @property
+    def _toast_request_ids(self) -> set[str]:
+        return self._drawer_request_ids
+
+    @property
+    def _approval_toast_generation(self) -> int:
+        return self._approval_drawer_generation
+
+    @_approval_toast_generation.setter
+    def _approval_toast_generation(self, value: int) -> None:
+        self._approval_drawer_generation = value
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -208,10 +227,6 @@ class ManaChatApp(App):
         with Vertical(id="body"):
             self.chat_log = ChatLog(history=self.history, id="chat-log")
             yield self.chat_log
-
-            # Approval toast layer positioned above input bar without covering/blocking chat log
-            with Vertical(id="approval-toast-layer"):
-                pass
 
             # Bottom input bar (message box)
             with Vertical(id="input-bar"):
@@ -238,7 +253,10 @@ class ManaChatApp(App):
             self.input.set_command_completions(cmd_names)
             self.input.focus()
         self._ui_thread_id = threading.get_ident()
-        self._sync_approval_toast_layer()
+        try:
+            self.query_one("#approval-drawer", VerticalScroll).display = False
+        except Exception:
+            pass
         self._unsubscribe_computer_permissions = self.history.subscribe(
             self._handle_computer_permission_event
         )
@@ -616,14 +634,23 @@ class ManaChatApp(App):
         self._transactional_modal_queue.clear()
         self._transactional_modal_active = False
         self._active_transactional_id = ""
-        self._resolved_approvals.clear()
-        self._approval_toast_generation += 1
-        self._toast_request_ids.clear()
+        self._modal_request_queue.clear()
+        self._modal_screen_active = False
+        self._active_modal_request_id = ""
+        from mana_agent.tui.computer_permission import ComputerPermissionScreen
+        if isinstance(self.screen, ComputerPermissionScreen):
+            self.screen.dismiss(None)
+        self._resolved_inline_approvals.clear()
+        self._approval_drawer_generation += 1
+        self._drawer_request_ids.clear()
         if self.chat_log is not None and self.chat_log.is_mounted:
-            from mana_agent.tui.computer_permission import ApprovalToast
-            for controls in list(self.query(ApprovalToast)):
+            from mana_agent.tui.computer_permission import InlineApproval
+            for controls in list(self.query(InlineApproval)):
                 controls.remove()
-            self._sync_approval_toast_layer()
+            try:
+                self.query_one("#approval-drawer", VerticalScroll).display = False
+            except Exception:
+                pass
         self.active_flow_id = None
         self._tool_cid_map.clear()
 
@@ -907,19 +934,20 @@ class ManaChatApp(App):
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
-        generation = self._approval_toast_generation
-        self.call_after_refresh(lambda: self._show_approval_toast(event) if generation == self._approval_toast_generation else None)
+        self._show_permission_modal(event)
 
-    def _show_approval_toast(self, event: Any) -> None:
-        """Show a request as a floating toast without creating a chat card."""
-        from mana_agent.tui.computer_permission import ApprovalToast
+    def _show_permission_modal(self, event: Any) -> None:
+        """Show approval request in a modal popup screen over the entire chat UI."""
+        from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionChoice
 
-        if event.request_id in self._resolved_approvals or event.request_id in self._toast_request_ids:
+        if event.request_id in self._resolved_inline_approvals:
+            self._show_next_modal_in_queue()
             return
 
         now = datetime.now(timezone.utc)
         if getattr(event, "expires_at", None) and event.expires_at <= now:
-            self._resolved_approvals.add(event.request_id)
+            self._resolved_inline_approvals.add(event.request_id)
+            self._show_next_modal_in_queue()
             return
 
         item = None
@@ -937,10 +965,12 @@ class ManaChatApp(App):
 
         if item is not None:
             if item.status.value not in {"pending", "delivered"}:
-                self._resolved_approvals.add(event.request_id)
+                self._resolved_inline_approvals.add(event.request_id)
+                self._show_next_modal_in_queue()
                 return
             if item.expires_at and item.expires_at <= now:
-                self._resolved_approvals.add(event.request_id)
+                self._resolved_inline_approvals.add(event.request_id)
+                self._show_next_modal_in_queue()
                 return
             if item.action_intent_id:
                 try:
@@ -954,40 +984,95 @@ class ManaChatApp(App):
                         or (act.expires_at and act.expires_at <= u_now)
                         or (act.policy_decision and act.policy_decision.expires_at and act.policy_decision.expires_at <= u_now)
                     ):
-                        self._resolved_approvals.add(event.request_id)
+                        self._resolved_inline_approvals.add(event.request_id)
+                        self._show_next_modal_in_queue()
                         return
                 except Exception:
                     pass
 
-        layer = self.query_one("#approval-toast-layer", Vertical)
-        self._toast_request_ids.add(event.request_id)
-        controls = ApprovalToast(event, lambda choice: self._apply_computer_permission(choice, controls=controls))
-        layer.mount(controls)
-        self._sync_approval_toast_layer()
-
-    def _sync_approval_toast_layer(self) -> None:
-        """Keep the toast layer visible exactly while a request is pending."""
-        try:
-            layer = self.query_one("#approval-toast-layer", Vertical)
-        except Exception:
+        # If a modal is already displayed on screen, queue this request
+        if self._modal_screen_active or isinstance(self.screen, ComputerPermissionScreen):
+            if not any(getattr(req, "request_id", None) == event.request_id for req in self._modal_request_queue):
+                self._modal_request_queue.append(event)
             return
-        layer.display = bool(self._toast_request_ids)
 
-    def on_approval_decided(self, event: Any) -> None:
-        from mana_agent.tui.computer_permission import ApprovalToast
+        self._modal_screen_active = True
+        self._active_modal_request_id = event.request_id
 
-        self._resolved_approvals.update(event.request_ids)
+        screen = ComputerPermissionScreen(
+            request_id=event.request_id,
+            scope=event.scope,
+            preview=event.preview,
+            remote=getattr(event, "remote", False),
+            server=getattr(event, "server", False),
+            api=getattr(event, "api", False),
+            transactional=getattr(event, "transactional", False),
+            pending_count=getattr(event, "pending_count", 1) + len(self._modal_request_queue),
+            expires_at=getattr(event, "expires_at", None),
+        )
+
+        def _on_modal_dismiss(choice: Any) -> None:
+            self._modal_screen_active = False
+            self._active_modal_request_id = ""
+            if choice is not None:
+                self._apply_computer_permission(choice)
+            else:
+                if event.request_id not in self._resolved_inline_approvals:
+                    choice_deny = ComputerPermissionChoice(
+                        event.request_id,
+                        None,
+                        remote=getattr(event, "remote", False),
+                        server=getattr(event, "server", False),
+                        api=getattr(event, "api", False),
+                        transactional=getattr(event, "transactional", False),
+                    )
+                    self._apply_computer_permission(choice_deny)
+            self.call_after_refresh(self._show_next_modal_in_queue)
+
+        self.push_screen(screen, _on_modal_dismiss)
+
+    def _show_next_modal_in_queue(self) -> None:
+        from mana_agent.tui.computer_permission import ComputerPermissionScreen
+        if self._modal_screen_active or isinstance(self.screen, ComputerPermissionScreen) or not self._modal_request_queue:
+            return
+        while self._modal_request_queue:
+            next_event = self._modal_request_queue.pop(0)
+            if next_event.request_id in self._resolved_inline_approvals:
+                continue
+            now = datetime.now(timezone.utc)
+            if getattr(next_event, "expires_at", None) and next_event.expires_at <= now:
+                self._resolved_inline_approvals.add(next_event.request_id)
+                continue
+            self._show_permission_modal(next_event)
+            break
+
+    def _show_inline_approval(self, event: Any) -> None:
+        self._show_permission_modal(event)
+
+    _show_approval_toast = _show_inline_approval
+
+    def _sync_approval_drawer(self) -> None:
+        pass
+
+    _sync_approval_toast_layer = _sync_approval_drawer
+
+    def on_inline_approval_decided(self, event: Any) -> None:
+        from mana_agent.tui.computer_permission import ComputerPermissionScreen
+
+        self._resolved_inline_approvals.update(event.request_ids)
+        self._modal_request_queue = [req for req in self._modal_request_queue if req.request_id not in event.request_ids]
         self._transactional_modal_queue[:] = [item for item in self._transactional_modal_queue if item not in event.request_ids]
-        advance = self._active_transactional_id in event.request_ids
+
+        advance = self._active_transactional_id in event.request_ids or self._active_modal_request_id in event.request_ids
         if advance:
             self._transactional_modal_active = False
             self._active_transactional_id = ""
-        for controls in list(self.query(ApprovalToast)):
-            if controls.request.request_id not in event.request_ids:
-                continue
-            controls.remove()
-        self._toast_request_ids.difference_update(event.request_ids)
-        self._sync_approval_toast_layer()
+
+        if isinstance(self.screen, ComputerPermissionScreen) and self.screen.request_id in event.request_ids:
+            self._modal_screen_active = False
+            self._active_modal_request_id = ""
+            self.screen.dismiss(None)
+
         if self.chat_log is not None:
             for panel in self.chat_log._execution_panels.values():
                 for box in (panel.main_box, panel.coding_box):
@@ -1001,30 +1086,33 @@ class ManaChatApp(App):
                             })
         if advance:
             self.call_after_refresh(self._show_next_transactional_modal)
+            self.call_after_refresh(self._show_next_modal_in_queue)
+
+    on_approval_decided = on_inline_approval_decided
 
     def _apply_computer_permission(self, choice: Any, *, controls: Any = None) -> None:
         if choice is None:
             return
 
         batch_ids = list(self._transactional_modal_queue) if getattr(choice, "approve_all", False) else []
-        generation = self._approval_toast_generation
+        generation = self._approval_drawer_generation
 
         async def complete_and_advance() -> None:
             success = False
             try:
                 success = await self._complete_computer_permission(choice, batch_ids=batch_ids)
             finally:
-                if generation == self._approval_toast_generation:
-                    if controls is not None:
-                        if success:
-                            from mana_agent.tui.computer_permission import ApprovalDecided
-                            self.on_approval_decided(ApprovalDecided({choice.request_id}, choice.decision is not None))
-                        else:
-                            controls.enable_choices()
-                    if choice.transactional and (success or controls is None) and self._active_transactional_id == choice.request_id:
-                        self._transactional_modal_active = False
-                        self._active_transactional_id = ""
-                        self.call_after_refresh(self._show_next_transactional_modal)
+                if success:
+                    from mana_agent.tui.computer_permission import InlineApprovalDecided
+                    resolved = {choice.request_id}
+                    if batch_ids:
+                        resolved.update(batch_ids)
+                    self.on_inline_approval_decided(InlineApprovalDecided(resolved, choice.decision is not None))
+                if choice.transactional and self._active_transactional_id == choice.request_id:
+                    self._transactional_modal_active = False
+                    self._active_transactional_id = ""
+                    self.call_after_refresh(self._show_next_transactional_modal)
+                self.call_after_refresh(self._show_next_modal_in_queue)
 
         self.run_worker(
             complete_and_advance(),

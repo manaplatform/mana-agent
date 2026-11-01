@@ -1035,11 +1035,14 @@
         .permission{border-color:#f59e0b88}.permission-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
         .permission-actions button{min-height:34px;padding:6px 12px}.permission-actions .deny{background:#b91c1c}
         .permission-state{margin-top:7px;color:#aeb4bd}.permission-error{margin-top:7px;color:#fca5a5}
-        .approval-toast-stack{position:fixed;right:16px;bottom:76px;z-index:40;display:flex;flex-direction:column;gap:10px;max-width:min(420px,calc(100vw - 32px));pointer-events:none}
-        .approval-toast{pointer-events:auto;background:#1b202b;border:1px solid #f59e0b88;border-left:3px solid #f59e0b;border-radius:8px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,0.45);overflow-wrap:anywhere}
-        .approval-toast-title{font-weight:600;color:#fcd34d}
-        .approval-toast .logs{max-height:160px;overflow:auto}
-        .approval-toast .meta{margin-top:4px;color:#aeb4bd;font-size:11px}
+        .approval-modal-backdrop{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
+        .approval-modal-backdrop[hidden]{display:none}
+        .approval-modal{background:#111827;border:1px solid #f59e0b;border-radius:8px;width:100%;max-width:600px;height:420px;max-height:85vh;overflow:hidden;padding:18px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.6);display:flex;flex-direction:column;gap:12px}
+        .approval-modal-items{flex:1;overflow-y:auto;min-height:0}
+        .approval-modal-title{font-size:15px;font-weight:700;color:#fcd34d;display:block}
+        .approval-drawer-item{padding:10px 0;border-top:1px solid #ffffff18;overflow-wrap:anywhere}
+        .approval-drawer-item:first-child{border-top:none}
+        .approval-drawer-item .logs{max-height:200px;overflow:auto;margin:8px 0;padding:8px;background:#0d1117;border-radius:4px;font-family:monospace;font-size:12px}
         .permission-notice{padding:8px 12px;color:#fcd34d;white-space:pre-wrap;overflow-wrap:anywhere}
         .error{color:#fca5a5}.logs{font-size:12px;color:#aeb4bd;white-space:pre-wrap}
         .execution-trace{display:flex;flex-direction:column;gap:4px;margin:6px 0 10px 8px;padding:8px 12px;background:#13161c;border-left:2px solid #3b82f644;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px}
@@ -1064,11 +1067,21 @@
       </style>
       <div class="shell"><div class="status"><span class="dot"></span><span class="statusText">Connecting to live events…</span><span class="contextMeter"></span></div>
       <div class="permission-notice" role="status" hidden></div>
-      <div class="approval-toast-stack" role="region" aria-label="Pending approvals" hidden></div>
+      <div class="approval-modal-backdrop approval-drawer" aria-label="Pending approvals" hidden>
+        <summary style="display:none;"></summary>
+        <div class="approval-modal" role="dialog" aria-modal="true">
+          <div class="approval-modal-header">
+            <span class="approval-modal-title">Approval required</span>
+          </div>
+          <div class="approval-modal-items approval-drawer-items"></div>
+        </div>
+      </div>
       <div class="timeline"></div><div class="attachment-preview-bar"></div><form><input type="file" id="mana-file-input" multiple style="display:none" /><button type="button" class="attach-btn" title="Attach file" aria-label="Attach file">📎</button><textarea aria-label="Chat message" placeholder="Message this conversation"></textarea><button type="submit">Send</button></form></div>`;
     const timeline = mount.querySelector(".timeline");
     const permissionNotice = mount.querySelector(".permission-notice");
-    const approvalToastStack = mount.querySelector(".approval-toast-stack");
+    const approvalDrawer = mount.querySelector(".approval-drawer");
+    const approvalDrawerSummary = mount.querySelector(".approval-drawer > summary");
+    const approvalDrawerItems = mount.querySelector(".approval-drawer-items");
     const form = mount.querySelector("form");
     const input = mount.querySelector("textarea");
     const submitButton = form.querySelector("button[type=submit]");
@@ -1232,7 +1245,8 @@
       }
     };
 
-    let toastSignature = "";
+    const drawerSeenIds = new Set();
+    let drawerSignature = "";
     const isRequestExpired = (request) => {
       if (!request) return true;
       if (request.status !== "pending") return true;
@@ -1243,17 +1257,22 @@
       return false;
     };
 
-    const renderApprovalToasts = () => {
+    const renderApprovalDrawer = () => {
       const pending = [...state.permissionRequests.values()].filter((request) => !isRequestExpired(request));
       const signature = JSON.stringify([config.sessionId, pending, pending.map((request) => [
         permissionBusy.has(`${config.sessionId}\u0000${request.requestId}`), permissionErrors.get(request.requestId) || "",
       ])]);
-      // Preserve focus and button state during unrelated streaming updates.
-      if (signature === toastSignature) return;
-      toastSignature = signature;
-      approvalToastStack.replaceChildren();
-      approvalToastStack.hidden = pending.length === 0;
+      // Preserve focus and manual drawer state during unrelated streaming updates.
+      if (signature === drawerSignature) return;
+      drawerSignature = signature;
+      approvalDrawer.hidden = pending.length === 0;
+      approvalDrawerItems.replaceChildren();
       if (!pending.length) return;
+      if (pending.some((request) => !drawerSeenIds.has(request.requestId))) approvalDrawer.open = true;
+      for (const request of pending) drawerSeenIds.add(request.requestId);
+      if (approvalDrawerSummary) approvalDrawerSummary.textContent = `Pending approvals (${pending.length})`;
+      const modalTitle = mount.querySelector(".approval-modal-title");
+      if (modalTitle) modalTitle.textContent = `Pending approval (${pending.length})`;
       for (const request of pending) {
         if (request.expiresAt) {
           const remaining = new Date(request.expiresAt).getTime() - Date.now();
@@ -1270,16 +1289,16 @@
         const id = request.requestId;
         const busyKey = `${config.sessionId}\u0000${id}`;
         const row = document.createElement("section");
-        row.className = "approval-toast";
+        row.className = "approval-drawer-item";
         const titles = { transactional: "Transactional action approval required", server: "Server action approval required", api: "API request approval required", computer: "Computer permission required" };
-        addText(row, "div", titles[request.kind] || "Approval required", "approval-toast-title");
+        addText(row, "div", titles[request.kind] || "Approval required");
         addText(row, "div", request.preview, "logs");
         addText(row, "div", `Scope: ${request.scope || ""}`, "meta");
         const actions = document.createElement("div");
         actions.className = "permission-actions";
         const choices = request.kind === "computer"
-          ? [["Reject", "deny"], ["Approve", "allow_once"], ["This session", "allow_session"], ["Always", "always"]]
-          : [["Reject", "deny"], ["Approve", "approve"]];
+          ? [["Deny", "deny"], ["Allow once", "allow_once"], ["This session", "allow_session"], ["Always", "always"]]
+          : [["Deny", "deny"], ["Approve once", "approve"]];
         for (const [label, decision] of choices) {
           const button = document.createElement("button");
           button.type = "button";
@@ -1310,7 +1329,9 @@
               if (current && (current.status === "pending" || current.status === "resuming")) {
                 state.permissionRequests.set(id, { ...current, status: "decided", decision: text(payload.decision || decision) });
               }
-              if (decision === "approve" && payload.approved !== false && payload.status !== "denied") forceScrollAfterApproval = true;
+              if (decision === "approve" || decision === "allow_once" || decision === "once" || decision === "all" || decision === "allow_session" || decision === "always") {
+                if (payload.approved !== false && payload.status !== "denied") forceScrollAfterApproval = true;
+              }
             } catch (error) {
               const msg = error.message || String(error);
               const lowered = msg.toLowerCase();
@@ -1341,7 +1362,7 @@
         }
         row.appendChild(actions);
         if (permissionErrors.has(id)) addText(row, "div", permissionErrors.get(id), "permission-error");
-        approvalToastStack.appendChild(row);
+        approvalDrawerItems.appendChild(row);
       }
     };
 
@@ -1725,7 +1746,7 @@
     };
 
     const render = () => {
-      renderApprovalToasts();
+      renderApprovalDrawer();
       const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
       for (const stream of timeline.querySelectorAll(".activity-stream[data-activity-stream-key]")) {
         rememberActivityStreamPosition(stream, stream.dataset.activityStreamKey);
@@ -1853,6 +1874,7 @@
       state.activities.clear();
       state.permissionRequests.clear();
       surfacedApprovalIds.clear();
+      drawerSeenIds.clear();
       permissionErrors.clear();
       permissionNotice.hidden = true;
       permissionNotice.textContent = "";

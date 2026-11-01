@@ -61,16 +61,47 @@ Footer {
     height: 1fr;
 }
 
-/* Floating layer for pending approval toasts. Positioned above the input bar
-   in normal layout flow so it does not obscure or block the conversation or
-   activity blocks underneath it. */
-#approval-toast-layer {
-    width: 1fr;
-    height: auto;
-    max-height: 14;
-    padding: 0;
-    background: transparent;
+/* Approval request popup modal screen */
+ComputerPermissionScreen {
+    align: center middle;
+}
+
+#computer-permission-dialog {
+    width: 76;
+    height: 18;
+    padding: 1 2;
+    border: round #f59e0b;
+    background: #111827;
+}
+
+#computer-permission-title {
+    color: #fcd34d;
+    text-style: bold;
+    height: 1;
+}
+
+#computer-permission-scroll {
+    height: 1fr;
+    margin: 1 0;
+}
+
+#computer-permission-preview {
+    color: #e5e7eb;
+}
+
+#computer-permission-scope {
+    color: #93c5fd;
+    height: 1;
+    margin-bottom: 1;
+}
+
+.computer-permission-actions {
+    height: 3;
     align-horizontal: right;
+}
+
+.computer-permission-actions Button {
+    margin-left: 1;
 }
 
 #main {

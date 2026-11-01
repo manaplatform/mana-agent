@@ -49,7 +49,7 @@ def test_main_activity_box_shows_pending_approval_row() -> None:
     assert "WAITING APPROVAL" in header_text
     assert box._active_status == "waiting_approval"
 
-    # Pending approvals are visible in the activity stream so the block under the toast is not hidden
+    # Pending approvals are visible in the activity stream as well as the approval drawer
     stream_text = box.activity_log.text
     assert "approval_request" in stream_text
     assert "[WAITING FOR APPROVAL]" in stream_text
@@ -74,7 +74,7 @@ def test_coding_activity_box_shows_pending_approval_row() -> None:
     assert "⚠️" in header_text
     assert "WAITING APPROVAL" in header_text
 
-    # Pending approvals are visible in the activity stream so the block under the toast is not hidden
+    # Pending approvals are visible in the activity stream as well as the approval drawer
     log_text = box.activity_log.text
     assert "Approval required: pytest" in log_text
     assert "[WAITING FOR APPROVAL]" in log_text
@@ -107,9 +107,9 @@ def test_approval_tools_do_not_create_separate_cards(tool_name: str) -> None:
 
 
 @pytest.mark.parametrize("backend,box_name", [("", "main_box"), ("internal", "coding_box")])
-def test_approval_toast_and_retry(tmp_path: Path, monkeypatch, backend: str, box_name: str) -> None:
+def test_approval_drawer_and_retry(tmp_path: Path, monkeypatch, backend: str, box_name: str) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ApprovalToast
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -131,22 +131,23 @@ def test_approval_toast_and_retry(tmp_path: Path, monkeypatch, backend: str, box
             await pilot.pause()
             panel = app.chat_log.get_execution_panel("turn-approval")
             box = getattr(panel, box_name)
-            layer = app.query_one("#approval-toast-layer")
-            controls = layer.query_one(ApprovalToast)
-            assert layer.display
-            assert not list(box.query(ApprovalToast))
-            assert controls.request.preview.find("git commit") >= 0
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert not list(box.query(ComputerPermissionScreen))
+            assert app.screen.preview.find("git commit") >= 0
             assert not decisions
-            controls.query_one(".inline-once").press()
+            app.screen.query_one(".inline-once").press()
             await pilot.pause()
             assert len(decisions) == 1
-            assert not controls.query_one(".inline-once").disabled
-            controls.query_one(".inline-deny").press()
+            # Re-open/push for retry
+            app._show_permission_modal(ComputerPermissionRequested(
+                request_id="item-1", scope="transactional_action.once", preview="git commit", transactional=True,
+            ))
+            await pilot.pause()
+            assert isinstance(app.screen, ComputerPermissionScreen)
+            app.screen.query_one(".inline-deny").press()
             await pilot.pause()
             assert len(decisions) == 2 and decisions[-1].decision is None
-            assert not list(layer.query(ApprovalToast))
-            assert not layer.display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
             assert any(e.get("status") == "failed" for e in box.events)
             assert "Review commit" not in box.activity_log.text
 
@@ -164,9 +165,9 @@ def test_approval_decision_does_not_resolve_other_requests(box_class) -> None:
 
 
 @pytest.mark.parametrize("kind", ["server", "api"])
-def test_approval_toast_external_decision_and_replay(tmp_path: Path, monkeypatch, kind: str) -> None:
+def test_approval_drawer_external_decision_and_replay(tmp_path: Path, monkeypatch, kind: str) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ApprovalToast, ApprovalDecided
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen, InlineApprovalDecided
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -178,29 +179,26 @@ def test_approval_toast_external_decision_and_replay(tmp_path: Path, monkeypatch
                 server=kind == "server", api=kind == "api",
             ))
             await pilot.pause()
-            layer = app.query_one("#approval-toast-layer")
-            controls = layer.query_one(ApprovalToast)
-            assert controls.request.preview == "Exact preview"
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app.screen.preview == "Exact preview"
             assert app.chat_log.get_execution_panel("pending-approvals") is None
-            app.post_message(ApprovalDecided({"recovered"}, approved=True))
+            app.post_message(InlineApprovalDecided({"recovered"}, approved=True))
             await pilot.pause()
-            assert not list(layer.query(ApprovalToast))
-            assert not layer.display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
             # A late request delivery must not resurrect resolved controls.
             app.post_message(ComputerPermissionRequested(
                 request_id="recovered", scope="once", preview="Exact preview",
                 server=kind == "server", api=kind == "api",
             ))
             await pilot.pause()
-            assert not list(layer.query(ApprovalToast))
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
     anyio.run(exercise)
 
 
-def test_toast_layer_keeps_other_requests_and_clears_on_session_change(tmp_path: Path, monkeypatch) -> None:
+def test_drawer_keeps_other_requests_and_clears_on_session_change(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ApprovalToast, ApprovalDecided
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen, InlineApprovalDecided
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -210,16 +208,17 @@ def test_toast_layer_keeps_other_requests_and_clears_on_session_change(tmp_path:
             for request_id in ("one", "two"):
                 app.post_message(ComputerPermissionRequested(request_id=request_id, scope="once", preview=request_id, api=True))
             await pilot.pause()
-            layer = app.query_one("#approval-toast-layer")
-            assert {item.request.request_id for item in layer.query(ApprovalToast)} == {"one", "two"}
-            app.post_message(ApprovalDecided({"one"}, approved=False))
+            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app.screen.request_id == "one"
+            assert [r.request_id for r in app._modal_request_queue] == ["two"]
+            app.post_message(InlineApprovalDecided({"one"}, approved=False))
             await pilot.pause()
-            assert layer.display
-            assert [item.request.request_id for item in layer.query(ApprovalToast)] == ["two"]
+            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app.screen.request_id == "two"
             app._handle_session_replacement("new-session", clear_view=False)
             await pilot.pause()
-            assert not layer.display
-            assert not list(layer.query(ApprovalToast))
+            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert len(app._modal_request_queue) == 0
 
     anyio.run(exercise)
 
@@ -230,9 +229,9 @@ def test_toast_layer_keeps_other_requests_and_clears_on_session_change(tmp_path:
     (".inline-always", "always_allow"),
     (".inline-deny", None),
 ])
-def test_computer_toast_preserves_scoped_choices(tmp_path: Path, monkeypatch, button: str, decision: str | None) -> None:
+def test_computer_drawer_preserves_scoped_choices(tmp_path: Path, monkeypatch, button: str, decision: str | None) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ApprovalToast
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen
     from mana_agent.integrations.computer_control.models import PermissionDecision
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
@@ -249,19 +248,20 @@ def test_computer_toast_preserves_scoped_choices(tmp_path: Path, monkeypatch, bu
         async with app.run_test(size=(140, 40)) as pilot:
             app.post_message(ComputerPermissionRequested(request_id="computer", scope="screen", preview="Capture"))
             await pilot.pause()
-            app.query_one(ApprovalToast).query_one(button).press()
+            assert isinstance(app.screen, ComputerPermissionScreen)
+            app.screen.query_one(button).press()
             await pilot.pause()
             expected = {"allow_once": PermissionDecision.ALLOW_ONCE, "allow_session": PermissionDecision.ALLOW_SESSION,
                         "always_allow": PermissionDecision.ALWAYS_ALLOW, None: None}[decision]
             assert choices[0].decision == expected
-            assert not app.query_one("#approval-toast-layer").display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
     anyio.run(exercise)
 
 
-def test_computer_external_decision_closes_toast(tmp_path: Path, monkeypatch) -> None:
+def test_computer_external_decision_closes_drawer(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ApprovalToast
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -270,20 +270,20 @@ def test_computer_external_decision_closes_toast(tmp_path: Path, monkeypatch) ->
         async with app.run_test() as pilot:
             app.post_message(ComputerPermissionRequested(request_id="computer", scope="screen", preview="Capture"))
             await pilot.pause()
+            assert isinstance(app.screen, ComputerPermissionScreen)
             app._handle_hub_session_event({"type": "computer.permission_decided", "metadata": {
                 "permission_request_id": "computer", "decision": "allow_once",
             }})
             await pilot.pause()
-            assert not list(app.query(ApprovalToast))
-            assert not app.query_one("#approval-toast-layer").display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
     anyio.run(exercise)
 
 
-def test_expired_approval_toast_is_not_displayed(tmp_path: Path, monkeypatch) -> None:
+def test_expired_approval_is_not_displayed_in_drawer(tmp_path: Path, monkeypatch) -> None:
     import anyio
     from datetime import datetime, timezone, timedelta
-    from mana_agent.tui.computer_permission import ApprovalToast, ComputerPermissionRequested
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionRequested
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -299,8 +299,7 @@ def test_expired_approval_toast_is_not_displayed(tmp_path: Path, monkeypatch) ->
                 expires_at=expired_time,
             ))
             await pilot.pause()
-            assert not list(app.query(ApprovalToast))
-            assert not app.query_one("#approval-toast-layer").display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
             # 2. Activity event with past expires_at in metadata
             app.history.add(CodingActivityEvent(turn_id="turn-exp", activity={
@@ -314,15 +313,14 @@ def test_expired_approval_toast_is_not_displayed(tmp_path: Path, monkeypatch) ->
                 },
             }))
             await pilot.pause()
-            assert not list(app.query(ApprovalToast))
-            assert not app.query_one("#approval-toast-layer").display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
     anyio.run(exercise)
 
 
-def test_inbox_item_expired_event_closes_toast(tmp_path: Path, monkeypatch) -> None:
+def test_inbox_item_expired_event_closes_drawer(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ApprovalToast, ComputerPermissionRequested
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionRequested
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -331,8 +329,7 @@ def test_inbox_item_expired_event_closes_toast(tmp_path: Path, monkeypatch) -> N
         async with app.run_test() as pilot:
             app.post_message(ComputerPermissionRequested(request_id="item-exp-close", scope="screen", preview="Capture"))
             await pilot.pause()
-            assert list(app.query(ApprovalToast))
-            assert app.query_one("#approval-toast-layer").display
+            assert isinstance(app.screen, ComputerPermissionScreen)
 
             app.history.add(CodingActivityEvent(turn_id="turn-exp", activity={
                 "event_type": "inbox.item.expired",
@@ -340,15 +337,14 @@ def test_inbox_item_expired_event_closes_toast(tmp_path: Path, monkeypatch) -> N
                 "metadata": {"inbox_item_id": "item-exp-close"},
             }))
             await pilot.pause()
-            assert not list(app.query(ApprovalToast))
-            assert not app.query_one("#approval-toast-layer").display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
     anyio.run(exercise)
 
 
-def test_approval_toast_handles_terminal_expired_error(tmp_path: Path, monkeypatch) -> None:
+def test_approval_drawer_handles_terminal_expired_error(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ApprovalToast, ComputerPermissionRequested
+    from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionRequested
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -359,13 +355,8 @@ def test_approval_toast_handles_terminal_expired_error(tmp_path: Path, monkeypat
                 request_id="item-terminal-err", scope="action.once", preview="Do command", transactional=True,
             ))
             await pilot.pause()
-            controls = app.query_one(ApprovalToast)
-            assert controls is not None
-            assert app.query_one("#approval-toast-layer").display
+            assert isinstance(app.screen, ComputerPermissionScreen)
 
-            # Trigger approval when the item is already terminal/expired
-            choice = controls.request
-            # Call complete with mock raising terminal error
             class DummyExcService:
                 class dummy_repo:
                     @staticmethod
@@ -378,15 +369,13 @@ def test_approval_toast_handles_terminal_expired_error(tmp_path: Path, monkeypat
                         item.expires_at = None
                         return item
                 repository = dummy_repo()
-            
+
             app.gateway = MagicMock()
             app.gateway.human_inbox_service = DummyExcService()
 
-            controls.query_one(".inline-once").press()
+            app.screen.query_one(".inline-once").press()
             await pilot.pause()
-            # The toast must be dismissed, not stuck in an error loop
-            assert not list(app.query(ApprovalToast))
-            assert not app.query_one("#approval-toast-layer").display
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
     anyio.run(exercise)
 

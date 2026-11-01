@@ -4,6 +4,29 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-01 — UI & Dashboard: render approval requests as interactive modal popup over entire chat UI:
+  - TUI: present pending approval requests directly in an interactive modal screen (`ComputerPermissionScreen`) popping up centered over the entire chat interface with a compact fixed height (18 rows), scrollable command preview, title, scope, and choices (`Deny`, `Allow once`, `Allow all matching queued`, `This session`, `Always`), dismissable with `Esc`. Sequential queuing of multiple requests preserves attention without layout clutter.
+  - Dashboard: render approval requests in a centered modal popup dialog (`.approval-modal`, fixed 420px height) with dimmed backdrop overlay (`.approval-modal-backdrop`) covering the chat interface.
+  - Expiration & Terminal Safety: suppressed expired or terminal items at entry, real-time modal dismissal on timeout or external decision, and graceful error dismissal without stuck states.
+  - See `docs/activity-approval-rendering.md`. User-owned verification (not run by the agent): `PYTHONPATH=src pytest tests/test_tui_approval_realtime.py tests/test_computer_control.py -v` and `node --test tests/dashboard/live_chat_approval_ui.test.mjs tests/dashboard/live_chat_reducer.test.mjs`.
+
+- 2026-11-01 — Documentation: add links to every available language README in
+  each README's language navigation. User-owned verification (not run by the
+  agent): inspect `git diff -- README.md CHANGELOG.md` and `head -n 3 README.*.md`.
+
+- 2026-11-01 — Documentation: add concise translated README introductions for Arabic, Bengali,
+  Breton, Bosnian, Danish, German, Spanish, French, Greek, Italian, Japanese,
+  Korean, Norwegian, Polish, Russian, Thai, Turkish, Ukrainian, Vietnamese,
+  Simplified Chinese and Traditional Chinese. Link them from the English and
+  Persian READMEs; the English README remains the full reference.
+  User-owned verification (not run by the agent): inspect `git status --short`,
+  `git diff -- README.md CHANGELOG.md`, and `cat README.*.md`.
+
+- 2026-11-01 — Documentation: add a Persian translation of the README
+  with language links, and remove the hard-coded project version badge from the
+  English README; the package version remains in `pyproject.toml`.
+  User-owned verification (not run by the agent): `git diff -- README.md README.fa.md CHANGELOG.md` and, for the new untracked file, `cat README.fa.md`.
+
 - 2026-11-01 — CI testing: configure git user identity in regression test:
   - In `tests/coding/test_approval_binding_regressions.py` (`test_git_commit_fenced_index_isolates_concurrent_git_add`): set `user.name` and `user.email` in the temporary test git repository so `git commit` succeeds consistently on Ubuntu CI runners where global git author identity is unconfigured.
   - User-owned verification (not run by the agent): `pytest tests/coding/test_approval_binding_regressions.py -k test_git_commit_fenced_index_isolates_concurrent_git_add -v`.
