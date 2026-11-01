@@ -3,6 +3,7 @@
 <p align="center">
   <img src="https://raw.githubusercontent.com/manaplatform/mana-agent/refs/heads/main/logo.png" alt="Mana-Agent" width="100%" />
 </p>
+
 [English](README.md) · [العربية](README.ar.md) · [বাংলা](README.bn.md) · [Brezhoneg](README.br.md) · [Bosanski](README.bs.md) · [Dansk](README.da.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [فارسی](README.fa.md) · [Français](README.fr.md) · [Ελληνικά](README.gr.md) · [Italiano](README.it.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Norsk](README.no.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [Tiếng Việt](README.vi.md) · [简体中文](README.zh.md) · [繁體中文](README.zht.md)
 
 Mana-Agent là nền tảng mã nguồn mở dựa trên Python để điều phối các tác tử AI. Nền tảng kết hợp vòng lặp thực thi tự chủ, tác tử chuyên biệt, quản lý tác vụ bền vững, thực thi công cụ có giám sát và tích hợp mở rộng. Bạn đặt mục tiêu; Mana-Agent giúp thực hiện bằng công cụ thực và kiểm tra kết quả.
