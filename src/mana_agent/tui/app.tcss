@@ -61,16 +61,13 @@ Footer {
     height: 1fr;
 }
 
-/* Floating layer for pending approval toasts. It docks above the input bar
-   so a pending request is always visible and actionable. The layer lives on
-   the overlay layer, so it floats over the conversation without shrinking
-   it, and it is displayed only while a request is pending. */
+/* Floating layer for pending approval toasts. Positioned above the input bar
+   in normal layout flow so it does not obscure or block the conversation or
+   activity blocks underneath it. */
 #approval-toast-layer {
-    layer: overlay;
-    dock: bottom;
     width: 1fr;
     height: auto;
-    margin: 0 1 6 0;
+    max-height: 14;
     padding: 0;
     background: transparent;
     align-horizontal: right;

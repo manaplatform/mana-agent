@@ -5,12 +5,13 @@ execution panel: general approvals belong in **Activity**, while approvals
 associated with a coding backend belong in **Coding Activity**. Dashboard
 transactional, server, API and computer decisions are made in a floating
 **toast stack** above the conversation. Each toast stays visible until its own
-decision is recorded and shows the request preview and scope. The TUI uses the
-same toast shape in a floating overlay layer above the conversation for
-transactional, server, API, computer and remote SSH requests. It disappears when
-empty; requests disappear only after a successful decision. Computer and remote
-SSH requests retain their once, session and always choices. Approval tools do
-not create separate TUI cards.
+decision is recorded and shows the request preview and scope. The TUI positions
+the toast layer directly above the input bar within the layout flow for
+transactional, server, API, computer and remote SSH requests, avoiding obscuring
+or blocking conversation cells. It disappears when empty; requests disappear
+only after a successful decision or expiration. Computer and remote SSH requests
+retain their once, session and always choices. Approval tools do not create
+separate TUI cards.
 
 Previously the dashboard rendered transactional controls inside activity rows
 and computer permission controls on separate timeline cards, and both surfaces
@@ -18,24 +19,19 @@ used a collapsible **Pending approvals** drawer. Resolved requests could remain
 visible as if they still required attention, and the same pending request was
 shown twice — once as a drawer entry and once as an activity row. The toast
 stack replaces both control locations and the drawer, trading inline controls
-for one consistently visible queue. A pending request is rendered **only** as a
-toast: the activity streams must not repeat it as a row. Activity retains
-lifecycle events, but a request row is hidden while the request is pending and
-returns as an ordinary outcome once its decision is recorded; the reducer
-retains decision state to prevent replay from reopening it. The toast stack
-uses the same durable inbox IDs, endpoints and computer permission choices as
-before; rendering never authorizes execution. Failed requests remain available
-for retry. When a computer permission is recorded but its action still requires
-a separate exact-action confirmation, the dashboard shows that confirmation
-requirement and identifier in a status notice; it does not grant the
-confirmation. A successful explicit approval scrolls the conversation to its
-end; a denied or failed request does not force the scroll. The queue does not
-depend on the truncated activity history. Previously the TUI put controls
-inside activity boxes or a separate modal; they could be hard to find or clutter
-the conversation. The toast layer is independent of activity history and the
-session's resolved request IDs prevent late deliveries from reopening it.
-Failed decisions remain actionable. Switching sessions clears the old toasts.
-Activity keeps decision events but hides the pending request row.
+for one consistently visible queue. The toast stack uses the same durable inbox
+IDs, endpoints and computer permission choices as before; rendering never
+authorizes execution. Failed requests remain available for retry. When a
+computer permission is recorded but its action still requires a separate
+exact-action confirmation, the dashboard shows that confirmation requirement
+and identifier in a status notice; it does not grant the confirmation. A
+successful explicit approval scrolls the conversation to its end; a denied or
+failed request does not force the scroll. The queue does not depend on the
+truncated activity history. In the TUI, the toast layer is laid out cleanly
+without covering or hiding the activity block or messages underneath it, and
+pending approvals in the activity stream clearly display their waiting status
+(`⚠️ [WAITING FOR APPROVAL]`). Failed decisions remain actionable. Switching
+sessions clears the old toasts.
 
 Runtime event producers may provide `backend` and `tool_name` at the event's
 top level or inside `metadata`, `details`, or `payload`. Classification must

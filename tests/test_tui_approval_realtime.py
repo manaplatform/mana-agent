@@ -24,7 +24,7 @@ from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.tui.widgets.tool_card import ToolCard
 
 
-def test_main_activity_box_hides_pending_approval_row() -> None:
+def test_main_activity_box_shows_pending_approval_row() -> None:
     box = MainActivityBox(turn_id="turn-1")
     box.update_event({
         "event_id": "ev-1",
@@ -49,14 +49,14 @@ def test_main_activity_box_hides_pending_approval_row() -> None:
     assert "WAITING APPROVAL" in header_text
     assert box._active_status == "waiting_approval"
 
-    # The pending request has its own toast, so the stream must not repeat it.
+    # Pending approvals are visible in the activity stream so the block under the toast is not hidden
     stream_text = box.activity_log.text
-    assert "approval_request" not in stream_text
-    assert "[WAITING FOR APPROVAL]" not in stream_text
+    assert "approval_request" in stream_text
+    assert "[WAITING FOR APPROVAL]" in stream_text
     assert "repo_search" in stream_text
 
 
-def test_coding_activity_box_hides_pending_approval_row() -> None:
+def test_coding_activity_box_shows_pending_approval_row() -> None:
     box = CodingActivityBox(turn_id="turn-2")
     box.backend = "internal"
     box.phase = "coding"
@@ -74,10 +74,10 @@ def test_coding_activity_box_hides_pending_approval_row() -> None:
     assert "⚠️" in header_text
     assert "WAITING APPROVAL" in header_text
 
-    # The pending request has its own toast, so the stream must not repeat it.
+    # Pending approvals are visible in the activity stream so the block under the toast is not hidden
     log_text = box.activity_log.text
-    assert "Approval required: pytest" not in log_text
-    assert "[WAITING FOR APPROVAL]" not in log_text
+    assert "Approval required: pytest" in log_text
+    assert "[WAITING FOR APPROVAL]" in log_text
 
 
 def test_tool_card_approval_header_badge() -> None:

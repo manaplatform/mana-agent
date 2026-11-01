@@ -4,10 +4,12 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
-- 2026-11-01 — Suppress expired and terminal items in approval toasts:
+- 2026-11-01 — Suppress expired items and prevent toast blocking in TUI:
   - TUI & Dashboard: filter out expired approval requests and items in terminal states (`EXPIRED`, `CANCELLED`, `APPROVED`, `DENIED`) so they are never displayed in the toast layer or drawer.
   - Automatically dismiss toasts on expiration: `ApprovalToast` monitors `expires_at` and cancels out when the expiration deadline passes. The Dashboard schedules timers for pending approvals with `expiresAt` deadlines and reacts to `inbox.item.expired`, `action.approval.expired`, and `action.approval.invalidated` events.
   - Graceful terminal error handling: when an action approval returns a terminal or expired error (`inbox item is already terminal: expired`), the toast is cleanly dismissed and recorded as expired rather than leaving the user stuck in an error loop.
+  - TUI toast layout without blocking: moved `#approval-toast-layer` into the normal vertical layout flow directly above the input bar inside `#body` (removing `layer: overlay` and absolute docking), so chat history shrinks cleanly without the toast obscuring or blocking messages underneath it.
+  - TUI activity box visibility: preserved pending approval operations in `MainActivityBox` and `CodingActivityBox` with `⚠️ [WAITING FOR APPROVAL]` rather than hiding the underlying block under the toast.
   - See `docs/activity-approval-rendering.md`.
 
 - 2026-10-31 — Approval toasts replace the approval drawer:

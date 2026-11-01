@@ -209,6 +209,10 @@ class ManaChatApp(App):
             self.chat_log = ChatLog(history=self.history, id="chat-log")
             yield self.chat_log
 
+            # Approval toast layer positioned above input bar without covering/blocking chat log
+            with Vertical(id="approval-toast-layer"):
+                pass
+
             # Bottom input bar (message box)
             with Vertical(id="input-bar"):
                 self.attachment_bar = AttachmentBar(id="attachment-bar")
@@ -222,13 +226,6 @@ class ManaChatApp(App):
                     "Ctrl+J / Alt+Enter also add a line · Ctrl+O attaches file",
                     id="input-help",
                 )
-
-        # Floating layer for pending approval toasts. It sits above the
-        # conversation and the input bar so a pending request is always
-        # visible and actionable without scrolling. It is hidden until a
-        # request is pending.
-        with Vertical(id="approval-toast-layer"):
-            pass
 
         yield Footer()
 
@@ -1034,7 +1031,7 @@ class ManaChatApp(App):
             name=f"computer-permission-{choice.request_id}",
         )
 
-    async def _complete_computer_permission(self, choice: Any, *, batch_ids: list[str] | None = None) -> bool:
+    async def _complete_computer_permission(self, choice: Any, *, batch_ids: list[str] | None = None, is_batch: bool = False) -> bool:
         from mana_agent.integrations.computer_control.cancellation import (
             decide_computer_permission,
             deny_computer_permission,
@@ -1070,6 +1067,8 @@ class ManaChatApp(App):
                     reference.status.value not in {"pending", "delivered"}
                     or (reference.expires_at and reference.expires_at <= now)
                 ):
+                    if is_batch:
+                        return False
                     is_expired = reference.status.value == "expired" or bool(reference.expires_at and reference.expires_at <= now)
                     logger.info("Inbox item %s is already terminal/expired (%s)", reference.inbox_item_id, reference.status.value)
                     self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
@@ -1120,6 +1119,8 @@ class ManaChatApp(App):
                             or "no longer approvable" in exc_str
                             or "no longer accepts" in exc_str
                         ):
+                            if is_batch:
+                                return False
                             is_expired = "expired" in exc_str
                             logger.info("Gateway transactional approval command error (terminal/expired): %s", exc)
                             self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
@@ -1273,6 +1274,8 @@ class ManaChatApp(App):
                             or "no longer approvable" in exc_str
                             or "no longer accepts" in exc_str
                         ):
+                            if is_batch:
+                                return False
                             is_expired = "expired" in exc_str
                             logger.info("Transactional action approval was terminal/expired: %s", exc)
                             self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
@@ -1308,7 +1311,7 @@ class ManaChatApp(App):
                                 approve_all=False,
                                 expected_version=candidate.version,
                             )
-                            await self._complete_computer_permission(rem_choice)
+                            await self._complete_computer_permission(rem_choice, is_batch=True)
                             if service.repository.get(rem_id).status.value == "approved":
                                 if rem_id in self._transactional_modal_queue:
                                     self._transactional_modal_queue.remove(rem_id)
@@ -1405,6 +1408,8 @@ class ManaChatApp(App):
         except Exception as exc:
             exc_str = str(exc).lower()
             if "expired" in exc_str or "already terminal" in exc_str or "is terminal" in exc_str:
+                if is_batch:
+                    return False
                 action_name = (
                     "Server approval"
                     if choice.server

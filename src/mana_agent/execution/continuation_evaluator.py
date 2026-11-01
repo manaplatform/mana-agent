@@ -60,21 +60,45 @@ def _coerce_continuation_decision(response: Any, task_id: str = "") -> Continuat
         return response
     if isinstance(response, dict):
         payload = dict(response)
-        if not payload.get("task_id") and task_id:
-            payload["task_id"] = task_id
-        return ContinuationDecision.model_validate(payload)
-    raw = getattr(response, "content", response)
-    text = extract_model_text(raw)
-    if text.startswith("```"):
-        text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start >= 0 and end >= start:
-        text = text[start : end + 1]
-    data = json.loads(text)
-    if isinstance(data, dict):
-        if not data.get("task_id") and task_id:
-            data["task_id"] = task_id
-    return ContinuationDecision.model_validate(data)
+    else:
+        raw = getattr(response, "content", response)
+        text = extract_model_text(raw)
+        if text.startswith("```"):
+            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end >= start:
+            text = text[start : end + 1]
+        data = json.loads(text)
+        payload = dict(data) if isinstance(data, dict) else {}
+
+    if not payload.get("task_id") and task_id:
+        payload["task_id"] = task_id
+
+    # If the response was an intent/routing payload from a routing model
+    if not payload.get("action") and payload.get("intent"):
+        intent = str(payload.get("intent") or "").lower()
+        if intent in {"answer", "conversation"}:
+            payload["action"] = ContinuationAction.FINALIZE
+            payload["goal_satisfied"] = True
+            payload["safe_to_continue"] = True
+        elif intent in {"web_research", "research", "coding", "code", "analyze", "planning", "plan"}:
+            payload["action"] = ContinuationAction.FINALIZE
+            payload["goal_satisfied"] = True
+            payload["safe_to_continue"] = True
+
+    if payload.get("action"):
+        if "goal_satisfied" not in payload:
+            payload["goal_satisfied"] = payload.get("action") == ContinuationAction.FINALIZE
+        if "safe_to_continue" not in payload:
+            payload["safe_to_continue"] = payload.get("action") != ContinuationAction.BLOCKED
+        if not payload.get("evidence_summary"):
+            payload["evidence_summary"] = str(payload.get("reasoning_summary") or payload.get("reason") or "Progress evaluated")
+        if not payload.get("reason"):
+            payload["reason"] = str(payload.get("reasoning_summary") or payload.get("evidence_summary") or "Continuation evaluated")
+        if "progress_detected" not in payload:
+            payload["progress_detected"] = True
+
+    return ContinuationDecision.model_validate(payload)
 
 
 class ContinuationEvaluator:

@@ -499,12 +499,20 @@ class MainAgent:
                 if managed_workspace is not None:
                     done_reason += " Managed worktree is a merge candidate; explicit merge intent is still required."
                 supervisor_task = self.execution_supervisor.store.get_task_or_none(task.task_id)
-                if supervisor_task is not None and task.status != TaskStatus.VERIFYING:
-                    self.taskboard.update_status(
-                        task.task_id,
-                        TaskStatus.VERIFYING,
-                        reason=f"{done_reason} Awaiting authoritative supervisor completion projection.",
-                    )
+                has_verification_evidence = bool(
+                    task.verification_results
+                    or task.verification_queue_job_ids
+                    or (task.supervisor_execution_id and task.supervisor_state and task.supervisor_verification_evidence)
+                )
+                if supervisor_task is not None and task.status != TaskStatus.VERIFYING and (route.requires_verification or has_verification_evidence):
+                    try:
+                        self.taskboard.update_status(
+                            task.task_id,
+                            TaskStatus.VERIFYING,
+                            reason=f"{done_reason} Awaiting authoritative supervisor completion projection.",
+                        )
+                    except Exception as trans_exc:
+                        logger.debug("Taskboard status update to VERIFYING skipped: %s", trans_exc)
                 step_answer = self._agent(AgentRole.SUMMARIZER, SummarizerAgent).summarize(task.task_id)
             else:
                 self.taskboard.update_status(task.task_id, TaskStatus.BLOCKED, reason="Reviewer rejected weak or incomplete hierarchy evidence.")
