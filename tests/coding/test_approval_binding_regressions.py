@@ -584,6 +584,8 @@ def test_git_commit_fenced_index_isolates_concurrent_git_add(tmp_path, monkeypat
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "config", "user.name", "Mana Agent Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     (repo / "original.txt").write_text("first\n")
     subprocess.run(["git", "add", "original.txt"], cwd=repo, check=True)
 

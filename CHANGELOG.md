@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-01 — CI testing: configure git user identity in regression test:
+  - In `tests/coding/test_approval_binding_regressions.py` (`test_git_commit_fenced_index_isolates_concurrent_git_add`): set `user.name` and `user.email` in the temporary test git repository so `git commit` succeeds consistently on Ubuntu CI runners where global git author identity is unconfigured.
+  - User-owned verification (not run by the agent): `pytest tests/coding/test_approval_binding_regressions.py -k test_git_commit_fenced_index_isolates_concurrent_git_add -v`.
+
 - 2026-11-01 — Suppress expired items and prevent toast blocking in TUI:
   - TUI & Dashboard: filter out expired approval requests and items in terminal states (`EXPIRED`, `CANCELLED`, `APPROVED`, `DENIED`) so they are never displayed in the toast layer or drawer.
   - Automatically dismiss toasts on expiration: `ApprovalToast` monitors `expires_at` and cancels out when the expiration deadline passes. The Dashboard schedules timers for pending approvals with `expiresAt` deadlines and reacts to `inbox.item.expired`, `action.approval.expired`, and `action.approval.invalidated` events.
