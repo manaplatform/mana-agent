@@ -408,6 +408,21 @@ class ManaChatApp(App):
         except Exception:
             logger.debug("Failed to subscribe to ExecutionEventHub for session %s", session_id, exc_info=True)
 
+    @property
+    def _active_permission_screen(self) -> Any:
+        """Safely return the active ComputerPermissionScreen if mounted and running, else None."""
+        try:
+            if not getattr(self, "is_running", False):
+                return None
+            from mana_agent.tui.computer_permission import ComputerPermissionScreen
+
+            scr = getattr(self, "screen", None)
+            if isinstance(scr, ComputerPermissionScreen):
+                return scr
+        except Exception:
+            return None
+        return None
+
     def _handle_hub_session_event(self, event: dict[str, Any]) -> None:
         """Handle execution events from ExecutionEventHub as durable fallback and source of truth."""
         sid = str(event.get("conversation_id") or "")
@@ -510,19 +525,18 @@ class ManaChatApp(App):
                 or metadata.get("action_id")
                 or ""
             )
-            from mana_agent.tui.computer_permission import ComputerPermissionScreen
-
+            perm_screen = self._active_permission_screen
             if (
                 req_id
-                and isinstance(getattr(self, "screen", None), ComputerPermissionScreen)
+                and perm_screen is not None
                 and (
-                    getattr(self.screen, "request_id", None) == req_id
-                    or getattr(self.screen, "request_id", None)
+                    getattr(perm_screen, "request_id", None) == req_id
+                    or getattr(perm_screen, "request_id", None)
                     in {metadata.get("inbox_item_id"), metadata.get("action_id")}
                 )
             ):
                 try:
-                    self.screen.dismiss(None)
+                    perm_screen.dismiss(None)
                 except Exception:
                     pass
             decision = str(metadata.get("decision") or "")
@@ -637,9 +651,12 @@ class ManaChatApp(App):
         self._modal_request_queue.clear()
         self._modal_screen_active = False
         self._active_modal_request_id = ""
-        from mana_agent.tui.computer_permission import ComputerPermissionScreen
-        if isinstance(self.screen, ComputerPermissionScreen):
-            self.screen.dismiss(None)
+        perm_screen = self._active_permission_screen
+        if perm_screen is not None:
+            try:
+                perm_screen.dismiss(None)
+            except Exception:
+                pass
         self._resolved_inline_approvals.clear()
         self._approval_drawer_generation += 1
         self._drawer_request_ids.clear()
@@ -991,7 +1008,7 @@ class ManaChatApp(App):
                     pass
 
         # If a modal is already displayed on screen, queue this request
-        if self._modal_screen_active or isinstance(self.screen, ComputerPermissionScreen):
+        if self._modal_screen_active or self._active_permission_screen is not None:
             if not any(getattr(req, "request_id", None) == event.request_id for req in self._modal_request_queue):
                 self._modal_request_queue.append(event)
             return
@@ -1032,8 +1049,7 @@ class ManaChatApp(App):
         self.push_screen(screen, _on_modal_dismiss)
 
     def _show_next_modal_in_queue(self) -> None:
-        from mana_agent.tui.computer_permission import ComputerPermissionScreen
-        if self._modal_screen_active or isinstance(self.screen, ComputerPermissionScreen) or not self._modal_request_queue:
+        if self._modal_screen_active or self._active_permission_screen is not None or not self._modal_request_queue:
             return
         while self._modal_request_queue:
             next_event = self._modal_request_queue.pop(0)
@@ -1057,8 +1073,6 @@ class ManaChatApp(App):
     _sync_approval_toast_layer = _sync_approval_drawer
 
     def on_inline_approval_decided(self, event: Any) -> None:
-        from mana_agent.tui.computer_permission import ComputerPermissionScreen
-
         self._resolved_inline_approvals.update(event.request_ids)
         self._modal_request_queue = [req for req in self._modal_request_queue if req.request_id not in event.request_ids]
         self._transactional_modal_queue[:] = [item for item in self._transactional_modal_queue if item not in event.request_ids]
@@ -1068,10 +1082,14 @@ class ManaChatApp(App):
             self._transactional_modal_active = False
             self._active_transactional_id = ""
 
-        if isinstance(self.screen, ComputerPermissionScreen) and self.screen.request_id in event.request_ids:
+        perm_screen = self._active_permission_screen
+        if perm_screen is not None and getattr(perm_screen, "request_id", None) in event.request_ids:
             self._modal_screen_active = False
             self._active_modal_request_id = ""
-            self.screen.dismiss(None)
+            try:
+                perm_screen.dismiss(None)
+            except Exception:
+                pass
 
         if self.chat_log is not None:
             for panel in self.chat_log._execution_panels.values():

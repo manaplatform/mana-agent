@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-01 — TUI & Lifecycle: guard screen stack access in unmounted TUI instances and isolate test history:
+  - TUI: added `_active_permission_screen` safe property to `ManaChatApp` guarding against `textual.app.ScreenStackError: No screens on stack` when checking or dismissing active permission modals on unmounted/unrunning instances (such as during test sessions and headless lifecycle replacements).
+  - Lifecycle tests: isolated global `ChatHistory` via autouse fixture in `tests/test_codex_tui_lifecycle.py` and explicit fresh history instance in `test_internal_reasoning_and_deltas_remain_hidden` so test cases never inherit dirty events from preceding tests.
+  - User-owned verification (not run by the agent): `PYTHONPATH=src pytest tests/test_codex_tui_lifecycle.py tests/test_tui_auto_chat_tool_events.py -v`.
+
 - 2026-11-01 — UI & Dashboard: render approval requests as interactive modal popup over entire chat UI:
   - TUI: present pending approval requests directly in an interactive modal screen (`ComputerPermissionScreen`) popping up centered over the entire chat interface with a compact fixed height (18 rows), scrollable command preview, title, scope, and choices (`Deny`, `Allow once`, `Allow all matching queued`, `This session`, `Always`), dismissable with `Esc`. Sequential queuing of multiple requests preserves attention without layout clutter.
   - Dashboard: render approval requests in a centered modal popup dialog (`.approval-modal`, fixed 420px height) with dimmed backdrop overlay (`.approval-modal-backdrop`) covering the chat interface.
