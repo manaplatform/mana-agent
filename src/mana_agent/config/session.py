@@ -90,6 +90,12 @@ class ConfigurationDraft:
                     values.get("NVIDIA_BASE_URL"),
                     values.get("NVIDIA_API_KEY"),
                 )
+            if provider == "anthropic":
+                return (
+                    provider,
+                    values.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com",
+                    values.get("ANTHROPIC_API_KEY"),
+                )
             return provider, values.get("OPENAI_BASE_URL"), values.get("OPENAI_API_KEY")
         old_identity = (
             *provider_identity(self.original),

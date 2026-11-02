@@ -29,6 +29,9 @@ TRANSITIONS: dict[ExecutionState, frozenset[ExecutionState]] = {
 def validate_transition(source: ExecutionState, target: ExecutionState) -> None:
     if source == target:
         return
+    if source in TERMINAL_STATES and target in TERMINAL_STATES:
+        # Idempotent terminal transition: once terminal, duplicate terminal delivery is idempotent
+        return
     if source in TERMINAL_STATES and target not in TRANSITIONS[source]:
         raise InvalidTransitionError(f"terminal task cannot transition: {source.value} -> {target.value}")
     if target not in TRANSITIONS.get(source, frozenset()):

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mana-agent"
-version = "0.7.0"
-description = "LLM-powered static analysis and repository understanding tool"
+version = "0.8.0"
+description = "Autonomous multi-agent AI software engineering platform for repository understanding, planning, coding, debugging, testing, and verified task execution."
 readme = "README.md"
 requires-python = ">=3.10,<3.15"  # Support Python 3.10 through 3.14 (3.14.x); some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
 license = { text = "MIT" }
@@ -38,6 +38,9 @@ dependencies = [
 
   # OpenAI SDK (required by langchain-openai >=1.1.14)
   "openai>=2.26.0,<3.0.0",
+
+  # Anthropic SDK
+  "anthropic>=0.40.0,<1.0.0",
 
   # Vector store
   "faiss-cpu>=1.7.3,<2.0.0",

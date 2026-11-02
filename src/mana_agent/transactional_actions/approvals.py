@@ -57,7 +57,7 @@ class ApprovalGrant(StrictModel):
         current = now or utc_now()
         if self.consumed_at is not None or self.expires_at <= current:
             return False
-        if action.state is not ActionState.AWAITING_APPROVAL:
+        if action.state not in {ActionState.AWAITING_APPROVAL, ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED}:
             return False
         if action.policy_decision is None:
             return False
@@ -131,8 +131,8 @@ class ApprovalRegistry:
                         return grant
                 except Exception:
                     pass
-        if action.state is not ActionState.AWAITING_APPROVAL:
-            raise ValueError("only an action awaiting approval may receive a grant")
+        if action.state not in {ActionState.AWAITING_APPROVAL, ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED}:
+            raise ValueError(f"only an action awaiting approval may receive a grant (current state: {action.state.value})")
         if scope is ApprovalScope.TRANSACTION and not action.transaction_id:
             raise ValueError("transaction approval requires transaction membership")
         if (

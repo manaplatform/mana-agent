@@ -16,8 +16,11 @@
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10--3.14-3776AB?logo=python&logoColor=white" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-22A06B" /></a>
-  <img alt="Version" src="https://img.shields.io/badge/Version-v0.7.0-8B5CF6" />
   <a href="https://github.com/manaplatform/mana-agent"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Mana--Agent-181717?logo=github" /></a>
+</p>
+
+<p align="center">
+  <a href="README.md" lang="en">English</a> · <a href="README.ar.md" lang="ar" dir="rtl">العربية</a> · <a href="README.bn.md" lang="bn">বাংলা</a> · <a href="README.br.md" lang="br">Brezhoneg</a> · <a href="README.bs.md" lang="bs">Bosanski</a> · <a href="README.da.md" lang="da">Dansk</a> · <a href="README.de.md" lang="de">Deutsch</a> · <a href="README.es.md" lang="es">Español</a> · <a href="README.fa.md" lang="fa" dir="rtl">فارسی</a> · <a href="README.fr.md" lang="fr">Français</a> · <a href="README.gr.md" lang="el">Ελληνικά</a> · <a href="README.it.md" lang="it">Italiano</a> · <a href="README.ja.md" lang="ja">日本語</a> · <a href="README.ko.md" lang="ko">한국어</a> · <a href="README.no.md" lang="no">Norsk</a> · <a href="README.pl.md" lang="pl">Polski</a> · <a href="README.ru.md" lang="ru">Русский</a> · <a href="README.th.md" lang="th">ไทย</a> · <a href="README.tr.md" lang="tr">Türkçe</a> · <a href="README.uk.md" lang="uk">Українська</a> · <a href="README.vi.md" lang="vi">Tiếng Việt</a> · <a href="README.zh.md" lang="zh-Hans">简体中文</a> · <a href="README.zht.md" lang="zh-Hant">繁體中文</a>
 </p>
 
 <p align="center">
@@ -26,6 +29,11 @@
 </p>
 
 ---
+
+**Live steering status:** Steering an ongoing execution, including Ctrl+S, is
+not available yet. Plan Mode remains separate and its approval requirements
+continue to apply. See [the steering design](docs/live-steering-design.md) for
+the safety work and integration still required.
 
 OpenAI Batch is used only when explicitly requested. Other batching uses Mana's
 internal parallel execution. Required Batch tasks pause durably and resume with

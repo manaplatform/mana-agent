@@ -32,7 +32,7 @@ from mana_agent.chat.events import (
     CodingActivityEvent,
     UserMessageEvent,
 )
-from mana_agent.chat.history import ChatHistory
+from mana_agent.chat.history import ChatHistory, reset_global_history
 from mana_agent.coding.event_visibility import (
     EventSemanticKind,
     EventVisibility,
@@ -50,6 +50,13 @@ from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.services.execution_event_hub import ExecutionEventHub, get_execution_event_hub
 from mana_agent.tui.app import ManaChatApp
 from mana_agent.tui.widgets.execution_panel import ExecutionPanel
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chat_history():
+    reset_global_history()
+    yield
+    reset_global_history()
 
 
 def _init_git_repo(path: Path) -> Path:
@@ -608,7 +615,7 @@ def test_terminal_and_error_events_appear_exactly_once(tmp_path: Path):
 def test_internal_reasoning_and_deltas_remain_hidden(tmp_path: Path):
     repo = _init_git_repo(tmp_path / "repo")
     session_id = f"session_hidden_{tmp_path.name}"
-    app = ManaChatApp(repo_root=repo)
+    app = ManaChatApp(repo_root=repo, history=ChatHistory())
     app._gateway_session_id = session_id
     app._subscribe_session_events(session_id)
     app._current_frontend_turn_id = "turn_11"

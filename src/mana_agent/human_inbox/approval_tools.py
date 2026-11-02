@@ -96,6 +96,27 @@ def _resolve_inbox_service(inbox_service: HumanInboxService | None = None) -> Hu
     return default_human_inbox_service()
 
 
+def _assert_current_human_approval(service: HumanInboxService, item: Any) -> None:
+    """Do not report legacy model decisions or stale reviewer responses as approval."""
+    if item.request_type is not InboxRequestType.APPROVAL or item.status is not InboxStatus.APPROVED:
+        raise PermissionError("an approved human approval request is required")
+    if item.response_channel == "model_judgment":
+        raise PermissionError("model judgment cannot substitute for a human approval")
+    if item.expires_at <= service.clock():
+        raise PermissionError("human approval has expired")
+    service.assert_response_actor_is_currently_authorized(item)
+
+
+def _assert_request_owner(item: Any, *, task_id: str, agent_id: str, source_decision_id: str) -> None:
+    """When a caller supplies provenance, do not disclose another request's decision."""
+    if task_id and item.task_id != task_id:
+        raise PermissionError("approval request belongs to a different task")
+    if agent_id and item.requested_by_agent_id != agent_id:
+        raise PermissionError("approval request belongs to a different agent")
+    if source_decision_id and item.policy_decision_id != source_decision_id:
+        raise PermissionError("approval request belongs to a different decision")
+
+
 def request_user_approval(
     source_decision_id: str,
     task_id: str,
@@ -210,9 +231,13 @@ def wait_for_approval(
             requesting_agent_id=agent_id,
             task_id=task_id,
         )
+        item = service.repository.get(inbox_item_id)
+        if item.policy_decision_id != source_decision_id or item.request_type is not InboxRequestType.APPROVAL:
+            raise PermissionError("inbox item belongs to a different decision or is not an approval request")
         last_observation = obs
 
         if obs.status is InboxStatus.APPROVED:
+            _assert_current_human_approval(service, item)
             return ApprovalWaitResult(
                 verdict="approved",
                 may_continue=True,
@@ -384,7 +409,7 @@ def approval_request(
     llm: Any = None,
     enable_model_judgment: bool = True,
 ) -> dict[str, Any]:
-    """Request human or model-judged approval for a command or action, emit live approval events, and wait for verdict.
+    """Request human approval for a command or action, emit live approval events, and wait for verdict.
 
     Returns a dictionary with approved status, approval_id (grant), inbox_item_id, and explanatory message.
     """
@@ -405,6 +430,11 @@ def approval_request(
         except Exception:
             item = None
 
+        # An explicit inbox identifier must never silently fall back to a
+        # different request, even when a valid action identifier was supplied.
+        if item is None:
+            raise LookupError("unknown inbox item")
+
     if item is None and target_action_id:
         try:
             matches = service.repository.find_for_action(target_action_id)
@@ -413,6 +443,12 @@ def approval_request(
                 req_inbox_id = item.inbox_item_id
         except Exception:
             item = None
+
+    if item is not None and target_action_id and item.action_intent_id != target_action_id:
+        raise PermissionError("inbox item belongs to a different action")
+    if item is not None:
+        _assert_request_owner(item, task_id=task_id, agent_id=agent_id, source_decision_id=source_decision_id)
+        target_action_id = target_action_id or item.action_intent_id
 
     from mana_agent.transactional_actions.runtime import default_action_gateway
 
@@ -425,6 +461,16 @@ def approval_request(
         except Exception:
             action = None
 
+    if action is not None:
+        if task_id and action.parent_task_id != task_id:
+            raise PermissionError("transactional action belongs to a different task")
+        if agent_id and action.originating_agent != agent_id:
+            raise PermissionError("transactional action belongs to a different agent")
+        if source_decision_id and (action.policy_decision is None or action.policy_decision.decision_id != source_decision_id):
+            raise PermissionError("transactional action belongs to a different decision")
+        from mana_agent.transactional_actions.runtime import _assert_workspace_scope
+        _assert_workspace_scope(root, action)
+
     if item is None and action is not None:
         try:
             ensured_inbox_id = gateway._ensure_inbox(action)
@@ -433,6 +479,14 @@ def approval_request(
                 item = service.repository.get(ensured_inbox_id)
         except Exception:
             item = None
+
+    if target_action_id and action is None:
+        raise LookupError("unknown transactional action")
+    if req_inbox_id and not req_inbox_id.startswith("act_") and item is None and not target_action_id:
+        raise LookupError("unknown inbox item")
+
+    if target_action_id and item is None:
+        raise LookupError("transactional action has no available inbox request")
 
     if item is None and cmd:
         from mana_agent.tools.shell_exec import split_shell_command
@@ -458,6 +512,8 @@ def approval_request(
             allow_command_result_verification=True,
         )
         action_intent = gateway.propose(adapter)
+        action = action_intent
+        req_action_id = action_intent.action_id
         if action_intent.policy_decision and action_intent.policy_decision.outcome is PolicyOutcome.DENY:
             return {
                 "approved": False,
@@ -466,15 +522,14 @@ def approval_request(
                 "message": f"Command denied by security policy: {action_intent.policy_decision.explanation}",
             }
         if action_intent.policy_decision and action_intent.policy_decision.outcome is PolicyOutcome.ALLOW:
-            grant = gateway.approvals.find_valid(action_intent)
-            grant_id = grant.approval_id if grant is not None else f"policy_allow_{action_intent.action_id}"
             return {
                 "approved": True,
-                "approval_id": grant_id,
+                "approval_id": "",
+                "action_id": action_intent.action_id,
                 "inbox_item_id": "",
                 "status": "approved",
                 "command": cmd,
-                "message": "Command is allowed by security policy.",
+                "message": "This proposed action is allowed by policy; no transferable approval grant was issued. The execution tool must evaluate its own action.",
             }
 
         req_inbox_id = action_intent.inbox_item_id
@@ -487,6 +542,9 @@ def approval_request(
                 item = service.repository.get(req_inbox_id)
             except Exception:
                 item = None
+
+    if item is None and action is not None:
+        raise LookupError("transactional action has no available inbox request")
 
     if item is None:
         # Create general inbox request
@@ -508,6 +566,8 @@ def approval_request(
             item = None
 
     target_inbox_id = item.inbox_item_id if item else req_inbox_id
+    if item is not None:
+        _assert_request_owner(item, task_id=task_id, agent_id=agent_id, source_decision_id=source_decision_id)
     target_action_id = (
         getattr(item, "action_intent_id", "")
         or getattr(item, "action_id", "")
@@ -580,26 +640,26 @@ def approval_request(
             cur_item = None
         if cur_item is not None:
             if cur_item.status == InboxStatus.APPROVED:
+                _assert_request_owner(cur_item, task_id=task_id, agent_id=agent_id, source_decision_id=source_decision_id)
+                _assert_current_human_approval(service, cur_item)
                 approved = True
                 if cur_item.action_intent_id:
                     action = gateway.store.get_action(cur_item.action_intent_id)
-                    if action is not None:
-                        grant = gateway.approvals.find_valid(action)
-                        if grant is None:
-                            grant = gateway.approvals.issue(
-                                action,
-                                approved_by=cur_item.response_actor_id or "user",
-                                ttl_seconds=300,
-                            )
-                        grant_id = grant.approval_id
+                    if action is None:
+                        raise LookupError("approved inbox item references an unknown transactional action")
+                    from mana_agent.transactional_actions.runtime import _assert_workspace_scope
+                    _assert_workspace_scope(root, action)
+                    grant = gateway.grant_for_approved_inbox(action, cur_item)
+                    grant_id = grant.approval_id
                 return {
                     "approved": True,
                     "approval_id": grant_id,
                     "inbox_item_id": target_inbox_id,
+                    "action_id": target_action_id,
                     "status": "approved",
                     "command": cmd,
                     "message": (
-                        f"Approval granted. You may now execute the command with action_approval_id={grant_id!r}."
+                        f"Approval granted for this exact action. Resume the same execution with action_approval_id={grant_id!r}; grants do not transfer between wrappers."
                         if grant_id
                         else "Approval granted."
                     ),
@@ -617,112 +677,10 @@ def approval_request(
                     "message": f"Approval request was {cur_item.status.value} by the reviewer.",
                 }
 
-    # Evaluate model approval judgment if enabled and a command is provided
-    if enable_model_judgment and bool(cmd and cmd.strip()):
-        try:
-            from mana_agent.multi_agent.agents.approval_agent import judge_approval_request
-
-            mj = judge_approval_request(
-                command=cmd,
-                reason=reason,
-                goal=task_id or "",
-                working_directory=str(root),
-                risk_level=risk_level,
-                llm=llm,
-                action_id=target_action_id,
-            )
-            if mj.judgment == "accept":
-                approved = True
-                reviewer_id = "model_judgment"
-                if target_inbox_id and service is not None:
-                    try:
-                        cur_item = service.repository.get(target_inbox_id)
-                        if cur_item is not None:
-                            reviewer_id = (
-                                cur_item.eligible_reviewer_ids[0]
-                                if cur_item.eligible_reviewer_ids
-                                else cur_item.assigned_reviewer_id
-                            ) or "model_judgment"
-                        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
-
-                        service.respond(
-                            ResponseSubmission(
-                                inbox_item_id=target_inbox_id,
-                                operation=ResponseOperation.APPROVE,
-                                actor_id=reviewer_id,
-                                channel="model_judgment",
-                                idempotency_key=f"mj_app_{target_inbox_id}",
-                                comment=mj.reason,
-                            )
-                        )
-                    except Exception as inb_err:
-                        logger.debug("Failed updating inbox item on model approval accept: %s", inb_err)
-                if target_action_id:
-                    act_obj = gateway.store.get_action(target_action_id)
-                    if act_obj is not None:
-                        found_grant = gateway.approvals.find_valid(act_obj)
-                        if found_grant is None:
-                            from mana_agent.transactional_actions.models import ApprovalScope
-                            req_scope = (
-                                act_obj.policy_decision.required_approval_scope
-                                if act_obj.policy_decision
-                                else ApprovalScope.ACTION_ONCE
-                            )
-                            found_grant = gateway.approvals.issue(
-                                act_obj,
-                                approved_by=reviewer_id,
-                                ttl_seconds=300,
-                                scope=req_scope or ApprovalScope.ACTION_ONCE,
-                            )
-                        grant_id = found_grant.approval_id
-            elif mj.judgment == "deny" and mj.confidence > 0.0:
-                if target_inbox_id and service is not None:
-                    try:
-                        cur_item = service.repository.get(target_inbox_id)
-                        deny_reviewer_id = "model_judgment"
-                        if cur_item is not None:
-                            deny_reviewer_id = (
-                                cur_item.eligible_reviewer_ids[0]
-                                if cur_item.eligible_reviewer_ids
-                                else cur_item.assigned_reviewer_id
-                            ) or "model_judgment"
-                        from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
-
-                        service.respond(
-                            ResponseSubmission(
-                                inbox_item_id=target_inbox_id,
-                                operation=ResponseOperation.DENY,
-                                actor_id=deny_reviewer_id,
-                                channel="model_judgment",
-                                idempotency_key=f"mj_deny_{target_inbox_id}",
-                                comment=mj.reason,
-                            )
-                        )
-                    except Exception:
-                        pass
-                return {
-                    "approved": False,
-                    "inbox_item_id": target_inbox_id,
-                    "status": "denied",
-                    "message": f"Approval request was denied by model judgment: {mj.reason}",
-                    "reason": mj.reason,
-                    "suggested_command": mj.suggested_command,
-                    "risk_assessment": mj.risk_assessment,
-                }
-        except Exception as mj_exc:
-            logger.debug("Model approval judgment evaluation bypassed: %s", mj_exc)
+    # The legacy option remains accepted for compatibility, but a model is
+    # neither an authenticated human reviewer nor a source of grants.
 
     while time.monotonic() - start_time < max_timeout:
-        # Check action grant
-        if target_action_id:
-            action = gateway.store.get_action(target_action_id)
-            if action is not None:
-                grant = gateway.approvals.find_valid(action)
-                if grant is not None:
-                    approved = True
-                    grant_id = grant.approval_id
-                    break
-
         if target_inbox_id:
             try:
                 cur_item = service.repository.get(target_inbox_id)
@@ -730,18 +688,17 @@ def approval_request(
                 cur_item = None
             if cur_item is not None:
                 if cur_item.status == InboxStatus.APPROVED:
+                    _assert_request_owner(cur_item, task_id=task_id, agent_id=agent_id, source_decision_id=source_decision_id)
+                    _assert_current_human_approval(service, cur_item)
                     approved = True
                     if cur_item.action_intent_id:
                         action = gateway.store.get_action(cur_item.action_intent_id)
-                        if action is not None:
-                            grant = gateway.approvals.find_valid(action)
-                            if grant is None:
-                                grant = gateway.approvals.issue(
-                                    action,
-                                    approved_by=cur_item.response_actor_id or "user",
-                                    ttl_seconds=300,
-                                )
-                            grant_id = grant.approval_id
+                        if action is None:
+                            raise LookupError("approved inbox item references an unknown transactional action")
+                        from mana_agent.transactional_actions.runtime import _assert_workspace_scope
+                        _assert_workspace_scope(root, action)
+                        grant = gateway.grant_for_approved_inbox(action, cur_item)
+                        grant_id = grant.approval_id
                     break
                 if cur_item.status in {
                     InboxStatus.DENIED,
@@ -763,10 +720,11 @@ def approval_request(
             "approved": True,
             "approval_id": grant_id,
             "inbox_item_id": target_inbox_id,
+            "action_id": target_action_id,
             "status": "approved",
             "command": cmd,
             "message": (
-                f"Approval granted. You may now execute the command with action_approval_id={grant_id!r}."
+                f"Approval granted for this exact action. Resume the same execution with action_approval_id={grant_id!r}; grants do not transfer between wrappers."
                 if grant_id
                 else "Approval granted."
             ),
@@ -775,6 +733,7 @@ def approval_request(
     return {
         "approved": False,
         "inbox_item_id": target_inbox_id,
+        "action_id": target_action_id,
         "status": "pending",
         "message": f"Timed out waiting for approval after {int(max_timeout)}s. The request remains pending in inbox.",
     }
@@ -784,6 +743,9 @@ def build_approval_tools(
     inbox_service: HumanInboxService | None = None,
     execution_supervisor: Any = None,
     on_timeout_suspend: Any = None,
+    workspace_root: Any = None,
+    task_id: str = "",
+    agent_id: str = "",
 ) -> list[StructuredTool]:
     """Return LangChain StructuredTools for model-driven human approval requests and waiting."""
     metadata = {"read_only": True, "inbox_only": True}
@@ -805,7 +767,10 @@ def build_approval_tools(
             action_id=action_id,
             risk_level=risk_level,
             timeout_seconds=timeout_seconds,
+            workspace_root=workspace_root,
             inbox_service=inbox_service,
+            task_id=task_id,
+            agent_id=agent_id,
         )
 
     def _req_tool(

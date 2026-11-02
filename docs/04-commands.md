@@ -1,5 +1,13 @@
 # Commands
 
+## Live steering status
+
+There is currently no Ctrl+S steering command or live steering input. Ctrl+S
+is already used to save in the configuration screen. Plan Mode and its
+approval gates remain unchanged; the proposed steering types, worker routing,
+and recovery behavior are not yet available. See
+[Live steering integration status](live-steering-design.md).
+
 ## Durable human inbox
 
 `mana-agent inbox` reads and responds to the authoritative persisted approval and

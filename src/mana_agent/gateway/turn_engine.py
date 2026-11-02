@@ -767,6 +767,8 @@ def process_chat_turn(
     autonomous_controller: Any | None = None,
     continuation_evaluator: Any | None = None,
     execution_context_included: bool = False,
+    supervisor_attempt_id: str = "",
+    supervisor_lease_token: str = "",
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 

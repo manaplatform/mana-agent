@@ -44,6 +44,7 @@ SECRET_KEYS = {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "NVIDIA_API_KEY",
+    "ANTHROPIC_API_KEY",
     "MANA_GITHUB_TOKEN",
     "MANA_WEB_SEARCH_API_KEY",
     "MANA_API_TOKEN",
@@ -70,6 +71,8 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "OPENROUTER_TITLE": "Mana-Agent",
     "OPENROUTER_PROVIDER_PREFERENCES": {},
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_CHAT_MODEL": "claude-sonnet-5-5",
     "OPENAI_CHAT_MODEL": "gpt-4.1-mini",
     "OPENAI_TOOL_WORKER_MODEL": "",
     "OPENAI_CODING_PLANNER_MODEL": "",
@@ -458,6 +461,9 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "OPENROUTER_PROVIDER_PREFERENCES": "openrouter_provider_preferences",
     "NVIDIA_API_KEY": "nvidia_api_key",
     "NVIDIA_BASE_URL": "nvidia_base_url",
+    "ANTHROPIC_API_KEY": "anthropic_api_key",
+    "ANTHROPIC_BASE_URL": "anthropic_base_url",
+    "ANTHROPIC_CHAT_MODEL": "anthropic_chat_model",
     "OPENAI_CHAT_MODEL": "openai_chat_model",
     "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
     "OPENAI_CODING_PLANNER_MODEL": "openai_coding_planner_model",
@@ -1148,6 +1154,8 @@ def is_user_config_valid() -> bool:
         api_key = effective.get("OPENROUTER_API_KEY", "")
     elif provider == "nvidia":
         api_key = effective.get("NVIDIA_API_KEY", "")
+    elif provider == "anthropic":
+        api_key = effective.get("ANTHROPIC_API_KEY", "")
     else:
         api_key = effective.get("OPENAI_API_KEY", "")
     return bool(

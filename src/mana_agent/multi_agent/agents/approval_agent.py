@@ -25,27 +25,13 @@ APPROVAL_ALLOWED_TOOLS = [
 
 
 class ModelApprovalJudgment(BaseModel):
-    """Structured decision produced by model judgment on approval requests."""
+    """Advisory assessment, not a human decision or execution authorization."""
 
-    judgment: Literal["accept", "deny"]
+    judgment: Literal["accept", "approval", "deny"]
     reason: str
     suggested_command: str = ""
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     risk_assessment: str = ""
-
-
-_DANGEROUS_COMMAND_PATTERNS = (
-    r"\brm\s+-[a-zA-Z]*r",
-    r"\brm\s+-[a-zA-Z]*f",
-    r"\brmdir\b",
-    r"\bsudo\b",
-    r"\bgit\s+reset\s+--hard\b",
-    r"\bgit\s+clean\s+-[a-zA-Z]*f",
-    r"\bgit\s+push\s+.*--force\b",
-    r"\bformat\s+[a-zA-Z]:",
-    r"\bmkfs\b",
-    r"\b(shutdown|reboot)\b",
-)
 
 
 def judge_approval_request(
@@ -57,20 +43,10 @@ def judge_approval_request(
     risk_level: str = "medium",
     llm: Any = None,
     action_id: str = "",
+    error: str = "",
 ) -> ModelApprovalJudgment:
-    """Evaluate an approval request using model judgment, enforcing deterministic safety invariants."""
+    """Assess an action; deterministic policy and human approval remain authoritative."""
     clean_cmd = str(command or "").strip()
-
-    # Deterministic safety gate: hard-deny known destructive commands
-    for pat in _DANGEROUS_COMMAND_PATTERNS:
-        if re.search(pat, clean_cmd, re.IGNORECASE):
-            return ModelApprovalJudgment(
-                judgment="deny",
-                reason=f"Deterministic security policy: destructive command pattern detected ({clean_cmd!r}).",
-                suggested_command="",
-                confidence=1.0,
-                risk_assessment="high_risk_destructive_shell",
-            )
 
     if llm is None:
         try:
@@ -90,27 +66,27 @@ def judge_approval_request(
             logger.debug("Could not resolve default LLM for approval judgment: %s", exc)
 
     if llm is None:
-        # Fail-closed when no model is available to make the decision
         return ModelApprovalJudgment(
-            judgment="deny",
-            reason="No model judgment engine is available to evaluate the approval request.",
+            judgment="approval",
+            reason="No model judgment engine is available to evaluate the approval request; human approval is required.",
             suggested_command="",
             confidence=0.0,
             risk_assessment="unverified_model_unavailable",
         )
 
     system_prompt = (
-        "You are Mana-Agent's authoritative Model Approval Judge.\n"
-        "Your role is to evaluate whether a requested shell command or tool execution should be ACCEPTED or DENIED.\n\n"
+        "You are Mana-Agent's advisory action risk assessor.\n"
+        "Your assessment cannot authorize execution, replace a human decision, or override deterministic policy.\n"
+        "Assess whether a proposed command appears acceptable, needs human approval, or should be denied.\n\n"
         "CRITICAL RULES:\n"
-        "1. ACCEPT (judgment='accept') commands that are safe, non-destructive, and genuinely needed to inspect, build, test, verify, or advance the user's task goal.\n"
-        "2. DENY (judgment='deny') any command that is destructive, dangerous, or unneeded.\n"
-        "   - Commands like rm, rmdir, git reset --hard, git clean -fd, sudo, or accessing secrets must ALWAYS be DENIED.\n"
-        "3. If a command is suboptimal or an alternative command should be run instead, provide the exact alternative in 'suggested_command'.\n"
-        "4. Return strictly one valid JSON object conforming to this schema:\n"
+        "1. ACCEPT (judgment='accept'): Safe, non-destructive, or verified commands needed to inspect, build, test, verify, or retry/advance the user's task goal.\n"
+        "2. REQUIRE HUMAN APPROVAL (judgment='approval'): Consequential, state-modifying, or sensitive commands (such as file deletions, hard resets, privilege escalation, or irreversible external changes) where human review and explicit consent are required.\n"
+        "3. DENY (judgment='deny'): Malicious, completely unrelated, or prohibited actions that must not run under any circumstances.\n"
+        "4. If an execution error occurred, you may suggest an alternative in 'suggested_command'; it is not authorized and must not run automatically.\n"
+        "5. Return strictly one valid JSON object conforming to this schema:\n"
         "{\n"
-        '  "judgment": "accept" | "deny",\n'
-        '  "reason": "Clear justification for accepting or denying",\n'
+        '  "judgment": "accept" | "approval" | "deny",\n'
+        '  "reason": "Clear justification for the decision",\n'
         '  "suggested_command": "Alternative command to run if different from target, else empty",\n'
         '  "confidence": 0.0 - 1.0,\n'
         '  "risk_assessment": "Summary of safety and impact analysis"\n'
@@ -118,7 +94,7 @@ def judge_approval_request(
         "Do not include markdown code fences or conversational prose."
     )
 
-    user_payload = {
+    user_payload: dict[str, Any] = {
         "command": clean_cmd,
         "reason": reason or "Execute command to advance or verify task",
         "task_goal": goal,
@@ -126,6 +102,8 @@ def judge_approval_request(
         "risk_level": risk_level,
         "action_id": action_id,
     }
+    if error:
+        user_payload["execution_error"] = str(error)
 
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -144,11 +122,16 @@ def judge_approval_request(
         if start >= 0 and end >= start:
             text = text[start : end + 1]
         data = json.loads(text)
-        judgment_val = str(data.get("judgment") or "deny").strip().lower()
-        if judgment_val not in {"accept", "deny"}:
-            judgment_val = "accept" if judgment_val in {"approved", "approve", "allow", "yes"} else "deny"
+        raw_val = str(data.get("judgment") or "deny").strip().lower()
+        if raw_val in {"accept", "approved", "approve", "allow", "yes"}:
+            judgment_val: Literal["accept", "approval", "deny"] = "accept"
+        elif raw_val in {"approval", "require_approval", "needs_approval", "ask_user", "human_approval"}:
+            judgment_val = "approval"
+        else:
+            judgment_val = "deny"
+
         return ModelApprovalJudgment(
-            judgment=judgment_val,  # type: ignore[arg-type]
+            judgment=judgment_val,
             reason=str(data.get("reason") or "Model evaluated command safety."),
             suggested_command=str(data.get("suggested_command") or "").strip(),
             confidence=max(0.0, min(1.0, float(data.get("confidence", 1.0)))),
@@ -157,8 +140,8 @@ def judge_approval_request(
     except Exception as exc:
         logger.warning("Model approval judgment evaluation failed: %s", exc)
         return ModelApprovalJudgment(
-            judgment="deny",
-            reason=f"Model approval judgment evaluation encountered an error: {exc}",
+            judgment="approval",
+            reason=f"Model approval judgment evaluation encountered an error ({exc}); human approval is required.",
             confidence=0.0,
             risk_assessment="evaluation_error",
         )
@@ -221,6 +204,7 @@ class ApprovalAgent(BaseAgent):
         working_directory: str = "",
         risk_level: str = "medium",
         action_id: str = "",
+        error: str = "",
     ) -> ModelApprovalJudgment:
         """Evaluate an approval request using this agent's model."""
         return judge_approval_request(
@@ -231,6 +215,7 @@ class ApprovalAgent(BaseAgent):
             risk_level=risk_level,
             llm=self.llm,
             action_id=action_id,
+            error=error,
         )
 
     def may_continue(self, result: Any) -> bool:

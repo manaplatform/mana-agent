@@ -62,7 +62,7 @@ from mana_agent.services.execution_event_hub import (
     reset_execution_event_hub_for_tests,
 )
 from mana_agent.tui.app import ManaChatApp
-from mana_agent.tui.computer_permission import ComputerPermissionScreen
+from mana_agent.tui.computer_permission import ComputerPermissionScreen, InlineApproval
 from mana_agent.transactional_actions.computer import ComputerActionAdapter
 from mana_agent.transactional_actions.gateway import ActionGateway, ApprovalRequired
 from mana_agent.transactional_actions.approvals import ApprovalRegistry
@@ -931,7 +931,7 @@ def test_dashboard_chat_permission_decision_executes_and_emits_result(
     assert any(event["type"] == "computer.permission_decided" for event in events)
 
 
-def test_tui_chat_opens_permission_decision_screen() -> None:
+def test_tui_chat_shows_permission_in_drawer() -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
 
@@ -951,13 +951,26 @@ def test_tui_chat_opens_permission_decision_screen() -> None:
             await pilot.pause()
             assert isinstance(app.screen, ComputerPermissionScreen)
             assert app.screen.scope == "computer.screenshot.capture"
+            assert {b.label.plain for b in app.screen.query("Button")} == {"Deny", "Allow once", "This session", "Always"}
 
     run(exercise())
 
 
-def test_tui_chat_opens_server_approval_screen() -> None:
+@pytest.mark.parametrize(
+    ("button", "expected_decision"),
+    [(".inline-once", PermissionDecision.ALLOW_ONCE), (".inline-deny", None)],
+)
+def test_tui_chat_shows_inline_server_approval(button, expected_decision, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana-home"))
     history = ChatHistory()
     app = ManaChatApp(history=history)
+    decisions = []
+
+    async def complete(choice, *, batch_ids=None):
+        decisions.append(choice)
+        return True
+
+    app._complete_computer_permission = complete
 
     async def exercise() -> None:
         async with app.run_test() as pilot:
@@ -975,7 +988,18 @@ def test_tui_chat_opens_server_approval_screen() -> None:
             }))
             await pilot.pause()
             assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app.screen.request_id == "server-approval-test"
             assert app.screen.server is True
             assert app.screen.scope == "server.action.execute"
+            assert app.screen.preview == "sudo apt-get install -y -- nginx"
+            assert {b.label.plain for b in app.screen.query("Button")} == {"Deny", "Allow once"}
+            assert not decisions
+            app.screen.query_one(button).press()
+            await pilot.pause()
+            assert len(decisions) == 1
+            assert decisions[0].request_id == "server-approval-test"
+            assert decisions[0].server is True
+            assert decisions[0].decision == expected_decision
+            assert not isinstance(app.screen, ComputerPermissionScreen)
 
     run(exercise())

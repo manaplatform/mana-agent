@@ -83,7 +83,6 @@ VALID_CHECKPOINT_STATES = frozenset(
         ExecutionState.CHECKPOINTING,
         ExecutionState.COMPLETED_PENDING_VERIFICATION,
         ExecutionState.PENDING_BUDGET_DECISION,
-        ExecutionState.WAITING,
     }
 )
 
@@ -639,12 +638,22 @@ class ExecutionSupervisor:
         *,
         reason: str = "",
         recovery_reason: str = "",
+        attempt_id: str | None = None,
+        generation: int | None = None,
     ) -> TaskRecord:
         prior: ExecutionState | None = None
 
         def update(task: TaskRecord) -> None:
             nonlocal prior
             prior = task.state
+            if attempt_id is not None and task.attempt_id != attempt_id:
+                raise StaleLeaseError(f"stale attempt {attempt_id} cannot transition task (active attempt is {task.attempt_id})")
+            if generation is not None and task.attempt_generation != generation:
+                raise StaleLeaseError(f"stale generation {generation} cannot transition task (active generation is {task.attempt_generation})")
+            if task.state == target:
+                return
+            if task.state in TERMINAL_STATES and target in TERMINAL_STATES:
+                return
             if task.waiting_inbox_item_id and target in {
                 ExecutionState.QUEUED,
                 ExecutionState.LEASED,
@@ -1133,7 +1142,10 @@ class ExecutionSupervisor:
     def _validate_lease(self, task: TaskRecord, *, attempt_id: str, lease_token: str) -> None:
         if task.attempt_id != attempt_id:
             raise StaleLeaseError("attempt no longer owns the task")
-        if not (hmac.compare_digest(task.lease_token, _token_hash(lease_token)) or hmac.compare_digest(task.lease_token, lease_token)):
+        if not lease_token or not (
+            hmac.compare_digest(task.lease_token, _token_hash(lease_token))
+            or hmac.compare_digest(task.lease_token, lease_token)
+        ):
             raise StaleLeaseError("lease token is stale or invalid")
         if task.lease_expires_at is None or task.lease_expires_at <= self.clock():
             raise StaleLeaseError("lease has expired")
@@ -1167,6 +1179,13 @@ class ExecutionSupervisor:
         """Release a claimed-but-not-started attempt without retrying executed work."""
 
         current = self.store.get_task(task_id)
+        if current.attempt_id != attempt_id:
+            raise StaleLeaseError("attempt no longer owns the task")
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt is not None and attempt.state == "released":
+            return current
+        if current.state == ExecutionState.QUEUED and not current.lease_token:
+            return current
         self._validate_lease(current, attempt_id=attempt_id, lease_token=lease_token)
         if current.state != ExecutionState.LEASED:
             raise LeaseConflictError(
@@ -1176,8 +1195,8 @@ class ExecutionSupervisor:
             task_id,
             ExecutionState.QUEUED,
             recovery_reason=reason or "lease released before execution",
+            attempt_id=attempt_id,
         )
-        attempt = self.store.get_attempt(attempt_id)
         if attempt is not None:
             attempt.state = "released"
             attempt.finished_at = self.clock()
@@ -1186,10 +1205,19 @@ class ExecutionSupervisor:
         self._emit("lease_released", task, released_attempt_id=attempt_id, reason=reason)
         return task
 
-    def heartbeat(self, task_id: str, *, attempt_id: str, lease_token: str) -> TaskRecord:
+    def heartbeat(
+        self,
+        task_id: str,
+        *,
+        attempt_id: str,
+        lease_token: str,
+        generation: int | None = None,
+    ) -> TaskRecord:
         now = self.clock()
         def renew(task: TaskRecord) -> None:
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if generation is not None and task.attempt_generation != generation:
+                raise StaleLeaseError("attempt generation no longer owns the task")
             if task.state not in {ExecutionState.LEASED, ExecutionState.RUNNING, ExecutionState.CHECKPOINTING, ExecutionState.WAITING}:
                 raise LeaseConflictError(f"task state does not accept heartbeats: {task.state.value}")
             task.heartbeat_at = now
@@ -1265,7 +1293,15 @@ class ExecutionSupervisor:
         """Resume an existing, still-valid leased attempt without creating a rival attempt."""
 
         def resume(task: TaskRecord) -> None:
-            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.attempt_id != attempt_id:
+                raise StaleLeaseError("attempt no longer owns the task")
+            if task.state == ExecutionState.WAITING:
+                # Re-acquire lease for the resuming attempt since it was released while waiting
+                task.lease_owner = task.lease_owner or f"resumed:{attempt_id}"
+                task.lease_token = _token_hash(lease_token)
+                task.lease_expires_at = self.clock() + timedelta(seconds=self.config.lease_seconds)
+            else:
+                self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             if task.state == ExecutionState.RUNNING:
                 task.heartbeat_at = task.updated_at = self.clock()
                 return
@@ -1282,6 +1318,9 @@ class ExecutionSupervisor:
         attempt = self.store.get_attempt(attempt_id)
         if attempt is not None:
             attempt.state = "running"
+            attempt.lease_owner = task.lease_owner
+            attempt.lease_token = task.lease_token
+            attempt.lease_expires_at = task.lease_expires_at
             attempt.started_at = attempt.started_at or task.started_at
             self.store.save_attempt(attempt)
         self._emit("task_resumed", task, reused_attempt=True)
@@ -1293,6 +1332,7 @@ class ExecutionSupervisor:
         *,
         attempt_id: str,
         lease_token: str,
+        generation: int | None = None,
         resume_payload: dict[str, Any],
         completed_steps: Iterable[str] = (),
         pending_steps: Iterable[str] = (),
@@ -1331,19 +1371,19 @@ class ExecutionSupervisor:
             caller=caller,
         )
 
-        if current_state in TERMINAL_STATES:
+        if current_state in TERMINAL_STATES or current_state == ExecutionState.WAITING:
             self._emit(
                 "checkpoint.skipped",
                 task_before,
                 checkpoint_boundary=boundary,
                 current_state=current_state.value,
                 expected_state=ExecutionState.RUNNING.value,
-                terminal_reason=task_before.failure_reason,
+                terminal_reason=task_before.failure_reason or task_before.waiting_reason,
                 attempt_id=attempt_id,
                 caller=caller,
-                reason="checkpoint_skipped_terminal_state",
+                reason="checkpoint_skipped_waiting_state" if current_state == ExecutionState.WAITING else "checkpoint_skipped_terminal_state",
             )
-            return None
+            return self.store.get_checkpoint(task_before.checkpoint_id) if (task_before.checkpoint_id and current_state == ExecutionState.WAITING) else None
 
         if current_state not in VALID_CHECKPOINT_STATES:
             self._emit(
@@ -1371,34 +1411,38 @@ class ExecutionSupervisor:
         original_state = current_state
 
         def begin(task: TaskRecord) -> None:
-            if task.state in TERMINAL_STATES:
+            if task.state in TERMINAL_STATES or task.state == ExecutionState.WAITING:
                 return
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if generation is not None and task.attempt_generation != generation:
+                raise StaleLeaseError("attempt generation no longer owns the task")
             validate_transition(task.state, ExecutionState.CHECKPOINTING)
             task.state = ExecutionState.CHECKPOINTING
             task.updated_at = self.clock()
 
         checkpointing, _ = self.store.update_task(task_id, begin)
-        if checkpointing.state in TERMINAL_STATES:
+        if checkpointing.state in TERMINAL_STATES or checkpointing.state == ExecutionState.WAITING:
             self._emit(
                 "checkpoint.skipped",
                 checkpointing,
                 checkpoint_boundary=boundary,
                 current_state=checkpointing.state.value,
                 expected_state=ExecutionState.RUNNING.value,
-                terminal_reason=checkpointing.failure_reason,
+                terminal_reason=checkpointing.failure_reason or checkpointing.waiting_reason,
                 attempt_id=attempt_id,
                 caller=caller,
-                reason="checkpoint_skipped_terminal_state",
+                reason="checkpoint_skipped_waiting_state" if checkpointing.state == ExecutionState.WAITING else "checkpoint_skipped_terminal_state",
             )
-            return None
+            return self.store.get_checkpoint(checkpointing.checkpoint_id) if (checkpointing.checkpoint_id and checkpointing.state == ExecutionState.WAITING) else None
 
         self._emit("task_checkpointing", checkpointing)
 
         def persist(task: TaskRecord) -> CheckpointRecord | None:
-            if task.state in TERMINAL_STATES:
+            if task.state in TERMINAL_STATES or task.state == ExecutionState.WAITING:
                 return None
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if generation is not None and task.attempt_generation != generation:
+                raise StaleLeaseError("attempt generation no longer owns the task")
             if task.state != ExecutionState.CHECKPOINTING:
                 raise LeaseConflictError(f"task cannot checkpoint from state {task.state.value}")
             checkpoint = CheckpointRecord(
@@ -1406,6 +1450,7 @@ class ExecutionSupervisor:
                 attempt_id=attempt_id,
                 state_version=task.state_version,
                 resume_payload=resume_payload,
+                steering_inputs=[dict(item) for item in task.steering_inputs],
                 completed_steps=list(completed_steps),
                 pending_steps=list(pending_steps),
                 tool_results=list(tool_results),
@@ -1479,7 +1524,11 @@ class ExecutionSupervisor:
             return False
         if task is None:
             return False
-        return task.state in VALID_CHECKPOINT_STATES and task.state not in TERMINAL_STATES
+        return (
+            task.state in VALID_CHECKPOINT_STATES
+            and task.state not in TERMINAL_STATES
+            and task.state != ExecutionState.WAITING
+        )
 
     def suspend_for_human_input(
         self,
@@ -1933,6 +1982,7 @@ class ExecutionSupervisor:
         *,
         attempt_id: str,
         lease_token: str,
+        generation: int | None = None,
         payload: dict[str, Any],
         token_usage: int = 0,
         actual_cost: float | None = None,
@@ -1972,6 +2022,8 @@ class ExecutionSupervisor:
 
         def escrow(task: TaskRecord) -> EscrowResult:
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if generation is not None and task.attempt_generation != generation:
+                raise StaleLeaseError("attempt generation no longer owns the task")
             if task.state not in {ExecutionState.RUNNING, ExecutionState.WAITING, ExecutionState.COMPLETED_PENDING_VERIFICATION}:
                 raise LeaseConflictError(f"task cannot publish a result from state {task.state.value}")
             target_state = (

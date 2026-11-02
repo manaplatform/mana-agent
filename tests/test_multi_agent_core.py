@@ -1296,7 +1296,8 @@ def test_main_agent_coding_route_has_queue_worker_verifier_and_review_evidence(t
     assert any(main.registry.agents[item].role == AgentRole.TOOL_WORKER for item in task.assigned_subagent_ids)
 
 
-def test_git_commit_push_request_queues_git_inspection_and_does_not_repo_search(tmp_path):
+def test_git_commit_push_request_queues_git_inspection_and_does_not_repo_search(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANA_TRANSACTIONAL_ALWAYS_APPROVE", "true")
     repo = _init_git_repo(tmp_path / "repo")
     (repo / "README.md").write_text("hello\nchanged\n", encoding="utf-8")
     main = MainAgent(repo)
@@ -1367,7 +1368,8 @@ def test_git_push_to_main_inspects_remote_and_blocks_when_behind(tmp_path):
     assert task.status == TaskStatus.BLOCKED
 
 
-def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
+def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANA_TRANSACTIONAL_ALWAYS_APPROVE", "true")
     repo = _init_git_repo(tmp_path / "repo")
     (repo / "README.md").write_text("hello\ncommit only\n", encoding="utf-8")
     main = MainAgent(repo)
@@ -1392,7 +1394,8 @@ def test_git_commit_inspects_diff_and_uses_diff_derived_message(tmp_path):
     assert task.status == TaskStatus.VERIFYING
 
 
-def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path):
+def test_git_create_new_branch_inspects_status_before_branch_creation(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANA_TRANSACTIONAL_ALWAYS_APPROVE", "true")
     repo = _init_git_repo(tmp_path / "repo")
     main = MainAgent(repo)
     intent = GitIntent(

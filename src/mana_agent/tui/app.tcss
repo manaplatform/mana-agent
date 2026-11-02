@@ -6,6 +6,7 @@
 Screen {
     background: #0f1117;
     color: #e6e6e6;
+    layers: default overlay;
 }
 
 Header {
@@ -58,6 +59,49 @@ Footer {
 
 #body {
     height: 1fr;
+}
+
+/* Approval request popup modal screen */
+ComputerPermissionScreen {
+    align: center middle;
+}
+
+#computer-permission-dialog {
+    width: 76;
+    height: 18;
+    padding: 1 2;
+    border: round #f59e0b;
+    background: #111827;
+}
+
+#computer-permission-title {
+    color: #fcd34d;
+    text-style: bold;
+    height: 1;
+}
+
+#computer-permission-scroll {
+    height: 1fr;
+    margin: 1 0;
+}
+
+#computer-permission-preview {
+    color: #e5e7eb;
+}
+
+#computer-permission-scope {
+    color: #93c5fd;
+    height: 1;
+    margin-bottom: 1;
+}
+
+.computer-permission-actions {
+    height: 3;
+    align-horizontal: right;
+}
+
+.computer-permission-actions Button {
+    margin-left: 1;
 }
 
 #main {

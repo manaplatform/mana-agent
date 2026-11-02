@@ -312,6 +312,66 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
             ModelCapability.TOOL_CALLING,
         }
     ),
+    "claude-sonnet-5-5": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STRUCTURED_OUTPUT,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
+    "claude-opus-5-5": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STRUCTURED_OUTPUT,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
+    "claude-haiku-5-5": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STRUCTURED_OUTPUT,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
+    "anthropic/claude-sonnet-5-5": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STRUCTURED_OUTPUT,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
+    "anthropic/claude-opus-5-5": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STRUCTURED_OUTPUT,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
+    "anthropic/claude-haiku-5-5": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STRUCTURED_OUTPUT,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+        }
+    ),
     "gpt-image-1": frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING}),
     "gpt-image-1-mini": frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING}),
     "dall-e-2": frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING}),

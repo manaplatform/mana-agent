@@ -34,6 +34,44 @@ def _safe_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _resolve_approval(events: list[dict[str, Any]], decision_event: dict[str, Any]) -> None:
+    """Update only the request named by a decision, never other pending requests."""
+    metadata = _safe_dict(decision_event.get("metadata"))
+    request_ids = {str(metadata.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} - {""}
+    if not request_ids:
+        return
+    approved = decision_event.get("event_type") == "action.approval.granted" or metadata.get("decision") == "approve"
+    for existing in events:
+        existing_meta = _safe_dict(existing.get("metadata"))
+        existing_ids = {str(existing_meta.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} - {""}
+        if request_ids & existing_ids and str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required", "waiting_permission"}:
+            existing["status"] = "completed" if approved else "failed"
+            existing["_approval_resolved"] = True
+
+
+_TERMINAL_STATUSES = {"success", "completed", "done", "failed", "error", "cancelled"}
+
+
+def _is_pending_approval(event: dict[str, Any]) -> bool:
+    """True while an approval request still needs a decision.
+
+    A pending request is shown only as a toast, so the activity stream must
+    not repeat it as a row. Once a decision is recorded the request is no
+    longer pending and remains visible as an ordinary outcome.
+    """
+    status = str(event.get("status") or "running").lower()
+    if status in _TERMINAL_STATUSES:
+        return False
+    event_type = str(event.get("event_type") or event.get("type") or "")
+    tool_name = str(event.get("tool_name") or "")
+    return (
+        status in {"waiting_approval", "pending_approval", "approval_required", "waiting_permission"}
+        or event_type.startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval", "computer.waiting_permission"))
+        or tool_name in {"approval_request", "request_user_approval", "wait_for_approval"}
+        or "approval.required" in tool_name
+    )
+
+
 class MainActivityBox(Vertical):
     """Unified, chronological stream for all general agent activities.
 
@@ -153,6 +191,10 @@ class MainActivityBox(Vertical):
         """Append or update a general agent activity event in the stream."""
         ev = dict(event)
         event_id = str(ev.get("event_id") or ev.get("id") or ev.get("call_id") or "").strip()
+        ev_type = str(ev.get("event_type") or "")
+        if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
+            _resolve_approval(self.events, ev)
+
         if event_id and event_id in self._event_ids:
             for i, existing in enumerate(self.events):
                 ex_id = str(existing.get("event_id") or existing.get("id") or existing.get("call_id") or "").strip()
@@ -214,6 +256,8 @@ class MainActivityBox(Vertical):
         # Consecutive operation grouping
         grouped: list[dict[str, Any]] = []
         for ev in visible_events:
+            if ev.get("_approval_resolved"):
+                continue
             tool_name = str(ev.get("tool_name") or ev.get("title") or ev.get("type") or "operation").strip()
             summary = str(ev.get("summary") or ev.get("detail") or ev.get("message") or "").strip()
             status = str(ev.get("status") or "running").lower()
@@ -425,6 +469,9 @@ class CodingActivityBox(Vertical):
         if ev_type.startswith(("context.", "cost.", "budget.")):
             self.context_meter.update(ev.get("payload") or ev.get("metadata") or {})
 
+        if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
+            _resolve_approval(self.events, ev)
+
         backend_val = ev.get("backend")
         if backend_val:
             self.backend = str(backend_val)
@@ -477,6 +524,8 @@ class CodingActivityBox(Vertical):
         # Activity log (terminal commands, patches, outputs, parallel events)
         lines: list[str] = []
         for row in self.events[-30:]:
+            if row.get("_approval_resolved"):
+                continue
             row_status = str(row.get("status") or "running").lower()
             row_type = str(row.get("event_type") or row.get("type") or "")
             row_tool = str(row.get("tool_name") or "")

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -95,7 +99,10 @@ class GitStateMemory:
 
 _SESSION_COMMAND_CACHE: dict[tuple[str, str], list[str]] = {}
 _DEFAULT_TIMEOUT_SECONDS = 120
-_READ_ONLY = {"status", "diff", "log", "show", "branch", "remote", "config", "help", "rev-parse"}
+_GIT_DISPATCH_CONTEXT: ContextVar[tuple[dict[str, Any], str]] = ContextVar(
+    "git_dispatch_context", default=({}, "")
+)
+_READ_ONLY = {"status", "diff", "log", "show", "branch", "remote", "config", "help", "rev-parse", "rev-list", "ls-files"}
 _LOCAL_SAFE_WRITE = {"add", "restore", "stash", "switch", "checkout", "fetch"}
 _LOCAL_HISTORY_WRITE = {"commit", "merge", "revert", "tag"}
 _REMOTE_WRITE = {"push", "pull"}
@@ -146,7 +153,17 @@ def _redact_text(text: str) -> str:
     return redact_json_line(str(text or ""))
 
 
-def _run_raw_git(args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+def _run_raw_git(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 30,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    merged_env = None
+    if env is not None:
+        merged_env = dict(os.environ)
+        merged_env.update(env)
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -156,6 +173,7 @@ def _run_raw_git(args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess
         capture_output=True,
         timeout=timeout,
         check=False,
+        env=merged_env,
     )
 
 
@@ -221,6 +239,44 @@ def observe_git_state(repo_path: str | Path | None = None) -> GitObservation:
     )
 
 
+def _staged_index_digest(repo_root: Path, *, index_file: Path | None = None) -> str:
+    """Fingerprint every index entry, independent of diff presentation config."""
+    try:
+        env = {"GIT_INDEX_FILE": str(index_file)} if index_file is not None else None
+        index = _run_raw_git(["ls-files", "--stage", "--full-name", "-z"], cwd=repo_root, timeout=30, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("could not inspect the Git index for commit approval") from exc
+    if index.returncode != 0:
+        raise RuntimeError("could not inspect the Git index for commit approval")
+    return hashlib.sha256(index.stdout.encode("utf-8", errors="surrogateescape")).hexdigest()
+
+
+@contextmanager
+def _fenced_commit_index(repo_root: Path, action_id: str):
+    """Snapshot the approved staged index so concurrent mutations or hooks cannot taint the commit."""
+    git_dir = repo_root / ".git"
+    if not git_dir.is_dir():
+        res = _run_raw_git(["rev-parse", "--git-dir"], cwd=repo_root, timeout=10)
+        if res.returncode == 0 and res.stdout.strip():
+            p = Path(res.stdout.strip())
+            git_dir = p if p.is_absolute() else (repo_root / p).resolve()
+    main_index = git_dir / "index"
+    if not main_index.is_file():
+        yield None, None
+        return
+    fenced_name = f"fenced_index_{action_id}"
+    fenced_index = git_dir / fenced_name
+    shutil.copy2(main_index, fenced_index)
+    try:
+        yield fenced_index, main_index
+    finally:
+        if fenced_index.exists():
+            try:
+                fenced_index.unlink()
+            except OSError:
+                pass
+
+
 def classify_git_risk(args: list[str]) -> GitRiskLevel:
     command = str(args[0] if args else "").strip()
     lowered = [str(item).strip().lower() for item in args]
@@ -228,12 +284,25 @@ def classify_git_risk(args: list[str]) -> GitRiskLevel:
         if command == "push" and any(item in lowered for item in {"--force", "--force-with-lease", "--mirror", "--delete"}):
             return GitRiskLevel.HISTORY_REWRITE
         return GitRiskLevel.DESTRUCTIVE if command not in _HISTORY_REWRITE else GitRiskLevel.HISTORY_REWRITE
-    if command == "config" and len(args) >= 3:
+    if any(item == "--output" or item.startswith("--output=") for item in lowered[1:]):
         return GitRiskLevel.LOCAL_SAFE_WRITE
-    if command == "branch" and any(item in args for item in {"-d", "-m", "-M", "--delete", "--move"}):
+    if command == "config":
+        if len(args) == 2 and not args[1].startswith("-"):
+            return GitRiskLevel.READ_ONLY
+        if len(args) == 3 and args[1] == "--get" and not args[2].startswith("-"):
+            return GitRiskLevel.READ_ONLY
         return GitRiskLevel.LOCAL_SAFE_WRITE
-    if command == "remote" and len(lowered) >= 2 and lowered[1] in {"add", "remove", "rename", "set-head", "set-url", "prune", "update"}:
+    if command == "branch":
+        if all(
+            item in {"-a", "--all", "-r", "--remotes", "--list", "-l", "--show-current", "-v", "-vv", "--verbose"}
+            or item.startswith("--format")
+            or item.startswith("--sort")
+            for item in args[1:]
+        ):
+            return GitRiskLevel.READ_ONLY
         return GitRiskLevel.LOCAL_SAFE_WRITE
+    if command == "remote":
+        return GitRiskLevel.READ_ONLY if all(item in {"-v", "--verbose"} for item in args[1:]) else GitRiskLevel.LOCAL_SAFE_WRITE
     if command in _READ_ONLY:
         return GitRiskLevel.READ_ONLY
     if command in _LOCAL_SAFE_WRITE:
@@ -284,6 +353,7 @@ def _run_git_direct(
     timeout: int | None = None,
     allow_protected: bool = False,
     memory: GitStateMemory | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     normalized = _validate_args(args)
     repo_root = resolve_repo_root(repo_path)
@@ -306,6 +376,7 @@ def _run_git_direct(
             normalized,
             cwd=repo_root,
             timeout=max(1, min(int(timeout or _DEFAULT_TIMEOUT_SECONDS), 900)),
+            env=env,
         )
         duration = round((time.perf_counter() - started) * 1000.0, 3)
         observation = observe_git_state(repo_root)
@@ -348,6 +419,18 @@ def run_git(
     action_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = _validate_args(args)
+    if normalized[0] == "commit":
+        # The approval preview fingerprints the index, not arbitrary worktree
+        # paths or content staged by commit -a/-i/-o or an interactive mode.
+        # Restrict this adapter to index-only commits whose inputs are bound.
+        remaining = normalized[1:]
+        while remaining:
+            option = remaining.pop(0)
+            if option == "-m" and remaining:
+                remaining.pop(0)
+            elif option not in {"--amend", "--no-edit"}:
+                return {"ok": False, "blocked": True, "error_code": "UNSUPPORTED_COMMIT_MODE",
+                        "error": "Only index-only commits with -m, --amend or --no-edit are supported; stage changes first."}
     risk = classify_git_risk(normalized)
     if risk is GitRiskLevel.READ_ONLY:
         return _run_git_direct(
@@ -355,9 +438,10 @@ def run_git(
             allow_protected=allow_protected, memory=memory,
         )
     repo_root = resolve_repo_root(repo_path)
-    context = redact_secrets(dict(action_context or {}))
+    dispatch_context, approval_id = _GIT_DISPATCH_CONTEXT.get()
+    context = redact_secrets({**dispatch_context, **dict(action_context or {})})
 
-    from mana_agent.transactional_actions.adapters import ActionAdapter
+    from mana_agent.transactional_actions.adapters import ActionAdapter, ActionInvalidatedError
     from mana_agent.transactional_actions.gateway import ApprovalRequired
     from mana_agent.transactional_actions.models import (
         ActionIntent, ActionPreview, BlastRadius, DataDisclosure,
@@ -374,21 +458,24 @@ def run_git(
                 tool_name="git",
                 operation_name=normalized[0],
                 target_resources=[str(repo_root), *[str(item) for item in context.get("target_resources") or []]],
-                normalized_arguments={"argv": ["git", *_redact_git_argv(normalized)], "argv_fingerprint": hashlib.sha256(json.dumps(normalized, ensure_ascii=False).encode("utf-8")).hexdigest(), "cwd": str(repo_root), "risk_level": risk.value, "policy_context": context},
+                normalized_arguments={"argv": ["git", *_redact_git_argv(normalized)], "argv_fingerprint": hashlib.sha256(json.dumps(normalized, ensure_ascii=False).encode("utf-8")).hexdigest(), "cwd": str(repo_root), "risk_level": risk.value, "policy_context": context, "timeout": timeout, "allow_protected": allow_protected},
                 requested_capabilities=["git.write", *[str(item) for item in context.get("requested_capabilities") or []]],
                 expected_side_effects=[f"execute git {normalized[0]} in {repo_root}"],
                 data_disclosure=DataDisclosure.EXTERNAL_PRIVATE if risk is GitRiskLevel.REMOTE_WRITE else DataDisclosure.NONE,
                 blast_radius=BlastRadius.EXTERNAL_ACCOUNT if risk is GitRiskLevel.REMOTE_WRITE else BlastRadius.WORKSPACE,
                 reversibility=Reversibility.IRREVERSIBLE if risk in {GitRiskLevel.DESTRUCTIVE, GitRiskLevel.HISTORY_REWRITE, GitRiskLevel.REMOTE_WRITE} else Reversibility.PARTIALLY_REVERSIBLE,
-                idempotency_key="git:" + hashlib.sha256(
-                    (str(repo_root) + "\x1f" + "\x1f".join(normalized)).encode("utf-8")
-                ).hexdigest(),
+                idempotency_key="git:" + hashlib.sha256(json.dumps(
+                    [str(repo_root), normalized, context, timeout, allow_protected],
+                    sort_keys=True, ensure_ascii=False, default=str,
+                ).encode("utf-8")).hexdigest(),
                 verification_plan=["observe repository state after execution", "match observation to execution evidence"],
                 compensation_strategy="Use a separately approved Git revert/restore action when safe; never rewrite history automatically.",
             )
 
         def preview(self, action: ActionIntent) -> ActionPreview:
             before = observe_git_state(repo_root).to_dict()
+            if normalized[0] == "commit":
+                before["staged_index_sha256"] = _staged_index_digest(repo_root)
             return ActionPreview(
                 summary=f"git {normalized[0]}",
                 resources=[{"repository": str(repo_root), "before_state": before}],
@@ -400,6 +487,39 @@ def run_git(
             )
 
         def execute(self, action: ActionIntent) -> dict[str, Any]:
+            if normalized[0] == "commit":
+                before = action.preview.resources[0].get("before_state", {}) if action.preview else {}
+                current = observe_git_state(repo_root).to_dict()
+                try:
+                    digest = _staged_index_digest(repo_root)
+                except RuntimeError as exc:
+                    raise ActionInvalidatedError("could not recheck the Git index after commit preview") from exc
+                if (not before.get("staged_index_sha256")
+                    or digest != before["staged_index_sha256"]
+                    or current.get("fingerprint") != before.get("fingerprint")):
+                    raise ActionInvalidatedError("repository or staged changes changed after commit preview")
+
+                with _fenced_commit_index(repo_root, action.action_id) as (fenced_idx, main_idx):
+                    if fenced_idx is not None:
+                        try:
+                            fenced_digest = _staged_index_digest(repo_root, index_file=fenced_idx)
+                        except RuntimeError as exc:
+                            raise ActionInvalidatedError("could not verify fenced Git index for commit") from exc
+                        if fenced_digest != before["staged_index_sha256"]:
+                            raise ActionInvalidatedError("repository or staged changes changed during index fencing")
+                        env = {"GIT_INDEX_FILE": str(fenced_idx)}
+                        result = _run_git_direct(
+                            normalized, repo_path=repo_root, timeout=timeout,
+                            allow_protected=allow_protected, memory=memory, env=env,
+                        )
+                        if result.get("ok") and main_idx is not None and fenced_idx.exists():
+                            try:
+                                current_main = _staged_index_digest(repo_root, index_file=main_idx)
+                                if current_main == before["staged_index_sha256"]:
+                                    shutil.copy2(fenced_idx, main_idx)
+                            except Exception:
+                                pass
+                        return result
             return _run_git_direct(
                 normalized, repo_path=repo_root, timeout=timeout,
                 allow_protected=allow_protected, memory=memory,
@@ -440,8 +560,16 @@ def run_git(
                 checks=checks,
             )
 
+    adapter = GitActionAdapter()
+    gateway = default_action_gateway(repo_root)
+    if approval_id:
+        grant = gateway.approvals.get(approval_id)
+        approved_action = gateway.store.get_action(grant.action_id) if grant else None
+        if approved_action is None or approved_action.intent_digest() != adapter.build_intent().intent_digest():
+            return {"ok": False, "blocked": True, "error_code": "INVALID_APPROVAL",
+                    "error": "Approval does not match the exact Git action and execution context."}
     try:
-        outcome = default_action_gateway(repo_root).execute(GitActionAdapter())
+        outcome = gateway.execute(adapter, approval_id=approval_id)
     except ApprovalRequired as exc:
         action = exc.action
         return {
@@ -452,6 +580,7 @@ def run_git(
             "permission_required": True,
             "permission_request_id": action.action_id,
             "action_id": action.action_id,
+            "inbox_item_id": exc.inbox_item_id,
             "preview": action.preview.redacted() if action.preview else {},
             "preview_digest": action.preview_digest,
             "policy_decision": action.policy_decision.model_dump(mode="json") if action.policy_decision else {},
@@ -520,7 +649,10 @@ def log(*, repo_path: str | Path | None = None, limit: int = 10, oneline: bool =
 
 
 def show(*, repo_path: str | Path | None = None, revision: str = "HEAD", stat: bool = False) -> dict[str, Any]:
-    args = ["show", str(revision or "HEAD")]
+    revision = str(revision or "HEAD")
+    if revision.startswith("-"):
+        raise ValueError("revision must not be a Git option")
+    args = ["show", revision]
     if stat:
         args.append("--stat")
     return run_git(args, repo_path=repo_path)
@@ -740,8 +872,10 @@ def generic(
     return run_git(args, repo_path=repo_path, timeout=timeout, allow_protected=allow_protected, memory=memory)
 
 
-def execute_tool(tool_name: str, args: dict[str, Any] | None = None, *, repo_path: str | Path | None = None) -> dict[str, Any]:
+def execute_tool(tool_name: str, args: dict[str, Any] | None = None, *, repo_path: str | Path | None = None,
+                 action_context: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = dict(args or {})
+    approval_id = str(payload.pop("action_approval_id", "") or "").strip()
     payload.setdefault("repo_path", repo_path)
     name = str(tool_name or "").strip().replace("_", ".")
     mapping = {
@@ -776,7 +910,11 @@ def execute_tool(tool_name: str, args: dict[str, Any] | None = None, *, repo_pat
     func = mapping.get(name)
     if func is None:
         raise ValueError(f"unsupported git tool: {tool_name}")
-    return func(**payload)
+    token = _GIT_DISPATCH_CONTEXT.set((dict(action_context or {}), approval_id))
+    try:
+        return func(**payload)
+    finally:
+        _GIT_DISPATCH_CONTEXT.reset(token)
 
 
 def _validate_branch_name(value: str) -> None:

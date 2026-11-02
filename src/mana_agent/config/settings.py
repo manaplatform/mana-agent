@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     nvidia_base_url: str = Field(
         default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL"
     )
+    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    anthropic_base_url: str = Field(
+        default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL"
+    )
+    anthropic_chat_model: str = Field(
+        default="claude-sonnet-5-5", alias="ANTHROPIC_CHAT_MODEL"
+    )
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_tool_worker_model: str | None = Field(
         default=None, alias="OPENAI_TOOL_WORKER_MODEL"

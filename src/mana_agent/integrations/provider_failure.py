@@ -105,6 +105,7 @@ _RETRYABLE_HTTP: dict[int, ProviderFailureKind] = {
     502: ProviderFailureKind.PROVIDER_ERROR,
     503: ProviderFailureKind.PROVIDER_OVERLOADED,
     504: ProviderFailureKind.PROVIDER_ERROR,
+    529: ProviderFailureKind.PROVIDER_OVERLOADED,
 }
 
 
@@ -169,6 +170,8 @@ class ProviderFailure:
         )
         if self.provider and self.provider.lower() == "nvidia":
             name = "NVIDIA"
+        elif self.provider and self.provider.lower() == "anthropic":
+            name = "Anthropic"
         elif self.provider:
             name = self.provider
         else:

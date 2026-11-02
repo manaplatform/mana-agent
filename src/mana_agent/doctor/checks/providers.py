@@ -61,5 +61,30 @@ def connectivity(context: DoctorContext) -> list[DoctorFinding]:
             except Exception as e:
                 findings.append(DoctorFinding("providers/openrouter-connect", Severity.ERROR, "OpenRouter Connectivity Failed", str(e), "Check your network and base URL.", code="CONNECT_FAILED"))
 
+        elif provider == "anthropic":
+            base_url = config.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
+            api_key = config.get("ANTHROPIC_API_KEY")
+            
+            if not api_key:
+                findings.append(DoctorFinding("providers/anthropic-auth", Severity.ERROR, "Anthropic API Key Missing", "ANTHROPIC_API_KEY is not set.", "Set ANTHROPIC_API_KEY.", code="AUTH_MISSING"))
+                continue
+                
+            try:
+                hostname = urllib.parse.urlparse(base_url).hostname
+                if hostname:
+                    socket.gethostbyname(hostname)
+                    
+                req = urllib.request.Request(
+                    f"{base_url}/v1/models",
+                    headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    if response.status == 200:
+                        findings.append(DoctorFinding("providers/anthropic", Severity.INFO, "Anthropic Provider", "Successfully connected and authenticated.", code="PROVIDER_OK"))
+            except urllib.error.HTTPError as e:
+                findings.append(DoctorFinding("providers/anthropic-auth", Severity.ERROR, "Anthropic Authentication Failed", f"HTTP {e.code}: {e.reason}", "Check your ANTHROPIC_API_KEY.", code="AUTH_FAILED"))
+            except Exception as e:
+                findings.append(DoctorFinding("providers/anthropic-connect", Severity.ERROR, "Anthropic Connectivity Failed", str(e), "Check your network and base URL.", code="CONNECT_FAILED"))
+
     return findings
 

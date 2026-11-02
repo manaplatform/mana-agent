@@ -711,7 +711,7 @@ class ShellExecutor:
     def _request_approval_and_wait(
         self,
         cmd: str,
-        action: dict[str, Any] | ShellCallAction,
+        adapter: Any,
         *,
         timeout_seconds: float | None = None,
     ) -> tuple[bool, str]:
@@ -721,20 +721,11 @@ class ShellExecutor:
             from mana_agent.chat.history import get_history
             from mana_agent.human_inbox import default_human_inbox_service
             from mana_agent.human_inbox.models import InboxStatus
-            from mana_agent.transactional_actions.adapters import ShellActionAdapter
             from mana_agent.transactional_actions.models import PolicyOutcome
             from mana_agent.transactional_actions.runtime import default_action_gateway
         except ImportError as exc:
             logger.warning("Approval subsystem imports unavailable: %s", exc)
             return False, f"approval subsystem unavailable ({exc})"
-
-        try:
-            argv = split_shell_command(cmd)
-        except ValueError as exc:
-            return False, f"invalid command syntax ({exc})"
-
-        if not argv:
-            return False, "empty command cannot be approved"
 
         timeout = (
             float(timeout_seconds)
@@ -744,19 +735,6 @@ class ShellExecutor:
 
         try:
             gateway = default_action_gateway(self.workspace_root)
-            cmd_digest = hashlib.sha256(cmd.encode("utf-8")).hexdigest()
-            idempotency_key = f"shell_approval:{cmd_digest}:{time.time()}"
-            adapter = ShellActionAdapter(
-                argv=argv,
-                cwd=self.workspace_root,
-                environment={},
-                expected_outputs=[],
-                parent_task_id=self.task_id or self.conversation_id or "shell_exec",
-                actor="user",
-                originating_agent="shell_executor",
-                idempotency_key=idempotency_key,
-                allow_command_result_verification=True,
-            )
             action_intent = gateway.propose(adapter)
             if (
                 action_intent.policy_decision
@@ -837,22 +815,11 @@ class ShellExecutor:
             poll_interval = 0.25
 
             while True:
-                # Check if approval registry already has a valid grant
-                grant = gateway.approvals.find_valid(action_intent)
-                if grant is not None:
-                    return True, grant.approval_id
-
                 if inbox_item_id:
                     item = inbox_service.repository.get(inbox_item_id)
                     if item is not None:
                         if item.status == InboxStatus.APPROVED:
-                            grant = gateway.approvals.find_valid(action_intent)
-                            if grant is None:
-                                grant = gateway.approvals.issue(
-                                    action_intent,
-                                    approved_by=item.response_actor_id or "user",
-                                    ttl_seconds=300,
-                                )
+                            grant = gateway.grant_for_approved_inbox(action_intent, item)
                             return True, grant.approval_id
                         if item.status in {
                             InboxStatus.DENIED,
@@ -908,6 +875,18 @@ class ShellExecutor:
         # The mode is trusted execution context supplied by the caller, not a
         # field in the model-controlled shell action payload.
 
+        if action_approval_id and len(commands) != 1:
+            return {
+                "type": "shell_call_output",
+                "call_id": call_id or "",
+                "max_output_length": max_output_length,
+                "output": [ShellCommandOutput(
+                    command="", stdout="", stderr="HumanApprovalRequired: A grant may authorize only one exact command.",
+                    outcome=ShellOutcome(type="exit", exit_code=1),
+                ).to_dict()],
+                "untrusted_content_notice": UNTRUSTED_CONTENT_NOTICE,
+            }
+
         for cmd in commands:
             # Check Plan Mode read-only enforcement
             if _execution_is_read_only(execution_mode) and not is_plan_mode_read_only_command(cmd):
@@ -937,49 +916,90 @@ class ShellExecutor:
                 break
 
             # Check approval requirement for mutating commands
-            read_only = is_read_only_command(cmd)
-            if not read_only and self.needs_approval and not action_approval_id:
-                approved = False
-                grant_or_reason = ""
-                if self.on_approval is not None:
-                    approval_res = self.on_approval({"command": cmd, "action": action})
-                    approved = bool(approval_res.get("approve"))
-                    if approved and "approval_id" in approval_res:
-                        action_approval_id = str(approval_res["approval_id"])
+            read_only = is_plan_mode_read_only_command(cmd)
+            if (not read_only and self.needs_approval) or action_approval_id:
+                from mana_agent.transactional_actions.adapters import ShellActionAdapter
+                from mana_agent.transactional_actions.gateway import ApprovalRequired
+                from mana_agent.transactional_actions.runtime import default_action_gateway
 
-                if not approved and self.auto_request_approval:
-                    approved, grant_or_reason = self._request_approval_and_wait(
-                        cmd, action, timeout_seconds=self.approval_wait_timeout_seconds
-                    )
-                    if approved and grant_or_reason:
-                        action_approval_id = grant_or_reason
+                grant_id = str(action_approval_id or "")
+                gateway = default_action_gateway(self.workspace_root)
+                try:
+                    argv = split_shell_command(cmd)
+                    # The adapter owns execution; a successful callback or token
+                    # must never turn into a direct, unvalidated subprocess call.
+                    def runner(argv, **kwargs):
+                        result = self.run(
+                            cmd, timeout=timeout_sec, max_output_length=max_output_length,
+                            execution_mode=execution_mode,
+                        )
+                        if result.outcome.type == "timeout":
+                            raise subprocess.TimeoutExpired(
+                                argv, timeout_sec, output=result.stdout, stderr=result.stderr,
+                            )
+                        return subprocess.CompletedProcess(argv, result.outcome.exit_code, result.stdout, result.stderr)
 
-                if not approved:
-                    self._audit("approval_required", cmd=cmd, read_only=False, reason=grant_or_reason)
-                    err_msg = (
-                        f"HumanApprovalRequired: Mutating shell command {cmd!r} was not approved: {grant_or_reason}."
-                        if grant_or_reason
-                        else (
-                            f"HumanApprovalRequired: Mutating shell command {cmd!r} "
-                            "requires explicit approval before execution."
-                        )
+                    adapter = ShellActionAdapter(
+                        argv=argv, cwd=self.workspace_root, environment={}, expected_outputs=[],
+                        parent_task_id=self.task_id or self.conversation_id or "shell_exec",
+                        actor="user", originating_agent="shell_executor",
+                        idempotency_key=f"shell_executor:{hashlib.sha256(cmd.encode('utf-8')).hexdigest()}:{time.time_ns()}",
+                        timeout_seconds=timeout_sec, runner=runner,
+                        # The less conservative generic argv classifier must not
+                        # override this executor's stricter read-only check.
+                        policy_context={"tool": "run_command", "wrapper": "shell_executor",
+                                        "max_output_length": max_output_length},
+                        allow_command_result_verification=True,
                     )
-                    results.append(
-                        ShellCommandOutput(
-                            command=cmd,
-                            stdout="",
-                            stderr=err_msg,
-                            outcome=ShellOutcome(type="exit", exit_code=1),
+                    if not grant_id and self.on_approval is not None:
+                        response = self.on_approval({"command": cmd, "action": action})
+                        if response.get("approve"):
+                            grant_id = str(response.get("approval_id") or "")
+                            if not grant_id:
+                                raise PermissionError("approval callback did not provide an exact action grant")
+                    if grant_id:
+                        grant = gateway.approvals.get(grant_id)
+                        approved_action = gateway.store.get_action(grant.action_id) if grant else None
+                        if approved_action is None:
+                            raise PermissionError("unknown approval grant")
+                        adapter.idempotency_key = approved_action.idempotency_key
+                        if approved_action.intent_digest() != adapter.build_intent().intent_digest():
+                            raise PermissionError("approval does not match the exact command and execution context")
+                    elif self.auto_request_approval:
+                        approved, grant_or_reason = self._request_approval_and_wait(
+                            cmd, adapter, timeout_seconds=self.approval_wait_timeout_seconds
                         )
+                        if not approved:
+                            raise PermissionError(grant_or_reason)
+                        grant_id = grant_or_reason
+                    else:
+                        raise PermissionError("requires explicit approval before execution")
+                    outcome = gateway.execute(adapter, approval_id=grant_id)
+                    data = outcome.result
+                    cmd_result = ShellCommandOutput(
+                        command=cmd, stdout=str(data.get("stdout") or ""), stderr=str(data.get("stderr") or ""),
+                        outcome=ShellOutcome(type="exit", exit_code=int(data.get("returncode", 1))),
                     )
+                except (ApprovalRequired, PermissionError, ValueError) as exc:
+                    self._audit("approval_required", cmd=cmd, read_only=False, reason=str(exc))
+                    results.append(ShellCommandOutput(
+                        command=cmd, stdout="", stderr=f"HumanApprovalRequired: {exc}",
+                        outcome=ShellOutcome(type="exit", exit_code=1),
+                    ))
                     break
-
-            cmd_result = self.run(
-                cmd,
-                timeout=timeout_sec,
-                max_output_length=max_output_length,
-                execution_mode=execution_mode,
-            )
+                except subprocess.TimeoutExpired as exc:
+                    results.append(ShellCommandOutput(
+                        command=cmd, stdout=str(exc.output or ""), stderr=str(exc.stderr or ""),
+                        outcome=ShellOutcome(type="timeout"),
+                    ))
+                    break
+            else:
+                cmd_result = self.run(
+                    cmd,
+                    timeout=timeout_sec,
+                    max_output_length=max_output_length,
+                    execution_mode=execution_mode,
+                )
             results.append(cmd_result)
 
             # If a command timed out or had a non-zero exit code, preserve output and stop chain

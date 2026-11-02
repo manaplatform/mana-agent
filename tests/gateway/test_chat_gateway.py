@@ -96,6 +96,19 @@ class _DummyAskService:
                         }
                     )
                 )
+            if "completed_steps" in payload or (messages and "authoritative semantic continuation evaluator" in str(messages[0].content)):
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "task_id": payload.get("task_id", "test_task"),
+                            "action": "FINALIZE",
+                            "goal_satisfied": True,
+                            "safe_to_continue": True,
+                            "reason": "dummy model finalized step",
+                            "evidence_summary": "verified in test",
+                        }
+                    )
+                )
             prompt = str(payload.get("user_prompt") or "").lower()
             if "gmail" in prompt:
                 route = "gmail"
@@ -2559,6 +2572,19 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
                             "related_task_id": "",
                             "safe_to_continue": True,
                             "reason": "new",
+                        }
+                    )
+                )
+            if "completed_steps" in payload or (messages and "authoritative semantic continuation evaluator" in str(messages[0].content)):
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "task_id": payload.get("task_id", "test_task"),
+                            "action": "FINALIZE",
+                            "goal_satisfied": True,
+                            "safe_to_continue": True,
+                            "reason": "dummy model finalized step",
+                            "evidence_summary": "verified in test",
                         }
                     )
                 )

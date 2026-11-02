@@ -43,14 +43,23 @@ contract while keeping fixtures aligned with the production model.
 
 The approval/TUI regression tests keep async coverage independent of an optional
 pytest async plugin: async application methods are invoked from ordinary test
-functions with `anyio.run`. Do not mark a test with `pytest.mark.asyncio` unless
-`pytest-asyncio` is declared and installed for the test environment. The
-`ToolExecutionDispatcher` also uses the explicit `FilePath` alias for path
-construction so a function-local `Path` import cannot shadow the filesystem
-path type and trigger `UnboundLocalError` during initialization.
+functions with `anyio.run` or `asyncio.run`. Do not mark a test with
+`pytest.mark.asyncio` unless `pytest-asyncio` is declared and installed for the
+test environment. The `ToolExecutionDispatcher` also uses the explicit
+`FilePath` alias for path construction so a function-local `Path` import cannot
+shadow the filesystem path type and trigger `UnboundLocalError` during initialization.
 
 **Do not reintroduce:** keep dispatcher path references unshadowable and keep
 async tests compatible with the dependencies declared by the project.
+
+The live-steering TUI integration tests previously used `pytest.mark.asyncio`
+without declaring the plugin in the `dev` extra installed by CI. A clean CI
+environment therefore reported an unknown marker and could not execute the two
+coroutines. The tests now use synchronous pytest entry points that run their
+unchanged async scenarios with `asyncio.run`; no runtime or dependency change
+is required. Do not reintroduce async test markers without installing their
+plugin in the test environment. User-owned verification (not run by the agent):
+`python -m pytest tests/execution/test_live_steering_integration.py -q`.
 
 ## Browser Integration
 

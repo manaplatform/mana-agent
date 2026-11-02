@@ -83,6 +83,12 @@ def resolve_inference_connection(
             getattr(settings, "nvidia_base_url", "") or definition.default_base_url
         )
         headers = dict(definition.default_headers)
+    elif provider_id == "anthropic":
+        api_key = str(getattr(settings, "anthropic_api_key", "") or "")
+        base_url = str(
+            getattr(settings, "anthropic_base_url", "") or definition.default_base_url
+        )
+        headers = dict(definition.default_headers)
     else:
         api_key = str(getattr(settings, "openai_api_key", "") or "")
         base_url = str(

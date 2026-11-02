@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from langchain_core.tools import StructuredTool
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
@@ -781,14 +783,73 @@ def test_deferred_shell_calls_keep_distinct_receipts_and_reuse_approved_action(t
         assert json.loads(command.invoke({"cmd": "rg demo"}))["ok"]
     assert gateway.execute.call_args.args[0].idempotency_key != first_key
     gateway.approvals.get.return_value = SimpleNamespace(action_id="approved")
-    gateway.store.get_action.return_value = SimpleNamespace(parent_task_id="batch-task", idempotency_key=first_key)
+    original_adapter = gateway.execute.call_args.args[0]
+    # Match the original call, not the second call's distinct idempotency key.
+    original_adapter.idempotency_key = first_key
+    gateway.store.get_action.return_value = SimpleNamespace(
+        parent_task_id="batch-task", idempotency_key=first_key,
+        intent_digest=lambda: original_adapter.build_intent().intent_digest(),
+    )
     with batch_tool_call_context("approval-retry"):
         assert json.loads(command.invoke({"cmd": "rg demo", "action_approval_id": "grant"}))["ok"]
     assert gateway.execute.call_args.args[0].idempotency_key == first_key
     assert not current_batch_tool_call_id()
 
 
-def test_ask_agent_cross_task_approval_evaluated_by_judgment(tmp_path: Path, monkeypatch) -> None:
+def test_ask_git_commit_resumes_only_exact_task_action(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+    import getpass
+    from mana_agent.multi_agent.tools import git_tools
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "sample").write_text("sample\n")
+    subprocess.run(["git", "add", "sample"], cwd=repo, check=True)
+    original = git_tools._run_git_direct
+    commits = []
+
+    def fake_git(args, **kwargs):
+        if args[0] == "commit":
+            commits.append(args)
+            return {"ok": True, "state": git_tools.observe_git_state(repo).to_dict()}
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(git_tools, "_run_git_direct", fake_git)
+    # The agent's checkout need not be the process working directory.
+    monkeypatch.chdir(tmp_path)
+    agent = _build_agent(repo)
+    tools, _, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="git-task", enable_run_evidence=False)
+    commit = next(tool for tool in tools if tool.name == "git_commit")
+    approval = next(tool for tool in tools if tool.name == "approval_request")
+    pending = json.loads(commit.invoke({"message": "example"}))
+    assert pending["permission_required"] and not commits
+    gateway = default_action_gateway(repo)
+    assert gateway.store.get_action(pending["action_id"]).parent_task_id == "git-task"
+    waiting = approval.invoke({"action_id": pending["action_id"], "timeout_seconds": 0.01})
+    assert waiting["status"] == "pending" and not waiting["approved"] and not commits
+    gateway.approve(pending["action_id"], approved_by=getpass.getuser())
+    other_tools, _, _, _ = agent._build_tools(k_default=4, timeout_seconds=1, run_id="other-task", enable_run_evidence=False)
+    other_approval = next(tool for tool in other_tools if tool.name == "approval_request")
+    for selector in ({"action_id": pending["action_id"]}, {"inbox_item_id": pending["inbox_item_id"]}):
+        with pytest.raises(PermissionError, match="different task"):
+            other_approval.invoke({**selector, "timeout_seconds": 0.01})
+    approved = approval.invoke({"inbox_item_id": pending["inbox_item_id"], "timeout_seconds": 0.01})
+    assert approved["approved"] and approved["action_id"] == pending["action_id"]
+    grant = approved["approval_id"]
+    changed = json.loads(commit.invoke({"message": "changed", "action_approval_id": grant}))
+    assert changed["error_code"] == "INVALID_APPROVAL" and not commits
+    other = next(tool for tool in other_tools if tool.name == "git_commit")
+    assert json.loads(other.invoke({"message": "example", "action_approval_id": grant}))["error_code"] == "INVALID_APPROVAL"
+    assert not commits
+    result = json.loads(commit.invoke({"message": "example", "action_approval_id": grant}))
+    assert result["ok"] and result["action_id"] == pending["action_id"]
+    assert commits == [["commit", "-m", "example"]]
+
+
+def test_ask_agent_cross_task_approval_rejected_even_if_model_accepts(tmp_path: Path, monkeypatch) -> None:
     from unittest.mock import MagicMock
     from mana_agent.batch.policy import batch_tool_call_context
     from mana_agent.multi_agent.agents.approval_agent import ModelApprovalJudgment
@@ -821,11 +882,12 @@ def test_ask_agent_cross_task_approval_evaluated_by_judgment(tmp_path: Path, mon
 
     with batch_tool_call_context("approval-retry"):
         res = json.loads(command.invoke({"cmd": "rg demo", "action_approval_id": "grant"}))
-        assert res["ok"] is True
-        assert res.get("model_judgment", {}).get("judgment") == "accept"
+        assert res["ok"] is False
+        assert res["error_code"] == "INVALID_APPROVAL"
+        gateway.execute.assert_not_called()
 
 
-def test_ask_agent_cross_task_approval_denied_by_judgment(tmp_path: Path, monkeypatch) -> None:
+def test_ask_agent_cross_task_approval_rejected_without_model_judgment(tmp_path: Path, monkeypatch) -> None:
     from unittest.mock import MagicMock
     from mana_agent.batch.policy import batch_tool_call_context
     from mana_agent.multi_agent.agents.approval_agent import ModelApprovalJudgment
@@ -852,8 +914,8 @@ def test_ask_agent_cross_task_approval_denied_by_judgment(tmp_path: Path, monkey
     with batch_tool_call_context("approval-retry"):
         res = json.loads(command.invoke({"cmd": "rg demo", "action_approval_id": "grant"}))
         assert res["ok"] is False
-        assert res["error_code"] == "APPROVAL_DENIED_BY_MODEL_JUDGMENT"
-        assert "unrelated" in res["reason"]
+        assert res["error_code"] == "INVALID_APPROVAL"
+        gateway.execute.assert_not_called()
 
 
 def test_ask_agent_records_timeout(tmp_path: Path, monkeypatch) -> None:

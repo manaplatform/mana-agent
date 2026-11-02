@@ -3474,24 +3474,32 @@ class AgentChatGateway:
             from mana_agent.transactional_actions.models import ActionState, PolicyOutcome, utc_now
 
             current_action = self._transactional_runtime.store.get_action(item.action_intent_id)
-            if (current_action is None or current_action.state is not ActionState.AWAITING_APPROVAL
+            if (current_action is None
+                    or (current_action.state is not ActionState.AWAITING_APPROVAL
+                        and current_action.state not in {ActionState.APPROVED, ActionState.EXECUTING, ActionState.COMMITTED})
                     or current_action.policy_decision is None
                     or current_action.policy_decision.outcome is not PolicyOutcome.REQUIRE_APPROVAL
-                    or current_action.expires_at <= utc_now()
-                    or current_action.policy_decision.expires_at <= utc_now()
+                    or (current_action.state is ActionState.AWAITING_APPROVAL and current_action.expires_at <= utc_now())
+                    or (current_action.state is ActionState.AWAITING_APPROVAL and current_action.policy_decision.expires_at <= utc_now())
                     or item.action_digest != current_action.approval_digest()):
                 raise PermissionError("transactional action changed or is no longer approvable")
         actor_id = getpass.getuser()
         if item.status in UNRESOLVED_STATUSES:
-            inbox_svc.respond(ResponseSubmission(
-                inbox_item_id=inbox_item_id,
-                operation=ResponseOperation.APPROVE,
-                actor_id=actor_id,
-                channel="tui-local",
-                idempotency_key=f"tui-approve:{inbox_item_id}",
-                expected_version=expected_version if expected_version is not None else item.version,
-                current_action_digest=item.action_digest,
-            ))
+            try:
+                inbox_svc.respond(ResponseSubmission(
+                    inbox_item_id=inbox_item_id,
+                    operation=ResponseOperation.APPROVE,
+                    actor_id=actor_id,
+                    channel="tui-local",
+                    idempotency_key=f"tui-approve:{inbox_item_id}",
+                    expected_version=expected_version if expected_version is not None else item.version,
+                    current_action_digest=item.action_digest,
+                ))
+            except Exception as resp_exc:
+                updated = inbox_svc.repository.get(inbox_item_id)
+                if updated is None or updated.status != InboxStatus.APPROVED:
+                    raise
+                logger.info("Inbox response succeeded with branch resumption notice: %s", resp_exc)
         elif item.status != InboxStatus.APPROVED:
             raise ValueError(f"inbox item is already terminal: {item.status.value}")
         action = self._transactional_runtime.store.get_action(item.action_intent_id)
@@ -5192,6 +5200,66 @@ class AgentChatGateway:
             **asdict(reservation.execution),
             "recovery_action": "replan_task",
             "decision_id": decision.decision_id,
+        }
+
+    def submit_steering(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        kind: str = "guidance",
+        scope: str = "execution",
+        target_id: str = "",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        """Submit a live steering instruction to the active execution in this session."""
+        from mana_agent.execution.steering import (
+            SteeringCoordinator,
+            SteeringKind,
+            SteeringScope,
+            SteeringSubmission,
+        )
+
+        active = self._lane_coordinator.list_tasks(active_only=True, session_id=session_id)
+        if not active:
+            active = self._lane_coordinator.list_tasks(active_only=True)
+        if not active:
+            raise RuntimeError("No active execution found to steer.")
+        execution = active[-1]
+        supervisor = self._lane_coordinator.execution_supervisor
+        task = supervisor.get_task(execution.task_id)
+
+        req_id = request_id or f"steer_{uuid.uuid4().hex[:12]}"
+        kind_enum = SteeringKind(kind) if kind in SteeringKind._value2member_map_ else SteeringKind.GUIDANCE
+        scope_enum = SteeringScope(scope) if scope in SteeringScope._value2member_map_ else SteeringScope.EXECUTION
+
+        effective_session_id = session_id or task.session_id or "session"
+        submission = SteeringSubmission(
+            execution_id=execution.task_id,
+            session_id=effective_session_id,
+            attempt_id=task.attempt_id,
+            generation=task.attempt_generation,
+            request_id=req_id,
+            text=text,
+            kind=kind_enum,
+            scope=scope_enum,
+            target_id=target_id if scope_enum != SteeringScope.EXECUTION else "",
+        )
+        coordinator = SteeringCoordinator(supervisor)
+        sequence, duplicate = coordinator.submit(
+            submission,
+            authenticated_session_id=effective_session_id,
+            allow_scoped=True,
+            allow_interrupt=True,
+        )
+        return {
+            "request_id": req_id,
+            "sequence": sequence,
+            "duplicate": duplicate,
+            "execution_id": execution.task_id,
+            "attempt_id": task.attempt_id,
+            "generation": task.attempt_generation,
+            "status": "pending",
         }
 
     def _resolve_task_control_id(
@@ -7654,6 +7722,10 @@ class AgentChatGateway:
                                 status = "blocked"
                                 result.payload["pending_required_work"] = False
                                 result.payload["resume_required"] = False
+                        elif reservation.execution.state == LaneTaskState.WAITING or status == "waiting":
+                            # The task is waiting for user approval or human response.
+                            # Do not checkpoint or finish the suspended branch.
+                            pass
                         else:
                             if entry_decision.route in {"gmail", "calendar", "computer", "browser", "search", "github", "media", "remote_execution", "server", "shell"} and not result.error:
                                 actual_tools = [
@@ -10367,6 +10439,7 @@ class AgentChatGateway:
                     "affected_resources": list(
                         redact_secrets(server_decision.affected_resources)
                     ),
+                    "expires_at": inbox_item.expires_at.isoformat() if getattr(inbox_item, "expires_at", None) else "",
                 }
                 from mana_agent.chat.events import CodingActivityEvent
                 from mana_agent.chat.history import get_history
@@ -10762,11 +10835,15 @@ class AgentChatGateway:
                 )
 
         integration_parent_task_id = ""
+        supervisor_attempt_id = ""
+        supervisor_lease_token = ""
         if lane_task_id:
             lane_execution = self._lane_coordinator.inspect_task(lane_task_id)
             integration_parent_task_id = str(
                 getattr(lane_execution, "taskboard_task_id", "") or lane_task_id
             )
+            supervisor_attempt_id = str(getattr(lane_execution, "supervisor_attempt_id", "") or "")
+            supervisor_lease_token = str(getattr(lane_execution, "supervisor_lease_token", "") or "")
 
         try:
             result = process_chat_turn(
@@ -10822,6 +10899,8 @@ class AgentChatGateway:
                 dispatch_source="entry_route",
                 autonomous_controller=getattr(self, "_autonomous_controller", None),
                 continuation_evaluator=getattr(self, "_continuation_evaluator", None),
+                supervisor_attempt_id=supervisor_attempt_id,
+                supervisor_lease_token=supervisor_lease_token,
             )
         except BatchPending as pending:
             result = ChatTurnResult(answer=str(pending), mode="batch-waiting", payload={
