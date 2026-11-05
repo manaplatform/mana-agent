@@ -2,9 +2,10 @@
 
 All notable repository changes should be recorded here.
 
-## 0.9.0 — 2026-11-05
+## 0.9.1 — 2026-11-05
 
-- Release metadata: update the package version from 0.8.0 to 0.9.0.
+- Release metadata: update the package version from 0.9.0 to 0.9.1 in `pyproject.toml` and generated distribution metadata.
+- User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.9.1'; print(__version__)"`.
 
 ## Unreleased
 
