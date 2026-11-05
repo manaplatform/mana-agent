@@ -2,6 +2,10 @@
 
 All notable repository changes should be recorded here.
 
+## 0.9.0 — 2026-11-05
+
+- Release metadata: update the package version from 0.8.0 to 0.9.0.
+
 ## Unreleased
 
 - 2026-11-02 — CI & Windows Compatibility: cross-platform command execution in approval binding tests and resilient modal transitions:
