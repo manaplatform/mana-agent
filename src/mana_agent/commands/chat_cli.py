@@ -676,8 +676,27 @@ def chat(
         "--welcome",
         help="Startup welcome detail: compact or full.",
     ),
+    full_access: bool = typer.Option(
+        False,
+        "--full-access",
+        help="Run in Full Access Mode: automatically approve all supported execution requests.",
+    ),
+    approval_mode: str | None = typer.Option(
+        None,
+        "--approval-mode",
+        help="Execution approval mode: default, auto_approve_safe, or full_access.",
+    ),
 ) -> None:
     output_file = _resolve_output_file()
+    from mana_agent.approval.policy import (
+        resolve_effective_approval_mode,
+        set_approval_mode,
+    )
+
+    cli_approval_mode = "full_access" if full_access else (approval_mode or None)
+    if cli_approval_mode:
+        set_approval_mode(cli_approval_mode)
+    effective_approval_mode = resolve_effective_approval_mode().value
     if mcp_server_json:
         # Worker subprocesses inherit this explicit per-invocation setting. It
         # is parsed and validated by the MCP tool registry before discovery.
@@ -944,7 +963,7 @@ def chat(
         model=effective_model,
         mode="chat",
         tools_enabled=bool(agent_tools),
-        approvals="auto",
+        approvals=effective_approval_mode,
         memory_enabled=bool(coding_memory and coding_agent),
         skills_status=detect_skills_status(root),
         ui_mode=("plain" if simple else default_ui_mode(console, as_json=as_json)),

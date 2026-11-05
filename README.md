@@ -151,6 +151,27 @@ mana-agent
 
 You're ready.
 
+### Execution & Approval Modes
+
+Mana-Agent supports three execution approval modes:
+
+- `default`: Interactive approval behavior (prompts for mutating/consequential operations).
+- `auto_approve_safe`: Automatically approves explicitly classified safe operations (e.g., non-destructive shell, test runs, linters, local git queries); prompts for destructive actions.
+- `full_access`: Automatically approves all supported operations without interactive confirmation prompts while preserving operating-system boundaries and security controls.
+
+```bash
+# Enable Full Access Mode via CLI
+mana-agent --full-access
+mana-agent --approval-mode full_access
+
+# Or set via environment variable
+export MANA_AGENT_APPROVAL_MODE=full_access
+
+# Or configure in ~/.mana/config.toml
+# [execution]
+# approval_mode = "full_access"
+```
+
 Start with a question about your repository, ask for an investigation, or describe something you want to accomplish.
 
 **Your first task doesn't need to be complicated.**

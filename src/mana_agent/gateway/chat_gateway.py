@@ -10428,6 +10428,20 @@ class AgentChatGateway:
                 ))
                 approval_request_id = inbox_item.permission_request_id
                 self._pending_server_approvals[approval_request_id] = pending_server_action
+                from mana_agent.approval.policy import get_approval_policy
+
+                if get_approval_policy().is_full_access():
+                    approval_res = self.server_approval_command(
+                        approval_request_id,
+                        session_id=context.session_id,
+                        client_type="tui",
+                    )
+                    return ChatTurnResult(
+                        answer=str(approval_res.get("message") or "Server action auto-approved and executed in Full Access Mode."),
+                        mode="server-executed",
+                        decision=decision,
+                        payload=approval_res,
+                    )
                 approval_metadata = {
                     "permission_request_id": approval_request_id,
                     "permission_scope": "server.action.execute",
@@ -12298,7 +12312,9 @@ class AgentChatGateway:
         )
         if lane_task_id and self._lane_coordinator:
             try:
-                if waiting_for_execution_approval:
+                from mana_agent.approval.policy import get_approval_policy
+
+                if waiting_for_execution_approval and not get_approval_policy().is_full_access():
                     self._lane_coordinator.transition(
                         lane_task_id,
                         LaneTaskState.WAITING,

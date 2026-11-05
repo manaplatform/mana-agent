@@ -16,6 +16,10 @@ class ApprovalBinding(BaseModel):
 class EmailApproval(BaseModel):
     id: str; binding_hash: str; expires_at: datetime
     def assert_valid_for(self, binding: ApprovalBinding, now: datetime | None = None) -> None:
+        from mana_agent.approval.policy import get_approval_policy
+
+        if get_approval_policy().is_full_access():
+            return
         if self.binding_hash != binding.digest() or self.expires_at <= (now or datetime.now(timezone.utc)):
             raise ApprovalRequired("Email approval is missing, expired, or does not match this exact action.")
 

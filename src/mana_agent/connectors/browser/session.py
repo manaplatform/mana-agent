@@ -183,6 +183,33 @@ class BrowserSessionManager:
         if action in {"click", "download"} and SENSITIVE_PATTERNS.search(label): sensitive = True
         binding = BrowserApprovalBinding(session_id=session_id, page_version=session.page_version, origin=origin, action=action, target=target, arguments={"value": "[REDACTED]" if action == "type" else value})
         if sensitive:
+            from mana_agent.approval.policy import get_approval_policy
+
+            if get_approval_policy().is_full_access():
+                issued = issue_approval(binding)
+                session.approvals[issued.token] = issued
+                approval_token = issued.token
+                from mana_agent.approval.audit import record_approval_audit
+                from mana_agent.approval.models import ApprovalDecision, ApprovalMode, ApprovalRequest
+
+                record_approval_audit(
+                    ApprovalDecision(
+                        approved=True,
+                        mode=ApprovalMode.FULL_ACCESS,
+                        source="full_access",
+                        interactive=False,
+                        reason="Automatically approved browser action.",
+                        approval_id=issued.token,
+                    ),
+                    ApprovalRequest(
+                        action_type="browser",
+                        action_id=issued.token,
+                        tool_name="browser_act",
+                        command=f"{action} on {origin}",
+                        risk_level=risk,
+                    ),
+                    result_status="auto_approved",
+                )
             approval = session.approvals.get(approval_token or "")
             if not approval or not approval.valid_for(binding):
                 issued = issue_approval(binding); session.pending_approvals[issued.token] = issued
