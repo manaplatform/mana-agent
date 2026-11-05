@@ -175,7 +175,25 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     os.environ["MANA_HOME"] = str(_TEST_MANA_HOME)
     os.environ["HOME"] = str(base)
     os.environ["USERPROFILE"] = str(base)
+    os.environ.pop("MANA_AGENT_APPROVAL_MODE", None)
+    os.environ.pop("MANA_TRANSACTIONAL_ALWAYS_APPROVE", None)
     _install_real_mana_write_guard()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_approval_mode_per_test(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Ensure every test runs in default approval mode and cleans up overrides."""
+    from mana_agent.approval.policy import reset_approval_mode
+
+    reset_approval_mode()
+    monkeypatch.delenv("MANA_AGENT_APPROVAL_MODE", raising=False)
+    monkeypatch.delenv("MANA_TRANSACTIONAL_ALWAYS_APPROVE", raising=False)
+    try:
+        yield
+    finally:
+        reset_approval_mode()
+        os.environ.pop("MANA_AGENT_APPROVAL_MODE", None)
+        os.environ.pop("MANA_TRANSACTIONAL_ALWAYS_APPROVE", None)
 
 
 @pytest.fixture(autouse=True)

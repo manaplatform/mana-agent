@@ -5,6 +5,7 @@ import warnings
 
 from .cli_internal import *
 from .output import build_output_sink
+from mana_agent.approval.policy import set_approval_mode
 from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup, run_setup_wizard
 from mana_agent.ui.banner import render_banner
@@ -60,7 +61,6 @@ def main(
     ),
 ) -> None:
     global OUTPUT_DIR, LLM_DEBUG_MODE
-    from mana_agent.approval.policy import set_approval_mode
 
     effective_approval_mode = "full_access" if full_access else (approval_mode or None)
     if effective_approval_mode:

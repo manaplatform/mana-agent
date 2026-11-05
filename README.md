@@ -30,17 +30,6 @@
 
 ---
 
-**Live steering status:** Steering an ongoing execution, including Ctrl+S, is
-not available yet. Plan Mode remains separate and its approval requirements
-continue to apply. See [the steering design](docs/live-steering-design.md) for
-the safety work and integration still required.
-
-OpenAI Batch is used only when explicitly requested. Other batching uses Mana's
-internal parallel execution. Required Batch tasks pause durably and resume with
-results; conversation follow-ups retain both user and assistant context across
-frontends. See [Batch execution and recovery](docs/26-openai-batch-api.md).
-
-
 ## What if your AI could do more than answer?
 
 Most AI tools stop at the answer.

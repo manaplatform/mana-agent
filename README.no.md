@@ -12,10 +12,6 @@ Mana-Agent er en åpen kildekode-plattform i Python for koordinering av KI-agent
 
 Analyser kodearkiver, dokumenter og API-er; planlegg oppgaver, koordiner agenter, følg fremdrift, gjenbruk godkjent kontekst og kontroller resultater. Plattformen hjelper med undersøkelser, programmering, feilsøking og automatisering, samt bruk av nettleser, Git, SSH, e-post og Telegram.
 
-**Direktestyring:** Styring av en pågående kjøring, inkludert Ctrl+S, er ennå ikke tilgjengelig. Plan Mode er separat, og kravene til godkjenning gjelder fortsatt. Se [designet for styring](docs/live-steering-design.md).
-
-OpenAI Batch brukes bare ved uttrykkelig forespørsel; annen batchbehandling bruker intern parallell kjøring. Oppgaver som krever Batch, settes varig på vent og fortsetter når resultatene kommer; oppfølginger beholder brukerens og assistentens kontekst på tvers av grensesnitt. [Batch og gjenoppretting](docs/26-openai-batch-api.md).
-
 ## Hurtigstart
 
 Krever Python 3.10–3.14. Anbefalt installasjon:
