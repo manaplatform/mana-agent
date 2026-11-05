@@ -9,6 +9,13 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-05 — Feature & Fix: Live text steering directly on Enter, unified session routing admission, and turn engine injection:
+  - TUI Direct Enter Steering: removed `Ctrl+S` shortcut collision with settings screen save. During an active execution (`_turn_in_progress is True`), entering text in the chat input and pressing Enter automatically forwards the message as live steering without modal popups or `"Wait for turn to finish"` warnings. Retained `/steer <instruction>` and programmatic `action_steer_execution()` as aliases.
+  - Gateway Routing Admission: updated `AgentChatGateway.submit_steering` to admit steering during in-flight turn phases (e.g. routing, conversation route, and pre-lane reservation), resolving the previous `"No active execution found to steer"` failure by queuing guidance in session state and draining into supervisor `SteeringCoordinator` upon task start.
+  - Injected Routing & Execution Guidance: added `live_steering_guidance` to `EntryRouteContext` and `EntryRouter.route` so the router model explicitly accounts for user steering during route selection. Injected active guidance into `_execute_entry_route_bound` and `process_chat_turn` generation passes, automatically marking consumed entries applied in `SteeringCoordinator`.
+  - Documentation: updated `docs/live-steering-design.md` with resolved gaps and architecture.
+  - User-owned verification (not run by the agent): `pytest tests/execution/test_live_steering_integration.py tests/gateway/test_entry_routing.py -k "test_tui_enter_submits_steering_during_turn or test_submit_steering_during_routing_queues_and_injects or test_steering_injected_into_process_chat_turn" -v`.
+
 - 2026-11-05 — Feature: Full Access Mode and centralized execution approval policy:
   - Centralized Approval Engine: added `mana_agent.approval` package (`ApprovalPolicy`, `ApprovalDecision`, `ApprovalRequest`, `ApprovalMode`, `record_approval_audit`) providing single authoritative decision gating across transactional actions, human inbox, tool execution, browser/email connectors, subagents, autonomous execution loop, plan mode, and live steer mode.
   - Three Execution Modes: supported `default` (existing interactive approval behavior unchanged), `auto_approve_safe` (automatically approves explicitly classified safe operations such as non-destructive shell, test runners, linters, and local git queries; prompts for destructive mutations), and `full_access` (automatically approves all supported approval requests permitted by the active execution environment without interactive user confirmation).

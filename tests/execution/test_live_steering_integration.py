@@ -396,12 +396,12 @@ def test_failed_execution_never_displays_completed_terminal_status() -> None:
     assert not trace.is_completed
 
 
-def test_tui_steer_modal_and_ctrl_s_interaction() -> None:
-    asyncio.run(_tui_steer_modal_and_ctrl_s_interaction())
+def test_tui_enter_submits_steering_during_turn() -> None:
+    asyncio.run(_tui_enter_submits_steering_during_turn())
 
 
-async def _tui_steer_modal_and_ctrl_s_interaction() -> None:
-    """Requirement 4 & 10.3-10.4: Ctrl+S and /steer trigger non-blocking steering in TUI."""
+async def _tui_enter_submits_steering_during_turn() -> None:
+    """Live text steering: entering text directly in chat input steers the active turn."""
     mock_gateway = MagicMock()
     mock_gateway.create_session.return_value = "session_tui_1"
     mock_gateway.submit_steering.return_value = {
@@ -421,21 +421,12 @@ async def _tui_steer_modal_and_ctrl_s_interaction() -> None:
         # Mark turn in progress
         app._turn_in_progress = True
 
-        # Test Ctrl+S opens SteerModal
-        await pilot.press("ctrl+s")
+        # User simply types in chat input and presses Enter (no shortcut modal needed)
+        msg_input = app.query_one("#chat-input")
+        msg_input.text = "Prioritize security checks"
+        from mana_agent.tui.widgets.message_input import MessageInput
+        await app.on_message_input_submitted(MessageInput.Submitted(msg_input))
         await pilot.pause()
-
-        # Verify SteerModal is on screen
-        assert isinstance(app.screen, SteerModal)
-
-        # Enter instruction in SteerModal
-        steer_input = app.screen.query_one("#steer-input")
-        steer_input.value = "Prioritize security checks"
-        await pilot.press("enter")
-        await pilot.pause()
-
-        # Modal dismissed
-        assert not isinstance(app.screen, SteerModal)
 
         # Verify gateway.submit_steering was called
         mock_gateway.submit_steering.assert_called_with(
@@ -451,6 +442,51 @@ async def _tui_steer_modal_and_ctrl_s_interaction() -> None:
         ]
         assert len(steering_events) == 1
         assert "Prioritize security checks" in steering_events[0].content
+
+
+def test_tui_programmatic_steer_modal() -> None:
+    asyncio.run(_tui_programmatic_steer_modal())
+
+
+async def _tui_programmatic_steer_modal() -> None:
+    """SteerModal can still be opened programmatically via action_steer_execution."""
+    mock_gateway = MagicMock()
+    mock_gateway.create_session.return_value = "session_tui_modal"
+    mock_gateway.submit_steering.return_value = {
+        "status": "pending",
+        "sequence": 1,
+        "duplicate": False,
+    }
+
+    history = ChatHistory()
+    app = ManaChatApp(
+        history=history,
+        gateway=mock_gateway,
+        repo_root=Path("."),
+    )
+
+    async with app.run_test() as pilot:
+        app._turn_in_progress = True
+        app.action_steer_execution()
+        await pilot.pause()
+
+        assert isinstance(app.screen, SteerModal)
+        steer_input = app.screen.query_one("#steer-input")
+        steer_input.value = "Modal steering"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, SteerModal)
+        mock_gateway.submit_steering.assert_called_with(
+            session_id="session_tui_modal",
+            text="Modal steering",
+            scope="execution",
+        )
+
+
+def test_tui_steer_modal_and_ctrl_s_interaction() -> None:
+    # Retained as alias to test_tui_enter_submits_steering_during_turn
+    asyncio.run(_tui_enter_submits_steering_during_turn())
 
 
 def test_tui_slash_steer_fallback_during_turn() -> None:
@@ -651,4 +687,123 @@ def test_autonomous_loop_continues_on_wrong_command_without_budget_rejection(
     assert res.status == "completed"
     assert res.goal_satisfied is True
     assert "completed successfully" in res.answer
+
+
+def test_submit_steering_during_routing_queues_and_injects() -> None:
+    """Steering submitted while session is active (e.g. during routing before lane task) queues and injects."""
+    from mana_agent.gateway.entry_routing import (
+        EntryRouteContext,
+        EntryRouter,
+        EntryRouteRegistry,
+        RouteAvailability,
+        RouteRegistration,
+    )
+
+    reg = EntryRouteRegistry()
+    reg.register(
+        RouteRegistration(
+            "coding",
+            "Codex coding",
+            lambda: RouteAvailability(True),
+            tools=("edit_file",),
+        )
+    )
+    reg.register(
+        RouteRegistration(
+            "repository",
+            "repository inspection",
+            lambda: RouteAvailability(True),
+            tools=("repo_search",),
+        )
+    )
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(content=json.dumps({
+        "route": "coding",
+        "confidence": 0.95,
+        "required_sources": ["repository"],
+        "runtime_capability_change": False,
+        "reason": "Followed user live steering guidance",
+    }))
+    router = EntryRouter(llm=mock_llm, registry=reg)
+    ctx = EntryRouteContext(
+        session_id="sess_steer",
+        conversation_id="conv_steer",
+        turn_id="turn_steer",
+        live_steering_guidance="Focus on backend auth only",
+    )
+    decision = router.route(user_prompt="Build authentication", context=ctx)
+    assert decision.route == "coding"
+    assert "Focus on backend auth only" in ctx.live_steering_guidance
+    assert ctx.to_dict()["live_steering_guidance"] == "Focus on backend auth only"
+
+
+def test_steering_injected_into_process_chat_turn(supervisor: ExecutionSupervisor) -> None:
+    """Pending steering is inspected and injected into request_for_generation in process_chat_turn."""
+    from mana_agent.gateway.turn_engine import process_chat_turn
+    from mana_agent.multi_agent.routing.agent_decision import AgentDecision
+
+    task, token = make_running_task(supervisor, "task_turn_steer", owner="turn_worker", session_id="sess_turn")
+    coord = SteeringCoordinator(supervisor)
+    coord.submit(
+        SteeringSubmission(
+            execution_id="task_turn_steer",
+            session_id="sess_turn",
+            attempt_id=task.attempt_id,
+            generation=task.attempt_generation,
+            request_id="steer_turn_1",
+            text="Add strict validation",
+            kind=SteeringKind.GUIDANCE,
+            scope=SteeringScope.EXECUTION,
+        ),
+        authenticated_session_id="sess_turn",
+        allow_scoped=True,
+    )
+
+    mock_coding_agent = MagicMock()
+    captured_requests: list[str] = []
+
+    def mock_generate(req, **kwargs):
+        captured_requests.append(req)
+        return {"answer": "Generated code with validation", "status": "completed"}
+
+    mock_coding_agent.generate.side_effect = mock_generate
+    mock_coding_agent.supports_gateway_task_identity = True
+
+    mock_ask_service = MagicMock()
+    mock_chat_service = MagicMock()
+    config = MagicMock(agent_tools=False, auto_execute_plan=False, auto_continue=False, dir_mode=False)
+
+    agent_decision = AgentDecision(
+        intent="edit",
+        confidence=0.95,
+        selected_tools=["edit_file"],
+        code_editing_needed=True,
+        flow_action="new",
+        verifier_passed=True,
+        runtime_capability_change=False,
+    )
+
+    res = process_chat_turn(
+        root=Path("."),
+        text="Implement login",
+        chat_service=mock_chat_service,
+        ask_service=mock_ask_service,
+        coding_agent=mock_coding_agent,
+        config=config,
+        session_state={},
+        agent_decision=agent_decision,
+        gateway_task_id="task_turn_steer",
+        feature_integration_execution_supervisor=supervisor,
+        supervisor_attempt_id=task.attempt_id,
+        supervisor_lease_token=token,
+    )
+
+    assert len(captured_requests) >= 1
+    assert "Add strict validation" in captured_requests[0]
+    # Check that steering was marked applied in task
+    task_after = supervisor.get_task("task_turn_steer")
+    applied = [i for i in task_after.steering_inputs if i["request_id"] == "steer_turn_1"]
+    assert len(applied) == 1
+    assert applied[0]["status"] == "applied"
+
 

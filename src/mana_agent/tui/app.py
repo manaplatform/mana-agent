@@ -81,7 +81,6 @@ class ManaChatApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("q", "quit", "Quit", show=False),
-        Binding("ctrl+s", "steer_execution", "Steer", show=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+r", "simulate_response", "Simulate Agent", show=True),
         Binding("ctrl+o", "attach_file", "Attach File", show=True),
@@ -1871,6 +1870,21 @@ class ManaChatApp(App):
         if not text.strip() and not pending_atts:
             return
 
+        if self._turn_in_progress:
+            # During an active turn, typing text and pressing Enter submits live steering
+            instruction = text.strip()
+            if instruction.startswith("/steer "):
+                instruction = instruction[len("/steer"):].strip()
+            elif instruction == "/steer":
+                instruction = ""
+            if self.input:
+                self.input.reset()
+            if instruction:
+                asyncio.create_task(self._submit_live_steering(instruction))
+            else:
+                self.action_steer_execution()
+            return
+
         if text == "/steer" or text.startswith("/steer "):
             instruction = text[len("/steer"):].strip()
             if not instruction:
@@ -1879,10 +1893,6 @@ class ManaChatApp(App):
                 asyncio.create_task(self._submit_live_steering(instruction))
             if self.input:
                 self.input.reset()
-            return
-
-        if self._turn_in_progress:
-            self.notify("Wait for the current turn to finish before sending another message or command.", severity="warning")
             return
 
         if text == "/models" or text.startswith("/models "):
