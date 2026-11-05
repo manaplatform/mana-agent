@@ -84,6 +84,14 @@ class StructuredPlan(BaseModel):
             }
         )
 
+    @property
+    def is_approved(self) -> bool:
+        if self.approved:
+            return True
+        from mana_agent.approval.policy import get_approval_policy
+
+        return get_approval_policy().is_full_access()
+
     def to_dict(self) -> dict[str, Any]:
         """Return the structured plan as a dictionary."""
         return self.model_dump()
@@ -187,3 +195,11 @@ class PlanApprovalState(BaseModel):
         self.approved = False
         self.rejection_reason = reason
         self.approved_at = None
+
+    @property
+    def is_approved(self) -> bool:
+        if self.approved:
+            return True
+        from mana_agent.approval.policy import get_approval_policy
+
+        return get_approval_policy().is_full_access()

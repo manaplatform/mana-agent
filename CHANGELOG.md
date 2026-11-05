@@ -2,7 +2,27 @@
 
 All notable repository changes should be recorded here.
 
+## 0.9.1 — 2026-11-05
+
+- Release metadata: update the package version from 0.9.0 to 0.9.1 in `pyproject.toml` and generated distribution metadata.
+- User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.9.1'; print(__version__)"`.
+
 ## Unreleased
+
+- 2026-11-05 — Feature & Fix: Live text steering directly on Enter, unified session routing admission, and turn engine injection:
+  - TUI Direct Enter Steering: removed `Ctrl+S` shortcut collision with settings screen save. During an active execution (`_turn_in_progress is True`), entering text in the chat input and pressing Enter automatically forwards the message as live steering without modal popups or `"Wait for turn to finish"` warnings. Retained `/steer <instruction>` and programmatic `action_steer_execution()` as aliases.
+  - Gateway Routing Admission: updated `AgentChatGateway.submit_steering` to admit steering during in-flight turn phases (e.g. routing, conversation route, and pre-lane reservation), resolving the previous `"No active execution found to steer"` failure by queuing guidance in session state and draining into supervisor `SteeringCoordinator` upon task start.
+  - Injected Routing & Execution Guidance: added `live_steering_guidance` to `EntryRouteContext` and `EntryRouter.route` so the router model explicitly accounts for user steering during route selection. Injected active guidance into `_execute_entry_route_bound` and `process_chat_turn` generation passes, automatically marking consumed entries applied in `SteeringCoordinator`.
+  - Documentation: updated `docs/live-steering-design.md` with resolved gaps and architecture.
+  - User-owned verification (not run by the agent): `pytest tests/execution/test_live_steering_integration.py tests/gateway/test_entry_routing.py -k "test_tui_enter_submits_steering_during_turn or test_submit_steering_during_routing_queues_and_injects or test_steering_injected_into_process_chat_turn" -v`.
+
+- 2026-11-05 — Feature: Full Access Mode and centralized execution approval policy:
+  - Centralized Approval Engine: added `mana_agent.approval` package (`ApprovalPolicy`, `ApprovalDecision`, `ApprovalRequest`, `ApprovalMode`, `record_approval_audit`) providing single authoritative decision gating across transactional actions, human inbox, tool execution, browser/email connectors, subagents, autonomous execution loop, plan mode, and live steer mode.
+  - Three Execution Modes: supported `default` (existing interactive approval behavior unchanged), `auto_approve_safe` (automatically approves explicitly classified safe operations such as non-destructive shell, test runners, linters, and local git queries; prompts for destructive mutations), and `full_access` (automatically approves all supported approval requests permitted by the active execution environment without interactive user confirmation).
+  - CLI & Configuration Precedence: added `--full-access` and `--approval-mode` options to `mana-agent` root and `chat` commands. Supported `MANA_AGENT_APPROVAL_MODE` environment variable and `execution.approval_mode` in `~/.mana/config.toml` / `~/.mana/config.yaml` with deterministic precedence (CLI > ENV > User Config > Default). Prevented silent activation from untrusted repository files or prompt injection.
+  - Subsystems Integration: integrated `ActionPolicy` and `ActionGateway`, human inbox tools (`approval_request`, `wait_for_approval`, `request_user_approval`), `shell_exec`, browser session actions, email connectors, `ApprovalAgent`, and `AutonomousExecutionController` (live steering, step gates, budget renewal) to execute without interactive modal halts in full access mode while preserving supervisor lease fencing, attempt validation, and platform security boundaries.
+  - TUI & Visual Reporting: displayed active approval mode (`Approval: FULL ACCESS`) in the header subtitle, suppressed interactive modal popups for auto-approved items, and formatted auto-approved operations with checkmarks and auto-approved tags in the unified activity panel.
+  - User-owned verification (not run by the agent): `pytest tests/test_full_access_mode.py tests/human_inbox/test_approval_tools.py tests/multi_agent/test_approval_agent.py -v`.
 
 - 2026-11-02 — CI & Windows Compatibility: cross-platform command execution in approval binding tests and resilient modal transitions:
   - In `tests/coding/test_approval_binding_regressions.py` (`test_human_approval_resumes_exact_pending_action` and `test_failed_approved_command_does_not_run_model_suggested_retry`): executed Python scripts written to the test workspace (`python print_123.py` and `python exit_7.py`) instead of inline `-c` code strings. This avoids Windows `cmd.exe /d /s /c` and `subprocess.list2cmdline()` quote-escaping discrepancies while preserving strict `list[str]` argv contracts across `ShellActionAdapter`, `ToolExecutionDispatcher`, queue executors, and test assertions.

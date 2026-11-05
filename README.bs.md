@@ -12,10 +12,6 @@ Mana-Agent je platforma otvorenog koda zasnovana na Pythonu za koordinaciju AI a
 
 Analizirajte repozitorije, dokumente i API-je; planirajte zadatke, koordinirajte agente, pratite napredak, ponovo koristite odobreni kontekst i provjeravajte rezultate. Platforma pomaže pri istraživanju, programiranju, otklanjanju grešaka i automatizaciji te radu s preglednikom, Gitom, SSH-om, e-poštom i Telegramom.
 
-**Upravljanje uživo:** usmjeravanje tekućeg izvršavanja, uključujući Ctrl+S, još nije dostupno. Plan Mode je odvojen, a njegovi zahtjevi za odobrenje i dalje važe. Pogledajte [dizajn upravljanja](docs/live-steering-design.md).
-
-OpenAI Batch koristi se samo na izričit zahtjev; ostala grupna obrada koristi interno paralelno izvršavanje. Zadaci koji zahtijevaju Batch trajno čekaju i nastavljaju po primitku rezultata; naknadne poruke zadržavaju kontekst korisnika i asistenta kroz različita sučelja. [Batch i oporavak](docs/26-openai-batch-api.md).
-
 ## Brzi početak
 
 Potreban je Python 3.10–3.14. Preporučena instalacija:

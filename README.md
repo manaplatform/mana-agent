@@ -30,17 +30,6 @@
 
 ---
 
-**Live steering status:** Steering an ongoing execution, including Ctrl+S, is
-not available yet. Plan Mode remains separate and its approval requirements
-continue to apply. See [the steering design](docs/live-steering-design.md) for
-the safety work and integration still required.
-
-OpenAI Batch is used only when explicitly requested. Other batching uses Mana's
-internal parallel execution. Required Batch tasks pause durably and resume with
-results; conversation follow-ups retain both user and assistant context across
-frontends. See [Batch execution and recovery](docs/26-openai-batch-api.md).
-
-
 ## What if your AI could do more than answer?
 
 Most AI tools stop at the answer.
@@ -150,6 +139,27 @@ mana-agent
 ```
 
 You're ready.
+
+### Execution & Approval Modes
+
+Mana-Agent supports three execution approval modes:
+
+- `default`: Interactive approval behavior (prompts for mutating/consequential operations).
+- `auto_approve_safe`: Automatically approves explicitly classified safe operations (e.g., non-destructive shell, test runs, linters, local git queries); prompts for destructive actions.
+- `full_access`: Automatically approves all supported operations without interactive confirmation prompts while preserving operating-system boundaries and security controls.
+
+```bash
+# Enable Full Access Mode via CLI
+mana-agent --full-access
+mana-agent --approval-mode full_access
+
+# Or set via environment variable
+export MANA_AGENT_APPROVAL_MODE=full_access
+
+# Or configure in ~/.mana/config.toml
+# [execution]
+# approval_mode = "full_access"
+```
 
 Start with a question about your repository, ask for an investigation, or describe something you want to accomplish.
 

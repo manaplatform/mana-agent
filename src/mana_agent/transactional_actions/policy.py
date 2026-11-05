@@ -75,14 +75,34 @@ class ActionPolicy:
     def evaluate(self, action: ActionIntent) -> PolicyDecision:
         now = utc_now()
         outcome, codes, explanation, rules = self._classify(action)
-        if self.config.always_approve and outcome is PolicyOutcome.REQUIRE_APPROVAL:
-            codes = [*codes, "always_approve"]
-            rules = [*rules, "always_approve"]
+        from mana_agent.approval.policy import get_approval_policy
+        from mana_agent.approval.models import ApprovalRequest
+
+        app_policy = get_approval_policy()
+        if (self.config.always_approve or app_policy.is_full_access()) and outcome is PolicyOutcome.REQUIRE_APPROVAL:
+            codes = [*codes, "full_access_auto_approve" if app_policy.is_full_access() else "always_approve"]
+            rules = [*rules, "full_access" if app_policy.is_full_access() else "always_approve"]
             explanation = (
-                f"{explanation} Always-approve policy mode auto-allowed this action "
-                "without a human inbox grant."
+                f"{explanation} Full Access Mode automatically approved this action "
+                "without requiring an interactive human approval."
             )
             outcome = PolicyOutcome.ALLOW
+        elif app_policy.is_auto_approve_safe() and outcome is PolicyOutcome.REQUIRE_APPROVAL:
+            req = ApprovalRequest(
+                action_type=action.tool_name,
+                action_id=action.action_id,
+                command=str(action.normalized_arguments.get("cmd") or ""),
+                tool_name=action.tool_name,
+                risk_level=str(action.normalized_arguments.get("risk_level") or "medium"),
+                reversibility=action.reversibility.value if hasattr(action.reversibility, "value") else str(action.reversibility),
+                blast_radius=action.blast_radius.value if hasattr(action.blast_radius, "value") else str(action.blast_radius),
+                metadata={"operation": action.operation_name},
+            )
+            if app_policy.is_safe_action(req):
+                codes = [*codes, "safe_auto_approve"]
+                rules = [*rules, "auto_approve_safe"]
+                explanation = f"{explanation} Auto-approve-safe mode auto-allowed this safe action."
+                outcome = PolicyOutcome.ALLOW
         return PolicyDecision(
             outcome=outcome,
             reason_codes=codes,

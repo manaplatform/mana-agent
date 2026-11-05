@@ -98,6 +98,11 @@ def _resolve_inbox_service(inbox_service: HumanInboxService | None = None) -> Hu
 
 def _assert_current_human_approval(service: HumanInboxService, item: Any) -> None:
     """Do not report legacy model decisions or stale reviewer responses as approval."""
+    from mana_agent.approval.policy import get_approval_policy
+
+    if get_approval_policy().is_full_access():
+        return
+
     if item.request_type is not InboxRequestType.APPROVAL or item.status is not InboxStatus.APPROVED:
         raise PermissionError("an approved human approval request is required")
     if item.response_channel == "model_judgment":
@@ -220,6 +225,43 @@ def wait_for_approval(
         raise ValueError("A valid inbox_item_id is required; no fallback decision was executed.")
 
     service = _resolve_inbox_service(inbox_service)
+    from mana_agent.approval.policy import get_approval_policy
+
+    if get_approval_policy().is_full_access():
+        try:
+            item = service.repository.get(inbox_item_id)
+            if item.status is not InboxStatus.APPROVED:
+                import getpass
+                from mana_agent.human_inbox.models import ResponseSubmission, ResponseOperation
+                actor = item.assigned_reviewer_id or getpass.getuser()
+                item = service.respond(ResponseSubmission(
+                    inbox_item_id=inbox_item_id,
+                    operation=ResponseOperation.APPROVE,
+                    actor_id=actor,
+                    channel="full_access_auto_approval",
+                    idempotency_key=f"full_access_approve:{inbox_item_id}",
+                ))
+            obs = service.observe_for_agent(
+                inbox_item_id,
+                requesting_agent_id=agent_id,
+                task_id=task_id,
+            )
+            return ApprovalWaitResult(
+                verdict="approved",
+                may_continue=True,
+                inbox_item_id=inbox_item_id,
+                status="approved",
+                response=obs.response.model_dump(mode="json") if obs.response else None,
+            )
+        except Exception:
+            return ApprovalWaitResult(
+                verdict="approved",
+                may_continue=True,
+                inbox_item_id=inbox_item_id,
+                status="approved",
+                response={"decision": "approve", "source": "full_access"},
+            )
+
     max_timeout = min(max(0.0, float(timeout_seconds)), 600.0)
     poll_interval = max(0.005, float(poll_interval_seconds))
     start_time = time.monotonic()
@@ -542,6 +584,90 @@ def approval_request(
                 item = service.repository.get(req_inbox_id)
             except Exception:
                 item = None
+
+    from mana_agent.approval.policy import get_approval_policy
+    from mana_agent.transactional_actions.models import ApprovalScope
+    from mana_agent.approval.audit import record_approval_audit
+    from mana_agent.approval.models import ApprovalDecision, ApprovalMode, ApprovalRequest
+
+    app_policy = get_approval_policy()
+    auto_decision = None
+    if app_policy.is_full_access():
+        auto_decision = "full_access"
+    elif app_policy.is_auto_approve_safe():
+        req = ApprovalRequest(
+            action_type="shell" if cmd else "transactional",
+            action_id=target_action_id or (action.action_id if action else ""),
+            command=cmd,
+            tool_name="approval_request",
+            risk_level=risk_level,
+        )
+        if app_policy.is_safe_action(req):
+            auto_decision = "safe_auto_approval"
+
+    if auto_decision:
+        grant_id = ""
+        if action is not None:
+            scope = action.policy_decision.required_approval_scope if action.policy_decision else ApprovalScope.ACTION_ONCE
+            grant = gateway.approvals.find_valid(action) or gateway.approvals.issue(
+                action,
+                approved_by=auto_decision,
+                ttl_seconds=max(300, int(timeout_seconds)),
+                scope=scope or ApprovalScope.ACTION_ONCE,
+            )
+            grant_id = grant.approval_id
+        if item is not None:
+            try:
+                import getpass
+                from mana_agent.human_inbox.models import ResponseSubmission, ResponseOperation, UNRESOLVED_STATUSES
+                if item.status in UNRESOLVED_STATUSES:
+                    actor = item.assigned_reviewer_id or getpass.getuser()
+                    item = service.respond(ResponseSubmission(
+                        inbox_item_id=item.inbox_item_id,
+                        operation=ResponseOperation.APPROVE,
+                        actor_id=actor,
+                        channel=f"{auto_decision}_auto_approval",
+                        idempotency_key=f"{auto_decision}_auto_approve:{item.inbox_item_id}",
+                    ))
+            except Exception:
+                pass
+
+        record_approval_audit(
+            ApprovalDecision(
+                approved=True,
+                mode=app_policy.mode,
+                source=auto_decision,
+                interactive=False,
+                reason="Automatically approved in Full Access Mode." if auto_decision == "full_access" else "Safe action automatically approved.",
+                approval_id=grant_id,
+                inbox_item_id=req_inbox_id or (item.inbox_item_id if item else ""),
+            ),
+            ApprovalRequest(
+                action_type="shell" if cmd else "transactional",
+                action_id=target_action_id or (action.action_id if action else ""),
+                command=cmd,
+                tool_name="approval_request",
+                task_id=task_id,
+                agent_id=agent_id,
+                execution_id=task_id,
+            ),
+            result_status="auto_approved",
+        )
+
+        return {
+            "approved": True,
+            "approval_id": grant_id,
+            "inbox_item_id": req_inbox_id or (item.inbox_item_id if item else ""),
+            "action_id": target_action_id or (action.action_id if action else ""),
+            "status": "approved",
+            "command": cmd,
+            "message": (
+                f"Approval granted for this exact action. Resume execution with action_approval_id={grant_id!r}."
+                if grant_id
+                else "Approval granted automatically."
+            ),
+            "auto_approved": True,
+        }
 
     if item is None and action is not None:
         raise LookupError("transactional action has no available inbox request")

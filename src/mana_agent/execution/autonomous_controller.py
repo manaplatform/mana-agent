@@ -603,22 +603,25 @@ class AutonomousExecutionController:
                         logger.warning("Failed to mark steering applied: %s", apply_err)
 
                     if any(item.get("requires_approval") for item in pending_items):
-                        self.supervisor.transition(
-                            task_id,
-                            ExecutionState.WAITING,
-                            reason="waiting_for_approval",
-                            attempt_id=active_attempt_id,
-                            generation=active_generation,
-                        )
-                        return _finish(AutonomousExecutionResult(
-                            task_id=task_id,
-                            status="waiting",
-                            goal_satisfied=False,
-                            answer="Live steering requires human approval before proceeding.",
-                            metrics=metrics,
-                            error="waiting_for_approval",
-                            completed_steps=completed_steps,
-                        ))
+                        from mana_agent.approval.policy import get_approval_policy
+
+                        if not get_approval_policy().is_full_access():
+                            self.supervisor.transition(
+                                task_id,
+                                ExecutionState.WAITING,
+                                reason="waiting_for_approval",
+                                attempt_id=active_attempt_id,
+                                generation=active_generation,
+                            )
+                            return _finish(AutonomousExecutionResult(
+                                task_id=task_id,
+                                status="waiting",
+                                goal_satisfied=False,
+                                answer="Live steering requires human approval before proceeding.",
+                                metrics=metrics,
+                                error="waiting_for_approval",
+                                completed_steps=completed_steps,
+                            ))
 
             # 2. Checkpoint before execution step
             current_task = self.supervisor.get_task(task_id)
@@ -824,34 +827,37 @@ class AutonomousExecutionController:
 
             # 6. Check for Pending Human Approval Gate
             if step_result.get("is_approval_pending"):
-                current_task = self.supervisor.get_task(task_id)
-                if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
-                    try:
-                        self.supervisor.transition(
-                            task_id,
-                            ExecutionState.WAITING,
-                            reason="waiting_for_approval",
-                            attempt_id=active_attempt_id,
-                            generation=active_generation,
-                        )
-                    except Exception:
-                        pass
-                if self.taskboard is not None:
-                    try:
-                        self.taskboard.update_status(task_id, TaskStatus.WAITING_FOR_TOOLS, reason="waiting_for_approval")
-                    except Exception:
-                        pass
-                return _finish(AutonomousExecutionResult(
-                    task_id=task_id,
-                    status="waiting",
-                    goal_satisfied=False,
-                    answer=step_answer or "Action requires human approval before continuing.",
-                    metrics=metrics,
-                    error="waiting_for_approval",
-                    trace=overall_trace,
-                    warnings=warnings,
-                    completed_steps=completed_steps,
-                ))
+                from mana_agent.approval.policy import get_approval_policy
+
+                if not get_approval_policy().is_full_access():
+                    current_task = self.supervisor.get_task(task_id)
+                    if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
+                        try:
+                            self.supervisor.transition(
+                                task_id,
+                                ExecutionState.WAITING,
+                                reason="waiting_for_approval",
+                                attempt_id=active_attempt_id,
+                                generation=active_generation,
+                            )
+                        except Exception:
+                            pass
+                    if self.taskboard is not None:
+                        try:
+                            self.taskboard.update_status(task_id, TaskStatus.WAITING_FOR_TOOLS, reason="waiting_for_approval")
+                        except Exception:
+                            pass
+                    return _finish(AutonomousExecutionResult(
+                        task_id=task_id,
+                        status="waiting",
+                        goal_satisfied=False,
+                        answer=step_answer or "Action requires human approval before continuing.",
+                        metrics=metrics,
+                        error="waiting_for_approval",
+                        trace=overall_trace,
+                        warnings=warnings,
+                        completed_steps=completed_steps,
+                    ))
 
             # 7. Progress Detection
             if evidence_fingerprint == last_evidence_fingerprint and not step_result.get("changed_files"):
@@ -936,29 +942,32 @@ class AutonomousExecutionController:
                     else:
                         # Cannot renew due to budget, max renewals, or no progress
                         if self.config.auto_renew.require_approval_above_budget and "budget" in renewal_reason:
-                            current_task = self.supervisor.get_task(task_id)
-                            if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
-                                try:
-                                    self.supervisor.transition(
-                                        task_id,
-                                        ExecutionState.WAITING,
-                                        reason="waiting_for_approval",
-                                        attempt_id=active_attempt_id,
-                                        generation=active_generation,
-                                    )
-                                except Exception:
-                                    pass
-                            return _finish(AutonomousExecutionResult(
-                                task_id=task_id,
-                                status="waiting",
-                                goal_satisfied=False,
-                                answer=f"Task paused: Budget extension requires user approval ({renewal_reason}).",
-                                metrics=metrics,
-                                error="waiting_for_approval",
-                                trace=overall_trace,
-                                warnings=warnings,
-                                completed_steps=completed_steps,
-                            ))
+                            from mana_agent.approval.policy import get_approval_policy
+
+                            if not get_approval_policy().is_full_access():
+                                current_task = self.supervisor.get_task(task_id)
+                                if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:
+                                    try:
+                                        self.supervisor.transition(
+                                            task_id,
+                                            ExecutionState.WAITING,
+                                            reason="waiting_for_approval",
+                                            attempt_id=active_attempt_id,
+                                            generation=active_generation,
+                                        )
+                                    except Exception:
+                                        pass
+                                return _finish(AutonomousExecutionResult(
+                                    task_id=task_id,
+                                    status="waiting",
+                                    goal_satisfied=False,
+                                    answer=f"Task paused: Budget extension requires user approval ({renewal_reason}).",
+                                    metrics=metrics,
+                                    error="waiting_for_approval",
+                                    trace=overall_trace,
+                                    warnings=warnings,
+                                    completed_steps=completed_steps,
+                                ))
                         # Mark budget exhausted
                         current_task = self.supervisor.get_task(task_id)
                         if current_task.state == ExecutionState.RUNNING and current_task.attempt_id == active_attempt_id:

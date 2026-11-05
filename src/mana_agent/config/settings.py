@@ -569,6 +569,12 @@ class Settings(BaseSettings):
     mana_transactional_always_approve: bool = Field(
         default=False, alias="MANA_TRANSACTIONAL_ALWAYS_APPROVE"
     )
+    # Execution approval mode: default, auto_approve_safe, or full_access.
+    mana_approval_mode: str = Field(
+        default="default",
+        alias="MANA_AGENT_APPROVAL_MODE",
+        description="Execution approval mode: 'default', 'auto_approve_safe', or 'full_access'.",
+    )
     # Authoritative coding runtime: Codex (external) or Mana-Agent native (internal).
     mana_coding_backend: str = Field(
         default="codex",

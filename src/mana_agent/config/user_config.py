@@ -610,6 +610,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_COMPUTER_CONTROL_ENABLED": "mana_computer_control_enabled",
     "MANA_MANAGED_WORKTREES_ENABLED": "mana_managed_worktrees_enabled",
     "MANA_TRANSACTIONAL_ALWAYS_APPROVE": "mana_transactional_always_approve",
+    "MANA_AGENT_APPROVAL_MODE": "mana_approval_mode",
     "MANA_CODING_BACKEND": "mana_coding_backend",
     "MANA_CODEX_ENABLED": "mana_codex_enabled",
     "MANA_CODEX_MAX_WORKERS": "mana_codex_max_workers",
@@ -1214,6 +1215,11 @@ def load_effective_settings(*, include_env: bool = False) -> dict[str, Any]:
                 values["OPENAI_BATCH_RETRY_FAILED_REQUESTS"] = bool(batch_cfg["retry_failed_requests"])
             if "cost_optimization" in batch_cfg:
                 values["OPENAI_BATCH_COST_OPTIMIZATION"] = bool(batch_cfg["cost_optimization"])
+
+    # Support execution.approval_mode configuration
+    exec_cfg = user_values.get("execution") or values.get("execution")
+    if isinstance(exec_cfg, dict) and "approval_mode" in exec_cfg:
+        values["MANA_AGENT_APPROVAL_MODE"] = str(exec_cfg["approval_mode"]).strip()
 
     return values
 

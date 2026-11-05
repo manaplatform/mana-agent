@@ -119,7 +119,10 @@ class ExecutionPanel(Vertical):
             duration_str = f" ({step.duration_ms}ms)" if step.duration_ms is not None and step.status != "running" else ""
             detail_str = f" — {step.detail}" if step.detail else ""
             if step.status in {"waiting_approval", "pending_approval"}:
-                lines.append(f"[bold #f59e0b]⚠️ {step.title.lower()} · waiting for approval{detail_str}[/]")
+                if step.detail and "auto-approved" in step.detail.lower():
+                    lines.append(f"[bold $success]✓[/] {step.title.lower()} · auto-approved{detail_str}")
+                else:
+                    lines.append(f"[bold #f59e0b]⚠️ {step.title.lower()} · waiting for approval{detail_str}[/]")
             elif step.status == "running":
                 lines.append(f"[dim]◌ {step.title.lower()} · running{detail_str}[/dim]")
             elif step.status in {"completed", "success"}:

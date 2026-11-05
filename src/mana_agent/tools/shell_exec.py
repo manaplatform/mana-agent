@@ -973,7 +973,10 @@ class ShellExecutor:
                             raise PermissionError(grant_or_reason)
                         grant_id = grant_or_reason
                     else:
-                        raise PermissionError("requires explicit approval before execution")
+                        from mana_agent.approval.policy import get_approval_policy
+
+                        if not get_approval_policy().is_full_access():
+                            raise PermissionError("requires explicit approval before execution")
                     outcome = gateway.execute(adapter, approval_id=grant_id)
                     data = outcome.result
                     cmd_result = ShellCommandOutput(

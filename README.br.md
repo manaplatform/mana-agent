@@ -12,10 +12,6 @@ Ur bladenn digor diazezet war Python eo Mana-Agent evit aozañ ajanted skiant ar
 
 Gant Mana-Agent e c'hallit enklask er mirdioù, an teuliadur hag an APIoù, prientiñ labourioù, aozañ ajanted, heuliañ ar mont war-raok, adimplijout ar c'hemperzh aotreet ha gwiriañ an disoc'hoù. Emañ ar c'hoderezh, an enklask, an difaziañ, an emgefreekaat hag implij ar merdeer, Git, SSH, postel ha Telegram e-touez an implijoù.
 
-**Sturerezh buhez:** n'haller ket c'hoazh sturiañ un erounit en cours, na gant Ctrl+S kennebeut. Disparti eo ar mod Plan ha dalc'het eo e ezhommoù aotre. Sellit ouzh [an tresadenn sturerezh](docs/live-steering-design.md).
-
-Implijet eo OpenAI Batch nemet pa vez goulennet en un doare sklaer; an dasparzhioù all a implij an erounit kenstur diabarzh. An trevelloù a c'houlenn Batch a chom war c'hortoz en un doare padus ha kenderc'hel a reont gant an disoc'hoù; miret eo kemperzh an implijer hag ar skoazeller dre an etrefasoù. [Batch ha dizober](docs/26-openai-batch-api.md).
-
 ## Kregiñ prim
 
 Ret eo Python 3.10–3.14. Staliañ erbedet:

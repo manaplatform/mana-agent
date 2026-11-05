@@ -81,7 +81,6 @@ class ManaChatApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("q", "quit", "Quit", show=False),
-        Binding("ctrl+s", "steer_execution", "Steer", show=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+r", "simulate_response", "Simulate Agent", show=True),
         Binding("ctrl+o", "attach_file", "Attach File", show=True),
@@ -263,7 +262,15 @@ class ManaChatApp(App):
         self._subscribe_session_events(self._gateway_session_id or "")
 
         # Safe immediate footer (avoids any early watcher issues)
-        self.sub_title = "Ready"
+        from mana_agent.approval.policy import ApprovalMode, get_approval_policy
+
+        app_policy = get_approval_policy()
+        if app_policy.mode == ApprovalMode.FULL_ACCESS:
+            self.sub_title = "Mode: Autonomous · Approval: FULL ACCESS"
+        elif app_policy.mode == ApprovalMode.AUTO_APPROVE_SAFE:
+            self.sub_title = "Approval: AUTO APPROVE SAFE"
+        else:
+            self.sub_title = "Ready"
 
         # Welcome (only if this is a fresh history)
         if len(self.history.get_events()) == 0:
@@ -483,6 +490,11 @@ class ManaChatApp(App):
             self._safe_post_activity(act, target_turn_id)
 
             # Trigger approval modal directly in real time
+            from mana_agent.approval.policy import get_approval_policy
+
+            if get_approval_policy().is_full_access():
+                return
+
             req_id = str(metadata.get("permission_request_id") or metadata.get("inbox_item_id") or event_id or "")
             if event_type == "action.approval.required" or bool(metadata.get("transactional_action_approval")):
                 inbox_item_id = str(metadata.get("inbox_item_id") or req_id)
@@ -743,6 +755,10 @@ class ManaChatApp(App):
         metadata: dict[str, Any] | None = None,
         title: str = "",
     ) -> None:
+        from mana_agent.approval.policy import get_approval_policy
+
+        if get_approval_policy().is_full_access():
+            return
         action_id = str((metadata or {}).get("action_id") or "")
         if inbox_item_id in self._computer_permission_requests_shown:
             return
@@ -1854,6 +1870,21 @@ class ManaChatApp(App):
         if not text.strip() and not pending_atts:
             return
 
+        if self._turn_in_progress:
+            # During an active turn, typing text and pressing Enter submits live steering
+            instruction = text.strip()
+            if instruction.startswith("/steer "):
+                instruction = instruction[len("/steer"):].strip()
+            elif instruction == "/steer":
+                instruction = ""
+            if self.input:
+                self.input.reset()
+            if instruction:
+                asyncio.create_task(self._submit_live_steering(instruction))
+            else:
+                self.action_steer_execution()
+            return
+
         if text == "/steer" or text.startswith("/steer "):
             instruction = text[len("/steer"):].strip()
             if not instruction:
@@ -1862,10 +1893,6 @@ class ManaChatApp(App):
                 asyncio.create_task(self._submit_live_steering(instruction))
             if self.input:
                 self.input.reset()
-            return
-
-        if self._turn_in_progress:
-            self.notify("Wait for the current turn to finish before sending another message or command.", severity="warning")
             return
 
         if text == "/models" or text.startswith("/models "):

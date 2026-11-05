@@ -5,6 +5,7 @@ import warnings
 
 from .cli_internal import *
 from .output import build_output_sink
+from mana_agent.approval.policy import set_approval_mode
 from mana_agent.tui.menu import NonInteractivePromptError
 from mana_agent.tui.wizard import ensure_setup, run_setup_wizard
 from mana_agent.ui.banner import render_banner
@@ -48,8 +49,22 @@ def main(
     output_dir: str | None = typer.Option(None, "--output-dir", help="Directory for saving command output logs."),
     no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive setup and menus."),
     configure_now: bool = typer.Option(False, "--configure", help="Open the complete configuration TUI and exit."),
+    full_access: bool = typer.Option(
+        False,
+        "--full-access",
+        help="Run in Full Access Mode: automatically approve all supported execution requests.",
+    ),
+    approval_mode: str | None = typer.Option(
+        None,
+        "--approval-mode",
+        help="Execution approval mode: default, auto_approve_safe, or full_access.",
+    ),
 ) -> None:
     global OUTPUT_DIR, LLM_DEBUG_MODE
+
+    effective_approval_mode = "full_access" if full_access else (approval_mode or None)
+    if effective_approval_mode:
+        set_approval_mode(effective_approval_mode)
     verbose = bool(verbose or debug)
     OUTPUT_DIR = Path(output_dir).resolve() if output_dir else None
     LLM_DEBUG_MODE = debug_llm
@@ -101,8 +116,14 @@ def main(
             ensure_setup(no_interactive=no_interactive, command_needs_llm=True, console=console)
         except NonInteractivePromptError as exc:
             raise typer.BadParameter(str(exc)) from exc
+        extra_appr_args = []
+        if full_access:
+            extra_appr_args.append("--full-access")
+        elif approval_mode:
+            extra_appr_args.extend(["--approval-mode", approval_mode])
+
         if chat_mode:
-            args = ["--root-dir", str(root)]
+            args = ["--root-dir", str(root), *extra_appr_args]
             if model:
                 args += ["--model", model]
             _invoke_with_multi_agent_route(
@@ -128,7 +149,7 @@ def main(
             _invoke_with_multi_agent_route(ctx, "plan", args, root=root, request="root --plan", entrypoint="root")
             return
         if act_mode:
-            args = ["--root-dir", str(root), "--act"]
+            args = ["--root-dir", str(root), "--act", *extra_appr_args]
             if model:
                 args += ["--model", model]
             _invoke_with_multi_agent_route(
@@ -147,7 +168,7 @@ def main(
                 "Interactive chat requires a TTY. Use a direct command for automation; "
                 "if configuration is missing, run `mana-agent --configure` from an interactive terminal."
             )
-        args = ["--root-dir", str(root)]
+        args = ["--root-dir", str(root), *extra_appr_args]
         if model:
             args += ["--model", model]
         _invoke_with_multi_agent_route(

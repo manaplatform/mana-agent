@@ -5223,15 +5223,61 @@ class AgentChatGateway:
         active = self._lane_coordinator.list_tasks(active_only=True, session_id=session_id)
         if not active:
             active = self._lane_coordinator.list_tasks(active_only=True)
-        if not active:
-            raise RuntimeError("No active execution found to steer.")
-        execution = active[-1]
-        supervisor = self._lane_coordinator.execution_supervisor
-        task = supervisor.get_task(execution.task_id)
 
         req_id = request_id or f"steer_{uuid.uuid4().hex[:12]}"
         kind_enum = SteeringKind(kind) if kind in SteeringKind._value2member_map_ else SteeringKind.GUIDANCE
         scope_enum = SteeringScope(scope) if scope in SteeringScope._value2member_map_ else SteeringScope.EXECUTION
+
+        if not active:
+            # Check whether this session or the gateway has an in-flight turn or active conversation
+            is_active_session = (session_id in self._active) or bool(self._active)
+            sess_state = self._sessions.get(session_id) if session_id else None
+            if not is_active_session and (sess_state is None or not sess_state.get("turn_in_progress")):
+                raise RuntimeError("No active execution found to steer.")
+
+            effective_session_id = session_id or (list(self._active)[0] if self._active else "session")
+            state = self._session(effective_session_id)
+            pending_list = state.setdefault("pending_steering", [])
+            entry = {
+                "request_id": req_id,
+                "session_id": effective_session_id,
+                "text": text,
+                "kind": kind_enum.value,
+                "scope": scope_enum.value,
+                "target_id": target_id if scope_enum != SteeringScope.EXECUTION else "",
+                "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            pending_list.append(entry)
+            if callable(self._event_sink):
+                try:
+                    self._event_sink(
+                        "steering.received",
+                        "Live steering received",
+                        status="pending",
+                        metadata={
+                            "request_id": req_id,
+                            "session_id": effective_session_id,
+                            "text": text,
+                            "kind": kind_enum.value,
+                            "scope": scope_enum.value,
+                        },
+                    )
+                except Exception:
+                    pass
+            return {
+                "request_id": req_id,
+                "sequence": len(pending_list),
+                "duplicate": False,
+                "execution_id": str(state.get("last_task_id") or ""),
+                "attempt_id": "",
+                "generation": 0,
+                "status": "queued_for_routing",
+            }
+
+        execution = active[-1]
+        supervisor = self._lane_coordinator.execution_supervisor
+        task = supervisor.get_task(execution.task_id)
 
         effective_session_id = session_id or task.session_id or "session"
         submission = SteeringSubmission(
@@ -5252,6 +5298,18 @@ class AgentChatGateway:
             allow_scoped=True,
             allow_interrupt=True,
         )
+        state = self._session(effective_session_id)
+        state.setdefault("pending_steering", []).append({
+            "request_id": req_id,
+            "session_id": effective_session_id,
+            "execution_id": execution.task_id,
+            "text": text,
+            "kind": kind_enum.value,
+            "scope": scope_enum.value,
+            "target_id": target_id if scope_enum != SteeringScope.EXECUTION else "",
+            "status": "pending",
+            "submitted_to_task": True,
+        })
         return {
             "request_id": req_id,
             "sequence": sequence,
@@ -6117,6 +6175,14 @@ class AgentChatGateway:
                 if candidate_id:
                     saved = self._lane_coordinator.execution_supervisor.store.get_task_or_none(candidate_id)
                     task_execution_policies[candidate_id] = saved.execution_policy.model_dump(mode="json") if saved else {}
+            pending_steering_items = [
+                item for item in state.get("pending_steering", [])
+                if item.get("status") == "pending"
+            ]
+            live_steering_guidance = "\n".join(
+                f"[Live Steering ({item.get('kind', 'guidance').upper()})]: {item['text']}"
+                for item in pending_steering_items
+            )
             route_context = EntryRouteContext(
                 session_id=session_id,
                 conversation_id=conversation_id,
@@ -6132,6 +6198,7 @@ class AgentChatGateway:
                 authenticated_user_id=authenticated_user_id,
                 repository_root=str(self.root),
                 envelope=routing_envelope,
+                live_steering_guidance=live_steering_guidance,
             )
             memory_task_binding = MemoryTaskBinding(selected_memory_task_id="")
             state["_memory_task_binding"] = memory_task_binding
@@ -7536,6 +7603,40 @@ class AgentChatGateway:
                         )
                         self._lane_coordinator.start(reservation)
                         options["_lane_task_id"] = reservation.execution.task_id
+                        if state.get("pending_steering"):
+                            from mana_agent.execution.steering import (
+                                SteeringCoordinator,
+                                SteeringKind,
+                                SteeringScope,
+                                SteeringSubmission,
+                            )
+                            coordinator = SteeringCoordinator(self._lane_coordinator.execution_supervisor)
+                            sup_task = self._lane_coordinator.execution_supervisor.get_task(reservation.execution.task_id)
+                            for item in state["pending_steering"]:
+                                if item.get("status") == "pending" and not item.get("submitted_to_task"):
+                                    kind_val = item.get("kind", "guidance")
+                                    scope_val = item.get("scope", "execution")
+                                    sub = SteeringSubmission(
+                                        execution_id=reservation.execution.task_id,
+                                        session_id=session_id,
+                                        attempt_id=sup_task.attempt_id,
+                                        generation=sup_task.attempt_generation,
+                                        request_id=item["request_id"],
+                                        text=item["text"],
+                                        kind=SteeringKind(kind_val) if kind_val in SteeringKind._value2member_map_ else SteeringKind.GUIDANCE,
+                                        scope=SteeringScope(scope_val) if scope_val in SteeringScope._value2member_map_ else SteeringScope.EXECUTION,
+                                    )
+                                    try:
+                                        coordinator.submit(
+                                            sub,
+                                            authenticated_session_id=session_id,
+                                            allow_scoped=True,
+                                            allow_interrupt=True,
+                                        )
+                                        item["submitted_to_task"] = True
+                                        item["execution_id"] = reservation.execution.task_id
+                                    except Exception as exc:
+                                        logger.debug("Failed draining pending steering into task: %s", exc)
                         policy = entry_decision.execution_policy
                         if policy.mode == "auto" and previous_task_id and relation_type != "independent":
                             parent_record = self._lane_coordinator.execution_supervisor.store.get_task_or_none(previous_task_id)
@@ -9974,6 +10075,16 @@ class AgentChatGateway:
         policy = TaskExecutionPolicy.model_validate(options.get("execution_policy") or decision.execution_policy.model_dump(mode="json"))
         text = options.get("_canonical_execution_text") or decision.resolved_request or text
         execution_text = text
+        pending_steering_items = [
+            item for item in state.get("pending_steering", [])
+            if item.get("status") == "pending"
+        ]
+        if pending_steering_items:
+            steering_text = "\n".join(
+                f"[Live Steering ({item.get('kind', 'guidance').upper()})]: {item['text']}"
+                for item in pending_steering_items
+            )
+            execution_text += f"\n\nActive Live Steering Guidance:\n{steering_text}"
         conversation_context = state.get("conversation_context")
         is_synthetic_selection = text.startswith('User selected ') or text.startswith('User provided free-text response ') or bool(options.get("suppress_conversation_context"))
         execution_context_included = bool(conversation_context and
@@ -10428,6 +10539,20 @@ class AgentChatGateway:
                 ))
                 approval_request_id = inbox_item.permission_request_id
                 self._pending_server_approvals[approval_request_id] = pending_server_action
+                from mana_agent.approval.policy import get_approval_policy
+
+                if get_approval_policy().is_full_access():
+                    approval_res = self.server_approval_command(
+                        approval_request_id,
+                        session_id=context.session_id,
+                        client_type="tui",
+                    )
+                    return ChatTurnResult(
+                        answer=str(approval_res.get("message") or "Server action auto-approved and executed in Full Access Mode."),
+                        mode="server-executed",
+                        decision=decision,
+                        payload=approval_res,
+                    )
                 approval_metadata = {
                     "permission_request_id": approval_request_id,
                     "permission_scope": "server.action.execute",
@@ -12298,7 +12423,9 @@ class AgentChatGateway:
         )
         if lane_task_id and self._lane_coordinator:
             try:
-                if waiting_for_execution_approval:
+                from mana_agent.approval.policy import get_approval_policy
+
+                if waiting_for_execution_approval and not get_approval_policy().is_full_access():
                     self._lane_coordinator.transition(
                         lane_task_id,
                         LaneTaskState.WAITING,

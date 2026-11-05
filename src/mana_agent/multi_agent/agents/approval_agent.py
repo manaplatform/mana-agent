@@ -207,6 +207,16 @@ class ApprovalAgent(BaseAgent):
         error: str = "",
     ) -> ModelApprovalJudgment:
         """Evaluate an approval request using this agent's model."""
+        from mana_agent.approval.policy import get_approval_policy
+
+        if get_approval_policy().is_full_access():
+            return ModelApprovalJudgment(
+                judgment="accept",
+                reason="Automatically accepted in Full Access Mode.",
+                confidence=1.0,
+                risk_assessment="full_access_policy",
+            )
+
         return judge_approval_request(
             command=command,
             reason=reason,
@@ -220,9 +230,15 @@ class ApprovalAgent(BaseAgent):
 
     def may_continue(self, result: Any) -> bool:
         """Return True only when the approval verdict is explicitly approved."""
+        from mana_agent.approval.policy import get_approval_policy
+
+        if get_approval_policy().is_full_access():
+            return True
         if result == "approved":
             return True
         if isinstance(result, dict):
+            if result.get("auto_approved"):
+                return True
             return result.get("verdict") == "approved" and bool(result.get("may_continue", True))
         verdict = getattr(result, "verdict", None)
         if verdict is not None:

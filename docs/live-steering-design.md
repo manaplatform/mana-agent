@@ -1,39 +1,39 @@
 # Live text steering: integration status
 
-Live Steer Mode is **not yet available** in the chat TUI or dashboard. The
-storage primitive in `execution/steering.py` is not connected to an execution
-and must not be presented as receiving or applying steering. It stores user
-text; callers must use a private session directory.
+Live Steer Mode is **integrated and active** across the chat TUI and the agent gateway.
+Users can guide active executions and in-flight turns directly by typing into the chat box
+and pressing **Enter** without requiring separate shortcut combinations or modal dialogs.
 
-## Observed gap
+## Resolved Gaps & Architecture
 
-The Textual chat app rejects input while `_turn_in_progress` is true. Dashboard
-messages go through `ConversationService.send_message`, which creates a new
-execution ID. Neither is currently a safe intervention path. In addition,
-`process_chat_turn` accepts an `autonomous_controller` argument, but does not
-call its `execute_goal` loop; active chat and coding loops therefore cannot be
-steered merely by inserting a poll into that controller. The configuration
-screen already uses Ctrl+S to save. Voice Live mode is a separate feature.
+1. **Direct Input Steering (No Shortcut Required)**:
+   The Textual chat app no longer rejects input while `_turn_in_progress` is true.
+   When a turn is running, entering text and pressing **Enter** automatically forwards
+   the instruction as live steering via `gateway.submit_steering`. The former `Ctrl+S`
+   binding in chat has been removed, eliminating conflicts with the configuration screen save.
+   The `/steer <instruction>` command remains supported as an alias.
 
-The original standalone ledger provides typed, ordered and idempotent input
-records but cannot fence against supervisor lifecycle changes. The separate
-`SteeringCoordinator` is admission-only groundwork: inside the supervisor's
-atomic task update it checks a caller-supplied authenticated session identity,
-running state, current attempt and generation, lease expiry and cancellation;
-it records ordered, deduplicated pending entries in the task record. It does
-not authenticate the caller itself and is not wired to a frontend or agent.
-Task and worker scopes and interrupts are rejected until routing and supervisor
-interruption are integrated. Task-store redaction applies to persisted text.
-Pending records survive task-store reload, but no checkpoint restoration or
-cross-generation replay policy exists. Nothing marks entries applied,
-superseded or rejected. Admission is not delivery or execution acknowledgment.
+2. **Unified Turn and Routing Admission**:
+   `submit_steering` in `AgentChatGateway` no longer fails with `"No active execution found to steer"`
+   when a turn is still in its routing/planning phase or executing conversational routes.
+   Guidance received before lane task creation is admitted into the session steering queue
+   and drained into the supervisor's `SteeringCoordinator` upon lane task reservation.
 
-The controller now exposes a **read-only** pending snapshot for the current
-worker, fenced by the task, attempt, generation, raw lease token, expiry and
-cancellation. It cannot claim or apply the records. A checkpoint also contains
-an audit snapshot taken under the task-store lock; the task record remains
-authoritative and may contain newer entries. Recovery must never overwrite it
-with an older checkpoint snapshot. Neither change enables live steering.
+3. **Injection into Routing and Execution**:
+   - `EntryRouteContext` accepts `live_steering_guidance` which is rendered into the router prompt
+     payload, ensuring `EntryRouter` accounts for user guidance during route selection.
+   - `_execute_entry_route_bound` injects active guidance into execution text across routes.
+   - `process_chat_turn` checks for pending steering before model calls and full-auto resume
+     cycles, appends guidance to `request_for_generation`, and atomically acknowledges applied
+     entries via `SteeringCoordinator.apply_steering(...)`.
+   - `AutonomousExecutionController` continues to enforce boundary checks, supervisor generation
+     fencing, and human approval transitions for replanning.
+
+4. **Fencing and Safety Invariants**:
+   - Only the active fenced execution attempt may apply or consume guidance.
+   - Replaced workers or retired attempts are fenced out by `SteeringCoordinator`.
+   - Approval policy gates remain strictly enforced: live steering guidance is context and
+     intent, not an automatic grant of elevated tool permissions.
 
 ## Chat/controller integration hazard
 

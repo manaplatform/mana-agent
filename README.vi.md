@@ -12,10 +12,6 @@ Mana-Agent là nền tảng mã nguồn mở dựa trên Python để điều ph
 
 Phân tích kho mã, tài liệu và API; lập kế hoạch, điều phối tác tử, theo dõi tiến độ, tái sử dụng ngữ cảnh được phép và kiểm chứng kết quả. Nền tảng hỗ trợ nghiên cứu, lập trình, gỡ lỗi và tự động hóa, cũng như làm việc với trình duyệt, Git, SSH, email và Telegram.
 
-**Điều hướng trực tiếp:** Chưa thể điều hướng một lần thực thi đang diễn ra, kể cả bằng Ctrl+S. Plan Mode vẫn tách biệt và các yêu cầu phê duyệt của chế độ này vẫn áp dụng. Xem [thiết kế điều hướng](docs/live-steering-design.md).
-
-OpenAI Batch chỉ được sử dụng khi có yêu cầu rõ ràng; các xử lý theo lô khác dùng thực thi song song nội bộ. Tác vụ cần Batch được tạm dừng bền vững và tiếp tục khi có kết quả; các lượt tiếp theo giữ ngữ cảnh của người dùng và trợ lý trên các giao diện. [Thực thi theo lô và khôi phục](docs/26-openai-batch-api.md).
-
 ## Bắt đầu nhanh
 
 Cần Python 3.10–3.14. Cài đặt được khuyến nghị:

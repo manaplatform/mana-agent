@@ -1105,6 +1105,50 @@ def process_chat_turn(
     if analysis_context:
         request_for_generation = f"{analysis_context}\n\n{request_for_generation}"
 
+    def _extract_and_apply_pending_steering() -> list[str]:
+        guidance_items: list[str] = []
+        applied_req_ids: list[str] = []
+        if gateway_task_id and feature_integration_execution_supervisor and supervisor_attempt_id and supervisor_lease_token:
+            try:
+                from mana_agent.execution.steering import SteeringCoordinator
+                coord = SteeringCoordinator(feature_integration_execution_supervisor)
+                sup_task = feature_integration_execution_supervisor.get_task(gateway_task_id)
+                task_gen = getattr(sup_task, "attempt_generation", 1)
+                pending_items = coord.pending_for_attempt(
+                    gateway_task_id,
+                    attempt_id=supervisor_attempt_id,
+                    generation=task_gen,
+                    lease_token=supervisor_lease_token,
+                )
+                for item in pending_items:
+                    guidance_items.append(f"[Live Steering ({item.get('kind', 'guidance').upper()})]: {item.get('text', '')}")
+                    applied_req_ids.append(item["request_id"])
+                if applied_req_ids:
+                    try:
+                        coord.apply_steering(
+                            gateway_task_id,
+                            attempt_id=supervisor_attempt_id,
+                            generation=task_gen,
+                            lease_token=supervisor_lease_token,
+                            request_ids=applied_req_ids,
+                        )
+                    except Exception as apply_err:
+                        logger.debug("Failed to mark steering applied in turn_engine: %s", apply_err)
+            except Exception as steer_err:
+                logger.debug("Failed checking pending steering in turn_engine: %s", steer_err)
+
+        if session_state.get("pending_steering"):
+            for s_item in session_state["pending_steering"]:
+                if s_item.get("status") == "pending":
+                    if s_item.get("request_id") not in applied_req_ids:
+                        guidance_items.append(f"[Live Steering ({s_item.get('kind', 'guidance').upper()})]: {s_item.get('text', '')}")
+                    s_item["status"] = "applied"
+        return guidance_items
+
+    initial_steering = _extract_and_apply_pending_steering()
+    if initial_steering:
+        request_for_generation = f"{request_for_generation}\n\nActive Live Steering Guidance:\n" + "\n".join(initial_steering)
+
     from mana_agent.utils.timeouts import normalize_agent_timeout_seconds
 
     # Do not hard-cap at 600s: SWE-bench / full-auto runners pass multi-hour
@@ -1142,10 +1186,11 @@ def process_chat_turn(
                     auto_chat_mode=auto_chat_mode.value,
                 )
 
-            def _call() -> dict[str, Any]:
+            def _call(req: str | None = None) -> dict[str, Any]:
+                target_req = req or request_for_generation
                 if auto_execute_available:
                     return coding_agent.generate_auto_execute(
-                        request_for_generation,
+                        target_req,
                         index_dirs=dirs,
                         k=resolved_k,
                         max_steps=coding_agent_max_steps,
@@ -1166,7 +1211,7 @@ def process_chat_turn(
                         ),
                     )
                 return coding_agent.generate_dir_mode(
-                    request_for_generation,
+                    target_req,
                     index_dirs=dirs,
                     k=resolved_k,
                     max_steps=coding_agent_max_steps,
@@ -1183,10 +1228,11 @@ def process_chat_turn(
                     config, "index_dir", None
                 )
 
-            def _call() -> dict[str, Any]:
+            def _call(req: str | None = None) -> dict[str, Any]:
+                target_req = req or request_for_generation
                 if auto_execute_available:
                     return coding_agent.generate_auto_execute(
-                        request_for_generation,
+                        target_req,
                         index_dir=target_index,
                         k=resolved_k,
                         max_steps=coding_agent_max_steps,
@@ -1207,7 +1253,7 @@ def process_chat_turn(
                         ),
                     )
                 return coding_agent.generate(
-                    request_for_generation,
+                    target_req,
                     index_dir=target_index,
                     k=resolved_k,
                     max_steps=coding_agent_max_steps,
@@ -1229,13 +1275,19 @@ def process_chat_turn(
             else None
         )
         while True:
+            cycle_steering = _extract_and_apply_pending_steering()
+            if cycle_steering:
+                joined_guidance = "\n".join(cycle_steering)
+                if joined_guidance not in request_for_generation:
+                    request_for_generation = f"{request_for_generation}\n\nActive Live Steering Guidance:\n{joined_guidance}"
+
             if isinstance(resume_core_result, dict):
                 result = dict(resume_core_result)
                 result["changed_files"] = list(saved_integration_checkpoint.get("core_changed_files") or [])
                 result["flow_id"] = saved_integration_checkpoint.get("flow_id") or active_flow_id
                 resume_core_result = None
             else:
-                result = _call() or {}
+                result = _call(request_for_generation) or {}
             if result.get("status") == "waiting" and (result.get("pending_operation") or result.get("human_input")):
                 return ChatTurnResult(
                     answer=str(result.get("answer") or "Waiting for OpenAI Batch"),

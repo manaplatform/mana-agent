@@ -105,6 +105,7 @@ class EntryRouteContext:
     authenticated_user_id: str = ""
     envelope: Any | None = None
     repository_root: str = ""
+    live_steering_guidance: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         base = {
@@ -124,6 +125,7 @@ class EntryRouteContext:
             "orchestration_parent_task_id": self.orchestration_parent_task_id,
             "authenticated_user_id": self.authenticated_user_id,
             "repository_root": self.repository_root,
+            "live_steering_guidance": self.live_steering_guidance,
         }
         if self.envelope is not None and hasattr(self.envelope, "to_dict"):
             base["envelope"] = self.envelope.to_dict()
@@ -765,6 +767,11 @@ class EntryRouter:
         if disallowed_routes:
             routes = [row for row in routes if row["name"] not in disallowed_routes]
 
+        guidance = getattr(context, "live_steering_guidance", "") or ""
+        effective_user_prompt = str(user_prompt or "").strip()
+        if guidance:
+            effective_user_prompt = f"{effective_user_prompt}\n\n[Live Steering Guidance]:\n{guidance}".strip()
+
         if self.compactor is None:
             try:
                 from mana_agent.gateway.context_compactor import ContextCompactor
@@ -790,7 +797,7 @@ class EntryRouter:
                         router_window = limits[0]
 
             compaction = self.compactor.compact_routing_context(
-                user_prompt=user_prompt,
+                user_prompt=effective_user_prompt,
                 system_prompt=ENTRY_ROUTER_PROMPT,
                 context=context,
                 envelope=envelope,
@@ -813,7 +820,8 @@ class EntryRouter:
             effective_envelope = envelope or getattr(context, "envelope", None)
 
         payload = {
-            "user_prompt": str(user_prompt or "").strip(),
+            "user_prompt": effective_user_prompt,
+            "live_steering_guidance": guidance,
             "context": context.to_dict(),
             "repository_guidance": _render_repository_guidance(context),
             "routes": routes,
@@ -869,7 +877,8 @@ class EntryRouter:
                 ),
                 choices=route_names,
                 evidence={
-                    "user_prompt": user_prompt,
+                    "user_prompt": effective_user_prompt,
+                    "live_steering_guidance": guidance,
                     "routes": route_names,
                     "repository_guidance": payload["repository_guidance"],
                 },
@@ -1010,7 +1019,7 @@ class EntryRouter:
         *,
         context: EntryRouteContext | None = None,
     ) -> EntryRoutingDecision:
-        route = str(payload.get("route") or "").strip()
+        route = str(payload.get("route") or payload.get("selected_route") or "").strip()
         if route not in self.registry.names:
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "

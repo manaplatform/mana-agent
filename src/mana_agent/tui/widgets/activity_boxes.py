@@ -483,15 +483,29 @@ class CodingActivityBox(Vertical):
     def _render_state(self, event: dict[str, Any]) -> None:
         status = str(event.get("status") or "running").lower()
         title = str(event.get("title") or event.get("event_type") or event.get("type") or "Coding")
+        event_auto_approved = bool(
+            event.get("auto_approved")
+            or (isinstance(event.get("metadata"), dict) and event["metadata"].get("auto_approved"))
+            or str(event.get("event_type") or "") in {"action.approval.auto_granted", "approval.auto_granted"}
+        )
         has_waiting_approval = (
-            status in {"waiting_approval", "pending_approval", "approval_required"}
-            or str(event.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
-            or str(event.get("tool_name") or "") in {"approval_request", "request_user_approval"}
-        ) and status not in {"success", "completed", "done", "failed", "error", "cancelled"}
+            not event_auto_approved
+            and (
+                status in {"waiting_approval", "pending_approval", "approval_required"}
+                or str(event.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                or str(event.get("tool_name") or "") in {"approval_request", "request_user_approval"}
+            )
+            and status not in {"success", "completed", "done", "failed", "error", "cancelled"}
+        )
 
         if not has_waiting_approval:
             has_waiting_approval = any(
-                (
+                not bool(
+                    e.get("auto_approved")
+                    or (isinstance(e.get("metadata"), dict) and e["metadata"].get("auto_approved"))
+                    or str(e.get("event_type") or "") in {"action.approval.auto_granted", "approval.auto_granted"}
+                )
+                and (
                     str(e.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required"}
                     or str(e.get("event_type") or "").startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
                     or str(e.get("tool_name") or "") in {"approval_request", "request_user_approval"}
@@ -529,27 +543,41 @@ class CodingActivityBox(Vertical):
             row_status = str(row.get("status") or "running").lower()
             row_type = str(row.get("event_type") or row.get("type") or "")
             row_tool = str(row.get("tool_name") or "")
-            row_is_approval = (
-                row_status in {"waiting_approval", "pending_approval", "approval_required"}
-                or row_type.startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
-                or row_tool in {"approval_request", "request_user_approval"}
-            ) and row_status not in {"success", "completed", "done", "failed", "error", "cancelled"}
-
-            if row_is_approval:
-                row_icon = "⚠️"
-            else:
-                row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
             r_title = str(row.get("title") or row_type or "code")
             dur = row.get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
             detail = str(row.get("output_preview") or row.get("summary") or row.get("error") or row.get("message") or "")
             cmd = str(row.get("command") or (row.get("payload") or {}).get("command") or "").strip()
 
+            is_auto_approved = bool(
+                row.get("auto_approved")
+                or (isinstance(row.get("metadata"), dict) and row["metadata"].get("auto_approved"))
+                or row_type in {"action.approval.auto_granted", "approval.auto_granted"}
+                or "auto-approved" in r_title.lower()
+            )
+            row_is_approval = (
+                not is_auto_approved
+                and (
+                    row_status in {"waiting_approval", "pending_approval", "approval_required"}
+                    or row_type.startswith(("action.approval.required", "server.waiting_approval", "api.waiting_approval"))
+                    or row_tool in {"approval_request", "request_user_approval"}
+                )
+                and row_status not in {"success", "completed", "done", "failed", "error", "cancelled"}
+            )
+
+            if row_is_approval:
+                row_icon = "⚠️"
+            else:
+                row_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(row_status, "›")
+
             if row_type.startswith("parallel.group"):
                 lines.append(f"⚡ {r_title}" + (f" — {detail}" if detail else ""))
             elif row_type.startswith("batch."):
                 b_badge = " [50% off]" if "discount" in row or "50%" in str(detail) or "50%" in str(row) else ""
                 lines.append(f"📦 {r_title}{b_badge}" + (f" — {detail}" if detail else ""))
+            elif is_auto_approved:
+                clean_title = r_title.replace(" [WAITING FOR APPROVAL]", "").replace(" — Auto-approved", "").strip()
+                lines.append(f"✓ {clean_title} — Auto-approved{dur_str}")
             elif row_is_approval:
                 lines.append(f"⚠️ {r_title} [WAITING FOR APPROVAL]" + (f" — {detail}" if detail else ""))
             elif cmd:

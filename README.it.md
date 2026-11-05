@@ -12,10 +12,6 @@ Mana-Agent è una piattaforma open source basata su Python per orchestrare agent
 
 Analizza repository, documenti e API; pianifica attività, coordina agenti, segue i progressi, riutilizza il contesto autorizzato e verifica i risultati. Supporta ricerca, programmazione, debug e automazione, oltre all'uso di browser, Git, SSH, email e Telegram.
 
-**Guida in tempo reale:** non è ancora possibile guidare un'esecuzione in corso, neppure con Ctrl+S. Plan Mode rimane separata e i suoi requisiti di approvazione restano validi. Consulta il [progetto della guida](docs/live-steering-design.md).
-
-OpenAI Batch viene usato solo su richiesta esplicita; gli altri batch usano l'esecuzione parallela interna. Le attività che richiedono Batch vengono sospese in modo persistente e riprendono con i risultati; i messaggi successivi conservano il contesto di utente e assistente tra le interfacce. [Batch e ripristino](docs/26-openai-batch-api.md).
-
 ## Avvio rapido
 
 Richiede Python 3.10–3.14. Installazione consigliata:

@@ -187,88 +187,50 @@ class ActionGateway:
             raise PermissionError("action or policy decision expired before execution")
         if action.state is ActionState.AWAITING_APPROVAL:
             transaction_binding = self._transaction_binding(action)
-            inbox_item = None
-            if self.inbox_service is not None:
-                items = self.inbox_service.repository.find_for_action(action.action_id)
-                inbox_item = items[0] if items else None
-                if inbox_item is None:
-                    inbox_item_id = self._ensure_inbox(action)
-                    inbox_item = self.inbox_service.repository.get(inbox_item_id)
-                if inbox_item is not None and inbox_item.status is InboxStatus.APPROVED:
-                    if inbox_item.response_channel == "model_judgment":
-                        raise PermissionError("model judgment cannot substitute for a human approval")
-                    if inbox_item.expires_at <= utc_now():
-                        raise PermissionError("human approval has expired")
-                    if inbox_item.action_digest != action.approval_digest():
-                        self.inbox_service.supersede_for_action(action.action_id)
-                        raise PermissionError("action material changed after the human decision")
-                    self.inbox_service.assert_response_actor_is_currently_authorized(inbox_item)
-                    self._assert_branch_runnable(inbox_item)
-                elif inbox_item is not None and inbox_item.status in {
-                    InboxStatus.DENIED,
-                    InboxStatus.CANCELLED,
-                    InboxStatus.SUPERSEDED,
-                    InboxStatus.EXPIRED,
-                }:
-                    action.transition(
-                        ActionState.EXPIRED if inbox_item.status is InboxStatus.EXPIRED else ActionState.CANCELLED
-                    )
-                    action.error = f"human decision: {inbox_item.status.value}"
-                    self.store.save_action(action)
-                    self.store.release_idempotency(action)
-                    raise PermissionError(action.error)
-                elif approval_id:
-                    raise PermissionError(
-                        "an approval grant cannot bypass the unresolved durable inbox item"
-                    )
-            if not approval_id:
+            from mana_agent.approval.policy import get_approval_policy
+
+            if get_approval_policy().is_full_access():
+                scope = (
+                    action.policy_decision.required_approval_scope
+                    if action.policy_decision is not None
+                    else ApprovalScope.ACTION_ONCE
+                )
                 pending_grant = self.approvals.find_valid(
                     action, transaction_binding_digest=transaction_binding
+                ) or self.approvals.issue(
+                    action,
+                    approved_by="full_access",
+                    ttl_seconds=300,
+                    scope=scope or ApprovalScope.ACTION_ONCE,
+                    transaction_binding_digest=transaction_binding,
                 )
-                # A single-action grant by itself is not proof that the durable
-                # human request was resolved. Older model-judgment paths could
-                # mint such grants while the inbox item was still pending.
-                if (pending_grant is not None and self.inbox_service is not None
-                    and inbox_item is not None and inbox_item.status is not InboxStatus.APPROVED
-                ):
-                    if pending_grant.scope is not ApprovalScope.TASK:
-                        raise PermissionError("an approval grant cannot bypass the unresolved durable inbox item")
-                    # A task grant may cover a later compatible action, but its
-                    # originating action must have an authenticated human decision.
-                    source = self.store.get_action(pending_grant.action_id)
-                    source_items = self.inbox_service.repository.find_for_action(pending_grant.action_id)
-                    source_item = next((item for item in source_items if item.status is InboxStatus.APPROVED), None)
-                    if (source is None or source_item is None
-                        or source_item.response_channel == "model_judgment"
-                        or source_item.expires_at <= utc_now()
-                        or source.expires_at <= utc_now()
-                        or source.policy_decision is None
-                        or source.policy_decision.expires_at <= utc_now()
-                        or source.policy_decision.policy_fingerprint != current_policy_fingerprint
-                        or source_item.action_digest != source.approval_digest()):
-                        raise PermissionError("task grant lacks a current human approval for its originating action")
-                    self.inbox_service.assert_response_actor_is_currently_authorized(source_item)
-                    self._assert_branch_runnable(source_item)
-                if pending_grant is None and self.inbox_service is not None:
-                    if inbox_item is not None and inbox_item.action_digest != action.approval_digest():
-                        self.inbox_service.supersede_for_action(action.action_id)
-                        raise PermissionError("action material changed after the human decision")
+                approval_id = pending_grant.approval_id
+                self.approvals.consume(
+                    approval_id,
+                    action,
+                    transaction_binding_digest=transaction_binding,
+                )
+                action.transition(ActionState.APPROVED)
+                self.store.save_action(action)
+                self._emit("action.policy.revalidated", action, approval_id=approval_id)
+            else:
+                inbox_item = None
+                if self.inbox_service is not None:
+                    items = self.inbox_service.repository.find_for_action(action.action_id)
+                    inbox_item = items[0] if items else None
+                    if inbox_item is None:
+                        inbox_item_id = self._ensure_inbox(action)
+                        inbox_item = self.inbox_service.repository.get(inbox_item_id)
                     if inbox_item is not None and inbox_item.status is InboxStatus.APPROVED:
-                        scope = (
-                            action.policy_decision.required_approval_scope
-                            if action.policy_decision is not None
-                            else ApprovalScope.ACTION_ONCE
-                        )
-                        pending_grant = self.approvals.issue(
-                            action,
-                            approved_by=inbox_item.response_actor_id,
-                            ttl_seconds=max(
-                                1,
-                                int((inbox_item.expires_at - utc_now()).total_seconds()),
-                            ),
-                            scope=scope or ApprovalScope.ACTION_ONCE,
-                            transaction_binding_digest=transaction_binding,
-                        )
+                        if inbox_item.response_channel == "model_judgment":
+                            raise PermissionError("model judgment cannot substitute for a human approval")
+                        if inbox_item.expires_at <= utc_now():
+                            raise PermissionError("human approval has expired")
+                        if inbox_item.action_digest != action.approval_digest():
+                            self.inbox_service.supersede_for_action(action.action_id)
+                            raise PermissionError("action material changed after the human decision")
+                        self.inbox_service.assert_response_actor_is_currently_authorized(inbox_item)
+                        self._assert_branch_runnable(inbox_item)
                     elif inbox_item is not None and inbox_item.status in {
                         InboxStatus.DENIED,
                         InboxStatus.CANCELLED,
@@ -282,27 +244,92 @@ class ActionGateway:
                         self.store.save_action(action)
                         self.store.release_idempotency(action)
                         raise PermissionError(action.error)
-                if pending_grant is None:
-                    inbox_item_id = self._ensure_inbox(action)
-                    if inbox_item_id and action.inbox_item_id != inbox_item_id:
-                        action.inbox_item_id = inbox_item_id
-                        self.store.save_action(action)
-                    self._emit("action.approval.required", action, inbox_item_id=inbox_item_id)
-                    raise ApprovalRequired(action, inbox_item_id=inbox_item_id)
-                authorized_by_task_grant = (
-                    pending_grant.scope is ApprovalScope.TASK
-                    and inbox_item is not None
-                    and inbox_item.status is not InboxStatus.APPROVED
+                    elif approval_id:
+                        raise PermissionError(
+                            "an approval grant cannot bypass the unresolved durable inbox item"
+                        )
+                if not approval_id:
+                    pending_grant = self.approvals.find_valid(
+                        action, transaction_binding_digest=transaction_binding
+                    )
+                    # A single-action grant by itself is not proof that the durable
+                    # human request was resolved. Older model-judgment paths could
+                    # mint such grants while the inbox item was still pending.
+                    if (pending_grant is not None and self.inbox_service is not None
+                        and inbox_item is not None and inbox_item.status is not InboxStatus.APPROVED
+                    ):
+                        if pending_grant.scope is not ApprovalScope.TASK:
+                            raise PermissionError("an approval grant cannot bypass the unresolved durable inbox item")
+                        # A task grant may cover a later compatible action, but its
+                        # originating action must have an authenticated human decision.
+                        source = self.store.get_action(pending_grant.action_id)
+                        source_items = self.inbox_service.repository.find_for_action(pending_grant.action_id)
+                        source_item = next((item for item in source_items if item.status is InboxStatus.APPROVED), None)
+                        if (source is None or source_item is None
+                            or source_item.response_channel == "model_judgment"
+                            or source_item.expires_at <= utc_now()
+                            or source.expires_at <= utc_now()
+                            or source.policy_decision is None
+                            or source.policy_decision.expires_at <= utc_now()
+                            or source.policy_decision.policy_fingerprint != current_policy_fingerprint
+                            or source_item.action_digest != source.approval_digest()):
+                            raise PermissionError("task grant lacks a current human approval for its originating action")
+                        self.inbox_service.assert_response_actor_is_currently_authorized(source_item)
+                        self._assert_branch_runnable(source_item)
+                    if pending_grant is None and self.inbox_service is not None:
+                        if inbox_item is not None and inbox_item.action_digest != action.approval_digest():
+                            self.inbox_service.supersede_for_action(action.action_id)
+                            raise PermissionError("action material changed after the human decision")
+                        if inbox_item is not None and inbox_item.status is InboxStatus.APPROVED:
+                            scope = (
+                                action.policy_decision.required_approval_scope
+                                if action.policy_decision is not None
+                                else ApprovalScope.ACTION_ONCE
+                            )
+                            pending_grant = self.approvals.issue(
+                                action,
+                                approved_by=inbox_item.response_actor_id,
+                                ttl_seconds=max(
+                                    1,
+                                    int((inbox_item.expires_at - utc_now()).total_seconds()),
+                                ),
+                                scope=scope or ApprovalScope.ACTION_ONCE,
+                                transaction_binding_digest=transaction_binding,
+                            )
+                        elif inbox_item is not None and inbox_item.status in {
+                            InboxStatus.DENIED,
+                            InboxStatus.CANCELLED,
+                            InboxStatus.SUPERSEDED,
+                            InboxStatus.EXPIRED,
+                        }:
+                            action.transition(
+                                ActionState.EXPIRED if inbox_item.status is InboxStatus.EXPIRED else ActionState.CANCELLED
+                            )
+                            action.error = f"human decision: {inbox_item.status.value}"
+                            self.store.save_action(action)
+                            self.store.release_idempotency(action)
+                            raise PermissionError(action.error)
+                    if pending_grant is None:
+                        inbox_item_id = self._ensure_inbox(action)
+                        if inbox_item_id and action.inbox_item_id != inbox_item_id:
+                            action.inbox_item_id = inbox_item_id
+                            self.store.save_action(action)
+                        self._emit("action.approval.required", action, inbox_item_id=inbox_item_id)
+                        raise ApprovalRequired(action, inbox_item_id=inbox_item_id)
+                    authorized_by_task_grant = (
+                        pending_grant.scope is ApprovalScope.TASK
+                        and inbox_item is not None
+                        and inbox_item.status is not InboxStatus.APPROVED
+                    )
+                    approval_id = pending_grant.approval_id
+                self.approvals.consume(
+                    approval_id,
+                    action,
+                    transaction_binding_digest=transaction_binding,
                 )
-                approval_id = pending_grant.approval_id
-            self.approvals.consume(
-                approval_id,
-                action,
-                transaction_binding_digest=transaction_binding,
-            )
-            action.transition(ActionState.APPROVED)
-            self.store.save_action(action)
-            self._emit("action.policy.revalidated", action, approval_id=approval_id)
+                action.transition(ActionState.APPROVED)
+                self.store.save_action(action)
+                self._emit("action.policy.revalidated", action, approval_id=approval_id)
         if action.state is not ActionState.APPROVED:
             raise PermissionError(f"action is not executable in state {action.state.value}")
         claim_id: str | None = None

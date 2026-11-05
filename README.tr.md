@@ -12,10 +12,6 @@ Mana-Agent, yapay zekâ ajanlarını koordine etmek için Python tabanlı açık
 
 Depoları, belgeleri ve API'leri analiz eder; görevleri planlar, ajanları koordine eder, ilerlemeyi izler, izinli bağlamı yeniden kullanır ve sonuçları doğrular. Araştırma, yazılım geliştirme, hata ayıklama ve otomasyonun yanı sıra tarayıcı, Git, SSH, e-posta ve Telegram kullanımına yardımcı olur.
 
-**Canlı yönlendirme:** Devam eden bir yürütmeyi yönlendirme, Ctrl+S dahil, henüz kullanılamıyor. Plan Mode ayrı kalır ve onay gereksinimleri geçerliliğini korur. [Yönlendirme tasarımına](docs/live-steering-design.md) bakın.
-
-OpenAI Batch yalnızca açıkça talep edildiğinde kullanılır; diğer toplu işlemler dahili paralel yürütmeyi kullanır. Batch gerektiren görevler kalıcı olarak bekletilir ve sonuçlarla devam eder; takip mesajları kullanıcı ve asistan bağlamını arayüzler arasında korur. [Toplu yürütme ve kurtarma](docs/26-openai-batch-api.md).
-
 ## Hızlı başlangıç
 
 Python 3.10–3.14 gereklidir. Önerilen kurulum:
