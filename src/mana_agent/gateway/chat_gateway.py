@@ -5310,6 +5310,24 @@ class AgentChatGateway:
             "status": "pending",
             "submitted_to_task": True,
         })
+        if callable(self._event_sink):
+            try:
+                self._event_sink(
+                    "steering.received",
+                    "Live steering received",
+                    status="pending",
+                    metadata={
+                        "request_id": req_id,
+                        "session_id": effective_session_id,
+                        "execution_id": execution.task_id,
+                        "text": text,
+                        "kind": kind_enum.value,
+                        "scope": scope_enum.value,
+                        "sequence": sequence,
+                    },
+                )
+            except Exception:
+                pass
         return {
             "request_id": req_id,
             "sequence": sequence,

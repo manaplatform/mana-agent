@@ -12,6 +12,9 @@ and pressing **Enter** without requiring separate shortcut combinations or modal
    the instruction as live steering via `gateway.submit_steering`. The former `Ctrl+S`
    binding in chat has been removed, eliminating conflicts with the configuration screen save.
    The `/steer <instruction>` command remains supported as an alias.
+   When a steered message is queued, the persistent Activity Box (`ExecutionPanel`) is dynamically
+   positioned directly after the queued steered message (on the last message) rather than remaining
+   stuck above it, and records the `steering.queued` event directly into the live activity stream.
 
 2. **Unified Turn and Routing Admission**:
    `submit_steering` in `AgentChatGateway` no longer fails with `"No active execution found to steer"`

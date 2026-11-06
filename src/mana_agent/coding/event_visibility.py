@@ -139,6 +139,8 @@ def semantic_kind_for_event_type(event_type: str, *, tool_name: str = "") -> Eve
         return EventSemanticKind.REASONING
     if et in {"warning", "provider.warning"}:
         return EventSemanticKind.WARNING
+    if et.startswith("steering."):
+        return EventSemanticKind.LIFECYCLE
     if et.startswith("usage.") or et == "usage.update":
         return EventSemanticKind.USAGE
     if et.startswith("context.") or et.startswith("budget.") or et.startswith("cost."):
