@@ -7,6 +7,11 @@ All notable repository changes should be recorded here.
 - Release metadata: update the package version from 0.9.0 to 0.9.1 in `pyproject.toml` and generated distribution metadata.
 - User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.9.1'; print(__version__)"`.
 
+## 0.9.2 — 2026-11-06
+
+- Release metadata: update the single-source package version to 0.9.2 in `pyproject.toml`.
+- User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.9.2'; print(__version__)"`.
+
 ## Unreleased
 
 - 2026-11-05 — Feature & Fix: Live text steering directly on Enter, unified session routing admission, and turn engine injection:
