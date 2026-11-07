@@ -14,6 +14,11 @@ All notable repository changes should be recorded here.
 
 ## Unreleased
 
+- 2026-11-07 — CI & Release: migrate macOS arm64 binary builder from retired `macos-14` runner:
+  - Release Runner Migration: updated `.github/workflows/release.yml` to replace the retired `macos-14` runner with `macos-15` for the `mana-agent-macos-arm64` binary build job, resolving the GitHub Actions runner configuration failure `The configuration 'macos-14-arm64-us-default' is not supported`.
+  - Regression Coverage: added `test_release_binary_matrix_uses_supported_macos_runners` in `tests/test_publish_pypi_workflow.py` asserting that `.github/workflows/release.yml` uses supported runner labels (`macos-15`, `macos-15-intel`) and excludes retired runners (`macos-13`, `macos-14`).
+  - User-owned verification (not run by the agent): `pytest tests/test_publish_pypi_workflow.py -k "test_release_binary_matrix_uses_supported_macos_runners" -v`.
+
 - 2026-11-06 — Fix & Feature: Activity box positioning on last message after queued steered messages:
   - TUI Activity Box Positioning: updated `ChatLog` (`src/mana_agent/tui/widgets/chat_log.py`) so that when a live steering instruction is submitted and queued during an active turn, the active `ExecutionPanel` (hosting `MainActivityBox` and `CodingActivityBox`) is dynamically positioned directly after the queued steered message (on the last message) rather than remaining pinned to the initial user prompt above the steering input.
   - Ongoing Activity Alignment: added `_ensure_panel_after_steered` in `ChatLog` across tool calls, tool results, and coding activity handlers to ensure the activity box consistently remains at the end of the chat stream following the latest queued steering instructions.

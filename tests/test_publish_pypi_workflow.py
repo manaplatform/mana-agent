@@ -64,6 +64,15 @@ def test_stable_github_release_keeps_its_trigger_tag_and_uses_the_application_ve
     assert '--display-tag "${RELEASE_TITLE}"' in workflow
 
 
+def test_release_binary_matrix_uses_supported_macos_runners() -> None:
+    workflow = _RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "os: macos-13" not in workflow
+    assert "os: macos-14" not in workflow
+    assert "os: macos-15-intel" in workflow
+    assert "os: macos-15\n" in workflow or "os: macos-15 " in workflow
+
+
 def test_pypi_release_validation_allows_the_explicit_release_tag_mismatch() -> None:
     workflow = _workflow_text()
 

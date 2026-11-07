@@ -128,7 +128,7 @@ jobs:
           - os: macos-15-intel
             asset_name: mana-agent-macos-x64
             pyinstaller_name: mana-agent
-          - os: macos-14
+          - os: macos-15
             asset_name: mana-agent-macos-arm64
             pyinstaller_name: mana-agent
           - os: windows-latest
