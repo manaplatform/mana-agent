@@ -105,6 +105,7 @@ class ChatLog(VerticalScroll):
         self._execution_panels: dict[str, ExecutionPanel] = {}
         self._user_widgets_by_turn: dict[str, SelectableText] = {}
         self._latest_user_widget: SelectableText | None = None
+        self._latest_steered_widget: SelectableText | None = None
         self._current_turn_id: str | None = None
         # Deduplicate live + replay so the same event_id is only painted once
         self._rendered_ids: set[str] = set()
@@ -255,16 +256,34 @@ class ChatLog(VerticalScroll):
     def get_execution_panel(self, turn_id: str) -> ExecutionPanel | None:
         return self._execution_panels.get(turn_id)
 
+    def _ensure_panel_after_steered(self, panel: ExecutionPanel | None) -> None:
+        """Keep the active execution panel (activity box) positioned after the latest steered message."""
+        if panel is None or not getattr(panel, "is_mounted", False) or panel not in self.children:
+            return
+        steered = getattr(self, "_latest_steered_widget", None)
+        if steered is not None and getattr(steered, "is_mounted", False) and steered in self.children:
+            try:
+                children = list(self.children)
+                if children.index(panel) < children.index(steered):
+                    self.move_child(panel, after=steered)
+            except Exception:
+                pass
+
     def _get_or_create_execution_panel(self, turn_id: str) -> ExecutionPanel:
         panel = self._execution_panels.get(turn_id)
         if panel is None:
             panel = ExecutionPanel(turn_id=turn_id)
             self._execution_panels[turn_id] = panel
-            user_widget = self._user_widgets_by_turn.get(turn_id) or self._latest_user_widget
-            if user_widget is not None and user_widget in self.children:
-                self.mount(panel, after=user_widget)
+            steered = getattr(self, "_latest_steered_widget", None)
+            target = steered if (steered is not None and getattr(steered, "is_mounted", False) and steered in self.children) else None
+            if target is None:
+                target = self._user_widgets_by_turn.get(turn_id) or self._latest_user_widget
+            if target is not None and target in self.children:
+                self.mount(panel, after=target)
             else:
                 self.mount(panel)
+        else:
+            self._ensure_panel_after_steered(panel)
         return panel
 
     def _add_user_message(self, event: UserMessageEvent) -> SelectableText:
@@ -288,6 +307,7 @@ class ChatLog(VerticalScroll):
         self.mount(widget)
         turn_id = event.turn_id or self._current_turn_id
         if turn_id:
+            self._current_turn_id = turn_id
             self._user_widgets_by_turn[turn_id] = widget
         self._latest_user_widget = widget
         return widget
@@ -295,47 +315,72 @@ class ChatLog(VerticalScroll):
     def _add_or_update_assistant(self, event: AssistantMessageEvent) -> SelectableText:
         """Create or replace the assistant message widget."""
         content = event.content or ""
-        widget = SelectableText(content or "…", language="markdown", classes="assistant-message")
-
-        # store for streaming updates
-        self._assistant_widgets[event.event_id] = widget
-
-        # If we already have a streaming assistant for this turn, replace its content
-        # Remove previous placeholder if present for same turn (simple heuristic)
-        if event.turn_id:
-            panel = self._execution_panels.get(event.turn_id)
-            if panel is not None:
-                is_failed = bool(
-                    getattr(event, "error", None)
-                    or getattr(event, "status", "") in {"failed", "error", "cancelled"}
-                    or (getattr(event, "metadata", None) and getattr(event, "metadata", {}).get("status") in {"failed", "error", "cancelled"})
-                    or "Gateway execution failed" in content
-                    or "Execution failed" in content
-                    or getattr(panel.trace, "is_failed", False)
-                )
-                if not is_failed:
-                    panel.update_event({
-                        "event_type": "turn.completed",
-                        "title": "Completed",
-                        "status": "success",
-                        "detail": "Response generated",
-                    })
-                else:
-                    panel.update_event({
-                        "event_type": "turn.failed",
-                        "title": "Failed",
-                        "status": "failed",
-                        "detail": getattr(event, "error", None) or "Execution failed",
-                    })
-            for existing_id, w in list(self._assistant_widgets.items()):
-                if getattr(w, "_turn_id", None) == event.turn_id and existing_id != event.event_id:
-                    try:
-                        w.remove()
-                    except Exception:
-                        pass
-
+        is_steering = bool(getattr(event, "is_steering", False) or "Live Steering submitted" in content)
+        classes = "assistant-message live-steering-message" if is_steering else "assistant-message"
+        widget = SelectableText(content or "…", language="markdown", classes=classes)
+        setattr(widget, "is_steering", is_steering)
         setattr(widget, "_turn_id", event.turn_id)
+
+        if not is_steering:
+            # store for streaming updates
+            self._assistant_widgets[event.event_id] = widget
+
+            # If we already have a streaming assistant for this turn, replace its content
+            # Remove previous placeholder if present for same turn (simple heuristic)
+            if event.turn_id:
+                panel = self._execution_panels.get(event.turn_id)
+                if panel is not None:
+                    is_failed = bool(
+                        getattr(event, "error", None)
+                        or getattr(event, "status", "") in {"failed", "error", "cancelled"}
+                        or (getattr(event, "metadata", None) and getattr(event, "metadata", {}).get("status") in {"failed", "error", "cancelled"})
+                        or "Gateway execution failed" in content
+                        or "Execution failed" in content
+                        or getattr(panel.trace, "is_failed", False)
+                    )
+                    if not is_failed:
+                        panel.update_event({
+                            "event_type": "turn.completed",
+                            "title": "Completed",
+                            "status": "success",
+                            "detail": "Response generated",
+                        })
+                    else:
+                        panel.update_event({
+                            "event_type": "turn.failed",
+                            "title": "Failed",
+                            "status": "failed",
+                            "detail": getattr(event, "error", None) or "Execution failed",
+                        })
+                for existing_id, w in list(self._assistant_widgets.items()):
+                    if getattr(w, "_turn_id", None) == event.turn_id and existing_id != event.event_id:
+                        try:
+                            w.remove()
+                        except Exception:
+                            pass
+
         self.mount(widget)
+
+        if is_steering:
+            self._latest_steered_widget = widget
+            target_panel = None
+            if event.turn_id and event.turn_id in self._execution_panels:
+                target_panel = self._execution_panels[event.turn_id]
+            elif self._execution_panels:
+                for p in reversed(list(self._execution_panels.values())):
+                    if not getattr(getattr(p, "trace", None), "is_completed", False):
+                        target_panel = p
+                        break
+                if target_panel is None:
+                    target_panel = list(self._execution_panels.values())[-1]
+
+            if target_panel is not None and target_panel in self.children and widget in self.children:
+                try:
+                    self.move_child(target_panel, after=widget)
+                except Exception:
+                    pass
+            self._scroll_to_latest()
+
         return widget
 
     def _add_tool_call(self, event: ToolCallEvent) -> ToolCard | ExecutionPanel | None:
@@ -350,6 +395,7 @@ class ChatLog(VerticalScroll):
         panel = None
         if turn_id:
             panel = self._get_or_create_execution_panel(turn_id)
+            self._ensure_panel_after_steered(panel)
             is_search = "search" in tool_name.lower() or tool_name in {
                 "find_by_name", "grep_search", "document_query"
             }
@@ -392,6 +438,7 @@ class ChatLog(VerticalScroll):
         )
         panel = self._get_or_create_execution_panel(turn_id) if turn_id else None
         if panel is not None:
+            self._ensure_panel_after_steered(panel)
             is_search = "search" in tool_name.lower() or tool_name in {
                 "find_by_name", "grep_search", "document_query"
             }
@@ -450,6 +497,7 @@ class ChatLog(VerticalScroll):
 
     def _add_coding_activity(self, event: CodingActivityEvent) -> ExecutionPanel:
         panel = self._get_or_create_execution_panel(event.turn_id)
+        self._ensure_panel_after_steered(panel)
         panel.update_event(event.activity)
         return panel
 
@@ -482,6 +530,8 @@ class ChatLog(VerticalScroll):
         self._execution_panels.clear()
         self._user_widgets_by_turn.clear()
         self._latest_user_widget = None
+        self._latest_steered_widget = None
+        self._current_turn_id = None
         self._rendered_ids.clear()
         try:
             self.refresh(layout=True)

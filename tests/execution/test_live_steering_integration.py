@@ -807,3 +807,96 @@ def test_steering_injected_into_process_chat_turn(supervisor: ExecutionSuperviso
     assert applied[0]["status"] == "applied"
 
 
+def test_tui_steered_message_shows_activity_box_on_last_message() -> None:
+    asyncio.run(_tui_steered_message_shows_activity_box_on_last_message())
+
+
+async def _tui_steered_message_shows_activity_box_on_last_message() -> None:
+    """When a steered message is queued, the activity box must show on the last message (after steered message)."""
+    mock_gateway = MagicMock()
+    mock_gateway.create_session.return_value = "session_steer_activity"
+    mock_gateway.submit_steering.return_value = {
+        "status": "pending",
+        "sequence": 1,
+        "duplicate": False,
+    }
+
+    history = ChatHistory()
+    user_event = UserMessageEvent(content="Build snake game", turn_id="turn_snake_1")
+    history.add(user_event)
+
+    app = ManaChatApp(
+        history=history,
+        gateway=mock_gateway,
+        repo_root=Path("."),
+    )
+
+    async with app.run_test() as pilot:
+        app._turn_in_progress = True
+        app._current_frontend_turn_id = "turn_snake_1"
+
+        # Emit initial coding activity event so the ExecutionPanel is mounted
+        history.add(CodingActivityEvent(
+            activity={
+                "event_type": "coding.progress",
+                "title": "Inspecting codebase",
+                "status": "running",
+            },
+            turn_id="turn_snake_1",
+        ))
+        await pilot.pause()
+
+        # Before steering: chat_log children has user message followed by ExecutionPanel (activity box)
+        children_before = list(app.chat_log.children)
+        assert len(children_before) == 2
+        from mana_agent.tui.widgets.execution_panel import ExecutionPanel
+        assert isinstance(children_before[1], ExecutionPanel)
+        panel = children_before[1]
+
+        # User submits live steering
+        msg_input = app.query_one("#chat-input")
+        msg_input.text = "Use curses library"
+        from mana_agent.tui.widgets.message_input import MessageInput
+        await app.on_message_input_submitted(MessageInput.Submitted(msg_input))
+        await pilot.pause()
+
+        # After steering:
+        # 1. The steered message was mounted
+        # 2. The ExecutionPanel (activity box) moved after the steered message (on the last message)
+        children_after = list(app.chat_log.children)
+        assert len(children_after) == 3
+        # children_after[0] is user message
+        # children_after[1] is steered message
+        steered_widget = children_after[1]
+        assert "Live Steering submitted" in getattr(steered_widget, "text", "")
+        assert "Use curses library" in getattr(steered_widget, "text", "")
+        # children_after[2] is the ExecutionPanel (activity box)
+        assert children_after[2] is panel
+        assert children_after.index(panel) > children_after.index(steered_widget)
+
+        # 3. Inside the activity box (main_box), the queued steering event is recorded
+        steering_activity = [
+            ev for ev in panel.main_box.events
+            if ev.get("event_type") == "steering.queued"
+        ]
+        assert len(steering_activity) == 1
+        assert "Use curses library" in steering_activity[0].get("detail", "")
+        assert steering_activity[0].get("status") == "queued"
+
+        # 4. Subsequent coding operations maintain the activity box after the steered message
+        history.add(CodingActivityEvent(
+            activity={
+                "event_type": "coding.progress",
+                "title": "Editing snake.py",
+                "status": "running",
+            },
+            turn_id="turn_snake_1",
+        ))
+        await pilot.pause()
+
+        children_subsequent = list(app.chat_log.children)
+        assert children_subsequent[-1] is panel
+        assert children_subsequent.index(panel) > children_subsequent.index(steered_widget)
+
+
+

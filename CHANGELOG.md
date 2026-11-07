@@ -7,7 +7,20 @@ All notable repository changes should be recorded here.
 - Release metadata: update the package version from 0.9.0 to 0.9.1 in `pyproject.toml` and generated distribution metadata.
 - User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.9.1'; print(__version__)"`.
 
+## 0.9.2 — 2026-11-06
+
+- Release metadata: update the single-source package version to 0.9.2 in `pyproject.toml`.
+- User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.9.2'; print(__version__)"`.
+
 ## Unreleased
+
+- 2026-11-06 — Fix & Feature: Activity box positioning on last message after queued steered messages:
+  - TUI Activity Box Positioning: updated `ChatLog` (`src/mana_agent/tui/widgets/chat_log.py`) so that when a live steering instruction is submitted and queued during an active turn, the active `ExecutionPanel` (hosting `MainActivityBox` and `CodingActivityBox`) is dynamically positioned directly after the queued steered message (on the last message) rather than remaining pinned to the initial user prompt above the steering input.
+  - Ongoing Activity Alignment: added `_ensure_panel_after_steered` in `ChatLog` across tool calls, tool results, and coding activity handlers to ensure the activity box consistently remains at the end of the chat stream following the latest queued steering instructions.
+  - Steered Activity Stream Recording: updated `ManaChatApp._submit_live_steering` (`src/mana_agent/tui/app.py`) to post a `steering.queued` activity event into `_safe_post_activity` on steering admission, immediately recording the queued instruction, sequence, and status in `MainActivityBox`.
+  - Event Visibility & Gateway Emission: updated `classify_coding_event` in `src/mana_agent/coding/event_visibility.py` to classify `steering.*` events as `EventSemanticKind.LIFECYCLE` with `EventVisibility.PROGRESS`, and updated `AgentChatGateway.submit_steering` in `src/mana_agent/gateway/chat_gateway.py` to emit `steering.received` session events for running tasks.
+  - Styling: added `.live-steering-message` CSS styling in `src/mana_agent/tui/app.tcss`.
+  - User-owned verification (not run by the agent): `pytest tests/execution/test_live_steering_integration.py -k "test_tui_steered_message_shows_activity_box_on_last_message or test_tui_enter_submits_steering_during_turn" -v`.
 
 - 2026-11-05 — Feature & Fix: Live text steering directly on Enter, unified session routing admission, and turn engine injection:
   - TUI Direct Enter Steering: removed `Ctrl+S` shortcut collision with settings screen save. During an active execution (`_turn_in_progress is True`), entering text in the chat input and pressing Enter automatically forwards the message as live steering without modal popups or `"Wait for turn to finish"` warnings. Retained `/steer <instruction>` and programmatic `action_steer_execution()` as aliases.

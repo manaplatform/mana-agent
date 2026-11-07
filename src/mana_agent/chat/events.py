@@ -73,6 +73,10 @@ class AssistantMessageEvent:
     turn_id: str = ""
     # When streaming, this may be appended to over time via StreamTokenEvent
     is_streaming: bool = False
+    is_steering: bool = False
+    steering_status: str = ""
+    steering_sequence: int = 0
+    steering_instruction: str = ""
 
     def __post_init__(self) -> None:
         if not self.turn_id:

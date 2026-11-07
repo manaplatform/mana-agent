@@ -125,6 +125,14 @@ ComputerPermissionScreen {
     color: #e2e8f0;
 }
 
+.live-steering-message {
+    margin: 1 0 1 2;
+    padding: 1;
+    background: #181f2a;
+    border-left: thick #f59e0b;
+    color: #fef08a;
+}
+
 .execution-steps {
     display: none;
 }

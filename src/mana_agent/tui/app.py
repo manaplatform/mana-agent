@@ -1776,9 +1776,37 @@ class ManaChatApp(App):
             )
             status = str(res.get("status", "received")).upper()
             seq = res.get("sequence", 0)
-            self.history.add(AssistantMessageEvent(
+            target_turn_id = (
+                self._current_frontend_turn_id
+                or getattr(self.chat_log, "_current_turn_id", None)
+                or (list(self.chat_log._execution_panels.keys())[-1] if self.chat_log and self.chat_log._execution_panels else "")
+                or "turn-main"
+            )
+            steer_event = AssistantMessageEvent(
                 content=f"⚡ Live Steering submitted (#{seq} {status}): {instruction}",
-            ))
+                turn_id=target_turn_id,
+                is_steering=True,
+                steering_status=status,
+                steering_sequence=seq,
+                steering_instruction=instruction,
+            )
+            self.history.add(steer_event)
+
+            self._safe_post_activity(
+                {
+                    "event_type": "steering.queued",
+                    "title": "Live steering queued",
+                    "status": "queued",
+                    "detail": f"#{seq} {status}: {instruction}",
+                    "summary": f"Steering #{seq} [{status}]: {instruction}",
+                    "metadata": {
+                        "instruction": instruction,
+                        "sequence": seq,
+                        "status": status,
+                    },
+                },
+                target_turn_id,
+            )
             self.notify(f"Steering submitted [{status}]: {instruction[:35]}", severity="information")
         except Exception as exc:
             logger.warning("Failed to submit live steering: %s", exc)
@@ -1929,6 +1957,7 @@ class ManaChatApp(App):
 
             if plan_command:
                 self._turn_in_progress = True
+                self._current_frontend_turn_id = activity_turn.turn_id
                 self.update_status("Preparing plan…")
                 await asyncio.sleep(0)
 
@@ -1961,9 +1990,11 @@ class ManaChatApp(App):
                         activity_turn.turn_id,
                     )
                 finally:
+                    self._current_frontend_turn_id = None
                     self._turn_in_progress = False
             elif approval_command:
                 self._turn_in_progress = True
+                self._current_frontend_turn_id = activity_turn.turn_id
                 self.update_status("Approving plan…")
                 await asyncio.sleep(0)
                 try:
@@ -1981,6 +2012,8 @@ class ManaChatApp(App):
                             turn_id=activity_turn.turn_id,
                         )
                     )
+                finally:
+                    self._current_frontend_turn_id = None
                     self._turn_in_progress = False
             else:
                 result = self.gateway.dispatch_command(
