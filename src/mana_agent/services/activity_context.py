@@ -165,11 +165,11 @@ def bind_activity_attempt(supervisor, task_id: str, attempt_id: str, lease_token
     if previous is None:
         return
     task = supervisor.get_task(task_id)
-    attempt = supervisor.store.get_attempt(attempt_id)
-    if attempt is None:
-        raise ValueError("activity attempt is unavailable")
+    attempt = supervisor.store.get_attempt(attempt_id) if attempt_id else None
+    generation = attempt.generation if attempt is not None else getattr(task, "attempt_generation", 0)
     _CONTEXT.set(replace(previous, task_id=task_id, root_task_id=task.root_task_id,
                          conversation_id=previous.conversation_id or task.session_id,
                          repository_id=previous.repository_id or task.repository_id,
-                         attempt_id=attempt_id, attempt_generation=attempt.generation,
+                         attempt_id=attempt_id or getattr(task, "attempt_id", "") or "",
+                         attempt_generation=generation,
                          supervisor=supervisor, lease_token=lease_token))

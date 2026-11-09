@@ -491,5 +491,6 @@ lifecycle and safety. Activity is a read-only projection, not another controller
 Public sequence is conversation order, while producer sequence remains separate.
 Portable file locks serialize journal append/allocation; ordered callbacks drain
 outside those locks. Consumers recover forward pages from a contiguous cursor.
-UI projections retain active operations plus bounded recent history and paginate
-older activity. See [regression contracts and verification](regressions/agent-activity-visibility.md).
+UI projections retain active operations plus bounded recent history inside Main
+Activity and Coding Activity. Internal coding events use Coding Activity; there
+is no separate archive panel. See [regression contracts and verification](regressions/agent-activity-visibility.md).

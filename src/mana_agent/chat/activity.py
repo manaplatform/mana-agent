@@ -219,7 +219,19 @@ def operation_key(event: dict[str, Any]) -> str:
         request_id = raw.get("request_id") or meta.get("request_id") or raw.get("operation_id")
         if request_id:
             return f"steering:{raw.get('conversation_id') or raw.get('session_id') or ''}:{request_id}"
-    op = raw.get("operation_id") or raw.get("tool_call_id") or raw.get("call_id") or meta.get("call_id") or meta.get("tool_call_id") or raw.get("step_id") or raw.get("event_id") or raw.get("id")
+    approval_id = (
+        raw.get("inbox_item_id")
+        or meta.get("inbox_item_id")
+        or raw.get("permission_request_id")
+        or meta.get("permission_request_id")
+        or raw.get("approval_request_id")
+        or meta.get("approval_request_id")
+        or raw.get("action_id")
+        or meta.get("action_id")
+    )
+    if approval_id:
+        return f"approval:{raw.get('conversation_id') or raw.get('session_id') or ''}:{approval_id}"
+    op = raw.get("operation_id") or raw.get("tool_call_id") or raw.get("call_id") or meta.get("call_id") or meta.get("tool_call_id") or raw.get("step_id") or raw.get("event_id") or raw.get("id") or raw.get("request_id") or meta.get("request_id")
     return ":".join(str(raw.get(k) or "") for k in ("task_id", "attempt_id", "agent_id", "subagent_id")) + ":" + str(op or raw["type"])
 
 

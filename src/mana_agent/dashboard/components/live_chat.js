@@ -7,6 +7,14 @@
 
   const terminal = new Set(["success", "completed", "done", "failed", "error", "cancelled", "timed_out", "rejected", "superseded", "unverified", "interrupted", "failure", "timeout", "skipped", "not_run"]);
   const text = (value) => String(value == null ? "" : value);
+  const parseJsonSafe = (val) => {
+    if (!val || typeof val !== "string") return null;
+    const trimmed = val.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try { return JSON.parse(trimmed); } catch { return null; }
+    }
+    return null;
+  };
   const metaOf = (event) => event.metadata || event.details || event.payload || {};
   const eventType = (event) => text(event.type || event.event_type);
   const eventStatus = (event) => text(event.status || "running");
@@ -154,6 +162,30 @@
       return true;
     }
     if (name.startsWith("edit_") || name.startsWith("write_")) {
+      return true;
+    }
+    return false;
+  }
+
+  const MUTATION_TOOLS = new Set([
+    "edit_file",
+    "multi_edit_file",
+    "apply_patch",
+    "apply_patch_batch",
+    "write_file",
+    "create_file",
+    "delete_file",
+    "patch",
+    "document_create",
+    "document_update",
+    "document_delete",
+  ]);
+
+  function isMutationTool(toolName) {
+    const name = text(toolName || "").trim().toLowerCase();
+    if (!name) return false;
+    if (MUTATION_TOOLS.has(name)) return true;
+    if (name.startsWith("edit_") || name.startsWith("write_") || name.startsWith("patch_") || name.startsWith("patch.")) {
       return true;
     }
     return false;
@@ -585,8 +617,12 @@
     if (isCoding) {
       if (meta && meta.backend) trace.codingBox.backend = text(meta.backend);
       if (meta && (meta.model || (event && event.model))) trace.codingBox.model = text(meta.model || event.model);
-      const filePath = text((event && event.path) || (meta && (meta.path || meta.filePath || (meta.args && meta.args.path) || (meta.arguments && meta.arguments.path))));
-      const mutation = ["file.changed", "patch.applied"].includes(type) && ["success", "completed", "done"].includes(rawStatus) && !["plan", "plan_only"].includes(event.execution_mode || meta.execution_mode || meta.phase);
+      const parsedArgs = (meta && typeof meta.args === "string" ? parseJsonSafe(meta.args) : (meta && meta.args)) ||
+                         (meta && typeof meta.arguments === "string" ? parseJsonSafe(meta.arguments) : (meta && meta.arguments)) || {};
+      const filePath = text((event && event.path) || (meta && (meta.path || meta.filePath || meta.file_path)) || (parsedArgs && (parsedArgs.path || parsedArgs.filePath || parsedArgs.file_path)));
+      const toolName = text((meta && (meta.tool_name || meta.name)) || (event && event.tool_name));
+      const isMutationType = ["file.changed", "patch.applied"].includes(type) || (isMutationTool(toolName) && (!type.startsWith("tool.") || type === "tool.finished" || type === "tool.completed" || isTerminalStep));
+      const mutation = isMutationType && ["success", "completed", "done"].includes(rawStatus) && !["plan", "plan_only"].includes(event.execution_mode || meta.execution_mode || meta.phase);
       if (mutation && filePath) trace.codingBox.changedFiles.add(filePath);
       if (mutation && meta && Array.isArray(meta.changed_files)) {
         for (const cf of meta.changed_files) {
@@ -1269,41 +1305,6 @@
       return node;
     };
     let forceScrollAfterApproval = false;
-    const activityArchives = new Map();
-    const appendActivityArchive = (node, trace, key) => {
-      const details = document.createElement("details");
-      const title = document.createElement("summary");
-      title.textContent = "Earlier activity";
-      details.appendChild(title);
-      const archive = document.createElement("pre");
-      archive.className = "logs";
-      const cached = activityArchives.get(key);
-      if (cached) archive.textContent = cached.rows.map((row) => `${row.agent_id || "MainAgent"} · ${row.title || row.type} · ${row.status}${row.summary ? ` — ${row.summary}` : ""}`).join("\n");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = "Load earlier activity";
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try {
-          const previous = activityArchives.get(key);
-          const execution = [...state.activities.values()].find((event) => trace.aliases.has(text(event.execution_id || event.turn_id)));
-          const executionId = execution ? text(execution.execution_id || execution.turn_id) : trace.turnId;
-          const before = previous ? previous.cursor : state.lastSequence + 1;
-          const url = `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/events?root=${encodeURIComponent(config.root)}&execution_id=${encodeURIComponent(executionId)}&limit=200&before_sequence=${before}`;
-          const response = await fetch(url, { headers: config.token ? { Authorization: `Bearer ${config.token}` } : {} });
-          const payload = await response.json();
-          if (!response.ok) throw new Error(payload.detail || "Activity history unavailable");
-          const rows = (payload.events || []).filter(publicActivity);
-          activityArchives.set(key, { rows, cursor: rows.length ? rows[0].sequence : before });
-          archive.textContent = rows.length ? rows.map((row) => `${row.agent_id || "MainAgent"} · ${row.title || row.type} · ${row.status}${row.summary ? ` — ${row.summary}` : ""}`).join("\n") : "No earlier activity.";
-          details.open = true;
-          button.disabled = rows.length === 0;
-        } catch (error) { archive.textContent = text(error.message); button.disabled = false; }
-      });
-      details.appendChild(archive);
-      details.appendChild(button);
-      node.appendChild(details);
-    };
     const activityBoxState = new Map();
     const activityStreamScrollState = new Map();
     const surfacedApprovalIds = new Set();
@@ -1562,7 +1563,7 @@
         expandBtn.type = "button";
         expandBtn.className = "activity-expand-history-btn";
         expandBtn.style.cssText = "font-size:11px;color:#93c5fd;background:none;border:none;cursor:pointer;padding:4px;text-align:left;";
-        expandBtn.textContent = `▲ Show ${allEvents.length - maxEvents} earlier operations...`;
+        expandBtn.textContent = `▲ Show all ${allEvents.length} operations`;
         expandBtn.addEventListener("click", (e) => {
           e.preventDefault();
           activityBoxState.set(showAllKey, true);
@@ -1651,7 +1652,6 @@
         }
         restoreActivityStreamPosition(stream, key);
       }
-      appendActivityArchive(node, trace, key);
       return node;
     };
 
@@ -1755,7 +1755,7 @@
           expandBtn.type = "button";
           expandBtn.className = "activity-expand-history-btn";
           expandBtn.style.cssText = "font-size:11px;color:#93c5fd;background:none;border:none;cursor:pointer;padding:4px;text-align:left;";
-          expandBtn.textContent = `▲ Show ${allEvents.length - maxEvents} earlier operations...`;
+          expandBtn.textContent = `▲ Show all ${allEvents.length} operations`;
           expandBtn.addEventListener("click", (e) => {
             e.preventDefault();
             activityBoxState.set(showAllKey, true);
@@ -1864,14 +1864,13 @@
         node.appendChild(summaryCard);
       }
 
-      appendActivityArchive(node, trace, key);
       return node;
     };
 
     const render = () => {
       renderApprovalDrawer();
-      const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
-      if (selection && !selection.isCollapsed && timeline.contains(selection.anchorNode)) return;
+      const selection = typeof window !== "undefined" && typeof window.getSelection === "function" ? window.getSelection() : null;
+      if (selection && !selection.isCollapsed && typeof timeline.contains === "function" && timeline.contains(selection.anchorNode)) return;
       const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
       for (const stream of timeline.querySelectorAll(".activity-stream[data-activity-stream-key]")) {
         rememberActivityStreamPosition(stream, stream.dataset.activityStreamKey);
@@ -1999,7 +1998,29 @@
     const dispatchEvent = (event) => {
       reduce(state, { type: "event", event });
       if (state.needsReplay && socket) { state.needsReplay = false; socket.close(1013, "Activity recovery required"); }
-      if (activityRenderTimer == null) activityRenderTimer = setTimeout(() => { activityRenderTimer = null; render(); }, 100);
+      const type = eventType(event);
+      if (
+        type.includes("approval") ||
+        type.startsWith("computer.") ||
+        type.startsWith("server.") ||
+        type.startsWith("api.") ||
+        type.startsWith("inbox.") ||
+        type === "turn.finished" ||
+        type === "turn.started" ||
+        type === "message.accepted" ||
+        terminal.has(eventStatus(event))
+      ) {
+        if (activityRenderTimer != null) {
+          clearTimeout(activityRenderTimer);
+          activityRenderTimer = null;
+        }
+        render();
+      } else if (activityRenderTimer == null) {
+        activityRenderTimer = setTimeout(() => {
+          activityRenderTimer = null;
+          render();
+        }, 100);
+      }
     };
     const socketUrl = () => `${config.wsBase}/api/v1/ws/conversations/${encodeURIComponent(config.sessionId)}?root=${encodeURIComponent(config.root)}&replay_limit=1000&after_sequence=${state.lastSequence}${config.token ? `&token=${encodeURIComponent(config.token)}` : ""}`;
     const switchSession = (sessionId) => {
@@ -2009,7 +2030,6 @@
       state.sessionId = replacementId;
       state.messages.clear();
       state.tools.clear();
-      activityArchives.clear();
       state.activities.clear();
       state.permissionRequests.clear();
       surfacedApprovalIds.clear();
@@ -2152,7 +2172,9 @@
       }
     });
     const resumeSelectedActivity = () => { if (!closed) render(); };
-    document.addEventListener("selectionchange", resumeSelectedActivity);
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("selectionchange", resumeSelectedActivity);
+    }
     const elapsedTimer = setInterval(() => {
       if (!state.submitting) return;
       const active = [...state.tools.values(), ...state.activities.values()]
@@ -2167,13 +2189,15 @@
     window.addEventListener("beforeunload", () => {
       closed = true;
       clearInterval(elapsedTimer);
-      document.removeEventListener("selectionchange", resumeSelectedActivity);
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        document.removeEventListener("selectionchange", resumeSelectedActivity);
+      }
       if (socket) socket.close();
     }, { once: true });
     render();
     connect();
-    return { state, reduce, snapshot: () => snapshot(state), close: () => { closed = true; if (socket) socket.close(); clearInterval(elapsedTimer); document.removeEventListener("selectionchange", resumeSelectedActivity); if (activityRenderTimer != null) clearTimeout(activityRenderTimer); } };
+    return { state, reduce, snapshot: () => snapshot(state), close: () => { closed = true; if (socket) socket.close(); clearInterval(elapsedTimer); if (typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("selectionchange", resumeSelectedActivity); if (activityRenderTimer != null) clearTimeout(activityRenderTimer); } };
   }
 
-  return { createState, reduce, snapshot, init, classifyRuntimePhase, isCodingTool };
+  return { createState, reduce, snapshot, init, classifyRuntimePhase, isCodingTool, isMutationTool };
 });

@@ -191,8 +191,9 @@ identity; backend completion and verified goal completion are separate states.
 
 Use `/activity minimal`, `/activity normal` (default), or `/activity verbose` to
 persist `MANA_ACTIVITY_VISIBILITY` through the existing user configuration.
-`/activity` shows recent history; `/activity history <before-sequence>` loads older
-records. In the TUI, **Ctrl+End** returns to latest activity. Visibility never
+Activity appears inside Main Activity and Coding Activity, including internal
+coding operations. `/activity` shows recent activity in terminal chat. In the
+TUI, **Ctrl+End** returns to latest activity. Visibility never
 reveals private reasoning, credentials, prompts, or raw invocation arguments.
 
 During an active TUI or dashboard turn, submit text to steer that execution.

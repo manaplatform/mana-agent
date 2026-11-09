@@ -39,13 +39,13 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 def _resolve_approval(events: list[dict[str, Any]], decision_event: dict[str, Any]) -> None:
     """Update only the request named by a decision, never other pending requests."""
     metadata = _safe_dict(decision_event.get("metadata"))
-    request_ids = {str(metadata.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} - {""}
+    request_ids = {str(metadata.get(key) or decision_event.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id", "request_id")} - {""}
     if not request_ids:
         return
     approved = decision_event.get("event_type") == "action.approval.granted" or metadata.get("decision") == "approve"
     for existing in events:
         existing_meta = _safe_dict(existing.get("metadata"))
-        existing_ids = {str(existing_meta.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} - {""}
+        existing_ids = {str(existing_meta.get(key) or existing.get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id", "request_id")} - {""}
         if request_ids & existing_ids and str(existing.get("status") or "").lower() in {"waiting_approval", "pending_approval", "approval_required", "waiting_permission"}:
             existing["status"] = "completed" if approved else "failed"
             existing["_approval_resolved"] = True
@@ -330,7 +330,7 @@ class MainActivityBox(_ActivityRendering, Vertical):
         visible_events = self._visible_events()[-40:]
         lines: list[str] = []
         if total_count > 40:
-            lines.append(f"… ({total_count - 40} earlier operations preserved)")
+            lines.append(f"Showing the latest 40 of {total_count} operations")
 
         # Consecutive operation grouping
         grouped: list[dict[str, Any]] = []

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from textual.containers import Vertical
-from textual.widgets import Button, Collapsible, Static
+from textual.widgets import Static
 
 from mana_agent.chat.execution_trace import (
     ExecutionTrace,
@@ -13,7 +13,6 @@ from mana_agent.chat.execution_trace import (
     event_classification_metadata,
 )
 from mana_agent.tui.widgets.activity_boxes import CodingActivityBox, MainActivityBox, _ActivityRendering
-from mana_agent.tui.widgets.selectable_text import SelectableText
 
 
 class ExecutionPanel(_ActivityRendering, Vertical):
@@ -23,7 +22,6 @@ class ExecutionPanel(_ActivityRendering, Vertical):
     .execution-steps { height: auto; margin: 0 0 0 0; padding: 0 1; display: none; }
     .execution-summary { height: auto; margin: 0 0 1 0; padding: 0 1; color: $success; }
     .execution-footer { color: $text-muted; margin-top: 0; padding: 0 1; }
-    .execution-log { height: auto; max-height: 18; }
     """
 
     def __init__(self, *, turn_id: str) -> None:
@@ -47,10 +45,6 @@ class ExecutionPanel(_ActivityRendering, Vertical):
         self.summary_card = Static("", classes="execution-summary", markup=False)
         self.footer = Static("0 events", classes="execution-footer", markup=False)
         self.context_meter: dict[str, Any] = {}
-        self._history_before = 0
-        self.history_view = SelectableText("", classes="execution-log")
-        self.history_details = Collapsible(self.history_view, title="Earlier activity", collapsed=True)
-        self.history_button = Button("Earlier activity", variant="default")
 
         # Aliases for backward compatibility with existing tests
         self.details = self.coding_box.details
@@ -63,33 +57,6 @@ class ExecutionPanel(_ActivityRendering, Vertical):
         yield self.coding_box
         yield self.summary_card
         yield self.footer
-        yield self.history_button
-        yield self.history_details
-
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button is not self.history_button:
-            return
-        event.stop()
-        import asyncio
-        from mana_agent.services.execution_event_hub import get_execution_event_hub
-        scope = next((row for row in reversed(self.events) if row.get("conversation_id") and row.get("repository_id")), None)
-        if scope is None:
-            self.history_view.load_text("No durable activity history is available for this turn.")
-        else:
-            cursor = self._history_before or max(int(row.get("sequence") or 0) for row in self.events) + 1
-            rows = await asyncio.to_thread(get_execution_event_hub().history,
-                conversation_id=scope["conversation_id"], repository_id=scope["repository_id"],
-                execution_id=scope.get("execution_id") or self.turn_id, before_sequence=cursor, limit=200)
-            if rows:
-                self._history_before = min(int(row.get("sequence") or 0) for row in rows)
-                self.history_view.load_text("\n".join(
-                    f"{row.get('agent_id') or 'MainAgent'} · {row.get('title') or row.get('type')} · {row.get('status')}"
-                    + (f" — {row['summary']}" if row.get("summary") else "")
-                    for row in rows if row.get("visibility") != "internal"))
-            else:
-                self.history_view.load_text("No earlier activity.")
-                self.history_button.disabled = True
-        self.history_details.collapsed = False
 
     def update_trace_event(self, event: dict[str, Any]) -> None:
         self.update_event(event)

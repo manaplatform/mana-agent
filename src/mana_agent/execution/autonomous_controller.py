@@ -438,6 +438,8 @@ class AutonomousExecutionController:
             if not active_attempt_id:
                 active_attempt_id = task.attempt_id
             if not active_lease_token:
+                active_lease_token = getattr(task, "lease_token", "") or ""
+            if not active_lease_token:
                 raise ValueError("Running execution requires the original worker lease token")
 
         active_generation = task.attempt_generation

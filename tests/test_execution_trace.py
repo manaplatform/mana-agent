@@ -620,5 +620,24 @@ def test_execution_panel_steps_view_is_hidden_by_default() -> None:
     assert panel.steps_view.display is False
 
 
+def test_execution_panel_keeps_main_and_internal_coding_activity_without_archive() -> None:
+    panel = ExecutionPanel(turn_id="turn-live-boxes")
+    panel.update_event({
+        "event_id": "main-plan", "type": "agent.planning", "status": "running",
+        "operation_id": "planning", "agent_id": "MainAgent", "title": "Reviewing requirements",
+    })
+    panel.update_event({
+        "event_id": "internal-read", "type": "tool.call.started", "status": "running",
+        "operation_id": "read", "backend": "internal", "tool_name": "read_file",
+        "agent_id": "CodingAgent", "title": "Reading implementation",
+    })
 
-
+    assert [row["event_id"] for row in panel.main_box.events] == ["main-plan"]
+    assert [row["event_id"] for row in panel.coding_box.events] == ["internal-read"]
+    assert "Reviewing requirements" in panel.main_box.activity_log.text
+    assert "Reading implementation" in panel.coding_box.activity_log.text
+    root_widgets = list(panel.compose())
+    assert root_widgets.count(panel.main_box) == 1
+    assert root_widgets.count(panel.coding_box) == 1
+    assert not any("Earlier activity" in str(getattr(widget, "label", "") or getattr(widget, "title", ""))
+                   for widget in root_widgets)

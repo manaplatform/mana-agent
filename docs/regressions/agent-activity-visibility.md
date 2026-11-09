@@ -17,7 +17,7 @@ The following mechanisms were found by source inspection:
 | Internal coding executes several steps | `stream()` collected the entire execution before yielding. | A bounded asynchronous producer/consumer path yields while execution runs. |
 | A compatibility provider sends `reasoning_content` | Responses-shaped summary fields could be confused with an authorized public summary. | Bridged, unknown, encrypted, and raw reasoning remain private. Only explicit agent explanations or completed, supported native summaries pass projection. |
 | Steering admission or acknowledgement is slow/fails | The user saw no message until admission returned; applied could appear before the fenced update. Session fallback could choose another session. | Clients show a pending user row immediately. Session/execution selection is explicit. Applied status follows the committed acknowledgement. |
-| High-volume tool activity or a user reading older text | Collections grew; forced scrolling and competing compatibility-log writes disrupted reading. Read paths could be listed as modifications. | Bounded operation projections, 10 Hz repaint coalescing, selection/scroll preservation, exclusive box rendering, paginated older history, and successful mutation evidence. |
+| High-volume tool activity or a user reading older text | Collections grew; forced scrolling and competing compatibility-log writes disrupted reading. Read paths could be listed as modifications. | Bounded operation projections, 10 Hz repaint coalescing, selection/scroll preservation, exclusive Main/Coding box rendering, transport-level history pagination, and successful mutation evidence. |
 | Concurrent publication, disconnect, or queue overflow | Sequence allocation, append, and callbacks could disagree; limited-tail replay and a maximum-sequence cursor skipped gaps. | Portable journal locks serialize append/sequence allocation. Ordered callbacks drain outside locks. Forward pages recover the complete gap; clients keep a contiguous cursor. |
 
 Existing tests primarily exercised sequential, coding-specific delivery and final
@@ -77,10 +77,13 @@ appended journal records. A complete record missing only its final newline is
 recovered before allocating the next sequence.
 
 `MANA_ACTIVITY_VISIBILITY=minimal|normal|verbose` is persisted through the existing
-user configuration, with `normal` as the default. `/activity` shows recent history;
-`/activity history <before-sequence>` pages backward. `/activity minimal`,
-`/activity normal`, and `/activity verbose` change presentation. TUI **Ctrl+End**
-returns to latest activity; each turn also exposes older durable activity.
+user configuration, with `normal` as the default. `/activity` shows recent
+activity in terminal chat; `/activity minimal`, `/activity normal`, and
+`/activity verbose` change presentation. TUI **Ctrl+End** returns to latest
+activity. Main Activity and Coding Activity are the only activity containers;
+internal coding operations appear in Coding Activity. Separate archive controls
+and the CLI backward-page shortcut have been removed. Durable cursor pagination
+remains available to recovery and API clients.
 
 Planning events carry `execution_mode=plan`. Saving a plan artifact is separate
 from implementation, and inspection does not enter the changed-file list. A
@@ -124,8 +127,33 @@ The 250 ms local visibility target, queue stress behavior, Windows file locking,
 provider interoperability, and full UI acceptance remain unmeasured until the
 following checks and manual scenarios are performed.
 
+## 2026-11-09: consolidate activity presentation
+
+The first activity implementation added an archive button and expander beside
+TUI activity boxes and a separate archive section inside each dashboard box.
+Those extra surfaces duplicated activity presentation. At the user's request,
+the TUI archive widgets/handler, dashboard archive renderer/cache/fetch path,
+and CLI backward-page shortcut are removed. Main Activity and Coding Activity
+continue to render their existing live projections and retain their bounded
+state, including internal coding events. The dashboard's Show all control
+expands retained operations within those same boxes. No stored activity is
+deleted and the hub's durable replay and REST cursor contracts remain unchanged.
+
+Regression coverage checks both containers still receive the correct events,
+that no archive UI is mounted, and that the CLI no longer offers backward-page
+navigation. The dashboard DOM fixture supplies the selection-listener APIs used
+by the current renderer. Runtime verification is pending; not run by the agent.
+User-owned checks for this change:
+
+```bash
+venv/bin/python -m pytest tests/test_execution_trace.py tests/test_chat_command_dispatcher.py -q
+node --test tests/dashboard/live_chat_approval_ui.test.mjs
+```
+
 ## Do not reintroduce
 
+- Keep activity inside Main Activity and Coding Activity; do not restore separate
+  archive panels or load-earlier controls.
 - Do not expose bridge `reasoning_content`, raw reasoning deltas, encrypted state,
   prompts, or arbitrary invocation arguments under any summary or verbosity label.
 - Do not drop ownership when normalizing `type`/`event_type`, deduplicate lifecycle
@@ -164,7 +192,9 @@ node --test tests/dashboard/live_chat_reducer.test.mjs tests/dashboard/live_chat
 
 Manually run an authorized long read-only task in each interface: confirm progress
 appears before the answer, concurrent actors remain separate, reading/selecting
-older content is stable, and latest/earlier controls work. Steer the active turn
+older content is stable, the latest action works, and no archive section or
+load-earlier control appears. Activity must stay in Main Activity/Coding
+Activity. Steer the active turn
 while routing and while executing; verify the same panel follows its user row and
 that another session remains unchanged. Disconnect/reconnect after more than one
 replay page. Exercise cancellation/recovery, a failed steering acknowledgement,

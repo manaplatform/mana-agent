@@ -708,27 +708,26 @@ def _reject_command(context: CommandContext, args: list[str]) -> CommandResult:
 def _activity(context: CommandContext, args: list[str]) -> CommandResult:
     from mana_agent.config.user_config import get_setting, save_user_config
     from mana_agent.services.execution_event_hub import get_execution_event_hub
+    if len(args) > 1:
+        raise ValueError("Usage: /activity [minimal|normal|verbose]")
     choice = args[0] if args else "history"
     if choice in {"minimal", "normal", "verbose"}:
         save_user_config({"MANA_ACTIVITY_VISIBILITY": choice})
         return CommandResult(status="success", message=f"Activity visibility: {choice}.", data={"activity_visibility": choice})
-    if choice != "history" or len(args) > 2:
-        raise ValueError("Usage: /activity [minimal|normal|verbose|history [before-sequence]]")
-    before = int(args[1]) if len(args) == 2 else 0
+    if choice != "history":
+        raise ValueError("Usage: /activity [minimal|normal|verbose]")
     rows = get_execution_event_hub().history(conversation_id=context.session_id, repository_id=context.repository_id,
-                                             before_sequence=before, limit=40)
+                                             limit=40)
     public = [row for row in rows if row.get("visibility") != "internal"]
     lines = [f"{row.get('agent_id') or 'MainAgent'} · {row.get('title') or row.get('type')} · {row.get('status')}"
              + (f" — {row['summary']}" if row.get("summary") else "") for row in public]
-    if rows:
-        lines.append(f"Earlier: /activity history {rows[0].get('sequence')}")
     return CommandResult(status="success", message="\n".join(lines) or "No activity recorded.",
                          data={"events": public, "activity_visibility": get_setting("MANA_ACTIVITY_VISIBILITY", "normal")})
 
 
 def definitions() -> list[CommandDefinition]:
     rows = [
-        CommandDefinition(canonical_name="activity", description="Show activity history or choose its visibility.", argument_schema="[minimal|normal|verbose|history [before-sequence]]", handler=_activity),
+        CommandDefinition(canonical_name="activity", description="Show recent activity or choose its visibility.", argument_schema="[minimal|normal|verbose]", handler=_activity),
         CommandDefinition(canonical_name="new", description="Permanently replace the current chat.", required_capability="sessions", handler=_new),
         CommandDefinition(canonical_name="session", aliases=("sessions",), description="Open the repository-scoped chat picker and manage chats.", argument_schema="[list|current|show|switch|rename|delete]", required_capability="sessions", confirmation_actions=frozenset({"delete"}), handler=_sessions),
         CommandDefinition(canonical_name="processes", description="Inspect persistent operating-system services.", argument_schema="[list|show|logs|stop|restart|cleanup]", required_capability="processes", confirmation_actions=frozenset({"stop"}), handler=_processes),
