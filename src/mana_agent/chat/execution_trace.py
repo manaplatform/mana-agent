@@ -512,7 +512,7 @@ class ExecutionTrace:
         if event_type == "error" and not ev.get("backend") and not ev.get("subagent_id") and not operation:
             root_terminal = True
         if root_terminal:
-            if status in {"success", "completed", "done"} and (self.is_failed or self.is_cancelled):
+            if self.is_failed or self.is_cancelled:
                 return None
             failed = status in {"failed", "error", "cancelled", "interrupted"}
             self.is_cancelled = status in {"cancelled", "interrupted"}

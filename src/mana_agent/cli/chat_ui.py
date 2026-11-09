@@ -329,6 +329,13 @@ class ChatUIState:
         return self.record_event(updated.finish(status=status, message=updated.message))
 
     def _persist_session_event(self, event: ChatEvent) -> None:
+        if self.session_path is not None:
+            try:
+                self.session_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.session_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(event.as_dict(), ensure_ascii=False, default=str) + "\n")
+            except Exception:
+                pass
         from mana_agent.services.execution_event_hub import get_execution_event_hub
         try:
             get_execution_event_hub().publish(event, conversation_id=self.session_id,

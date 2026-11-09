@@ -98,7 +98,7 @@ class ExecutionPanel(_ActivityRendering, Vertical):
             self.coding_box.update_event(event_dict)
         else:
             self.main_box.update_event(event_dict)
-        self._schedule_activity_render(lambda: self._render_state(event_dict))
+        self._render_state(event_dict)
 
     def on_mount(self) -> None:
         if self.events:
@@ -204,7 +204,12 @@ class ExecutionPanel(_ActivityRendering, Vertical):
         self.coding_box.display = len(self.coding_box.events) > 0
         self.main_box.display = len(self.main_box.events) > 0
 
-        is_turn_terminal = self.trace.is_completed or self.trace.is_failed or self.trace.is_cancelled
+        is_turn_terminal = (
+            self.trace.is_completed
+            or self.trace.is_failed
+            or self.trace.is_cancelled
+            or event_type in {"turn.completed", "turn.finished", "turn.cancelled", "turn.failed"}
+        )
         if is_turn_terminal:
             if self.details and getattr(self.coding_box, "_user_collapsed", None) is not False:
                 self.details.collapsed = True
@@ -218,10 +223,10 @@ class ExecutionPanel(_ActivityRendering, Vertical):
                 files_count = len(self.coding_box.changed_files)
                 files_text = f"{files_count} file{'s' if files_count != 1 else ''} modified" if files_count > 0 else "Code inspected"
                 ops_count = len(self.coding_box.events)
-                outcome = "cancelled" if self.trace.is_cancelled else "failed" if self.trace.is_failed else "completed"
-                marker = "✓" if self.trace.is_completed else "■" if self.trace.is_cancelled else "✗"
+                outcome = "cancelled" if (self.trace.is_cancelled or event_type == "turn.cancelled") else "failed" if (self.trace.is_failed or event_type == "turn.failed") else "complete"
+                marker = "✓" if outcome == "complete" else "■" if outcome == "cancelled" else "✗"
                 evidence = " · verified" if (event.get("metadata") or {}).get("evidence_status") == "verified" else " · observed; verification recorded separately"
-                summary_lines = [f"{marker} Coding activity {outcome} · {files_text} ({ops_count} operations){evidence}"]
+                summary_lines = [f"{marker} Coding {outcome} · {files_text} ({ops_count} operations){evidence}"]
                 if self.coding_box.changed_files:
                     cfs = self.coding_box.changed_files
                     preview = ", ".join(cfs[:3]) + ("..." if len(cfs) > 3 else "")

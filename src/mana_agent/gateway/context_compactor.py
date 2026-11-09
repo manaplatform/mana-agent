@@ -548,6 +548,7 @@ class ContextCompactor:
         cur_mem = list(raw_mem)[:self.policy.max_recovery_candidates]
         cur_summary = str(conv_summary or "")
         cur_pointers = prev_turn_pointers or PreviousTurnPointers()
+        cur_routes = list(routes)
 
         env, ctx = _build_bounded(
             cur_lanes, cur_all, cur_rec, cur_tools, cur_art, cur_mem, cur_summary, cur_pointers
@@ -632,6 +633,25 @@ class ContextCompactor:
                 env, ctx, breakdown = env_cand, ctx_cand, bd_cand
                 if breakdown.total_tokens <= resolved_window:
                     break
+
+        # Pass 5: Compact route availability descriptions and verbose availability metadata if still exceeding budget
+        if breakdown.total_tokens > resolved_window and cur_routes:
+            cur_routes = [
+                {
+                    "name": r.get("name", ""),
+                    "description": str(r.get("description") or "")[:80],
+                    "available": bool((r.get("availability") or {}).get("available", True)) if isinstance(r.get("availability"), dict) else True,
+                }
+                if isinstance(r, (dict, Mapping)) else r
+                for r in cur_routes
+            ]
+            breakdown = self.calculate_raw_breakdown(
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                context=ctx,
+                envelope=env,
+                routes=cur_routes,
+            )
 
         compacted_total = breakdown.total_tokens
         tokens_saved = max(0, raw_total - compacted_total)

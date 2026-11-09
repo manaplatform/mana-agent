@@ -111,9 +111,10 @@ class _ActivityRendering:
         actor = current.get("subagent_id") or current.get("agent_id") or "MainAgent"
         self.header.update(f"◌ {actor} — {current.get('title') or current.get('tool_name') or 'Working'} · {seconds}s")
 
-    def _schedule_activity_render(self, render) -> None:
+    def _schedule_activity_render(self, render, immediate: bool = False) -> None:
         self._latest_render = render
-        if not self.is_mounted:
+        if not self.is_mounted or immediate:
+            self._activity_render_pending = False
             render()
             return
         if getattr(self, "_activity_render_pending", False):
@@ -122,7 +123,7 @@ class _ActivityRendering:
         def repaint():
             self._activity_render_pending = False
             self._latest_render()
-        self.set_timer(0.1, repaint)
+        self.set_timer(0.02, repaint)
 
     def _upsert_activity(self, event: dict[str, Any]) -> dict[str, Any]:
         ev = normalize_activity(event)
@@ -344,8 +345,10 @@ class MainActivityBox(_ActivityRendering, Vertical):
                 summary = "Summary: " + summary
             elif ev.get("evidence_status") == "verified":
                 summary = "Verified: " + summary
-            actor = ev.get("subagent_id") or ev.get("agent_id") or "MainAgent"
-            tool_name = f"{actor} — {tool_name}"
+            is_sub = bool(ev.get("sub_operation") or ev.get("indent") or ev.get("parent_agent_id"))
+            if not is_sub:
+                actor = ev.get("subagent_id") or ev.get("agent_id") or "MainAgent"
+                tool_name = f"{actor} — {tool_name}"
             sig = operation_key(ev)
             if grouped and grouped[-1].get("signature") == sig:
                 grouped[-1]["count"] += 1

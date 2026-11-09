@@ -106,7 +106,7 @@ def activity_turn(method):
     @wraps(method)
     def wrapped(gateway, session_id: str, text: str, **options):
         from mana_agent.workspaces.paths import repository_id_for_path
-        turn_id = str(options.get("turn_id") or f"turn-{uuid.uuid4().hex}")
+        turn_id = str(options.get("turn_id") or f"turn_{uuid.uuid4().hex}")
         options["turn_id"] = turn_id
         state = gateway._session(session_id)
         state["activity_execution_id"] = turn_id

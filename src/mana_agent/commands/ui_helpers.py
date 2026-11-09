@@ -455,7 +455,7 @@ class LiveToolActivity:
         resolved_model: str = "",
     ) -> None:
         tool = str(tool or "tool")
-        args = "[browser input redacted: REDACTED]" if tool == "browser_type" and args else ""
+        args = "[browser input redacted: REDACTED]" if tool == "browser_type" and args else str(args or "")
         error = safe_text(error, 240)
         key = self._event_key(tool, args, event_id)
         if kind == "start":
@@ -594,37 +594,7 @@ class LiveToolActivity:
 
     # -- rendering --------------------------------------------------------
     def __rich__(self):
-        from mana_agent.config.user_config import get_setting
-        with self._activity_lock:
-            activities = [row for row in self._activities.values() if visible_activity(row, str(get_setting("MANA_ACTIVITY_VISIBILITY", "normal")))]
-        if not activities:
-            return ChatLogRenderer(self.log, spinner_text=self.spinner_text, max_rows=self.max_rows).__rich__()
-        lines = Text()
-        for row in activities[-40:]:
-            status = str(row.get("status") or "running")
-            icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(status, "◌")
-            actor = row.get("subagent_id") or row.get("agent_id") or "MainAgent"
-            meta = row.get("metadata") or {}
-            backend = row.get("backend") or meta.get("backend")
-            label = "Coding Activity" if backend in {"codex", "coding", "internal"} else "Activity"
-            title = row.get("title") or row.get("tool_name") or row.get("event_type")
-            if status == "running" and row.get("started_at"):
-                try:
-                    started = datetime.fromisoformat(str(row["started_at"]).replace("Z", "+00:00"))
-                    title = f"{title} · {max(0, int(time.time() - started.timestamp()))}s"
-                except (TypeError, ValueError, OverflowError):
-                    pass
-            summary = row.get("summary") or ""
-            indent = "  ↳ " if row.get("parent_agent_id") else ""
-            if row.get("summary_source") in {"agent", "provider"}:
-                summary = "Summary: " + summary
-            elif row.get("evidence_status") == "verified":
-                summary = "Verified: " + summary
-            lines.append(f"{indent}{icon} {label} · {actor} — {title}", style="cyan" if status == "running" else "")
-            if summary:
-                lines.append(f" — {summary}")
-            lines.append("\n")
-        return Panel(lines, title="Activity", title_align="left", border_style="cyan")
+        return ChatLogRenderer(self.log, spinner_text=self.spinner_text, max_rows=self.max_rows).__rich__()
 
 
 # Currently-active activity panel, set while a tool run is in progress.

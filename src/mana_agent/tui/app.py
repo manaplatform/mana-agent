@@ -261,7 +261,8 @@ class ManaChatApp(App):
         self._unsubscribe_computer_permissions = self.history.subscribe(
             self._handle_computer_permission_event
         )
-        self._subscribe_session_events(self._gateway_session_id or "")
+        if self._gateway_session_id:
+            self._subscribe_session_events(self._gateway_session_id)
 
         # Safe immediate footer (avoids any early watcher issues)
         from mana_agent.approval.policy import ApprovalMode, get_approval_policy
@@ -399,22 +400,20 @@ class ManaChatApp(App):
         self._unsubscribe_api_approval_events = None
 
         sid = str(session_id or self._gateway_session_id or "").strip()
+        if not sid:
+            return
+
         try:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
 
             from mana_agent.workspaces.paths import repository_id_for_path
             hub = get_execution_event_hub()
-            if sid:
-                unsub = hub.subscribe(
-                    sid,
-                    self._handle_hub_session_event,
-                    repository_id=repository_id_for_path(self.repo_root),
-                    buffered=True,
-                )
-            else:
-                unsub = hub.subscribe_all(
-                    self._handle_hub_session_event,
-                )
+            unsub = hub.subscribe(
+                sid,
+                self._handle_hub_session_event,
+                repository_id=repository_id_for_path(self.repo_root),
+                buffered=True,
+            )
             self._unsubscribe_session_events = unsub
             self._unsubscribe_api_approval_events = unsub
         except Exception:
@@ -438,7 +437,10 @@ class ManaChatApp(App):
     def _handle_hub_session_event(self, event: dict[str, Any]) -> None:
         """Handle execution events from ExecutionEventHub as durable fallback and source of truth."""
         sid = str(event.get("conversation_id") or "")
-        if sid and self._gateway_session_id and sid != str(self._gateway_session_id):
+        if self._gateway_session_id:
+            if sid and sid != str(self._gateway_session_id):
+                return
+        elif sid:
             return
 
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
@@ -607,7 +609,7 @@ class ManaChatApp(App):
             return
 
         key = delivery_key(event)
-        if key in self._delivered_coding_event_ids:
+        if (event_id and event_id in self._delivered_coding_event_ids) or key in self._delivered_coding_event_ids:
             return
         safe = project_activity(event)
         if safe is None:

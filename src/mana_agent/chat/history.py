@@ -87,7 +87,8 @@ class ChatHistory:
             # Raw invocations belong at the guarded tool boundary, not chat history.
             event = replace(event, args={}, summary=safe_text(event.summary, 240, protected=protected))
         elif isinstance(event, ToolResultEvent):
-            event = replace(event, result=None, summary=safe_text(event.summary, 240, protected=protected),
+            res_val = safe_text(event.result, protected=protected) if isinstance(event.result, str) else event.result
+            event = replace(event, result=res_val, summary=safe_text(event.summary, 240, protected=protected),
                             error=safe_text(event.error, protected=protected) if event.error else None)
         with self._lock:
             if isinstance(event, UserMessageEvent) and event.is_steering and event.request_id:

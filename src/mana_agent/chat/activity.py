@@ -51,7 +51,7 @@ _LEGACY_PUBLIC = frozenset({
 _PUBLIC_PREFIXES = (
     "agent.", "task.", "subagent.", "worker.", "loop.", "step.", "plan.",
     "tool.", "command.", "file.", "patch.", "test.", "verification.",
-    "review.", "approval.", "action.approval.", "steering.", "turn.",
+    "review.", "approval.", "action.", "steering.", "turn.",
     "backend.", "context.", "cost.", "budget.", "batch.", "parallel.",
     "model.", "workspace.", "search.", "investigation.", "discovery.", "recovery.", "activity.",
     "api.", "server.", "computer.", "inbox.", "routing.", "execution.", "log.",
@@ -77,7 +77,7 @@ _PUBLIC_METADATA = frozenset(_IDENTITY_FIELDS) | frozenset({
     "batch_id", "total_requests", "completed_requests", "completed", "total", "retry_count",
     "reason_code", "recovery_reason", "resume_checkpoint_id", "checkpoint_id", "last_checkpoint_id",
     "provider", "transport", "summary_trusted", "summary_complete", "summary_index", "item_id",
-    "role", "message_id", "client_message_id", "content", "attachments", "summary",
+    "role", "message_id", "client_message_id", "content", "attachments", "summary", "resumed",
     "used_tokens", "context_window", "utilization_ratio", "breakdown", "cumulative_cost",
     "remaining_cost", "estimated", "input_tokens", "output_tokens", "total_tokens", "token_usage",
     "model_level", "resolved_model", "requested_by_agent_id", "queue_job_id", "delegation_path",
@@ -183,6 +183,7 @@ def project_activity(event: Any, *, protected: Iterable[str] = ()) -> dict[str, 
     safe["details"] = public_meta
     safe["type"] = safe["event_type"] = raw["type"]
     safe["visibility"] = "terminal" if raw.get("visibility") == "terminal" else "progress"
+    public_meta["visibility"] = safe["visibility"]
     summary = raw.get("public_summary") or meta.get("public_summary") or raw.get("summary") or raw.get("detail") or raw.get("message") or ""
     safe["summary"] = safe_text(summary, 240, protected=protected)
     safe["detail"] = safe_text(raw.get("detail") or summary, protected=protected)
@@ -231,7 +232,19 @@ def operation_key(event: dict[str, Any]) -> str:
     )
     if approval_id:
         return f"approval:{raw.get('conversation_id') or raw.get('session_id') or ''}:{approval_id}"
-    op = raw.get("operation_id") or raw.get("tool_call_id") or raw.get("call_id") or meta.get("call_id") or meta.get("tool_call_id") or raw.get("step_id") or raw.get("event_id") or raw.get("id") or raw.get("request_id") or meta.get("request_id")
+    op = (
+        raw.get("operation_id")
+        or raw.get("tool_call_id")
+        or raw.get("call_id")
+        or meta.get("call_id")
+        or meta.get("tool_call_id")
+        or raw.get("step_id")
+        or raw.get("event_id")
+        or raw.get("id")
+        or raw.get("request_id")
+        or meta.get("request_id")
+        or (raw.get("title") if (raw.get("sub_operation") or meta.get("sub_operation")) else None)
+    )
     return ":".join(str(raw.get(k) or "") for k in ("task_id", "attempt_id", "agent_id", "subagent_id")) + ":" + str(op or raw["type"])
 
 
@@ -249,7 +262,11 @@ def accepts_activity_update(previous: dict[str, Any], event: dict[str, Any]) -> 
 
 def is_mutation(event: dict[str, Any]) -> bool:
     raw = normalize_activity(event)
-    return raw["type"] in {"file.changed", "patch.applied"} and raw.get("status", "success") in {"success", "completed", "done"} and raw.get("execution_mode", raw["metadata"].get("phase")) not in {"plan", "plan_only"}
+    tool = str(raw.get("tool_name") or raw.get("title") or "").lower()
+    type_matches = raw["type"] in {"file.changed", "patch.applied"}
+    tool_matches = any(m in tool for m in ("edit_file", "write_file", "apply_patch", "modify_file", "create_file"))
+    is_mut = type_matches or tool_matches
+    return is_mut and raw.get("status", "success") in {"success", "completed", "done"} and raw.get("execution_mode", raw["metadata"].get("phase")) not in {"plan", "plan_only"}
 
 
 def visible_activity(event: dict[str, Any], visibility: str = "normal") -> bool:
