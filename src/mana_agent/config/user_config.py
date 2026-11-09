@@ -60,6 +60,7 @@ MANAGED_SECRET_KEYS = frozenset(NON_PERSISTED_SECRET_KEYS)
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_CONFIG_SCHEMA_VERSION": 2,
+    "MANA_ACTIVITY_VISIBILITY": "normal",
     "MANA_USER_ID": "",
     "MANA_AI_PROVIDER": "openai",
     "MANA_PRIMARY_MODEL": "openai/gpt-4.1-mini",
@@ -500,6 +501,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_ROUTING_RELIABILITY_DECAY_SECONDS": "mana_routing_reliability_decay_seconds",
     "MANA_ROUTING_MODEL_FAILURE_PENALTY_WEIGHT": "mana_routing_model_failure_penalty_weight",
     "MANA_ROUTING_PROVIDER_FAILURE_PENALTY_WEIGHT": "mana_routing_provider_failure_penalty_weight",
+    "MANA_ACTIVITY_VISIBILITY": "mana_activity_visibility",
     "DEFAULT_TOP_K": "default_top_k",
     "LLM_MODEL": "llm_model",
     "MANA_LLM_LOG_FILE": "mana_llm_log_file",
@@ -1304,6 +1306,8 @@ def validate_model_level(value: str) -> str:
 
 def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(values)
+    if "MANA_ACTIVITY_VISIBILITY" in cleaned and cleaned["MANA_ACTIVITY_VISIBILITY"] not in {"minimal", "normal", "verbose"}:
+        raise UserConfigError("MANA_ACTIVITY_VISIBILITY must be minimal, normal, or verbose.")
     if "spirit" in cleaned:
         from mana_agent.spirit.registry import resolve_spirit
         from mana_agent.spirit.schema import SpiritSettings

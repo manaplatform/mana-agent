@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
 const { createState, reduce, snapshot } = require(
@@ -15,6 +16,56 @@ const event = (sequence, type, extra = {}) => ({
   started_at: `2026-07-23T00:00:${String(sequence).padStart(2, "0")}Z`,
   execution_id: extra.execution_id || "run-1",
   ...extra,
+});
+
+test("shared activity fixture preserves parallel attribution and mutation evidence", () => {
+  const rows = JSON.parse(readFileSync(new URL("../fixtures/activity/parallel.json", import.meta.url), "utf8"));
+  const state = createState("session_fixture");
+  for (const row of rows) reduce(state, { type: "event", event: row });
+  const trace = snapshot(state).executionTraces[0];
+  assert.deepEqual(trace.codingBox.changedFiles, ["src/example.py"]);
+  assert.equal(trace.codingBox.events.length, 2);
+  assert.ok(trace.codingBox.events.every((row) => row.metadata.attempt_id === "coding_attempt"));
+  assert.ok(trace.mainBox.events.some((row) => row.title.includes("ResearchAgent")));
+  assert.equal(state.lastSequence, 10);
+});
+
+test("recovery cursor waits for missing sequences", () => {
+  const state = createState("session-1");
+  reduce(state, { type: "event", event: event(2, "agent.planning") });
+  assert.equal(state.lastSequence, 0);
+  reduce(state, { type: "event", event: event(1, "agent.routing") });
+  assert.equal(state.lastSequence, 2);
+});
+
+test("raw and bridged reasoning cannot become visible summaries", () => {
+  const state = createState("session-1");
+  reduce(state, { type: "event", event: event(1, "reasoning.update", { summary: "private" }) });
+  reduce(state, { type: "event", event: event(2, "agent.summary", {
+    summary: "private bridge output", metadata: { summary_source: "provider", summary_trusted: true,
+      summary_complete: true, provider: "openai", transport: "responses_bridge" },
+  }) });
+  assert.equal(snapshot(state).activities.length, 0);
+  assert.equal(state.lastSequence, 2);
+});
+
+test("one agent starting another phase does not complete a sibling", () => {
+  const state = createState("session-1");
+  reduce(state, { type: "event", event: event(1, "tool.started", { agent_id: "CodingAgent", operation_id: "read", metadata: { tool_name: "read_file" } }) });
+  reduce(state, { type: "event", event: event(2, "model.started", { agent_id: "ResearchAgent", operation_id: "research" }) });
+  const trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.steps.filter((step) => step.status === "running").length, 2);
+});
+
+test("high volume completed activity remains bounded", () => {
+  const state = createState("session-1");
+  for (let sequence = 1; sequence <= 10000; sequence += 1) {
+    reduce(state, { type: "event", event: event(sequence, "task.updated", { status: "success", operation_id: `op-${sequence}` }) });
+  }
+  assert.equal(state.lastSequence, 10000);
+  assert.ok(state.activities.size <= 200);
+  assert.ok(state.seenSequences.size <= 4001);
+  assert.ok(snapshot(state).executionTraces[0].mainBox.events.length <= 200);
 });
 
 test("optimistic message reconciles with its canonical server message", () => {
@@ -374,7 +425,7 @@ test("execution trace progresses chronologically and updates in-place without du
   assert.equal(traces[0].isCompleted, true);
   assert.equal(traces[0].activeStepId, null);
   assert.equal(traces[0].steps.length, 6);
-  assert.equal(traces[0].steps[4].status, "completed"); // Model step finalized
+  assert.equal(traces[0].steps[4].status, "unverified"); // No model completion was observed
   assert.equal(traces[0].steps[5].phase, "completion");
 });
 
@@ -635,3 +686,32 @@ test("activity boxes preserve open event stream and update to latest activity on
 
 
 
+
+test("same tool names from different attempts retain separate operation state", () => {
+  const state = createState("session-1");
+  for (const [sequence, agent, attempt] of [[1, "AgentOne", "attempt-one"], [2, "AgentTwo", "attempt-two"]]) {
+    reduce(state, { type: "event", event: event(sequence, "tool.started", { task_id: "task-one", attempt_id: attempt,
+      operation_id: "read", agent_id: agent, metadata: { tool_name: "read_file" } }) });
+  }
+  assert.equal(state.tools.size, 2);
+  assert.equal(snapshot(state).executionTraces[0].steps.filter((step) => step.status === "running").length, 2);
+});
+
+test("stale attempts do not reopen activity after a recorded replacement", () => {
+  const state = createState("session-1");
+  reduce(state, { type: "event", event: event(1, "task.started", { task_id: "task-one", root_task_id: "task-one",
+    attempt_generation: 2, attempt_id: "current", metadata: { execution_supervisor: true } }) });
+  reduce(state, { type: "event", event: event(2, "tool.started", { task_id: "task-one", attempt_generation: 1,
+    attempt_id: "old", operation_id: "old-tool", summary: "stale activity" }) });
+  assert.ok(!JSON.stringify(snapshot(state)).includes("stale activity"));
+  assert.equal(state.lastSequence, 2);
+});
+
+test("steering user message follows authoritative status without reopening", () => {
+  const state = createState("session-1");
+  reduce(state, { type: "optimistic", message: { message_id: "steering-request-one", content: "Keep the existing API",
+    is_steering: true, steering_status: "pending", execution_id: "run-1" } });
+  reduce(state, { type: "event", event: event(1, "steering.applied", { status: "success", metadata: { request_id: "request-one" } }) });
+  reduce(state, { type: "event", event: event(2, "steering.queued", { status: "queued", metadata: { request_id: "request-one" } }) });
+  assert.equal(state.messages.get("steering-request-one").steering_status, "applied");
+});

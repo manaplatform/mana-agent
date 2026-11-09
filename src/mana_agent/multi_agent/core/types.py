@@ -479,6 +479,10 @@ class ExecutionContext:
     queue_job_id: str | None = None
     model_level: str | None = None
     resolved_model: str | None = None
+    attempt_id: str | None = None
+    attempt_generation: int | None = None
+    execution_id: str | None = None
+    execution_mode: str | None = None
     task_id: str | None = None
     root_task_id: str | None = None
     delegation_path: list[str] = field(default_factory=list)
@@ -504,6 +508,10 @@ class ExecutionContext:
             queue_job_id=_clean_optional(data.get("queue_job_id")),
             model_level=_clean_optional(data.get("model_level")),
             resolved_model=_clean_optional(data.get("resolved_model")),
+            attempt_id=_clean_optional(data.get("attempt_id")),
+            attempt_generation=_optional_int(data.get("attempt_generation")),
+            execution_id=_clean_optional(data.get("execution_id")),
+            execution_mode=_clean_optional(data.get("execution_mode")),
             task_id=_clean_optional(data.get("task_id")),
             root_task_id=_clean_optional(data.get("root_task_id")),
             delegation_path=[str(item) for item in data.get("delegation_path") or [] if str(item or "").strip()],
@@ -533,6 +541,8 @@ class ExecutionContext:
             queue_job_id=self.queue_job_id,
             model_level=self.model_level,
             resolved_model=self.resolved_model,
+            attempt_id=self.attempt_id, attempt_generation=self.attempt_generation,
+            execution_id=self.execution_id, execution_mode=self.execution_mode,
             task_id=self.task_id,
             root_task_id=self.root_task_id or self.task_id,
             delegation_path=delegation,
@@ -558,6 +568,8 @@ class ExecutionContext:
             "queue_job_id": ctx.queue_job_id,
             "model_level": ctx.model_level,
             "resolved_model": ctx.resolved_model,
+            "attempt_id": ctx.attempt_id, "attempt_generation": ctx.attempt_generation,
+            "execution_id": ctx.execution_id, "execution_mode": ctx.execution_mode,
             "task_id": ctx.task_id,
             "root_task_id": ctx.root_task_id,
             "delegation_path": list(ctx.delegation_path),

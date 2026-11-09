@@ -5,6 +5,7 @@ timeline ordering. Streamlit is imported lazily only inside render functions.
 """
 
 import json
+from mana_agent.chat.activity import project_activity, operation_key, bound_operations, is_mutation, visible_activity
 from typing import Any
 
 
@@ -94,8 +95,11 @@ def render_message(message: dict[str, Any]) -> None:
 
 
 def render_event(event: dict[str, Any], *, compact: bool = True) -> None:
+    event = project_activity(event)
+    if event is None:
+        return
     st = _streamlit()
-    kind = str(event.get("kind") or "reasoning")
+    kind = str(event.get("kind") or "activity")
     raw_status = str(event.get("status") or "running")
     status = raw_status
     icon = _EVENT_ICONS.get(kind, "•")
@@ -115,21 +119,21 @@ def render_event(event: dict[str, Any], *, compact: bool = True) -> None:
             label = f"{spinner} **{tool_name}** · running"
             if action:
                 label += f" — {action[:80]}"
-            st.markdown(label)
+            st.text(label)
             return
         fin_icon = "✅" if raw_status in {"success", "done"} else "❌"
         dur = f" ({duration}ms)" if duration else ""
         label = f"{fin_icon} **{tool_name}**{dur}"
         if action:
             label += f" — {action[:100]}"
-        st.markdown(label)
+        st.text(label)
         if summary and summary != action:
             st.caption(summary[:120])
         return
 
     label = f"{icon} **{title}** · `{status}`{duration_txt}"
     if compact and not summary and not meta:
-        st.markdown(label)
+        st.text(label)
         return
     with st.expander(f"{icon} {title} · {status}{duration_txt}", expanded=False):
         if summary:
@@ -176,13 +180,7 @@ def merge_timeline(
         et = str(event.get("type") or "")
         if et.startswith("tool."):
             meta = event.get("metadata") or event.get("details") or {}
-            eid = str(
-                event.get("tool_call_id")
-                or meta.get("tool_call_id")
-                or event.get("event_id")
-                or event.get("id")
-                or ""
-            ).strip()
+            eid = operation_key(event)
             ts = str(event.get("started_at") or event.get("timestamp") or "")
             if eid:
                 if eid not in tool_first_ts:
@@ -227,7 +225,16 @@ def render_activity_boxes(events: list[dict[str, Any]]) -> None:
 
     main_events: list[dict[str, Any]] = []
     coding_events: list[dict[str, Any]] = []
-    for ev in events:
+    from mana_agent.config.user_config import get_setting
+    visibility = str(get_setting("MANA_ACTIVITY_VISIBILITY", "normal"))
+    operations = {}
+    for original in events:
+        ev = project_activity(original)
+        if ev is not None:
+            operations[operation_key(ev)] = ev
+    for ev in bound_operations(list(operations.values())):
+        if not visible_activity(ev, visibility):
+            continue
         et = str(ev.get("type") or "")
         if et in {"turn.started"}:
             continue
@@ -241,7 +248,7 @@ def render_activity_boxes(events: list[dict[str, Any]]) -> None:
 
     if main_events:
         with st.expander(f"⚡ Main Activity ({len(main_events)} operations)", expanded=False):
-            for ev in main_events:
+            for ev in main_events[-40:]:
                 render_event(ev, compact=True)
 
     if coding_events:
@@ -258,7 +265,7 @@ def render_activity_boxes(events: list[dict[str, Any]]) -> None:
                 or payload_dict.get("path")
                 or args_dict.get("path")
             )
-            if fpath:
+            if is_mutation(ev) and fpath:
                 changed_files.add(str(fpath))
             cmd = (
                 ev.get("command")
@@ -275,11 +282,9 @@ def render_activity_boxes(events: list[dict[str, Any]]) -> None:
                 st.caption(f"Files: {', '.join(sorted(changed_files))}")
             if commands:
                 st.code("\n".join(f"$ {c}" for c in commands), language="bash")
-            for ev in coding_events:
+            for ev in coding_events[-40:]:
                 render_event(ev, compact=True)
-            files_count = len(changed_files)
-            files_text = f"{files_count} file{'s' if files_count != 1 else ''} modified" if files_count > 0 else "Code inspected"
-            st.caption(f"✓ Coding complete · {files_text} ({len(coding_events)} operations)")
+            st.caption("Operation outcomes are observations. Goal verification is recorded separately.")
 
 
 def render_timeline(messages: list[dict[str, Any]], events: list[dict[str, Any]]) -> None:

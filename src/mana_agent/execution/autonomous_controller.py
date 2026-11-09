@@ -6,6 +6,9 @@ task state machine, context compactor, and checkpoint system across every Mana-A
 
 from __future__ import annotations
 
+from contextvars import copy_context
+from mana_agent.services.activity_context import controller_activity, bind_activity_attempt, current_activity_context
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import contextvars
 from enum import Enum
@@ -97,13 +100,20 @@ def normalize_strategy(strategy: str | None) -> str:
 
 
 def _publish_hub_event(event_data: dict[str, Any]) -> None:
-    """Publish an execution event to the central event hub safely."""
+    """Publish observations; a terminal lifecycle follows recorded supervision."""
     try:
         from mana_agent.services.execution_event_hub import get_execution_event_hub
-
-        get_execution_event_hub().publish(event_data)
+        context = current_activity_context()
+        terminal = event_data.get("event_type") == "loop.completed"
+        if terminal and context and context.supervisor is not None:
+            task = context.supervisor.get_task(context.task_id)
+            if task.attempt_id != context.attempt_id or task.attempt_generation != context.attempt_generation:
+                return
+            if event_data.get("status") == "completed" and task.state.value != "completed":
+                event_data = {**event_data, "status": "waiting", "title": "Awaiting execution verification"}
+        get_execution_event_hub().publish(event_data, authoritative=terminal)
     except Exception:
-        pass
+        logger.debug("Activity projection unavailable", exc_info=True)
 
 
 def _extract_target_paths_safe(tool_name: str, args: dict[str, Any]) -> set[str]:
@@ -273,11 +283,18 @@ class AutonomousExecutionController:
     ) -> None:
         """Emit an execution event to the hub and active sinks."""
         event = {
+            **data,
+            "event_id": "activity-" + __import__("uuid").uuid4().hex,
             "event_type": event_type,
             "type": event_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            **data,
         }
+        context = current_activity_context()
+        if context is not None:
+            for key, value in context.identity().items():
+                if key in {"agent_id", "subagent_id", "parent_agent_id", "task_id", "root_task_id", "parent_task_id"} and event.get(key):
+                    continue
+                event[key] = value
         _publish_hub_event(event)
         if sink is not None:
             try:
@@ -354,6 +371,7 @@ class AutonomousExecutionController:
             target_id=target_id,
         )
 
+    @controller_activity
     def execute_goal(
         self,
         *,
@@ -420,9 +438,10 @@ class AutonomousExecutionController:
             if not active_attempt_id:
                 active_attempt_id = task.attempt_id
             if not active_lease_token:
-                active_lease_token = task.lease_token
+                raise ValueError("Running execution requires the original worker lease token")
 
         active_generation = task.attempt_generation
+        bind_activity_attempt(self.supervisor, task_id, active_attempt_id or "", active_lease_token)
 
         root_task_id = task.root_task_id or task_id
 
@@ -562,46 +581,6 @@ class AutonomousExecutionController:
                 if pending_items:
                     from mana_agent.execution.steering import SteeringCoordinator
                     steering_coord = SteeringCoordinator(self.supervisor)
-                    applied_ids = []
-                    for item in pending_items:
-                        text = item.get("text", "")
-                        kind = item.get("kind", "guidance")
-                        scope = item.get("scope", "execution")
-                        req_id = item["request_id"]
-                        steering_msg = f"[Live Steering ({kind.upper()})]: {text}"
-                        existing_guidance = ctx.get("live_steering_guidance", "")
-                        ctx["live_steering_guidance"] = (
-                            f"{existing_guidance}\n{steering_msg}".strip()
-                            if existing_guidance
-                            else steering_msg
-                        )
-                        if event_sink:
-                            try:
-                                event_sink({
-                                    "event_type": "steering.applied",
-                                    "request_id": req_id,
-                                    "kind": kind,
-                                    "scope": scope,
-                                    "text": text,
-                                    "applied_at": self.supervisor.clock().isoformat(),
-                                })
-                            except Exception:
-                                pass
-                        applied_ids.append(req_id)
-                        if kind in {"replan", "scope_change"}:
-                            consecutive_no_progress = 0
-
-                    try:
-                        steering_coord.apply_steering(
-                            task_id,
-                            attempt_id=active_attempt_id,
-                            generation=active_generation,
-                            lease_token=active_lease_token,
-                            request_ids=applied_ids,
-                        )
-                    except Exception as apply_err:
-                        logger.warning("Failed to mark steering applied: %s", apply_err)
-
                     if any(item.get("requires_approval") for item in pending_items):
                         from mana_agent.approval.policy import get_approval_policy
 
@@ -622,6 +601,38 @@ class AutonomousExecutionController:
                                 error="waiting_for_approval",
                                 completed_steps=completed_steps,
                             ))
+
+                    steering_coord._publish_status(task_id, "delivered", pending_items)
+                    applied_ids = []
+                    for item in pending_items:
+                        text = item.get("text", "")
+                        kind = item.get("kind", "guidance")
+                        scope = item.get("scope", "execution")
+                        req_id = item["request_id"]
+                        steering_msg = f"[Live Steering ({kind.upper()})]: {text}"
+                        existing_guidance = ctx.get("live_steering_guidance", "")
+                        ctx["live_steering_guidance"] = (
+                            f"{existing_guidance}\n{steering_msg}".strip()
+                            if existing_guidance
+                            else steering_msg
+                        )
+                        applied_ids.append(req_id)
+                        if kind in {"replan", "scope_change"}:
+                            consecutive_no_progress = 0
+
+                    try:
+                        steering_coord.apply_steering(
+                            task_id,
+                            attempt_id=active_attempt_id,
+                            generation=active_generation,
+                            lease_token=active_lease_token,
+                            request_ids=applied_ids,
+                        )
+                    except Exception as apply_err:
+                        return _finish(AutonomousExecutionResult(task_id=task_id, status="blocked", goal_satisfied=False,
+                            answer="Steering could not be acknowledged by the active execution.", error=str(apply_err),
+                            metrics=metrics, trace=overall_trace, warnings=warnings, completed_steps=completed_steps))
+
 
             # 2. Checkpoint before execution step
             current_task = self.supervisor.get_task(task_id)
@@ -1146,6 +1157,11 @@ class AutonomousExecutionController:
                 self.supervisor.store.update_task(task_id, update_task_metrics)
             except Exception:
                 pass
+
+            if decision.public_summary:
+                self._emit("agent.summary", {"task_id": task_id, "title": "Execution decision",
+                    "summary": decision.public_summary, "status": "success",
+                    "metadata": {"summary_source": "agent", "decision_id": decision.decision_id}}, sink=event_sink)
 
             # 10. Handle Model Decision
             if decision.action == ContinuationAction.FINALIZE:
@@ -1688,6 +1704,9 @@ class AutonomousExecutionController:
             {
                 "task_id": root_task_id,
                 "subtask_id": child_id,
+                "operation_id": child_id,
+                "agent_id": getattr(task_item, "owner_agent_id", None) or "main",
+                "parent_task_id": root_task_id,
                 "tool_name": tool_name,
                 "args": tool_args,
                 "title": f"↳ Tool {tool_name} — Running",
@@ -1777,6 +1796,9 @@ class AutonomousExecutionController:
         if result_output or error_msg:
             ctx.setdefault("evidence", []).append({
                 "subtask_id": child_id,
+                "operation_id": child_id,
+                "agent_id": getattr(task_item, "owner_agent_id", None) or "main",
+                "parent_task_id": root_task_id,
                 "title": title,
                 "tool_name": tool_name,
                 "output": result_output,
@@ -1795,6 +1817,9 @@ class AutonomousExecutionController:
             {
                 "task_id": root_task_id,
                 "subtask_id": child_id,
+                "operation_id": child_id,
+                "agent_id": getattr(task_item, "owner_agent_id", None) or "main",
+                "parent_task_id": root_task_id,
                 "tool_name": tool_name,
                 "duration_ms": duration_ms,
                 "status": "success" if success else "failed",
@@ -1978,7 +2003,7 @@ class AutonomousExecutionController:
                 elif len(concurrent_batch) > 1:
                     with ThreadPoolExecutor(max_workers=min(len(concurrent_batch), self.maximum_concurrency)) as pool:
                         futures = {
-                            pool.submit(self._execute_single_subtask, task_id, item, ctx, event_sink): item
+                            pool.submit(copy_context().run, self._execute_single_subtask, task_id, item, ctx, event_sink): item
                             for item in concurrent_batch
                         }
                         for fut in as_completed(futures):

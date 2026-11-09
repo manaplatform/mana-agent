@@ -4,7 +4,7 @@ import os
 import json
 import subprocess
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -144,6 +144,20 @@ class ChatUIState:
         return EventRenderer(mode=self.ui_mode, trace_mode=self.trace_mode)
 
     def record_event(self, event: ChatEvent) -> ChatEvent:
+        from mana_agent.chat.activity import project_activity, safe_text
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        public = project_activity(event, protected=context.protected_text if context else ())
+        if public is None and (event.type.startswith(("reasoning.", "provider.", "usage.", "assistant.", "subagent.delta"))
+                               or event.type == "agent.summary" or event.metadata.get("visibility") == "internal"
+                               or event.metadata.get("semantic_kind") in {"reasoning", "assistant_generation", "provider", "usage"}):
+            return event
+        if public is not None:
+            event = replace(event, title=public.get("title", ""), summary=public.get("summary", ""),
+                            metadata=dict(public.get("metadata") or {}))
+        else:
+            event = replace(event, title=safe_text(event.title, 240), summary=safe_text(event.summary),
+                            metadata={})
         if not event.session_id:
             event.session_id = self.session_id
         stored = self._upsert_event(event)
@@ -258,6 +272,9 @@ class ChatUIState:
         existing.agent_id = event.agent_id if event.agent_id is not None else existing.agent_id
         existing.subagent_id = event.subagent_id if event.subagent_id is not None else existing.subagent_id
         existing.step_id = event.step_id if event.step_id is not None else existing.step_id
+        for key in ("task_id", "root_task_id", "parent_task_id", "parent_agent_id", "attempt_id", "attempt_generation", "operation_id", "producer_sequence", "execution_mode"):
+            if getattr(event, key):
+                setattr(existing, key, getattr(event, key))
         existing.type = event.type or existing.type
         existing.status = event.status or existing.status
         existing.title = event.title or existing.title
@@ -275,7 +292,7 @@ class ChatUIState:
             _upsert_collection(self.subagent_events, event)
         if event.type.startswith("file.") or event.type.startswith("patch.") or event.metadata.get("path") or event.metadata.get("file_path"):
             _upsert_collection(self.file_events, event)
-        if event.type.startswith("test.") or event.metadata.get("command"):
+        if event.type.startswith(("test.", "verification.")):
             _upsert_collection(self.test_runs, event)
         if event.type.startswith("log.") or event.type in {"tool.stdout", "tool.stderr"}:
             _upsert_collection(self.log_events, event)
@@ -312,60 +329,25 @@ class ChatUIState:
         return self.record_event(updated.finish(status=status, message=updated.message))
 
     def _persist_session_event(self, event: ChatEvent) -> None:
-        if self.session_path is None:
-            return
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
         try:
-            self.session_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.session_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event.as_dict(), ensure_ascii=False, default=str) + "\n")
+            get_execution_event_hub().publish(event, conversation_id=self.session_id,
+                                              execution_id=event.turn_id, repository_id=self.repository_id)
         except Exception:
-            return
+            # A diagnostic sink cannot change the chat turn's result.
+            pass
 
     def start_turn(self, turn_id: str) -> ChatEvent:
         self.tracker.start_turn(turn_id)
-        first = self.record_event(
-            make_event(
-                "turn.started",
-                title="User input received",
-                message="Request queued for chat routing.",
-                status="success",
-                session_id=self.session_id,
-                turn_id=turn_id,
-                step_id="01",
-            ).finish(status="success")
-        )
-        for step_id, title, message in (
-            ("02", "Context loading", f"Repository context: {self.repo_root}"),
-            ("03", "Memory retrieval", "Session and coding memory status checked."),
-            ("04", "Skill selection", f"Skill index status: {self.skills_status}."),
-            ("05", "Decision routing", "Routing decision pending."),
-        ):
-            self.record_event(
-                make_event(
-                    "step.finished" if step_id != "05" else "step.started",
-                    title=title,
-                    message=message,
-                    status="success" if step_id != "05" else "running",
-                    session_id=self.session_id,
-                    turn_id=turn_id,
-                    step_id=step_id,
-                ).finish(status="success" if step_id != "05" else "running")
-            )
-        return first
+        return self.record_event(make_event("turn.started", title="User input received",
+            message="Request admitted for routing.", status="running", session_id=self.session_id,
+            turn_id=turn_id, metadata={"evidence_status": "observed"}))
 
     def finish_turn(self, turn_id: str, message: str = "Final response rendered.") -> ChatEvent:
-        return self.record_event(
-            make_event(
-                "turn.finished",
-                title="Final response",
-                message=message,
-                status="success",
-                session_id=self.session_id,
-                turn_id=turn_id,
-                step_id="10",
-                token_usage=self.tracker.by_turn.get(turn_id, self.tracker.session_total),
-            ).finish(status="success")
-        )
+        return self.record_event(make_event("turn.finished", title="Response rendered", message=message,
+            status="success", session_id=self.session_id, turn_id=turn_id,
+            token_usage=self.tracker.by_turn.get(turn_id, self.tracker.session_total),
+            metadata={"evidence_status": "observed"}).finish(status="success"))
 
     def add_conversation_turn(self, question: str, answer: str) -> None:
         question_text = str(question or "").strip()

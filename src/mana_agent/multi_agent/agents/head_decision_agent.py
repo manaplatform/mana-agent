@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from mana_agent.multi_agent.agents.base_agent import BaseAgent
+from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
 from mana_agent.multi_agent.communication.decision_room import DecisionRoom
 from mana_agent.multi_agent.core.types import MessageType, RouteDecision, TaskStatus
 
 
 class HeadDecisionAgent(BaseAgent):
+    @agent_activity
     def decide(self, task_id: str, route: RouteDecision, decision_room: DecisionRoom) -> None:
         task = self.taskboard.get_task(task_id)
         task.required_capabilities = list(route.required_capabilities)

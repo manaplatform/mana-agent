@@ -56,6 +56,12 @@ class UserMessageEvent:
     event_id: str = field(default_factory=lambda: _new_id("user"))
     turn_id: str = ""
     attachments: tuple[Any, ...] = ()
+    is_steering: bool = False
+    steering_status: str = ""
+    steering_sequence: int = 0
+    steering_instruction: str = ""
+    request_id: str = ""
+    steering_recorded: bool = False
 
     def __post_init__(self) -> None:
         if not self.turn_id:
@@ -137,8 +143,8 @@ class StreamTokenEvent:
 
 
 @dataclass(slots=True)
-class CodingActivityEvent:
-    """A backend-neutral coding lifecycle update for an active turn."""
+class ActivityEvent:
+    """A public runtime activity update for an active turn, across all domains."""
 
     activity: dict[str, Any]
     timestamp: str = field(default_factory=_utc_now)
@@ -150,7 +156,11 @@ class CodingActivityEvent:
         if provider_id:
             self.event_id = provider_id
         if not self.turn_id:
-            self.turn_id = str(self.activity.get("turn_id") or "") or _new_id("turn")
+            self.turn_id = str(self.activity.get("execution_id") or self.activity.get("turn_id") or "") or _new_id("turn")
+
+
+# Preserve existing imports and isinstance checks.
+CodingActivityEvent = ActivityEvent
 
 
 # Union type for convenience (runtime checks use isinstance)
@@ -170,6 +180,7 @@ __all__ = [
     "ToolResultEvent",
     "StreamTokenEvent",
     "CodingActivityEvent",
+    "ActivityEvent",
     "ChatEvent",
     "_utc_now",
     "_new_id",

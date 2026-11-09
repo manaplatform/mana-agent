@@ -22,6 +22,19 @@ _execution: ContextVar[dict[str, object] | None] = ContextVar("mana_coding_execu
 
 
 def publish_coding_event(event: AgentEvent) -> None:
+    from mana_agent.chat.activity import project_activity
+    from mana_agent.services.activity_context import current_activity_context
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+    context = current_activity_context()
+    if context is not None:
+        try:
+            public = project_activity(event, protected=context.protected_text)
+            if public is not None:
+                published = get_execution_event_hub().publish(public)
+                if published.get("visibility") == "internal":
+                    return
+        except Exception:
+            logger.warning("Coding activity projection unavailable")
     scoped = _scoped_subscriber.get()
     if scoped is not None:
         try:
@@ -75,6 +88,10 @@ def coding_execution_context(*, task_id: str, backend: str, model: str = ""):
         _execution.reset(token)
 
 
+def current_coding_execution() -> dict[str, object] | None:
+    return _execution.get()
+
+
 def publish_internal_tool_event(
     kind: str,
     tool: str,
@@ -102,7 +119,9 @@ def publish_internal_tool_event(
         sequence=sequence,
         status="failed" if failed else "success" if completed else "running",
         title=str(tool),
-        summary=str(args or "")[:1000],
+        summary=f"{tool} {phase}",
+        operation_id=cid,
+        producer_sequence=sequence,
         tool_name=str(tool),
         duration_ms=int(float(duration) * 1000) if duration is not None else None,
         error=str(error or ""),

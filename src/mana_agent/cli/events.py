@@ -30,6 +30,15 @@ class ChatEvent:
     duration_ms: int | None = None
     token_usage: TokenUsage | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    task_id: str = ""
+    root_task_id: str = ""
+    parent_task_id: str = ""
+    parent_agent_id: str = ""
+    attempt_id: str = ""
+    attempt_generation: int = 0
+    operation_id: str = ""
+    producer_sequence: int = 0
+    execution_mode: str = ""
 
     @property
     def id(self) -> str:
@@ -118,6 +127,10 @@ class ChatEvent:
             "token_usage": self.token_usage.as_dict() if self.token_usage is not None else None,
             "metadata": dict(self.metadata),
             "details": dict(self.metadata),
+            **{key: getattr(self, key) for key in (
+                "task_id", "root_task_id", "parent_task_id", "parent_agent_id", "attempt_id",
+                "attempt_generation", "operation_id", "producer_sequence", "execution_mode",
+            )},
         }
 
 

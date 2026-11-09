@@ -232,7 +232,7 @@ def test_execution_trace_chronological_progression_and_in_place_updates() -> Non
         "status": "success",
     })
     assert trace.is_completed is True
-    assert s5.status == "completed"  # Running model step automatically finalized
+    assert s5.status == "unverified"  # Root completion does not prove an unobserved model outcome
     assert s6.status == "completed"
     assert len(trace.steps) == 6
 
@@ -401,6 +401,9 @@ def test_chat_log_places_panel_under_user_message_and_clears_on_new() -> None:
             )
             history.add(asst_ev)
             await pilot.pause()
+            assert panel.trace.is_completed is False
+            history.add(CodingActivityEvent(activity={"type": "turn.finished", "status": "success"}, turn_id="turn-user-1"))
+            await pilot.pause()
             assert panel.trace.is_completed is True
 
             # Clear log on /new
@@ -432,7 +435,7 @@ def test_execution_trace_and_activity_boxes_handle_string_args_without_error() -
         },
     })
     assert len(trace.coding_events) == 1
-    assert "src/mana_agent/app.py" in trace.changed_files
+    assert trace.changed_files == []  # Inspection arguments are not mutation evidence
 
 
 def test_activity_box_stays_open_on_new_activity_and_scrolls_to_latest() -> None:

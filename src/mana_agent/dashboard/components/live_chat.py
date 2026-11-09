@@ -22,6 +22,7 @@ def live_chat_html(
     """Build live chat with the shared timeline and context/cost meter."""
     session_id = require_safe_id(conversation_id, field="conversation_id")
     script = Path(__file__).with_name("live_chat.js").read_text(encoding="utf-8")
+    from mana_agent.config.user_config import get_setting
     config = {
         "mountId": "mana-live-chat",
         "sessionId": session_id,
@@ -33,6 +34,7 @@ def live_chat_html(
         "events": events,
         "height": height,
         "contextCostMeter": True,
+        "activityVisibility": get_setting("MANA_ACTIVITY_VISIBILITY", "normal"),
     }
     safe_config = script_json(config)
     return (

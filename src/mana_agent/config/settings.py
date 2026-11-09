@@ -70,6 +70,7 @@ def resolve_embed_model(
 
 
 class Settings(BaseSettings):
+    mana_activity_visibility: Literal["minimal", "normal", "verbose"] = Field(default="normal", alias="MANA_ACTIVITY_VISIBILITY")
     mana_config_schema_version: int = Field(default=2, alias="MANA_CONFIG_SCHEMA_VERSION")
     mana_ai_provider: str = Field(default="openai", alias="MANA_AI_PROVIDER")
     mana_primary_model: str = Field(

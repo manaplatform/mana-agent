@@ -470,8 +470,18 @@ def _plan_command(context: CommandContext, args: list[str]) -> CommandResult:
     if not plan_task:
         plan_task = "analyze and plan the next repository change"
 
-    activity_sink = context.frontend_data.get("activity_sink")
-    preparation_event_id = f"plan-preparation-{context.session_id or 'session'}"
+    original_activity_sink = context.frontend_data.get("activity_sink")
+    plan_turn_id = str(context.frontend_data.get("activity_turn_id") or "plan-" + __import__("uuid").uuid4().hex)
+    def activity_sink(event):
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        from mana_agent.workspaces.paths import repository_id_for_path
+        root = Path(getattr(context.gateway, "root", None) or Path.cwd())
+        event = {**event, "execution_mode": "plan", "operation_id": event.get("event_id", "")}
+        get_execution_event_hub().publish(event, conversation_id=context.session_id, execution_id=plan_turn_id,
+                                          repository_id=repository_id_for_path(root))
+        if callable(original_activity_sink):
+            original_activity_sink(event)
+    preparation_event_id = f"plan-preparation-{plan_turn_id}"
     if callable(activity_sink):
         activity_sink({
             "event_id": preparation_event_id,
@@ -695,8 +705,30 @@ def _reject_command(context: CommandContext, args: list[str]) -> CommandResult:
     )
 
 
+def _activity(context: CommandContext, args: list[str]) -> CommandResult:
+    from mana_agent.config.user_config import get_setting, save_user_config
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+    choice = args[0] if args else "history"
+    if choice in {"minimal", "normal", "verbose"}:
+        save_user_config({"MANA_ACTIVITY_VISIBILITY": choice})
+        return CommandResult(status="success", message=f"Activity visibility: {choice}.", data={"activity_visibility": choice})
+    if choice != "history" or len(args) > 2:
+        raise ValueError("Usage: /activity [minimal|normal|verbose|history [before-sequence]]")
+    before = int(args[1]) if len(args) == 2 else 0
+    rows = get_execution_event_hub().history(conversation_id=context.session_id, repository_id=context.repository_id,
+                                             before_sequence=before, limit=40)
+    public = [row for row in rows if row.get("visibility") != "internal"]
+    lines = [f"{row.get('agent_id') or 'MainAgent'} · {row.get('title') or row.get('type')} · {row.get('status')}"
+             + (f" — {row['summary']}" if row.get("summary") else "") for row in public]
+    if rows:
+        lines.append(f"Earlier: /activity history {rows[0].get('sequence')}")
+    return CommandResult(status="success", message="\n".join(lines) or "No activity recorded.",
+                         data={"events": public, "activity_visibility": get_setting("MANA_ACTIVITY_VISIBILITY", "normal")})
+
+
 def definitions() -> list[CommandDefinition]:
     rows = [
+        CommandDefinition(canonical_name="activity", description="Show activity history or choose its visibility.", argument_schema="[minimal|normal|verbose|history [before-sequence]]", handler=_activity),
         CommandDefinition(canonical_name="new", description="Permanently replace the current chat.", required_capability="sessions", handler=_new),
         CommandDefinition(canonical_name="session", aliases=("sessions",), description="Open the repository-scoped chat picker and manage chats.", argument_schema="[list|current|show|switch|rename|delete]", required_capability="sessions", confirmation_actions=frozenset({"delete"}), handler=_sessions),
         CommandDefinition(canonical_name="processes", description="Inspect persistent operating-system services.", argument_schema="[list|show|logs|stop|restart|cleanup]", required_capability="processes", confirmation_actions=frozenset({"stop"}), handler=_processes),

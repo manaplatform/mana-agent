@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import time
+import threading
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
@@ -540,16 +541,29 @@ class InternalCodingEngine(CodingEngine):
             if cancel_ev.is_set():
                 raise asyncio.CancelledError()
 
+            from mana_agent.services.activity_context import emit_activity
+            model_operation = f"model-{task.task_id}-{turn}"
+            emit_activity("model.started", title="Waiting for the coding model", status="running",
+                          operation_id=model_operation, model=self.model)
             if hasattr(model_with_tools, "ainvoke") and callable(model_with_tools.ainvoke):
                 response = await model_with_tools.ainvoke(messages)
             else:
                 response = await asyncio.to_thread(model_with_tools.invoke, messages)
 
+            emit_activity("model.completed", title="Coding model responded", status="success",
+                          operation_id=model_operation, model=self.model)
+            publisher = getattr(llm, "_publish_completed_activity_summaries", None)
+            if callable(publisher):
+                try:
+                    publisher(response)
+                except Exception:
+                    logger.warning("Public provider summary unavailable")
             tool_calls = getattr(response, "tool_calls", None)
             if not tool_calls:
                 content_val = getattr(response, "content", response)
                 if isinstance(content_val, list):
-                    final_summary = "".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content_val)
+                    from mana_agent.utils.text import extract_model_text
+                    final_summary = extract_model_text(content_val)
                 else:
                     final_summary = str(content_val or "")
                 if not final_summary.strip() and getattr(session.state, "executed_operations", []):
@@ -1087,16 +1101,78 @@ class InternalCodingEngine(CodingEngine):
         raise RuntimeError("Internal coding model is unavailable; configure the selected provider and credentials")
 
     async def stream(self, task: CodingTask, workspace: WorkspaceContext) -> AsyncIterator[AgentEvent]:
-        events: list[AgentEvent] = []
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=1024)
+        overflow: dict[str, AgentEvent] = {}
+        overflow_lock = threading.RLock()
+        scheduled = threading.BoundedSemaphore(1024)
+        loop_thread = threading.get_ident()
+        dropped = 0
 
-        def _collector(ev: AgentEvent) -> None:
-            events.append(ev)
+        def enqueue(event: AgentEvent) -> None:
+            try:
+                events.put_nowait(event)
+            except asyncio.QueueFull:
+                # The hub journals each public event independently. Coalesce only
+                # this stream's presentation backlog, retaining terminal outcomes.
+                coalesce(event)
 
-        with coding_event_scope(_collector):
-            await self.execute(task, workspace)
+        def coalesce(event: AgentEvent) -> None:
+            nonlocal dropped
+            key = event.operation_id or event.event_id
+            with overflow_lock:
+                if key in overflow or len(overflow) < 1024:
+                    overflow[key] = event
+                else:
+                    dropped += 1
 
-        for ev in events:
-            yield ev
+        def collect(event: AgentEvent) -> None:
+            if threading.get_ident() == loop_thread:
+                enqueue(event)
+            elif scheduled.acquire(blocking=False):
+                def receive():
+                    try:
+                        enqueue(event)
+                    finally:
+                        scheduled.release()
+                try:
+                    loop.call_soon_threadsafe(receive)
+                except RuntimeError:
+                    scheduled.release()
+            else:
+                coalesce(event)
+
+        async def produce() -> None:
+            with coding_event_scope(collect):
+                await self.execute(task, workspace)
+
+        producer = asyncio.create_task(produce())
+        try:
+            while not producer.done() or not events.empty() or overflow:
+                if events.empty() and overflow:
+                    with overflow_lock:
+                        pending = list(overflow.values())
+                        overflow.clear()
+                    for event in pending:
+                        yield event
+                    continue
+                getter = asyncio.create_task(events.get())
+                done, _ = await asyncio.wait({getter, producer}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    yield getter.result()
+                else:
+                    getter.cancel()
+                    await asyncio.gather(getter, return_exceptions=True)
+            if dropped:
+                yield AgentEvent(event_type="activity.degraded", task_id=task.task_id, backend="internal",
+                    title="Activity stream exceeded its local buffer", status="waiting", visibility="progress",
+                    summary="Some presentation updates require recovery from durable activity history.", payload={"dropped": dropped})
+            await producer  # Preserve the original execution failure.
+        finally:
+            if not producer.done():
+                await self.cancel(task.task_id)
+                producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
 
     async def cancel(self, task_id: str) -> None:
         ev = self._cancellation_events.get(task_id)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
+from contextlib import nullcontext
+import logging
 from typing import Any, Callable
 
 from mana_agent.multi_agent.core.ids import new_task_id
@@ -22,6 +24,9 @@ from mana_agent.context_cost.compression import compress_tool_result, render_env
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.multi_agent.taskboard.store import JsonStateStore, serialize, task_from_dict
 from mana_agent.multi_agent.taskboard.validators import validate_transition
+
+
+logger = logging.getLogger(__name__)
 
 
 def _append_unique(target: list[str], values: list[str]) -> None:
@@ -62,6 +67,7 @@ class TaskBoard:
         self.memory_service = memory_service
         self._task_id_is_reserved = task_id_is_reserved
         self.tasks: dict[str, TaskBoardItem] = {}
+        self._activity_snapshots: dict[str, tuple] = {}
         self.load()
 
     def _new_task_id(self) -> str:
@@ -985,9 +991,42 @@ class TaskBoard:
         return render_envelope(envelope)
 
     def save(self) -> None:
+        notifications = []
+        snapshots = {}
         with self._save_lock:
             for task in self.tasks.values():
                 self.store.repository.save_task(task)
+                snapshot = (str(task.status), task.aggregate_progress, tuple(task.plan), tuple(task.blockers), task.owner_agent_id)
+                if self._activity_snapshots.get(task.task_id) != snapshot:
+                    snapshots[task.task_id] = snapshot
+                    notifications.append({
+                        "type": "task.updated", "task_id": task.task_id,
+                        "root_task_id": task.root_task_id or task.task_id, "parent_task_id": task.parent_task_id,
+                        "agent_id": task.owner_agent_id or "main", "title": task.title,
+                        "status": task.status.value, "summary": "; ".join(task.blockers) if task.blockers else task.aggregate_progress,
+                        "operation_id": f"{task.task_id}:taskboard",
+                        "metadata": {"summary_source": "agent" if task.aggregate_progress or task.blockers else "observable",
+                                     "evidence_status": "unverified"},
+                        "conversation_id": task.session_id or "", "repository_id": task.primary_repository_id or "",
+                    })
+            self._activity_snapshots.update(snapshots)
+        # Emission follows successful storage and is never a new task transition.
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        for notification in notifications:
+            try:
+                if context is not None:
+                    notification["execution_id"] = context.execution_id
+                    notification["conversation_id"] = notification["conversation_id"] or context.conversation_id
+                    notification["repository_id"] = notification["repository_id"] or context.repository_id
+                    notification["attempt_id"] = context.attempt_id
+                    notification["attempt_generation"] = context.attempt_generation
+                with context.publication() if context else nullcontext():
+                    get_execution_event_hub().publish(notification, authoritative=True)
+            except Exception:
+                # TaskBoard remains authoritative even if the view is unavailable.
+                logger.debug("TaskBoard activity projection unavailable", exc_info=True)
 
     def load(self) -> None:
         self.tasks = {task.task_id: task for task in self.store.repository.list_tasks()}

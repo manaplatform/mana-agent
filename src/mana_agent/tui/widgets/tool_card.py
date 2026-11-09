@@ -115,7 +115,7 @@ class ToolCard(Vertical):
 
         # Always-visible compact line with "full data" (tool + summary).
         # This stays visible even if the details "menu" (Collapsible) is collapsed.
-        self.header_line = Static(header, classes="tool-card-header")
+        self.header_line = Static(header, classes="tool-card-header", markup=False)
         yield self.header_line
 
         # Collapsible "menu" for verbose/full details (args + result body).

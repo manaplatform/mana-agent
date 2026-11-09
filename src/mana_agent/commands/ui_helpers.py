@@ -12,7 +12,11 @@ import subprocess
 import sys
 import time
 import uuid
-from collections import deque
+from collections import deque, OrderedDict
+from contextvars import ContextVar
+from contextlib import contextmanager
+import threading
+from mana_agent.chat.activity import project_activity, operation_key, bound_operations, visible_activity, safe_text, accepts_activity_update
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -89,50 +93,42 @@ def _sanitize_full_auto_answer_text(
 
 
 class RichToolCallbackHandler(BaseCallbackHandler):
-    """Stream tool start/end/error into the active chat log."""
+    """Correlate concurrent callbacks by their registered run ID."""
 
     def __init__(self, *, show_inputs: bool = True) -> None:
         self.show_inputs = show_inputs
-        self._tool: str | None = None
-        self._t0: float = 0.0
-        self._event_id: str | None = None
+        self._runs: dict[str, tuple[str, float, str]] = {}
+        self._run_lock = threading.RLock()
+
+    @staticmethod
+    def _run_key(kwargs: dict[str, Any]) -> str:
+        return str(kwargs.get("run_id") or f"thread-{threading.get_ident()}")
 
     def on_tool_start(self, serialized, input_str: str, **kwargs) -> None:
-        name = (serialized or {}).get("name") or "tool"
-        self._tool = str(name)
-        self._t0 = time.time()
-        self._event_id = f"callback-{uuid.uuid4().hex}"
-        args = ""
-        if self.show_inputs and input_str:
-            args = input_str.strip().replace("\n", " ")
-        if self._tool == "browser_type" and args:
-            try:
-                payload = json.loads(args)
-            except Exception:
-                args = "[browser input redacted]"
-            else:
-                if isinstance(payload, dict) and "value" in payload:
-                    payload["value"] = "[REDACTED]"
-                args = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        emit_tool_event("start", self._tool, args=args, event_id=self._event_id)
+        tool = str((serialized or {}).get("name") or "tool")
+        event_id = f"callback-{uuid.uuid4().hex}"
+        with self._run_lock:
+            self._runs[self._run_key(kwargs)] = (tool, time.monotonic(), event_id)
+        # Inputs remain at the guarded invocation boundary. The public row only
+        # describes the registered operation, including redacted browser input.
+        args = "[browser input redacted: REDACTED]" if tool == "browser_type" else ""
+        emit_tool_event("start", tool, args=args, event_id=event_id)
+
+    def _finish(self, kwargs: dict[str, Any]) -> tuple[str, float, str | None]:
+        with self._run_lock:
+            tool, started, event_id = self._runs.pop(self._run_key(kwargs), ("tool", time.monotonic(), None))
+        return tool, max(0.0, time.monotonic() - started), event_id
 
     def on_tool_end(self, output: str, **kwargs) -> None:
-        tool = self._tool or "tool"
-        dt = max(0.0, time.time() - self._t0)
-        event_id = self._event_id
-        self._tool = None
-        self._event_id = None
+        tool, duration, event_id = self._finish(kwargs)
         if error := structured_tool_error_detail(output):
-            emit_tool_event("error", tool, duration=dt, error=error, event_id=event_id)
-            return
-        emit_tool_event("end", tool, duration=dt, event_id=event_id)
+            emit_tool_event("error", tool, duration=duration, error=error, event_id=event_id)
+        else:
+            emit_tool_event("end", tool, duration=duration, event_id=event_id)
 
     def on_tool_error(self, error: BaseException, **kwargs) -> None:
-        tool = self._tool or "tool"
-        event_id = self._event_id
-        self._tool = None
-        self._event_id = None
-        emit_tool_event("error", tool, error=str(error), event_id=event_id)
+        tool, duration, event_id = self._finish(kwargs)
+        emit_tool_event("error", tool, duration=duration, error=str(error), event_id=event_id)
 
 
 # -----------------------------------------
@@ -423,6 +419,24 @@ class LiveToolActivity:
         self._ok = 0
         self._failed = 0
         self.events: list[ChatEvent] = []
+        self._activities: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._activity_lock = threading.RLock()
+        self._hub_unsubscribe = None
+
+    def handle_activity(self, payload: dict[str, Any]) -> None:
+        public = project_activity(payload)
+        if public is None:
+            return
+        with self._activity_lock:
+            key = operation_key(public)
+            previous = self._activities.get(key)
+            if previous is not None and not accepts_activity_update(previous, public):
+                return
+            if previous is not None:
+                public["started_at"] = previous.get("started_at") or public.get("started_at")
+            self._activities[key] = public
+            retained = bound_operations(list(self._activities.values()))
+            self._activities = OrderedDict((operation_key(row), row) for row in retained)
 
     # -- event ingestion --------------------------------------------------
     def handle(
@@ -441,7 +455,8 @@ class LiveToolActivity:
         resolved_model: str = "",
     ) -> None:
         tool = str(tool or "tool")
-        args = str(args or "")
+        args = "[browser input redacted: REDACTED]" if tool == "browser_type" and args else ""
+        error = safe_text(error, 240)
         key = self._event_key(tool, args, event_id)
         if kind == "start":
             self._started_at[key] = time.time()
@@ -455,7 +470,7 @@ class LiveToolActivity:
                 "resolved_model": resolved_model,
             }
             self.log.start_tool(tool, tool_args=args, tool_call_id=event_id or "", agent_id=agent_id, subagent_id=subagent_id, agent_role=agent_role)
-            summary = action_summary if (action_summary := _compact_display_text(args, 160)) else derive_tool_action_summary(tool, args)
+            summary = f"{tool} started"
             start_evt = make_tool_event(
                 "start",
                 tool,
@@ -479,6 +494,18 @@ class LiveToolActivity:
         elif kind == "error":
             key = self._matching_running_key(key, tool, args, event_id)
             self._finish(key, tool, duration=duration, ok=False, error=str(error or ""), event_id=event_id, agent_id=agent_id, subagent_id=subagent_id, agent_role=agent_role)
+
+    def trim_presentation(self) -> None:
+        latest = OrderedDict((event.event_id, event) for event in self.events)
+        rows = list(latest.values())
+        completed = [row for row in rows if row.status != "running"]
+        keep = {id(row) for row in completed[-200:]} | {id(row) for row in rows if row.status == "running"}
+        self.events[:] = [row for row in rows if id(row) in keep]
+        active = {id(row) for row in self.log.entries if row.role == "tool" and row.status == "running"}
+        recent = {id(row) for row in self.log.entries[-200:]}
+        self.log.entries[:] = [row for row in self.log.entries if id(row) in active | recent]
+        retained = {id(row) for row in self.log.entries}
+        self.log._tool_entries = {key: row for key, row in self.log._tool_entries.items() if id(row) in retained}
 
     @staticmethod
     def _event_key(tool: str, args: str, event_id: str | None) -> str:
@@ -567,12 +594,42 @@ class LiveToolActivity:
 
     # -- rendering --------------------------------------------------------
     def __rich__(self):
-        return ChatLogRenderer(self.log, spinner_text=self.spinner_text, max_rows=self.max_rows).__rich__()
+        from mana_agent.config.user_config import get_setting
+        with self._activity_lock:
+            activities = [row for row in self._activities.values() if visible_activity(row, str(get_setting("MANA_ACTIVITY_VISIBILITY", "normal")))]
+        if not activities:
+            return ChatLogRenderer(self.log, spinner_text=self.spinner_text, max_rows=self.max_rows).__rich__()
+        lines = Text()
+        for row in activities[-40:]:
+            status = str(row.get("status") or "running")
+            icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(status, "◌")
+            actor = row.get("subagent_id") or row.get("agent_id") or "MainAgent"
+            meta = row.get("metadata") or {}
+            backend = row.get("backend") or meta.get("backend")
+            label = "Coding Activity" if backend in {"codex", "coding", "internal"} else "Activity"
+            title = row.get("title") or row.get("tool_name") or row.get("event_type")
+            if status == "running" and row.get("started_at"):
+                try:
+                    started = datetime.fromisoformat(str(row["started_at"]).replace("Z", "+00:00"))
+                    title = f"{title} · {max(0, int(time.time() - started.timestamp()))}s"
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            summary = row.get("summary") or ""
+            indent = "  ↳ " if row.get("parent_agent_id") else ""
+            if row.get("summary_source") in {"agent", "provider"}:
+                summary = "Summary: " + summary
+            elif row.get("evidence_status") == "verified":
+                summary = "Verified: " + summary
+            lines.append(f"{indent}{icon} {label} · {actor} — {title}", style="cyan" if status == "running" else "")
+            if summary:
+                lines.append(f" — {summary}")
+            lines.append("\n")
+        return Panel(lines, title="Activity", title_align="left", border_style="cyan")
 
 
 # Currently-active activity panel, set while a tool run is in progress.
-_ACTIVE_TOOL_ACTIVITY: LiveToolActivity | None = None
-_ACTIVE_CHAT_UI_STATE: ChatUIState | None = None
+_ACTIVE_TOOL_ACTIVITY: ContextVar[LiveToolActivity | None] = ContextVar("mana_cli_activity", default=None)
+_ACTIVE_CHAT_UI_STATE: ContextVar[ChatUIState | None] = ContextVar("mana_cli_chat_state", default=None)
 
 
 def _env_flag(name: str) -> bool | None:
@@ -606,20 +663,41 @@ def _use_live_tool_activity(console: Console) -> bool:
 
 def set_active_tool_activity(activity: LiveToolActivity | None) -> None:
     """Register (or clear) the active chat log that tool events should stream into."""
-    global _ACTIVE_TOOL_ACTIVITY
-    _ACTIVE_TOOL_ACTIVITY = activity
+    previous = _ACTIVE_TOOL_ACTIVITY.get()
+    if previous is not None and previous is not activity and previous._hub_unsubscribe:
+        previous._hub_unsubscribe()
+        previous._hub_unsubscribe = None
+    _ACTIVE_TOOL_ACTIVITY.set(activity)
+    state = _ACTIVE_CHAT_UI_STATE.get()
+    if activity is not None and state is not None and activity._hub_unsubscribe is None:
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        activity._hub_unsubscribe = get_execution_event_hub().subscribe(
+            state.session_id, activity.handle_activity, repository_id=state.repository_id, buffered=True)
 
 
 def set_active_chat_ui_state(state: ChatUIState | None) -> None:
-    global _ACTIVE_CHAT_UI_STATE
-    _ACTIVE_CHAT_UI_STATE = state
+    _ACTIVE_CHAT_UI_STATE.set(state)
 
 
 def emit_chat_event(event: ChatEvent) -> ChatEvent:
-    state = _ACTIVE_CHAT_UI_STATE
+    state = _ACTIVE_CHAT_UI_STATE.get()
     if state is not None:
         return state.record_event(event)
     return event
+
+
+_TOOL_EVENT_CALLBACK: ContextVar[Any] = ContextVar("mana_tool_observer", default=None)
+_OBSERVED_CALLS: dict[tuple, list[str]] = {}
+_OBSERVED_CALLS_LOCK = threading.RLock()
+
+
+@contextmanager
+def tool_event_scope(callback):
+    token = _TOOL_EVENT_CALLBACK.set(callback)
+    try:
+        yield
+    finally:
+        _TOOL_EVENT_CALLBACK.reset(token)
 
 
 def emit_tool_event(
@@ -637,6 +715,42 @@ def emit_tool_event(
     resolved_model: str = "",
 ) -> None:
     """Send a tool start/end/error event to the active chat log, if any."""
+    from mana_agent.services.activity_context import current_activity_context, emit_activity
+    context = current_activity_context()
+    internal_coding = False
+    if context is not None:
+        from mana_agent.coding.live_events import current_coding_execution
+        internal_coding = (current_coding_execution() or {}).get("backend") == "internal"
+        phase = "failed" if kind.lower() in {"error", "failed", "failure"} else "finished" if kind.lower() in {"end", "finished", "done", "success"} else "started"
+        call_id = str(event_id or "")
+        if not call_id:
+            key = (context.execution_id, threading.get_ident(), tool, agent_id, subagent_id)
+            with _OBSERVED_CALLS_LOCK:
+                if phase == "started":
+                    call_id = f"tool-{uuid.uuid4().hex}"
+                    if len(_OBSERVED_CALLS) >= 4000 and key not in _OBSERVED_CALLS:
+                        _OBSERVED_CALLS.pop(next(iter(_OBSERVED_CALLS)))
+                    pending = _OBSERVED_CALLS.setdefault(key, [])
+                    pending.append(call_id)
+                    del pending[:-1024]
+                else:
+                    pending = _OBSERVED_CALLS.get(key, [])
+                    call_id = pending.pop() if pending else f"tool-{uuid.uuid4().hex}"
+                    if not pending:
+                        _OBSERVED_CALLS.pop(key, None)
+        event_id = call_id
+        if not internal_coding:
+            emit_activity(f"tool.{phase}", title=f"{tool} {phase}", status="failed" if phase == "failed" else "success" if phase == "finished" else "running",
+                          event_id=f"{call_id}-{phase}", operation_id=call_id, tool_name=tool,
+                          agent_id=agent_id or context.agent_id, subagent_id=subagent_id or context.subagent_id,
+                          duration_ms=int(duration * 1000) if duration is not None else None,
+                          error=safe_text(error) if error else "")
+    else:
+        callback = _TOOL_EVENT_CALLBACK.get()
+        if callback is not None:
+            callback(kind, tool, args=args, duration=duration, error=error, event_id=event_id,
+                     agent_id=agent_id, subagent_id=subagent_id, agent_role=agent_role,
+                     model_level=model_level, resolved_model=resolved_model)
     from mana_agent.coding.live_events import publish_internal_tool_event
 
     publish_internal_tool_event(
@@ -647,10 +761,10 @@ def emit_tool_event(
         error=error,
         event_id=event_id,
     )
-    activity = _ACTIVE_TOOL_ACTIVITY
+    activity = _ACTIVE_TOOL_ACTIVITY.get()
     if activity is None:
         return
-    before = len(activity.events)
+    before = {id(event) for event in activity.events}
     activity.handle(
         kind,
         tool,
@@ -664,10 +778,11 @@ def emit_tool_event(
         model_level=model_level,
         resolved_model=resolved_model,
     )
-    state = _ACTIVE_CHAT_UI_STATE
+    activity.trim_presentation()
+    state = _ACTIVE_CHAT_UI_STATE.get()
     if state is None:
         return
-    for event in activity.events[before:]:
+    for event in [event for event in activity.events if id(event) not in before]:
         event.session_id = state.session_id
         event.turn_id = state.tracker.current_turn_id
         if event.type in {"tool.finished", "tool.failed"}:
@@ -699,6 +814,8 @@ def log_worker_event(event: Any) -> None:
         if isinstance(maybe_data, dict):
             data = maybe_data
 
+    if data.get("_activity_published"):
+        return
     status = str(data.get("status", "") or "").lower()
     tool = str(data.get("tool", "") or name).strip()
     args_str = str(data.get("args", "") or "")
@@ -706,7 +823,7 @@ def log_worker_event(event: Any) -> None:
     error = str(data.get("error", "") or "")
     event_id = str(data.get("event_id", "") or "") or None
 
-    kind = "start" if status == "start" else ("end" if status == "ok" else "error")
+    kind = "start" if status == "start" or name in {"tool_start", "worker_request_start"} else ("end" if status == "ok" or name in {"tool_end", "worker_request_end"} else "error")
     emit_tool_event(
         kind,
         tool,
@@ -1299,7 +1416,7 @@ def _run_with_live_buffer(
     try:
         if manage_live:
             if use_live_activity:
-                with Live(live_activity, console=console, refresh_per_second=12, transient=True):
+                with Live(live_activity, console=console, refresh_per_second=10, transient=True):
                     result = fn(callbacks=callbacks or [])
             else:
                 result = fn(callbacks=callbacks or [])

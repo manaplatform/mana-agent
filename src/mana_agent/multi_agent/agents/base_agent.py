@@ -1,12 +1,40 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
+from functools import wraps
+import uuid
 
 from mana_agent.multi_agent.communication.message_bus import MessageBus
 from mana_agent.multi_agent.core.types import AgentRole, AgentState, HandoffRecord, MessageType
 from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 from mana_agent.multi_agent.memory.memory_bundle import AgentMemoryBundle
+
+
+def agent_activity(method):
+    """Observe a specialist call without changing its decisions or result."""
+    @wraps(method)
+    def wrapped(agent, task_id: str, *args, **kwargs):
+        from mana_agent.services.activity_context import current_activity_context, activity_scope, emit_activity
+        context = current_activity_context()
+        if context is None:
+            return method(agent, task_id, *args, **kwargs)
+        scoped = replace(context, agent_id=agent.agent_id, parent_agent_id=agent.parent_agent_id or context.agent_id)
+        operation_id = f"agent-{uuid.uuid4().hex}"
+        with activity_scope(scoped):
+            emit_activity("agent.started", title=f"{agent.role.value}: {method.__name__.replace('_', ' ')}",
+                          status="running", operation_id=operation_id)
+            try:
+                result = method(agent, task_id, *args, **kwargs)
+            except BaseException:
+                emit_activity("agent.failed", title=f"{agent.role.value} failed", status="failed", operation_id=operation_id)
+                raise
+            emit_activity("agent.completed", title=f"{agent.role.value} completed",
+                          status="failed" if getattr(result, "passed", True) is False else "success",
+                          operation_id=operation_id)
+            return result
+    return wrapped
 
 class BaseAgent:
     def __init__(
@@ -70,6 +98,9 @@ class BaseAgent:
     def handoff(self, target_agent_id: str, task_id: str, reason: str) -> HandoffRecord:
         record = HandoffRecord(self.agent_id, target_agent_id, task_id, reason)
         self.taskboard.add_handoff(task_id, record)
+        from mana_agent.services.activity_context import emit_activity
+        emit_activity("agent.handoff", title=f"Handoff: {self.agent_id} → {target_agent_id}",
+                      task_id=task_id, agent_id=self.agent_id, parent_agent_id=self.parent_agent_id, status="success")
         self._remember_only(
         f"Handoff from {self.agent_id} to {target_agent_id} for task {task_id}: {reason[:300]}",
         scope="task",
@@ -95,6 +126,11 @@ class BaseAgent:
         
     def record_decision(self, task_id: str, decision) -> None:
         self.taskboard.add_decision(task_id, decision)
+        public_summary = getattr(decision, "public_summary", "")
+        if public_summary:
+            from mana_agent.services.activity_context import emit_activity
+            emit_activity("agent.summary", title="Agent decision", summary=public_summary,
+                          agent_id=self.agent_id, status="success", metadata={"summary_source": "agent"})
         summary = getattr(decision, "summary", None) or str(decision)
         self._remember_only(f"Decision by {self.agent_id}: {summary}", scope="task")
         self._remember_only(f"Decision recorded for task {task_id}: {summary}", scope="agent")

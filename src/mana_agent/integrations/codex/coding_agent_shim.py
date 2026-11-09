@@ -1058,7 +1058,9 @@ class CodexCodingAgentShim:
             return
 
         safe = progress_event_payload(event)
-        output_preview = str(safe.get("output_preview") or event.output_preview or "")
+        if safe.get("visibility") == "internal":
+            return
+        output_preview = str(safe.get("output_preview") or "")
         # Rebuild a slim AgentEvent for coding subscribers (no raw payload prose).
         progress = AgentEvent(
             event_id=str(safe.get("event_id") or event.event_id),
@@ -1081,7 +1083,17 @@ class CodexCodingAgentShim:
             output_preview=output_preview,
             visibility="progress",
             semantic_kind=str(safe.get("semantic_kind") or event.semantic_kind or ""),
-            payload={},
+            payload=dict(safe.get("metadata") or {}),
+            operation_id=str(safe.get("operation_id") or event.operation_id),
+            producer_sequence=event.producer_sequence or event.sequence,
+            agent_id=str(safe.get("agent_id") or event.agent_id),
+            subagent_id=str(safe.get("subagent_id") or event.subagent_id),
+            parent_agent_id=str(safe.get("parent_agent_id") or event.parent_agent_id),
+            root_task_id=str(safe.get("root_task_id") or event.root_task_id),
+            parent_task_id=str(safe.get("parent_task_id") or event.parent_task_id),
+            attempt_id=str(safe.get("attempt_id") or event.attempt_id),
+            attempt_generation=int(safe.get("attempt_generation") or event.attempt_generation),
+            execution_mode=str(safe.get("execution_mode") or event.execution_mode),
         )
         try:
             publish_coding_event(progress)

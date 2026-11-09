@@ -68,6 +68,7 @@ from mana_agent.chat.events import (
     UserMessageEvent,
 )
 from mana_agent.chat.history import ChatHistory, get_history
+from mana_agent.chat.activity import delivery_key, project_activity, safe_text
 from mana_agent.tui.widgets.attachment_bar import AttachmentBar
 from mana_agent.tui.widgets.chat_log import ChatLog
 from mana_agent.tui.widgets.message_input import MessageInput
@@ -84,6 +85,7 @@ class ManaChatApp(App):
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+r", "simulate_response", "Simulate Agent", show=True),
         Binding("ctrl+o", "attach_file", "Attach File", show=True),
+        Binding("ctrl+end", "latest_activity", "Latest activity", show=True),
     ]
 
     # Reactive status for footer
@@ -400,11 +402,14 @@ class ManaChatApp(App):
         try:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
 
+            from mana_agent.workspaces.paths import repository_id_for_path
             hub = get_execution_event_hub()
             if sid:
                 unsub = hub.subscribe(
                     sid,
                     self._handle_hub_session_event,
+                    repository_id=repository_id_for_path(self.repo_root),
+                    buffered=True,
                 )
             else:
                 unsub = hub.subscribe_all(
@@ -438,6 +443,13 @@ class ManaChatApp(App):
 
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
         event_id = str(event.get("event_id") or event.get("id") or "").strip()
+        if event_type in {"activity.degraded", "activity.backpressure"} and not event.get("execution_id"):
+            title = safe_text(event.get("title") or "Activity stream degraded", 120)
+            if self.is_running and threading.get_ident() != getattr(self, "_ui_thread_id", None):
+                self.call_from_thread(self.update_status, title)
+            else:
+                self.update_status(title)
+            return
 
         # Handle API, server, and transactional action approval modal trigger
         if event_type in {"api.waiting_approval", "server.waiting_approval", "action.approval.required"}:
@@ -594,37 +606,20 @@ class ManaChatApp(App):
             )
             return
 
-        # Deduplicate scope + hub delivery using original event_id
-        if event_id and event_id in self._delivered_coding_event_ids:
+        key = delivery_key(event)
+        if key in self._delivered_coding_event_ids:
             return
-
-        from mana_agent.coding.event_visibility import (
-            classify_coding_event,
-            is_user_publishable,
-            progress_event_payload,
-        )
-
-        metadata = dict(event.get("metadata") or {})
-        tool_name = str(event.get("tool_name") or metadata.get("tool_name") or "")
-        semantic_kind, visibility = classify_coding_event(event_type, tool_name=tool_name)
-        if not is_user_publishable(visibility):
-            # Internal reasoning, raw assistant generation / deltas, and provider internals remain hidden!
+        safe = project_activity(event)
+        if safe is None:
             return
-
-        if event_id:
-            self._delivered_coding_event_ids.add(event_id)
-
-        execution_id = str(event.get("execution_id") or event.get("task_id") or "")
-        target_turn_id = (
-            self._execution_to_frontend_turn.get(execution_id)
-            or self._current_frontend_turn_id
-            or execution_id
-        )
-
-        safe = progress_event_payload(event)
-        if event_id and not safe.get("event_id"):
-            safe["event_id"] = event_id
-
+        self._delivered_coding_event_ids.add(key)
+        if len(self._delivered_coding_event_ids) > 4000:
+            self._delivered_coding_event_ids = {key}
+        execution_id = str(event.get("execution_id") or event.get("turn_id") or "")
+        target_turn_id = self._execution_to_frontend_turn.get(execution_id) or execution_id
+        if not target_turn_id:
+            # An unbound event cannot attach itself to whichever turn is current.
+            return
         self._safe_post_activity(safe, target_turn_id)
 
     def _handle_api_approval_event(self, event: dict[str, Any]) -> None:
@@ -632,16 +627,22 @@ class ManaChatApp(App):
         self._handle_hub_session_event(event)
 
     def _safe_post_activity(self, activity: dict[str, Any], turn_id: str) -> None:
-        def _post() -> None:
-            self.history.add(CodingActivityEvent(activity=activity, turn_id=turn_id))
-
-        if hasattr(self, "call_from_thread") and threading.get_ident() != getattr(self, "_ui_thread_id", None):
-            try:
-                self.call_from_thread(_post)
-            except Exception:
-                _post()
-        else:
-            _post()
+        projected = project_activity(activity)
+        if projected is not None:
+            projected.setdefault("conversation_id", self._gateway_session_id)
+            projected.setdefault("execution_id", turn_id)
+            if projected["type"].startswith("steering."):
+                metadata = projected.get("metadata") or {}
+                request_id = str(metadata.get("request_id") or projected.get("request_id") or "")
+                if request_id and metadata.get("text") and not any(
+                    isinstance(row, UserMessageEvent) and row.is_steering and row.request_id == request_id
+                    for row in self.history.get_events()
+                ):
+                    self.history.add(UserMessageEvent(content=metadata["text"], turn_id=turn_id,
+                        event_id=f"steering-{request_id}", is_steering=True, request_id=request_id,
+                        steering_status=projected["type"].split(".")[-1], steering_recorded=bool(projected.get("sequence"))))
+            # ChatLog marshals history notifications through nonblocking messages.
+            self.history.add(CodingActivityEvent(activity=projected, turn_id=turn_id))
 
     def _handle_session_replacement(self, new_session_id: str, *, clear_view: bool = True) -> str:
         """Atomically detach previous chat/session, reset state, and attach fresh session."""
@@ -697,28 +698,23 @@ class ManaChatApp(App):
             return
         try:
             from mana_agent.services.execution_event_hub import get_execution_event_hub
-            from mana_agent.coding.event_visibility import classify_coding_event, is_user_publishable, progress_event_payload
-
+            from mana_agent.workspaces.paths import repository_id_for_path
             hub = get_execution_event_hub()
-            events = hub.history(conversation_id=session_id, limit=500)
-            for ev in events:
-                event_type = str(ev.get("type") or ev.get("event_type") or "").strip()
-                event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
-                if event_id and event_id in self._delivered_coding_event_ids:
-                    continue
-                metadata = dict(ev.get("metadata") or {})
-                tool_name = str(ev.get("tool_name") or metadata.get("tool_name") or "")
-                semantic_kind, visibility = classify_coding_event(event_type, tool_name=tool_name)
-                if not is_user_publishable(visibility):
-                    continue
-                if event_id:
-                    self._delivered_coding_event_ids.add(event_id)
-                execution_id = str(ev.get("execution_id") or ev.get("task_id") or "")
-                target_turn_id = self._execution_to_frontend_turn.get(execution_id) or execution_id
-                safe = progress_event_payload(ev)
-                if event_id and not safe.get("event_id"):
-                    safe["event_id"] = event_id
-                self._safe_post_activity(safe, target_turn_id)
+            repository = repository_id_for_path(self.repo_root)
+            high = hub.history(conversation_id=session_id, repository_id=repository, limit=1)
+            high_water = int(high[-1].get("sequence") or 0) if high else 0
+            cursor = 0
+            while cursor < high_water:
+                page = hub.history(conversation_id=session_id, repository_id=repository,
+                                   after_sequence=cursor, forward=True, limit=500)
+                if not page:
+                    break
+                for ev in page:
+                    sequence = int(ev.get("sequence") or 0)
+                    if sequence > high_water:
+                        break
+                    cursor = sequence
+                    self._handle_hub_session_event(ev)
         except Exception:
             logger.debug("Failed to replay durable events for session %s", session_id, exc_info=True)
 
@@ -1646,6 +1642,10 @@ class ManaChatApp(App):
             process_status = f"  |  processes: {active}"
         self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}{mode_str}{process_status}"
 
+    def action_latest_activity(self) -> None:
+        if self.chat_log is not None:
+            self.chat_log._scroll_to_latest()
+
     def action_clear_log(self) -> None:
         if self.chat_log:
             self.chat_log.clear_log()
@@ -1761,56 +1761,32 @@ class ManaChatApp(App):
         asyncio.create_task(self._submit_live_steering(result.strip()))
 
     async def _submit_live_steering(self, instruction: str) -> None:
+        import uuid
+        target_turn_id = self._current_frontend_turn_id or getattr(self.chat_log, "_current_turn_id", "")
+        if not target_turn_id or not self.gateway or not self._gateway_session_id:
+            self.notify("Steering unavailable: no active execution in this session.", severity="warning")
+            return
+        request_id = f"steer_{uuid.uuid4().hex}"
+        message = UserMessageEvent(content=instruction, turn_id=target_turn_id,
+                                   event_id=f"steering-{request_id}", is_steering=True,
+                                   steering_status="pending", steering_instruction=instruction,
+                                   request_id=request_id)
+        self.history.add(message)
         try:
-            if not self.gateway or not hasattr(self.gateway, "submit_steering"):
-                self.notify("Steering unavailable: gateway not connected.", severity="warning")
-                return
-            if not self._gateway_session_id:
-                self._gateway_session_id = self.gateway.create_session(frontend="tui")
-            sid = self._gateway_session_id or "tui_session"
-            res = await asyncio.to_thread(
-                self.gateway.submit_steering,
-                session_id=sid,
-                text=instruction,
-                scope="execution",
-            )
-            status = str(res.get("status", "received")).upper()
-            seq = res.get("sequence", 0)
-            target_turn_id = (
-                self._current_frontend_turn_id
-                or getattr(self.chat_log, "_current_turn_id", None)
-                or (list(self.chat_log._execution_panels.keys())[-1] if self.chat_log and self.chat_log._execution_panels else "")
-                or "turn-main"
-            )
-            steer_event = AssistantMessageEvent(
-                content=f"⚡ Live Steering submitted (#{seq} {status}): {instruction}",
-                turn_id=target_turn_id,
-                is_steering=True,
-                steering_status=status,
-                steering_sequence=seq,
-                steering_instruction=instruction,
-            )
-            self.history.add(steer_event)
-
-            self._safe_post_activity(
-                {
-                    "event_type": "steering.queued",
-                    "title": "Live steering queued",
-                    "status": "queued",
-                    "detail": f"#{seq} {status}: {instruction}",
-                    "summary": f"Steering #{seq} [{status}]: {instruction}",
-                    "metadata": {
-                        "instruction": instruction,
-                        "sequence": seq,
-                        "status": status,
-                    },
-                },
-                target_turn_id,
-            )
-            self.notify(f"Steering submitted [{status}]: {instruction[:35]}", severity="information")
+            result = await asyncio.to_thread(self.gateway.submit_steering,
+                                             session_id=self._gateway_session_id, text=instruction,
+                                             scope="execution", request_id=request_id, execution_id=target_turn_id)
+            status = str(result.get("status") or "queued")
+            self._safe_post_activity({"event_type": "steering.queued", "title": "Live steering queued",
+                                      "status": "queued", "operation_id": request_id, "detail": instruction,
+                                      "metadata": {"request_id": request_id, "text": instruction,
+                                                   "steering_sequence": result.get("sequence", 0),
+                                                   "status": status}}, target_turn_id)
         except Exception as exc:
-            logger.warning("Failed to submit live steering: %s", exc)
-            self.notify(f"Steering failed: {exc}", severity="error")
+            self._safe_post_activity({"event_type": "steering.rejected", "title": "Live steering rejected",
+                                      "status": "rejected", "summary": safe_text(exc), "operation_id": request_id,
+                                      "metadata": {"request_id": request_id}}, target_turn_id)
+            self.notify(f"Steering rejected: {safe_text(exc, 120)}", severity="error")
 
     def _apply_file_attachment_path(self, target_path: Path | str) -> None:
         p = Path(target_path).expanduser()
@@ -1975,7 +1951,7 @@ class ManaChatApp(App):
                         text,
                         session_id=self._gateway_session_id,
                         frontend="tui",
-                        frontend_data={"activity_sink": _plan_activity},
+                        frontend_data={"activity_sink": _plan_activity, "activity_turn_id": activity_turn.turn_id},
                     )
                 except Exception as exc:
                     result = None
@@ -2302,7 +2278,8 @@ class ManaChatApp(App):
         """Count ToolCall/ToolResult events already recorded for this turn."""
         n = 0
         for event in self.history.get_events():
-            if not isinstance(event, (ToolCallEvent, ToolResultEvent)):
+            is_runtime_tool = isinstance(event, CodingActivityEvent) and str(event.activity.get("event_type") or "").startswith(("tool.", "command."))
+            if not isinstance(event, (ToolCallEvent, ToolResultEvent)) and not is_runtime_tool:
                 continue
             if str(getattr(event, "turn_id", "") or "") == str(turn_id or ""):
                 n += 1
@@ -2335,7 +2312,7 @@ class ManaChatApp(App):
                 call_kwargs: dict[str, Any] = {
                     "tool_name": str(tool),
                     "args": args or {},
-                    "summary": str(args)[:60] if args else "running…",
+                    "summary": f"{tool} started",
                     "turn_id": turn_id,
                 }
                 if event_id and str(event_id).strip():
@@ -2403,7 +2380,7 @@ class ManaChatApp(App):
                 # Already rendered live in the backend-neutral execution panel.
                 continue
             tname = str(row.get("tool_name") or row.get("tool") or "tool")
-            args_summary = str(row.get("args_summary") or row.get("args") or tname)[:120]
+            args_summary = f"{tname} observed invocation"
             cid = str(row.get("call_id") or row.get("event_id") or f"gw-{tname}-{turn_id}-{idx}")
             status = str(row.get("status", "ok") or "ok").lower()
             preview = row.get("output_preview") or row.get("result_summary") or row.get("result") or "(ok)"
@@ -2449,18 +2426,16 @@ class ManaChatApp(App):
         turn_id = user_event.turn_id
 
         def _on_coding_event(event: Any) -> None:
-            payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else dict(event)
-            event_id = str(payload.get("event_id") or payload.get("id") or "").strip()
-            if event_id:
-                if event_id in self._delivered_coding_event_ids:
-                    return
-                self._delivered_coding_event_ids.add(event_id)
-            task_id = str(payload.get("task_id") or payload.get("execution_id") or "").strip()
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+            from mana_agent.workspaces.paths import repository_id_for_path
+            payload = project_activity(event)
+            if payload is None:
+                return
+            task_id = str(payload.get("task_id") or "")
             if task_id:
                 self._execution_to_frontend_turn[task_id] = turn_id
-            # The frontend turn is authoritative for presentation. Provider turn
-            # IDs remain available inside the normalized activity payload.
-            self.history.add(CodingActivityEvent(activity=payload, turn_id=turn_id))
+            get_execution_event_hub().publish(payload, conversation_id=self._gateway_session_id,
+                                              execution_id=turn_id, repository_id=repository_id_for_path(self.repo_root))
 
         # --- Planning collection state machine (mirrors console pre-generate logic) ---
         if self._in_planning_collection and self._planning_request:
@@ -2480,15 +2455,11 @@ class ManaChatApp(App):
 
         self.update_status("Thinking with multi-agent flow...")
 
-        # Bridge emit_tool_event for the *entire* turn — including gateway auto-chat.
-        # Previously the bridge was only installed after the gateway path returned,
-        # so email_read / web_search / MCP tools never became ToolCards in the TUI.
-        import mana_agent.commands.ui_helpers as ui_helpers
-        original_emit = ui_helpers.emit_tool_event
-        ui_helpers.emit_tool_event = self._make_tool_emit_bridge(
-            original_emit=original_emit,
-            turn_id=turn_id,
-        )
+        # Legacy observers are scoped to this turn; never replace a process-global
+        # emitter while another session or agent may be using it.
+        from mana_agent.commands.ui_helpers import tool_event_scope
+        tool_scope = tool_event_scope(self._make_tool_emit_bridge(original_emit=lambda *a, **k: None, turn_id=turn_id))
+        tool_scope.__enter__()
 
         answer = ""
         used_full_flow = False
@@ -2536,7 +2507,9 @@ class ManaChatApp(App):
                             "status": kwargs.get("status") or metadata.get("status") or "running",
                             **kwargs,
                         }
-                        self._safe_post_activity(event_payload, turn_id)
+                        from mana_agent.services.execution_event_hub import get_execution_event_hub
+                        from mana_agent.workspaces.paths import repository_id_for_path
+                        get_execution_event_hub().publish(event_payload, conversation_id=sid, execution_id=turn_id, repository_id=repository_id_for_path(self.repo_root))
                         try:
                             if hasattr(self, "call_from_thread"):
                                 self.call_from_thread(self.update_status, f"{display_title}…")
@@ -2944,7 +2917,7 @@ class ManaChatApp(App):
                             tool_name=tname,
                             args=args_val,
                             call_id=cid,
-                            summary=str(args_val)[:60] if args_val else "",
+                            summary=f"{tname} observed invocation",
                             turn_id=turn_id,
                         )
                         self.history.add(tcall)
@@ -3026,7 +2999,7 @@ class ManaChatApp(App):
                 except Exception as exc:
                     answer = f"Understood: {question[:80]}. (All paths failed: {exc})"
         finally:
-            ui_helpers.emit_tool_event = original_emit
+            tool_scope.__exit__(None, None, None)
 
         if not answer:
             answer = f"Understood: {question[:80]}. (No answer produced.)"

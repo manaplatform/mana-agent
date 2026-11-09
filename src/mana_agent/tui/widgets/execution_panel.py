@@ -5,18 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 from textual.containers import Vertical
-from textual.widgets import Collapsible, Static
+from textual.widgets import Button, Collapsible, Static
 
 from mana_agent.chat.execution_trace import (
     ExecutionTrace,
     classify_activity_category,
     event_classification_metadata,
 )
-from mana_agent.tui.widgets.activity_boxes import CodingActivityBox, MainActivityBox
+from mana_agent.tui.widgets.activity_boxes import CodingActivityBox, MainActivityBox, _ActivityRendering
 from mana_agent.tui.widgets.selectable_text import SelectableText
 
 
-class ExecutionPanel(Vertical):
+class ExecutionPanel(_ActivityRendering, Vertical):
     DEFAULT_CSS = """
     ExecutionPanel { height: auto; margin: 0 0 1 0; padding: 0; }
     .execution-header { text-style: bold; color: $accent; margin: 0 0 0 0; padding: 0 1; }
@@ -41,12 +41,16 @@ class ExecutionPanel(Vertical):
         self.coding_box = CodingActivityBox(turn_id=turn_id)
 
         # Header, steps, summary and footer widgets for overall turn
-        self.header = Static("◌ execution · queued", classes="execution-header")
-        self.steps_view = Static("", classes="execution-steps")
+        self.header = Static("◌ execution · queued", classes="execution-header", markup=False)
+        self.steps_view = Static("", classes="execution-steps", markup=False)
         self.steps_view.display = False
-        self.summary_card = Static("", classes="execution-summary")
-        self.footer = Static("0 events", classes="execution-footer")
+        self.summary_card = Static("", classes="execution-summary", markup=False)
+        self.footer = Static("0 events", classes="execution-footer", markup=False)
         self.context_meter: dict[str, Any] = {}
+        self._history_before = 0
+        self.history_view = SelectableText("", classes="execution-log")
+        self.history_details = Collapsible(self.history_view, title="Earlier activity", collapsed=True)
+        self.history_button = Button("Earlier activity", variant="default")
 
         # Aliases for backward compatibility with existing tests
         self.details = self.coding_box.details
@@ -59,51 +63,75 @@ class ExecutionPanel(Vertical):
         yield self.coding_box
         yield self.summary_card
         yield self.footer
+        yield self.history_button
+        yield self.history_details
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is not self.history_button:
+            return
+        event.stop()
+        import asyncio
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        scope = next((row for row in reversed(self.events) if row.get("conversation_id") and row.get("repository_id")), None)
+        if scope is None:
+            self.history_view.load_text("No durable activity history is available for this turn.")
+        else:
+            cursor = self._history_before or max(int(row.get("sequence") or 0) for row in self.events) + 1
+            rows = await asyncio.to_thread(get_execution_event_hub().history,
+                conversation_id=scope["conversation_id"], repository_id=scope["repository_id"],
+                execution_id=scope.get("execution_id") or self.turn_id, before_sequence=cursor, limit=200)
+            if rows:
+                self._history_before = min(int(row.get("sequence") or 0) for row in rows)
+                self.history_view.load_text("\n".join(
+                    f"{row.get('agent_id') or 'MainAgent'} · {row.get('title') or row.get('type')} · {row.get('status')}"
+                    + (f" — {row['summary']}" if row.get("summary") else "")
+                    for row in rows if row.get("visibility") != "internal"))
+            else:
+                self.history_view.load_text("No earlier activity.")
+                self.history_button.disabled = True
+        self.history_details.collapsed = False
 
     def update_trace_event(self, event: dict[str, Any]) -> None:
         self.update_event(event)
 
     def update_event(self, event: dict[str, Any]) -> None:
-        event_dict = dict(event)
-        event_id = str(event_dict.get("event_id") or event_dict.get("id") or "").strip()
-        if event_id:
-            if event_id in self._event_ids:
-                # Still pass to trace and activity boxes for idempotent updates/completion
-                self.trace.apply_event(event_dict)
-                category = classify_activity_category(
-                    event_dict.get("event_type") or event_dict.get("type") or "",
-                    event_dict.get("tool_name"),
-                    event_classification_metadata(event_dict),
-                )
-                if category == "coding":
-                    self.coding_box.update_event(event_dict)
-                else:
-                    self.main_box.update_event(event_dict)
-                self._render_state(event_dict)
-                return
-            self._event_ids.add(event_id)
-        self.events.append(event_dict)
-        if len(self.events) > 80:
-            self.events = self.events[-80:]
-            self._event_ids = {
-                str(e.get("event_id") or e.get("id") or "").strip()
-                for e in self.events
-                if str(e.get("event_id") or e.get("id") or "").strip()
-            }
+        from mana_agent.chat.activity import project_activity, delivery_key, bound_operations, operation_key, accepts_activity_update
+        event_dict = project_activity(event)
+        if event_dict is None:
+            return
+        key = delivery_key(event_dict)
+        if key in self._event_ids:
+            return
+        self._event_ids.add(key)
+        if len(self._event_ids) > 4000:
+            self._event_ids = {key}
+        op = operation_key(event_dict)
+        for i, row in enumerate(self.events):
+            if operation_key(row) == op:
+                if not accepts_activity_update(row, event_dict):
+                    return
+                self.events[i] = {**row, **event_dict}
+                break
+        else:
+            self.events.append(event_dict)
+        self.events[:] = bound_operations(self.events)
         self.trace.apply_event(event_dict)
-
-        # Route to appropriate activity box
-        category = classify_activity_category(
-            event_dict.get("event_type") or event_dict.get("type") or "",
-            event_dict.get("tool_name"),
-            event_classification_metadata(event_dict),
-        )
+        if self.trace.is_completed or self.trace.is_failed or self.trace.is_cancelled:
+            outcome = "cancelled" if self.trace.is_cancelled else "failed" if self.trace.is_failed else "success"
+            for box in (self.main_box, self.coding_box):
+                box._root_status = outcome
+                for operation in box.events:
+                    if str(operation.get("status")) not in {"success", "completed", "done", "failed", "error", "cancelled", "unverified"}:
+                        operation["status"] = "unverified"
+        else:
+            for box in (self.main_box, self.coding_box):
+                box._root_status = None
+        category = classify_activity_category(event_dict["event_type"], event_dict.get("tool_name"), event_classification_metadata(event_dict))
         if category == "coding":
             self.coding_box.update_event(event_dict)
         else:
             self.main_box.update_event(event_dict)
-
-        self._render_state(event_dict)
+        self._schedule_activity_render(lambda: self._render_state(event_dict))
 
     def on_mount(self) -> None:
         if self.events:
@@ -176,17 +204,6 @@ class ExecutionPanel(Vertical):
         if self.details:
             self.details.title = "coding activity" if has_coding else "activity"
 
-        # Synchronize backward compatible activity log
-        lines: list[str] = []
-        for row in self.events[-14:]:
-            row_status = str(row.get("status") or "running")
-            row_icon = {"success": "✓", "failed": "✗", "cancelled": "■"}.get(row_status, "›")
-            title = str(row.get("title") or row.get("event_type") or row.get("type") or "activity")
-            detail = str(row.get("output_preview") or row.get("summary") or row.get("error") or row.get("message") or "")
-            lines.append(f"{row_icon} {title}" + (f" — {detail}" if detail else ""))
-        if self.activity_log:
-            self.activity_log.load_text("\n".join(lines))
-
         # Overall footer statistics
         usage = event.get("token_usage") or {}
         tokens = usage.get("total_tokens") or usage.get("totalTokens")
@@ -220,7 +237,7 @@ class ExecutionPanel(Vertical):
         self.coding_box.display = len(self.coding_box.events) > 0
         self.main_box.display = len(self.main_box.events) > 0
 
-        is_turn_terminal = event_type in {"turn.completed", "turn.finished", "turn.cancelled"}
+        is_turn_terminal = self.trace.is_completed or self.trace.is_failed or self.trace.is_cancelled
         if is_turn_terminal:
             if self.details and getattr(self.coding_box, "_user_collapsed", None) is not False:
                 self.details.collapsed = True
@@ -234,7 +251,10 @@ class ExecutionPanel(Vertical):
                 files_count = len(self.coding_box.changed_files)
                 files_text = f"{files_count} file{'s' if files_count != 1 else ''} modified" if files_count > 0 else "Code inspected"
                 ops_count = len(self.coding_box.events)
-                summary_lines = [f"✓ Coding complete · {files_text} ({ops_count} operations)"]
+                outcome = "cancelled" if self.trace.is_cancelled else "failed" if self.trace.is_failed else "completed"
+                marker = "✓" if self.trace.is_completed else "■" if self.trace.is_cancelled else "✗"
+                evidence = " · verified" if (event.get("metadata") or {}).get("evidence_status") == "verified" else " · observed; verification recorded separately"
+                summary_lines = [f"{marker} Coding activity {outcome} · {files_text} ({ops_count} operations){evidence}"]
                 if self.coding_box.changed_files:
                     cfs = self.coding_box.changed_files
                     preview = ", ".join(cfs[:3]) + ("..." if len(cfs) > 3 else "")
@@ -244,19 +264,8 @@ class ExecutionPanel(Vertical):
             else:
                 self.summary_card.update("")
                 self.summary_card.display = False
+
         else:
-            # During active execution (new activities arriving):
-            # Do NOT close if already open; scroll to latest activity.
-            if self.coding_box.details and not self.coding_box.details.collapsed:
-                try:
-                    self.coding_box.activity_log.scroll_end(animate=False)
-                except Exception:
-                    pass
-            if self.main_box.details and not self.main_box.details.collapsed:
-                try:
-                    self.main_box.activity_log.scroll_end(animate=False)
-                except Exception:
-                    pass
             self.summary_card.update("")
             self.summary_card.display = False
 

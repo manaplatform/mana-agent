@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mana_agent.multi_agent.agents.base_agent import BaseAgent
+from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
 from mana_agent.multi_agent.core.ids import new_decision_id
 from mana_agent.multi_agent.core.types import QueueJobType, VerificationResult
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
@@ -26,6 +26,7 @@ class VerifierAgent(BaseAgent):
         record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
 
+    @agent_activity
     def verify_no_mutation(self, task_id: str, commands: list[str]) -> VerificationResult:
         result = VerificationResult(
             verification_id=new_decision_id().replace("decision", "verification", 1),
@@ -40,6 +41,7 @@ class VerifierAgent(BaseAgent):
         record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
 
+    @agent_activity
     def execute_verification(self, task_id: str, commands: list[str]) -> VerificationResult:
         if self.queue_manager is None:
             return self.record_failed_verification(
@@ -93,6 +95,7 @@ class VerifierAgent(BaseAgent):
         record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
 
+    @agent_activity
     def execute_git_verification(self, task_id: str, *, wants_push: bool, target_branch: str | None = None) -> VerificationResult:
         if self.queue_manager is None:
             return self.record_failed_verification(

@@ -35,6 +35,7 @@ from mana_agent.chat.events import (
 )
 from mana_agent.chat.execution_trace import is_coding_tool
 from mana_agent.chat.history import ChatHistory
+from mana_agent.chat.activity import delivery_key, safe_text
 from mana_agent.tui.widgets.tool_card import ToolCard
 from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.tui.widgets.selectable_text import SelectableText
@@ -51,6 +52,10 @@ class ChatHistoryMessage(Message):
     def __init__(self, event: ChatEvent) -> None:
         super().__init__()
         self.event = event
+
+
+class ActivityHistoryMessage(Message):
+    """One wake-up for a burst of activity; history retains the reduced state."""
 
 
 class ChatLog(VerticalScroll):
@@ -106,6 +111,11 @@ class ChatLog(VerticalScroll):
         self._user_widgets_by_turn: dict[str, SelectableText] = {}
         self._latest_user_widget: SelectableText | None = None
         self._latest_steered_widget: SelectableText | None = None
+        self._steered_widgets_by_turn: dict[str, SelectableText] = {}
+        self._steering_widgets: dict[str, SelectableText] = {}
+        self._activity_notification_lock = threading.Lock()
+        self._pending_activity_turns: set[str] = set()
+        self._activity_notification_pending = False
         self._current_turn_id: str | None = None
         # Deduplicate live + replay so the same event_id is only painted once
         self._rendered_ids: set[str] = set()
@@ -146,6 +156,18 @@ class ChatLog(VerticalScroll):
         - Other threads: non-blocking ``post_message`` (thread-safe; no deadlock risk
           with ``asyncio.to_thread`` / blocking workers).
         """
+        if isinstance(event, CodingActivityEvent) and threading.get_ident() != self._ui_thread_id:
+            with self._activity_notification_lock:
+                self._pending_activity_turns.add(event.turn_id)
+                if self._activity_notification_pending:
+                    return
+                self._activity_notification_pending = True
+            # Posting once avoids an unbounded Textual message queue during
+            # replay or a fast producer burst. The history already upserts and
+            # bounds active/recent operations before notifying this listener.
+            self.post_message(ActivityHistoryMessage())
+            return
+
         # Same UI thread: mount immediately when possible so user messages appear
         # in the message box without waiting for the next refresh cycle.
         if self._ui_thread_id is not None and threading.get_ident() == self._ui_thread_id:
@@ -180,15 +202,27 @@ class ChatLog(VerticalScroll):
         """Handle thread-safe history notifications posted from any thread."""
         self._safe_render(message.event)
 
+    def on_activity_history_message(self, message: ActivityHistoryMessage) -> None:
+        with self._activity_notification_lock:
+            turns = self._pending_activity_turns
+            self._pending_activity_turns = set()
+            self._activity_notification_pending = False
+        if self._history is not None:
+            for event in self._history.get_events():
+                if isinstance(event, CodingActivityEvent) and event.turn_id in turns:
+                    self._safe_render(event)
+
     def _safe_render(self, event: ChatEvent) -> None:
         """Render only when mounted; skip duplicates (live vs history replay)."""
         if not self.is_mounted:
             return
-        event_id = getattr(event, "event_id", None)
+        event_id = delivery_key(event.activity) if isinstance(event, CodingActivityEvent) else getattr(event, "event_id", None)
         if event_id and event_id in self._rendered_ids:
             return
         if event_id:
             self._rendered_ids.add(event_id)
+            if len(self._rendered_ids) > 4000:
+                self._rendered_ids = {event_id}
         self._render_event(event)
 
     def _render_event(self, event: ChatEvent) -> None:
@@ -212,7 +246,7 @@ class ChatLog(VerticalScroll):
 
         is_tool_event = isinstance(event, (ToolCallEvent, ToolResultEvent, CodingActivityEvent))
         # Keep chat history pinned at the end of chats (not snapped/pinned to tool widgets)
-        if was_near_bottom or is_tool_event:
+        if was_near_bottom or isinstance(event, UserMessageEvent):
             self._scroll_to_latest()
 
     def _pin_to_tool(self, tool_widget: Static | SelectableText | ToolCard | ExecutionPanel | None = None) -> None:
@@ -260,7 +294,7 @@ class ChatLog(VerticalScroll):
         """Keep the active execution panel (activity box) positioned after the latest steered message."""
         if panel is None or not getattr(panel, "is_mounted", False) or panel not in self.children:
             return
-        steered = getattr(self, "_latest_steered_widget", None)
+        steered = self._steered_widgets_by_turn.get(panel.turn_id)
         if steered is not None and getattr(steered, "is_mounted", False) and steered in self.children:
             try:
                 children = list(self.children)
@@ -274,7 +308,7 @@ class ChatLog(VerticalScroll):
         if panel is None:
             panel = ExecutionPanel(turn_id=turn_id)
             self._execution_panels[turn_id] = panel
-            steered = getattr(self, "_latest_steered_widget", None)
+            steered = self._steered_widgets_by_turn.get(turn_id)
             target = steered if (steered is not None and getattr(steered, "is_mounted", False) and steered in self.children) else None
             if target is None:
                 target = self._user_widgets_by_turn.get(turn_id) or self._latest_user_widget
@@ -287,7 +321,9 @@ class ChatLog(VerticalScroll):
         return panel
 
     def _add_user_message(self, event: UserMessageEvent) -> SelectableText:
-        display_text = event.content or ""
+        display_text = safe_text(event.content or "", 100000)
+        if event.is_steering:
+            display_text = f"⚡ Steering [{event.steering_status}]: {display_text}"
         if event.attachments:
             from mana_agent.chat.attachments import format_size
 
@@ -305,6 +341,15 @@ class ChatLog(VerticalScroll):
                 display_text = f"Attachments:\n{att_block}"
         widget = SelectableText(display_text, classes="user-message")
         self.mount(widget)
+        if event.is_steering:
+            setattr(widget, "_steering_instruction", safe_text(event.content, 16000))
+            setattr(widget, "_steering_status", event.steering_status)
+            setattr(widget, "_steering_recorded", event.steering_recorded)
+            self._steering_widgets[event.request_id] = widget
+            self._steered_widgets_by_turn[event.turn_id] = widget
+            self._latest_steered_widget = widget
+            self._ensure_panel_after_steered(self._execution_panels.get(event.turn_id))
+            return widget
         turn_id = event.turn_id or self._current_turn_id
         if turn_id:
             self._current_turn_id = turn_id
@@ -328,30 +373,6 @@ class ChatLog(VerticalScroll):
             # If we already have a streaming assistant for this turn, replace its content
             # Remove previous placeholder if present for same turn (simple heuristic)
             if event.turn_id:
-                panel = self._execution_panels.get(event.turn_id)
-                if panel is not None:
-                    is_failed = bool(
-                        getattr(event, "error", None)
-                        or getattr(event, "status", "") in {"failed", "error", "cancelled"}
-                        or (getattr(event, "metadata", None) and getattr(event, "metadata", {}).get("status") in {"failed", "error", "cancelled"})
-                        or "Gateway execution failed" in content
-                        or "Execution failed" in content
-                        or getattr(panel.trace, "is_failed", False)
-                    )
-                    if not is_failed:
-                        panel.update_event({
-                            "event_type": "turn.completed",
-                            "title": "Completed",
-                            "status": "success",
-                            "detail": "Response generated",
-                        })
-                    else:
-                        panel.update_event({
-                            "event_type": "turn.failed",
-                            "title": "Failed",
-                            "status": "failed",
-                            "detail": getattr(event, "error", None) or "Execution failed",
-                        })
                 for existing_id, w in list(self._assistant_widgets.items()):
                     if getattr(w, "_turn_id", None) == event.turn_id and existing_id != event.event_id:
                         try:
@@ -362,17 +383,11 @@ class ChatLog(VerticalScroll):
         self.mount(widget)
 
         if is_steering:
+            self._steered_widgets_by_turn[event.turn_id] = widget
             self._latest_steered_widget = widget
             target_panel = None
             if event.turn_id and event.turn_id in self._execution_panels:
                 target_panel = self._execution_panels[event.turn_id]
-            elif self._execution_panels:
-                for p in reversed(list(self._execution_panels.values())):
-                    if not getattr(getattr(p, "trace", None), "is_completed", False):
-                        target_panel = p
-                        break
-                if target_panel is None:
-                    target_panel = list(self._execution_panels.values())[-1]
 
             if target_panel is not None and target_panel in self.children and widget in self.children:
                 try:
@@ -499,6 +514,21 @@ class ChatLog(VerticalScroll):
         panel = self._get_or_create_execution_panel(event.turn_id)
         self._ensure_panel_after_steered(panel)
         panel.update_event(event.activity)
+        if str(event.activity.get("event_type") or "").startswith("steering."):
+            meta = event.activity.get("metadata") or {}
+            request_id = str(meta.get("request_id") or event.activity.get("request_id") or "")
+            widget = self._steering_widgets.get(request_id)
+            if widget is not None:
+                status = str(event.activity.get("event_type", "")).split(".")[-1]
+                instruction = meta.get("text") or meta.get("instruction") or getattr(widget, "_steering_instruction", "")
+                if instruction:
+                    setattr(widget, "_steering_instruction", instruction)
+                previous_status = getattr(widget, "_steering_status", "pending")
+                recorded = bool(event.activity.get("sequence"))
+                if previous_status not in {"applied", "rejected", "superseded"} or not getattr(widget, "_steering_recorded", False) and recorded:
+                    setattr(widget, "_steering_status", status)
+                    setattr(widget, "_steering_recorded", recorded)
+                    widget.load_text(f"⚡ Steering [{status}]: {instruction}")
         return panel
 
     def _append_to_assistant_widget(self, widget: SelectableText, token: str) -> None:
@@ -529,6 +559,11 @@ class ChatLog(VerticalScroll):
         self._tool_cards.clear()
         self._execution_panels.clear()
         self._user_widgets_by_turn.clear()
+        self._steering_widgets.clear()
+        self._steered_widgets_by_turn.clear()
+        with self._activity_notification_lock:
+            self._pending_activity_turns.clear()
+            self._activity_notification_pending = False
         self._latest_user_widget = None
         self._latest_steered_widget = None
         self._current_turn_id = None
@@ -543,6 +578,9 @@ class ChatLog(VerticalScroll):
         has been mounted. This prevents MountError when populating from history.
         """
         self._ui_thread_id = threading.get_ident()
+        with self._activity_notification_lock:
+            self._pending_activity_turns.clear()
+            self._activity_notification_pending = False
         if self._history:
             self.call_after_refresh(self._replay_history)
 

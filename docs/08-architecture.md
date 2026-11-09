@@ -475,3 +475,21 @@ src/mana_agent/
 - [Project Diagram](./07-diagram.md)
 - [README](../README.md)
 - [Resilient Execution Supervisor](./29-resilient-execution.md)
+
+## Public activity projection
+
+The existing `ExecutionEventHub` is the public activity publication path for
+Textual, Rich, dashboard, REST, and WebSocket consumers. `chat/activity.py`
+normalizes aliases, preserves ownership and operation correlation, and filters
+and redacts public fields before delivery and journaling. `activity_context.py`
+carries original attempt authorization; parent-side IPC callbacks validate that
+context without exposing lease credentials. Recorded TaskBoard and supervisor
+changes publish observations after persistence. The Autonomous Loop still
+chooses and executes; TaskBoard still owns progress; the supervisor still owns
+lifecycle and safety. Activity is a read-only projection, not another controller.
+
+Public sequence is conversation order, while producer sequence remains separate.
+Portable file locks serialize journal append/allocation; ordered callbacks drain
+outside those locks. Consumers recover forward pages from a contiguous cursor.
+UI projections retain active operations plus bounded recent history and paginate
+older activity. See [regression contracts and verification](regressions/agent-activity-visibility.md).

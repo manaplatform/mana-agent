@@ -530,6 +530,14 @@ def trigger_automation(action: str, *, root: Path | None = None, **kwargs: Any) 
         return {"ok": False, "action": action, "error": str(e)}
 
 
+def submit_dashboard_steering(conversation_id: str, *, root: Path, **fields: Any) -> dict[str, Any]:
+    """Use the gateway already executing this session, without creating a worker."""
+    gateway = _dashboard_gateway_cache().get((str(root.resolve()), conversation_id))
+    if gateway is None:
+        raise RuntimeError("No active execution is owned by this dashboard runtime.")
+    return gateway.submit_steering(session_id=conversation_id, **fields)
+
+
 def run_dashboard_chat(
     prompt: str,
     root: Path | None = None,

@@ -34,6 +34,7 @@ class ModelCapabilityDescriptor:
     supports_shell: bool = False
     supports_structured_output: bool = False
     supports_streaming: bool = False
+    supports_public_reasoning_summaries: bool = False
     supports_parallel_tools: bool = False
     supports_server_tools: bool = False
     capability_confidence: str = "unknown"  # "high", "medium", "low", "unknown"
@@ -81,6 +82,7 @@ class ModelCapabilityDescriptor:
             "supports_shell": self.supports_shell,
             "supports_structured_output": self.supports_structured_output,
             "supports_streaming": self.supports_streaming,
+            "supports_public_reasoning_summaries": self.supports_public_reasoning_summaries,
             "supports_parallel_tools": self.supports_parallel_tools,
             "supports_server_tools": self.supports_server_tools,
             "capability_confidence": self.capability_confidence,
@@ -222,6 +224,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_shell=True,
         supports_structured_output=True,
         supports_streaming=True,
+        supports_public_reasoning_summaries=True,
         supports_parallel_tools=True,
         supports_server_tools=True,
         capability_confidence="high",
@@ -238,6 +241,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_shell=True,
         supports_structured_output=True,
         supports_streaming=True,
+        supports_public_reasoning_summaries=True,
         supports_parallel_tools=True,
         supports_server_tools=True,
         capability_confidence="high",
@@ -254,6 +258,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_shell=True,
         supports_structured_output=True,
         supports_streaming=True,
+        supports_public_reasoning_summaries=True,
         supports_parallel_tools=True,
         supports_server_tools=True,
         capability_confidence="high",
@@ -270,6 +275,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_shell=True,
         supports_structured_output=True,
         supports_streaming=True,
+        supports_public_reasoning_summaries=True,
         supports_parallel_tools=True,
         supports_server_tools=True,
         capability_confidence="high",
@@ -286,6 +292,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_shell=True,
         supports_structured_output=True,
         supports_streaming=True,
+        supports_public_reasoning_summaries=True,
         supports_parallel_tools=True,
         supports_server_tools=True,
         capability_confidence="high",
@@ -347,6 +354,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_shell=True,
         supports_structured_output=True,
         supports_streaming=True,
+        supports_public_reasoning_summaries=True,
         supports_parallel_tools=True,
         supports_server_tools=True,
         capability_confidence="high",
@@ -379,6 +387,7 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         supports_shell=True,
         supports_structured_output=True,
         supports_streaming=True,
+        supports_public_reasoning_summaries=True,
         supports_parallel_tools=True,
         supports_server_tools=True,
         capability_confidence="high",

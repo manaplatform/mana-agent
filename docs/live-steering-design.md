@@ -38,45 +38,32 @@ and pressing **Enter** without requiring separate shortcut combinations or modal
    - Approval policy gates remain strictly enforced: live steering guidance is context and
      intent, not an automatic grant of elevated tool permissions.
 
-## Chat/controller integration hazard
+## Public delivery and acknowledgement
 
-The current chat path invokes `process_chat_turn` directly, and the internal
-coding engine owns an additional model/tool loop inside that call. Wrapping a
-whole chat turn in `execute_goal` could repeat a turn or its side effects.
-Furthermore, the existing autonomous loop reads the current task's attempt and
-stored lease token at checkpoint time instead of retaining a caller's original
-attempt credentials. A replaced worker therefore cannot safely use that loop
-as a steering consumer without first propagating and enforcing the original
-lease identity throughout execution. The new read-only API requires the raw
-worker token; the task's stored hash is not accepted. It is only a snapshot:
-an eventual decision/acknowledgement must recheck the fence atomically.
+TUI and dashboard render a pending user steering message immediately, keyed by
+`request_id` and anchored to the active turn. Admission is session-scoped; an
+explicit execution target must match that session's active task or admitted turn.
+The gateway does not fall back to tasks belonging to another session. Queued,
+delivered, applied, rejected, and superseded events use the shared public hub.
+Delivered describes acceptance at a safe boundary; applied is emitted only after
+the fenced acknowledgement persists successfully. Approval gates run before
+guidance consumption. A failed acknowledgement cannot report applied.
 
-## Remaining implementation plan
+The authenticated `POST /api/v1/conversations/{conversation_id}/steering` endpoint
+accepts the existing text/kind/scope/target/request fields plus a required
+`execution_id`. It uses the cached owning gateway and never submits a new chat
+turn. Attachments are unsupported. A separate API process without that owning
+gateway returns a conflict; shared journals support cross-process observation,
+not remote execution control.
 
-1. Connect both frontends to an authenticated gateway intervention endpoint
-   bound to the actual session, supervisor task, attempt and generation. Do not
-   use the ordinary dashboard message endpoint to launch another turn. Ensure
-   the Ctrl+S binding is limited to chat and cannot steal approval/config input.
-2. Coordinate admission consumption and acknowledgment with supervisor fencing
-   and durable checkpoints; a standalone read of supervisor state followed by
-   an unrelated SQLite write is not an atomic lease or cancellation check.
-   Restore pending and applied state without replay after recovery.
-3. Route input to safe boundaries in the actual chat, internal coding and
-   delegated worker loops, and explicitly handle unsupported external backends.
-   Preserve in-flight tools and scoped isolation; interrupt only through the
-   supervisor's explicit cancellation/fencing semantics.
-4. Use a validated model decision for semantic classification, reconciliation
-   and plan changes. Reuse TaskBoard and existing Plan Mode/approval gates;
-   changing a previously approved action requires fresh authorization. Compact
-   active guidance without allowing superseded instructions to leak forward.
-5. Add end-to-end frontend, multithreading, worker isolation, checkpoint,
-   cancellation-race, plan and approval tests before enabling the feature.
+## Preserved execution boundaries
 
-**Do not reintroduce:** reporting a queued message as applied or treating a
-steering message as permission to execute an action. Only the current fenced
-execution may apply guidance, and approval and policy boundaries remain in force.
-Do not treat a caller-supplied session ID as authentication or use the standalone
-SQLite ledger as a lifecycle fence. Do not expose pending entries to models until
-approval, safe-boundary delivery, recovery, and scope semantics are implemented.
-Never let a retired chat worker adopt the currently stored attempt or replace
-the authoritative steering log with an older checkpoint snapshot.
+The chat path invokes `process_chat_turn` directly, and internal coding retains
+its model/tool loop. This activity change does not wrap whole turns in another
+controller or repeat their side effects. Original attempt credentials are carried
+through controller and parent-side worker callbacks; a stored token hash or a
+newer attempt cannot authorize an old publisher. External Codex retains its
+supported inner execution/steering boundaries; no engine switch is introduced.
+
+Runtime verification is pending. See [activity causes, corrected invariants,
+limitations, and exact user-owned checks](regressions/agent-activity-visibility.md).

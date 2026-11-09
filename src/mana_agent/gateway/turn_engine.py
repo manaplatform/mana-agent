@@ -1112,8 +1112,10 @@ def process_chat_turn(
             try:
                 from mana_agent.execution.steering import SteeringCoordinator
                 coord = SteeringCoordinator(feature_integration_execution_supervisor)
-                sup_task = feature_integration_execution_supervisor.get_task(gateway_task_id)
-                task_gen = getattr(sup_task, "attempt_generation", 1)
+                original_attempt = feature_integration_execution_supervisor.store.get_attempt(supervisor_attempt_id)
+                if original_attempt is None:
+                    raise RuntimeError("Original steering attempt is unavailable")
+                task_gen = original_attempt.generation
                 pending_items = coord.pending_for_attempt(
                     gateway_task_id,
                     attempt_id=supervisor_attempt_id,
@@ -1125,6 +1127,7 @@ def process_chat_turn(
                     applied_req_ids.append(item["request_id"])
                 if applied_req_ids:
                     try:
+                        coord._publish_status(gateway_task_id, "delivered", pending_items)
                         coord.apply_steering(
                             gateway_task_id,
                             attempt_id=supervisor_attempt_id,
@@ -1132,17 +1135,23 @@ def process_chat_turn(
                             lease_token=supervisor_lease_token,
                             request_ids=applied_req_ids,
                         )
-                    except Exception as apply_err:
-                        logger.debug("Failed to mark steering applied in turn_engine: %s", apply_err)
+                    except Exception:
+                        raise RuntimeError("Steering acknowledgement failed; the execution cannot consume this guidance")
             except Exception as steer_err:
-                logger.debug("Failed checking pending steering in turn_engine: %s", steer_err)
+                raise RuntimeError("Unable to validate active steering ownership") from steer_err
 
         if session_state.get("pending_steering"):
             for s_item in session_state["pending_steering"]:
                 if s_item.get("status") == "pending":
+                    if s_item.get("submitted_to_task") and s_item.get("request_id") not in applied_req_ids:
+                        continue
                     if s_item.get("request_id") not in applied_req_ids:
                         guidance_items.append(f"[Live Steering ({s_item.get('kind', 'guidance').upper()})]: {s_item.get('text', '')}")
                     s_item["status"] = "applied"
+                    if not s_item.get("submitted_to_task"):
+                        from mana_agent.services.activity_context import emit_activity
+                        emit_activity("steering.applied", title="Live steering applied", status="success",
+                            operation_id=s_item["request_id"], metadata={"request_id": s_item["request_id"], "text": s_item.get("text", "")})
         return guidance_items
 
     initial_steering = _extract_and_apply_pending_steering()

@@ -354,3 +354,38 @@ def test_dashboard_transactional_action_endpoint_by_action_id(
     assert response.json()["decision"] == "approve"
     assert response.json()["result"]["action_id"] == action_id
 
+
+
+def test_steering_endpoint_authenticates_and_targets_existing_execution(client, tmp_path, monkeypatch):
+    root = str(tmp_path / "repo")
+    created = client.post("/api/v1/conversations", json={"title": "Steering", "root": root})
+    conversation = created.json()["conversation"]["conversation_id"]
+    calls = []
+    def submit(conversation_id, **fields):
+        calls.append((conversation_id, fields))
+        return {"request_id": fields["request_id"], "status": "pending"}
+    monkeypatch.setattr("mana_agent.ui.streamlit_helpers.submit_dashboard_steering", submit)
+    monkeypatch.setenv("MANA_API_TOKEN", "fixture-token")
+    payload = {"root": root, "execution_id": "turn_active", "request_id": "steer-one", "text": "Inspect the contract"}
+    assert client.post(f"/api/v1/conversations/{conversation}/steering", json=payload).status_code == 401
+    response = client.post(f"/api/v1/conversations/{conversation}/steering", json=payload,
+                           headers={"Authorization": "Bearer fixture-token"})
+    assert response.status_code == 200
+    assert calls[0][0] == conversation
+    assert calls[0][1]["execution_id"] == "turn_active"
+    assert response.json()["request_id"] == "steer-one"
+    assert client.post(f"/api/v1/conversations/{conversation}/steering", json={**payload, "execution_id": ""},
+                       headers={"Authorization": "Bearer fixture-token"}).status_code == 422
+
+
+def test_steering_endpoint_rejects_non_owned_or_inactive_execution(client, tmp_path, monkeypatch):
+    root = str(tmp_path / "repo")
+    created = client.post("/api/v1/conversations", json={"title": "Steering scope", "root": root})
+    conversation = created.json()["conversation"]["conversation_id"]
+    def reject(*args, **kwargs):
+        raise ValueError("Steering target does not belong to the active turn in this session")
+    monkeypatch.setattr("mana_agent.ui.streamlit_helpers.submit_dashboard_steering", reject)
+    response = client.post(f"/api/v1/conversations/{conversation}/steering", json={"root": root,
+        "execution_id": "other_session_turn", "request_id": "steer-one", "text": "Inspect"})
+    assert response.status_code == 409
+    assert client.get(f"/api/v1/conversations/{conversation}/messages", params={"root": root}).json()["messages"] == []

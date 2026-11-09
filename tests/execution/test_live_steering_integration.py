@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -420,6 +420,7 @@ async def _tui_enter_submits_steering_during_turn() -> None:
     async with app.run_test() as pilot:
         # Mark turn in progress
         app._turn_in_progress = True
+        app._current_frontend_turn_id = "turn_active_fixture"
 
         # User simply types in chat input and presses Enter (no shortcut modal needed)
         msg_input = app.query_one("#chat-input")
@@ -432,13 +433,13 @@ async def _tui_enter_submits_steering_during_turn() -> None:
         mock_gateway.submit_steering.assert_called_with(
             session_id="session_tui_1",
             text="Prioritize security checks",
-            scope="execution",
+            scope="execution", request_id=ANY, execution_id=ANY,
         )
 
         # Verify steering submitted message appeared in history
         steering_events = [
             e for e in history.get_events()
-            if isinstance(e, AssistantMessageEvent) and "Live Steering submitted" in e.content
+            if isinstance(e, UserMessageEvent) and e.is_steering
         ]
         assert len(steering_events) == 1
         assert "Prioritize security checks" in steering_events[0].content
@@ -467,6 +468,7 @@ async def _tui_programmatic_steer_modal() -> None:
 
     async with app.run_test() as pilot:
         app._turn_in_progress = True
+        app._current_frontend_turn_id = "turn_active_fixture"
         app.action_steer_execution()
         await pilot.pause()
 
@@ -480,7 +482,7 @@ async def _tui_programmatic_steer_modal() -> None:
         mock_gateway.submit_steering.assert_called_with(
             session_id="session_tui_modal",
             text="Modal steering",
-            scope="execution",
+            scope="execution", request_id=ANY, execution_id=ANY,
         )
 
 
@@ -513,6 +515,7 @@ async def _tui_slash_steer_fallback_during_turn() -> None:
     async with app.run_test() as pilot:
         # Turn actively running
         app._turn_in_progress = True
+        app._current_frontend_turn_id = "turn_active_fixture"
 
         # Submit /steer command in chat input
         msg_input = app.query_one("#chat-input")
@@ -525,7 +528,7 @@ async def _tui_slash_steer_fallback_during_turn() -> None:
         mock_gateway.submit_steering.assert_called_with(
             session_id="session_tui_2",
             text="Run edge-case tests",
-            scope="execution",
+            scope="execution", request_id=ANY, execution_id=ANY,
         )
 
 
@@ -868,7 +871,7 @@ async def _tui_steered_message_shows_activity_box_on_last_message() -> None:
         # children_after[0] is user message
         # children_after[1] is steered message
         steered_widget = children_after[1]
-        assert "Live Steering submitted" in getattr(steered_widget, "text", "")
+        assert "Steering [" in getattr(steered_widget, "text", "")
         assert "Use curses library" in getattr(steered_widget, "text", "")
         # children_after[2] is the ExecutionPanel (activity box)
         assert children_after[2] is panel

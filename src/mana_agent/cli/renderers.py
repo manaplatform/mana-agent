@@ -464,13 +464,17 @@ class InlineChatRenderer:
         self._tool_event_ids: dict[str, str] = {}  # event_id -> last_status seen
 
     def render_event(self, event: ChatEvent) -> None:
+        from mana_agent.chat.activity import visible_activity
+        from mana_agent.config.user_config import get_setting
+        if not visible_activity(event.as_dict(), str(get_setting("MANA_ACTIVITY_VISIBILITY", "normal"))):
+            return
         line = self.format_event(event)
         if not line:
             return
         if self.mode == "json":
             self.console.print(json.dumps({"type": "chat.event", "line": line, "event": event.as_dict()}, ensure_ascii=False))
             return
-        self.console.print(line)
+        self.console.print(line, markup=False)
 
     def render_final(self, message: str) -> None:
         text = str(message or "").strip()

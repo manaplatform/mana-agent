@@ -10,6 +10,8 @@ Provides:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from mana_agent.chat.activity import (operation_key, normalize_activity, bound_operations, is_mutation, visible_activity, TERMINAL, accepts_activity_update)
 from typing import Any
 
 from textual.containers import Vertical
@@ -49,7 +51,7 @@ def _resolve_approval(events: list[dict[str, Any]], decision_event: dict[str, An
             existing["_approval_resolved"] = True
 
 
-_TERMINAL_STATUSES = {"success", "completed", "done", "failed", "error", "cancelled"}
+_TERMINAL_STATUSES = set(TERMINAL)
 
 
 def _is_pending_approval(event: dict[str, Any]) -> bool:
@@ -72,7 +74,79 @@ def _is_pending_approval(event: dict[str, Any]) -> bool:
     )
 
 
-class MainActivityBox(Vertical):
+class _ActivityRendering:
+    """At most ten repaints per second; every event still reaches the reducer."""
+    def _write_activity_text(self, text: str) -> None:
+        if self.activity_log.selected_text:
+            self._pending_activity_text = text
+            return
+        self._pending_activity_text = None
+        follow = self.activity_log.max_scroll_y - self.activity_log.scroll_y <= 2
+        scroll_x, scroll_y = self.activity_log.scroll_x, self.activity_log.scroll_y
+        if self.activity_log.text == text:
+            return
+        self.activity_log.load_text(text)
+        if self.activity_log.is_mounted:
+            def restore():
+                if follow:
+                    self.activity_log.scroll_end(animate=False)
+                else:
+                    self.activity_log.scroll_to(x=scroll_x, y=scroll_y, animate=False)
+            self.activity_log.call_after_refresh(restore)
+
+    def _tick_elapsed(self) -> None:
+        pending = getattr(self, "_pending_activity_text", None)
+        if pending is not None and not self.activity_log.selected_text:
+            self._write_activity_text(pending)
+        if getattr(self, "_root_status", None):
+            return
+        current = next((row for row in reversed(self.events) if str(row.get("status")) not in _TERMINAL_STATUSES), None)
+        if not current or not (current.get("started_at") or current.get("timestamp")):
+            return
+        try:
+            started = datetime.fromisoformat(str(current.get("started_at") or current["timestamp"]).replace("Z", "+00:00"))
+            seconds = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+        except (ValueError, TypeError):
+            return
+        actor = current.get("subagent_id") or current.get("agent_id") or "MainAgent"
+        self.header.update(f"◌ {actor} — {current.get('title') or current.get('tool_name') or 'Working'} · {seconds}s")
+
+    def _schedule_activity_render(self, render) -> None:
+        self._latest_render = render
+        if not self.is_mounted:
+            render()
+            return
+        if getattr(self, "_activity_render_pending", False):
+            return
+        self._activity_render_pending = True
+        def repaint():
+            self._activity_render_pending = False
+            self._latest_render()
+        self.set_timer(0.1, repaint)
+
+    def _upsert_activity(self, event: dict[str, Any]) -> dict[str, Any]:
+        ev = normalize_activity(event)
+        key = operation_key(ev)
+        for i, previous in enumerate(self.events):
+            if operation_key(previous) == key:
+                if not accepts_activity_update(previous, ev):
+                    return previous
+                ev = {**previous, **ev, "started_at": previous.get("started_at") or ev.get("started_at")}
+                self.events[i] = ev
+                break
+        else:
+            self.events.append(ev)
+        self.events[:] = bound_operations(self.events)
+        self._event_ids = {str(row.get("event_id") or "") for row in self.events}
+        return ev
+
+    def _visible_events(self) -> list[dict[str, Any]]:
+        from mana_agent.config.user_config import get_setting
+        visibility = str(get_setting("MANA_ACTIVITY_VISIBILITY", "normal"))
+        return [row for row in self.events if visible_activity(row, visibility)]
+
+
+class MainActivityBox(_ActivityRendering, Vertical):
     """Unified, chronological stream for all general agent activities.
 
     Exactly one instance per active turn. All non-coding tool calls, results,
@@ -116,11 +190,11 @@ class MainActivityBox(Vertical):
         self._pending_cards: list[ToolCard] = []
         self._active_status = "running"
 
-        self.header = Static("◌ agent activity · running", classes="main-activity-header")
+        self.header = Static("◌ agent activity · running", classes="main-activity-header", markup=False)
         self.details = Collapsible(title="activity stream", collapsed=False)
         self.activity_log = SelectableText("Waiting for activity…", classes="main-activity-stream")
         self.cards_container = Vertical(classes="main-activity-cards")
-        self.footer = Static("0 activities", classes="main-activity-summary")
+        self.footer = Static("0 activities", classes="main-activity-summary", markup=False)
         self._user_collapsed: bool | None = None
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
@@ -129,13 +203,13 @@ class MainActivityBox(Vertical):
 
     def compose(self):
         yield self.header
-        with Collapsible(title="activity stream", collapsed=False) as details:
-            self.details = details
+        with self.details:
             yield self.activity_log
             yield self.cards_container
         yield self.footer
 
     def on_mount(self) -> None:
+        self.set_interval(1, self._tick_elapsed)
         for card in list(self._pending_cards):
             try:
                 self.cards_container.mount(card)
@@ -149,6 +223,11 @@ class MainActivityBox(Vertical):
         """Add a general tool call as an expandable card inside this activity box."""
         card = ToolCard(call_event)
         self._tool_cards[call_event.call_id] = card
+        completed_cards = [(key, value) for key, value in self._tool_cards.items() if value.result_event is not None]
+        for key, previous in completed_cards[:-200]:
+            self._tool_cards.pop(key, None)
+            if previous.is_mounted:
+                previous.remove()
         # Bounded virtualization: mount active card into internal container
         if self.is_mounted and getattr(self.cards_container, "is_mounted", False):
             try:
@@ -174,6 +253,13 @@ class MainActivityBox(Vertical):
         card = self._tool_cards.get(result_event.call_id)
         if card is not None:
             card.set_result(result_event)
+        completed_cards = [(key, value) for key, value in self._tool_cards.items() if value.result_event is not None]
+        for key, previous in completed_cards[:-200]:
+            self._tool_cards.pop(key, None)
+            if previous in self._pending_cards:
+                self._pending_cards.remove(previous)
+            if previous.is_mounted:
+                previous.remove()
 
         self.update_event({
             "event_id": getattr(result_event, "event_id", None) or f"res-{result_event.call_id}",
@@ -189,24 +275,10 @@ class MainActivityBox(Vertical):
 
     def update_event(self, event: dict[str, Any]) -> None:
         """Append or update a general agent activity event in the stream."""
-        ev = dict(event)
-        event_id = str(ev.get("event_id") or ev.get("id") or ev.get("call_id") or "").strip()
-        ev_type = str(ev.get("event_type") or "")
-        if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
+        ev = self._upsert_activity(event)
+        if ev["event_type"] in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
             _resolve_approval(self.events, ev)
-
-        if event_id and event_id in self._event_ids:
-            for i, existing in enumerate(self.events):
-                ex_id = str(existing.get("event_id") or existing.get("id") or existing.get("call_id") or "").strip()
-                if ex_id == event_id:
-                    self.events[i] = {**existing, **ev}
-                    break
-        else:
-            if event_id:
-                self._event_ids.add(event_id)
-            self.events.append(ev)
-
-        self._render_stream()
+        self._schedule_activity_render(self._render_stream)
 
     def _render_stream(self) -> None:
         if not self.activity_log:
@@ -228,7 +300,11 @@ class MainActivityBox(Vertical):
         has_failed = any(str(e.get("status") or "").lower() in {"failed", "error"} for e in self.events)
         all_completed = all(str(e.get("status") or "").lower() in {"success", "completed", "done"} for e in self.events)
 
-        if has_waiting_approval:
+        if getattr(self, "_root_status", None):
+            self._active_status = self._root_status
+            icon = {"success": "✓", "failed": "✗", "cancelled": "■"}[self._root_status]
+            status_label = "completed" if self._root_status == "success" else self._root_status
+        elif has_waiting_approval:
             self._active_status = "waiting_approval"
             icon = "⚠️"
             status_label = "WAITING APPROVAL"
@@ -245,10 +321,13 @@ class MainActivityBox(Vertical):
             icon = "◌"
             status_label = "running"
 
-        self.header.update(f"{icon} agent activity · {status_label} ({total_count} operations)")
+        active = next((row for row in reversed(self.events) if str(row.get("status")) not in _TERMINAL_STATUSES), self.events[-1])
+        actor = active.get("subagent_id") or active.get("agent_id") or "MainAgent"
+        current = str(active.get("title") or active.get("tool_name") or "Activity")
+        self.header.update(f"{icon} {actor} — {current} · {status_label} ({total_count} operations)")
 
         # Render rows with bounded rendering (display up to 40 recent rows, full history preserved in self.events)
-        visible_events = self.events[-40:]
+        visible_events = self._visible_events()[-40:]
         lines: list[str] = []
         if total_count > 40:
             lines.append(f"… ({total_count - 40} earlier operations preserved)")
@@ -261,7 +340,13 @@ class MainActivityBox(Vertical):
             tool_name = str(ev.get("tool_name") or ev.get("title") or ev.get("type") or "operation").strip()
             summary = str(ev.get("summary") or ev.get("detail") or ev.get("message") or "").strip()
             status = str(ev.get("status") or "running").lower()
-            sig = f"{tool_name}:{status}:{summary[:40]}"
+            if ev.get("summary_source") in {"agent", "provider"}:
+                summary = "Summary: " + summary
+            elif ev.get("evidence_status") == "verified":
+                summary = "Verified: " + summary
+            actor = ev.get("subagent_id") or ev.get("agent_id") or "MainAgent"
+            tool_name = f"{actor} — {tool_name}"
+            sig = operation_key(ev)
             if grouped and grouped[-1].get("signature") == sig:
                 grouped[-1]["count"] += 1
                 grouped[-1]["latest_ev"] = ev
@@ -283,7 +368,7 @@ class MainActivityBox(Vertical):
                 or "approval.required" in item["tool_name"]
             ) and st not in {"success", "completed", "done", "failed", "error", "cancelled"}
 
-            is_sub = bool(item["latest_ev"].get("sub_operation") or item["latest_ev"].get("indent"))
+            is_sub = bool(item["latest_ev"].get("sub_operation") or item["latest_ev"].get("indent") or item["latest_ev"].get("parent_agent_id"))
             prefix = "  ↳ " if is_sub else ""
 
             if is_item_approval:
@@ -307,20 +392,13 @@ class MainActivityBox(Vertical):
             if err:
                 lines.append(f"  Error: {str(err)[:180]}")
 
-        self.activity_log.load_text("\n".join(lines))
+        self._write_activity_text("\n".join(lines))
         self.footer.update(f"{total_count} total operations")
 
-        # Do not close if already open when new activity arrives.
-        # If open, advance to latest activity.
-        if self.details and not self.details.collapsed:
-            try:
-                self.activity_log.scroll_end(animate=False)
-            except Exception:
-                pass
         self.refresh(layout=True)
 
 
-class CodingActivityBox(Vertical):
+class CodingActivityBox(_ActivityRendering, Vertical):
     """Dedicated persistent activity box for all coding operations.
 
     Captures file reads, edits, writes, patches, terminal commands, test executions,
@@ -372,11 +450,11 @@ class CodingActivityBox(Vertical):
         self._event_ids: set[str] = set()
         self.context_meter: dict[str, Any] = {}
 
-        self.header = Static("◌ coding · queued", classes="coding-activity-header")
-        self.changed_files_view = Static("", classes="coding-changed-files")
+        self.header = Static("◌ coding · queued", classes="coding-activity-header", markup=False)
+        self.changed_files_view = Static("", classes="coding-changed-files", markup=False)
         self.details = Collapsible(title="coding activity", collapsed=False)
         self.activity_log = SelectableText("Waiting for coding engine…", classes="coding-activity-log")
-        self.footer = Static("0 coding events", classes="coding-activity-footer")
+        self.footer = Static("0 coding events", classes="coding-activity-footer", markup=False)
         self._user_collapsed: bool | None = None
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
@@ -386,38 +464,16 @@ class CodingActivityBox(Vertical):
     def compose(self):
         yield self.header
         yield self.changed_files_view
-        with Collapsible(title="coding activity", collapsed=False) as details:
-            self.details = details
+        with self.details:
             yield self.activity_log
         yield self.footer
 
+    def on_mount(self) -> None:
+        self.set_interval(1, self._tick_elapsed)
+
     def update_event(self, event: dict[str, Any]) -> None:
         """Append or update a coding operation in the box."""
-        ev = dict(event)
-        event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
-        payload_dict = _safe_dict(ev.get("payload"))
-        call_id = str(payload_dict.get("call_id") or ev.get("call_id") or "").strip()
-        matched = False
-        if event_id and event_id in self._event_ids:
-            for i, existing in enumerate(self.events):
-                ex_id = str(existing.get("event_id") or existing.get("id") or "").strip()
-                if ex_id == event_id:
-                    self.events[i] = {**existing, **ev}
-                    matched = True
-                    break
-        elif call_id:
-            for i, existing in enumerate(self.events):
-                ex_payload = _safe_dict(existing.get("payload"))
-                ex_cid = str(ex_payload.get("call_id") or existing.get("call_id") or "").strip()
-                if ex_cid == call_id:
-                    self.events[i] = {**existing, **ev}
-                    matched = True
-                    break
-        if not matched:
-            if event_id:
-                self._event_ids.add(event_id)
-            self.events.append(ev)
-
+        ev = self._upsert_activity(event)
         # Track phase and concurrency metadata
         payload_dict = _safe_dict(ev.get("payload"))
         meta = dict(ev.get("metadata") or ev.get("details") or payload_dict)
@@ -458,9 +514,9 @@ class CodingActivityBox(Vertical):
             or args_dict.get("filePath")
             or args_dict.get("file_path")
         )
-        if raw_path and str(raw_path).strip() and str(raw_path).strip() not in self.changed_files:
+        if is_mutation(ev) and raw_path and str(raw_path).strip() and str(raw_path).strip() not in self.changed_files:
             self.changed_files.append(str(raw_path).strip())
-        for cf in (ev.get("changed_files") or meta.get("changed_files") or payload_dict.get("changed_files") or []):
+        for cf in ((ev.get("changed_files") or meta.get("changed_files") or payload_dict.get("changed_files") or []) if is_mutation(ev) else []):
             cf_s = str(cf).strip()
             if cf_s and cf_s not in self.changed_files:
                 self.changed_files.append(cf_s)
@@ -478,7 +534,7 @@ class CodingActivityBox(Vertical):
         if ev.get("model"):
             self.model = str(ev.get("model"))
 
-        self._render_state(ev)
+        self._schedule_activity_render(lambda: self._render_state(ev))
 
     def _render_state(self, event: dict[str, Any]) -> None:
         status = str(event.get("status") or "running").lower()
@@ -537,13 +593,14 @@ class CodingActivityBox(Vertical):
 
         # Activity log (terminal commands, patches, outputs, parallel events)
         lines: list[str] = []
-        for row in self.events[-30:]:
+        for row in self._visible_events()[-40:]:
             if row.get("_approval_resolved"):
                 continue
             row_status = str(row.get("status") or "running").lower()
             row_type = str(row.get("event_type") or row.get("type") or "")
             row_tool = str(row.get("tool_name") or "")
-            r_title = str(row.get("title") or row_type or "code")
+            actor = row.get("subagent_id") or row.get("agent_id") or "CodingAgent"
+            r_title = f"{actor} — " + str(row.get("title") or row_type or "code")
             dur = row.get("duration_ms")
             dur_str = f" ({dur}ms)" if dur is not None else ""
             detail = str(row.get("output_preview") or row.get("summary") or row.get("error") or row.get("message") or "")
@@ -589,7 +646,7 @@ class CodingActivityBox(Vertical):
                 lines.append(f"  Error: {str(row.get('error'))[:180]}")
 
         if self.activity_log:
-            self.activity_log.load_text("\n".join(lines))
+            self._write_activity_text("\n".join(lines))
 
         # Footer stats
         usage = event.get("token_usage") or {}
@@ -615,14 +672,8 @@ class CodingActivityBox(Vertical):
         # Do not close if already open when new activity arrives.
         # Only turn completion collapses if not explicitly kept open by user.
         if self.details:
-            if event_type in {"turn.completed", "turn.finished"} and self._user_collapsed is not False:
+            if event_type == "turn.finished" and self._user_collapsed is not False:
                 self.details.collapsed = True
-            elif not self.details.collapsed:
-                # Advance to latest activity
-                try:
-                    self.activity_log.scroll_end(animate=False)
-                except Exception:
-                    pass
 
         self.refresh(layout=True)
 

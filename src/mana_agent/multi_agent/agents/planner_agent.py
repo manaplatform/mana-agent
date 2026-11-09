@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from mana_agent.multi_agent.agents.base_agent import BaseAgent
+from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
 from mana_agent.multi_agent.core.types import PlanResult
 
 
 class PlannerAgent(BaseAgent):
+    @agent_activity
     def plan(
         self,
         task_id: str,
