@@ -292,10 +292,10 @@ class ChatLog(VerticalScroll):
 
     def _ensure_panel_after_steered(self, panel: ExecutionPanel | None) -> None:
         """Keep the active execution panel (activity box) positioned after the latest steered message."""
-        if panel is None or not getattr(panel, "is_mounted", False) or panel not in self.children:
+        if panel is None or panel not in self.children:
             return
         steered = self._steered_widgets_by_turn.get(panel.turn_id)
-        if steered is not None and getattr(steered, "is_mounted", False) and steered in self.children:
+        if steered is not None and steered in self.children:
             try:
                 children = list(self.children)
                 if children.index(panel) < children.index(steered):
@@ -309,7 +309,7 @@ class ChatLog(VerticalScroll):
             panel = ExecutionPanel(turn_id=turn_id)
             self._execution_panels[turn_id] = panel
             steered = self._steered_widgets_by_turn.get(turn_id)
-            target = steered if (steered is not None and getattr(steered, "is_mounted", False) and steered in self.children) else None
+            target = steered if (steered is not None and steered in self.children) else None
             if target is None:
                 target = self._user_widgets_by_turn.get(turn_id) or self._latest_user_widget
             if target is not None and target in self.children:
@@ -340,7 +340,11 @@ class ChatLog(VerticalScroll):
             else:
                 display_text = f"Attachments:\n{att_block}"
         widget = SelectableText(display_text, classes="user-message")
-        self.mount(widget)
+        panel = self._execution_panels.get(event.turn_id) if event.turn_id else None
+        if event.is_steering and panel is not None and panel in self.children:
+            self.mount(widget, before=panel)
+        else:
+            self.mount(widget)
         if event.is_steering:
             setattr(widget, "_steering_instruction", safe_text(event.content, 16000))
             setattr(widget, "_steering_status", event.steering_status)
@@ -348,7 +352,7 @@ class ChatLog(VerticalScroll):
             self._steering_widgets[event.request_id] = widget
             self._steered_widgets_by_turn[event.turn_id] = widget
             self._latest_steered_widget = widget
-            self._ensure_panel_after_steered(self._execution_panels.get(event.turn_id))
+            self._ensure_panel_after_steered(panel)
             return widget
         turn_id = event.turn_id or self._current_turn_id
         if turn_id:

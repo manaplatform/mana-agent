@@ -277,9 +277,16 @@ class MainActivityBox(_ActivityRendering, Vertical):
     def update_event(self, event: dict[str, Any]) -> None:
         """Append or update a general agent activity event in the stream."""
         ev = self._upsert_activity(event)
-        if ev["event_type"] in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
+        is_approval = ev["event_type"] in {
+            "action.approval.granted",
+            "action.approval.denied",
+            "server.approval_decided",
+            "api.approval_decided",
+            "computer.permission_decided",
+        }
+        if is_approval:
             _resolve_approval(self.events, ev)
-        self._schedule_activity_render(self._render_stream)
+        self._schedule_activity_render(self._render_stream, immediate=is_approval)
 
     def _render_stream(self) -> None:
         if not self.activity_log:
@@ -528,7 +535,14 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         if ev_type.startswith(("context.", "cost.", "budget.")):
             self.context_meter.update(ev.get("payload") or ev.get("metadata") or {})
 
-        if ev_type in {"action.approval.granted", "action.approval.denied", "server.approval_decided", "api.approval_decided"}:
+        is_approval = ev_type in {
+            "action.approval.granted",
+            "action.approval.denied",
+            "server.approval_decided",
+            "api.approval_decided",
+            "computer.permission_decided",
+        }
+        if is_approval:
             _resolve_approval(self.events, ev)
 
         backend_val = ev.get("backend")
@@ -537,7 +551,7 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         if ev.get("model"):
             self.model = str(ev.get("model"))
 
-        self._schedule_activity_render(lambda: self._render_state(ev))
+        self._schedule_activity_render(lambda: self._render_state(ev), immediate=is_approval)
 
     def _render_state(self, event: dict[str, Any]) -> None:
         status = str(event.get("status") or "running").lower()
