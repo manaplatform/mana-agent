@@ -25,6 +25,8 @@ _MUTATION_FAILURE_MESSAGES: dict[str, str] = {
 
 def terminal_reason_from_result(result: CodingTaskResult) -> str:
     """Map a CodingTaskResult to a stable terminal reason code."""
+    if result.debugging_report is not None and result.status == "waiting":
+        return "coding_debugging_handoff"
     if result.status == "completed":
         return "completed"
     if result.status == "cancelled":
@@ -45,6 +47,9 @@ def build_coding_terminal_answer(
 ) -> str:
     """Return exactly one user-facing terminal summary for a coding turn."""
     reason = str(terminal_reason or terminal_reason_from_result(result)).strip()
+
+    if result.status == "waiting" and result.debugging_report is not None:
+        return "Coding investigation needs Main Model review; work remains pending."
 
     if result.status == "cancelled":
         return "Codex coding turn was cancelled."

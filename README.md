@@ -44,6 +44,8 @@ Not just for writing code.
 
 For researching, building, debugging, managing, automating, and solving complex tasks across connected systems.
 
+For unresolved coding bugs, the Main Model can select bounded, version-aware web/GitHub research after local investigation and return sourced findings to the same coding task. Both coding engines use the existing Coding Activity stream. See [coding research configuration and recovery](docs/regressions/coding-bug-research.md).
+
 **You define the destination. Mana-Agent helps navigate the journey.**
 
 ## Meet Mana-Agent

@@ -26,6 +26,10 @@ from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
 logger = logging.getLogger(__name__)
 
 
+def operation_fingerprint(tool_name: str, arguments: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps({"tool": tool_name.replace(".", "_"), "arguments": arguments}, sort_keys=True, default=str).encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class ProgrammaticToolCall:
     call_id: str
@@ -63,6 +67,7 @@ class ToolExecutionDispatcher:
         model: str = "",
         provider: str = "openai",
         llm: Any = None,
+        completed_operations: list[dict[str, Any]] | None = None,
     ) -> None:
         if workspace is not None:
             self.workspace = workspace
@@ -80,6 +85,10 @@ class ToolExecutionDispatcher:
         self.model = model
         self.provider = provider
         self.llm = llm
+        self._previous_operation_fingerprints = {
+            operation.get("fingerprint") or operation_fingerprint(operation["tool"], operation.get("arguments") or {})
+            for operation in (completed_operations or [])
+        }
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         tool_name = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_name)
@@ -121,6 +130,12 @@ class ToolExecutionDispatcher:
 
         tool_name = str(tool_name or "").strip()
         normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_name)
+
+        read_tools = {"read_file", "read_skill", "list_files", "repo_search", "repo_batch_read", "repo_batch_search",
+                      "batch_read_files", "batch_search_files", "batch_list_files", "git_status", "git_diff", "git_log", "git_show"}
+        if normalized not in read_tools and operation_fingerprint(tool_name, arguments) in self._previous_operation_fingerprints:
+            return {"ok": False, "error_code": "RECOVERY_RECONCILIATION_REQUIRED",
+                    "error": "This operation belongs to the completed coding context. Reconcile its existing side effect instead of replaying it."}
 
         # Check for extra custom or MCP tools first (supports both exact and normalized keys)
         for cand in (tool_name, normalized, tool_name.replace("_", ".")):
@@ -805,6 +820,7 @@ class ProgrammaticExecutionSession:
             output_preview = result[:300]
         self.state.executed_operations.append({
             "tool": tool_name,
+            "fingerprint": operation_fingerprint(tool_name, arguments),
             "call_id": call_id,
             "arguments": arguments,
             "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,

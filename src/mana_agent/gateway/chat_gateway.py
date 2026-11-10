@@ -74,6 +74,7 @@ from mana_agent.gateway.artifact_routing import (
 )
 from mana_agent.gateway.turn_engine import (
     ChatTurnResult,
+    CODING_RESEARCH_STOP_ERRORS,
     SearchOperationDecisionError,
     _serialize_tool_traces,
     _conversation_prompt,
@@ -1444,6 +1445,11 @@ class AgentChatGateway:
         item = self.human_inbox_service.repository.get(inbox_item_id)
         protected = self.human_inbox_service.repository.read_protected_context(item.protected_context_ref) if item.protected_context_ref else {}
         branch = self._lane_coordinator.execution_supervisor.get_task(task_id)
+        if protected.get("coding_research_task_id") == task_id:
+            if item.task_id != task_id or item.resume_claim_id != resume_claim_id or item.status is not InboxStatus.ANSWERED:
+                return
+            self._resume_coding_research_task(task_id, structured_response)
+            return
         if branch.execution_policy.required and (protected.get("batch_task_id") == task_id or item.request_type.value == "approval"):
             if item.task_id != task_id or item.resume_claim_id != resume_claim_id or item.status not in {InboxStatus.APPROVED, InboxStatus.ANSWERED}:
                 return
@@ -6850,6 +6856,7 @@ class AgentChatGateway:
                             "shell_write",
                             "git_read",
                             "test_execution",
+                            *(("web_search", "browser") if getattr(self.settings, "mana_coding_research_enabled", False) else ()),
                         ),
                         "shell": (
                             "shell_read",
@@ -7894,6 +7901,10 @@ class AgentChatGateway:
                                 status = "blocked"
                                 result.payload["pending_required_work"] = False
                                 result.payload["resume_required"] = False
+                        elif result.error in CODING_RESEARCH_STOP_ERRORS:
+                            self._lane_coordinator.mark_blocked(reservation.execution.task_id, reason=result.answer or str(result.error))
+                            status = "blocked"
+                            result.payload.update(pending_required_work=False, resume_required=False)
                         elif reservation.execution.state == LaneTaskState.WAITING or status == "waiting":
                             # The task is waiting for user approval or human response.
                             # Do not checkpoint or finish the suspended branch.
@@ -9320,6 +9331,7 @@ class AgentChatGateway:
                 "shell_write",
                 "git_read",
                 "test_execution",
+                *(("web_search", "browser") if getattr(self.settings, "mana_coding_research_enabled", False) else ()),
             ),
             "shell": (
                 "shell_read",
@@ -9562,6 +9574,10 @@ class AgentChatGateway:
                 reservation.execution.task_id,
                 reason=result.answer or str(result.error),
             )
+        elif result.error in CODING_RESEARCH_STOP_ERRORS:
+            status = "blocked"
+            self._lane_coordinator.mark_blocked(reservation.execution.task_id, reason=result.answer or str(result.error))
+            result.payload.update(pending_required_work=False, resume_required=False)
         elif result.error:
             status = "failed"
             self._finish_lane(
@@ -11042,6 +11058,21 @@ class AgentChatGateway:
             supervisor_lease_token = str(getattr(lane_execution, "supervisor_lease_token", "") or "")
 
         try:
+            if lane_task_id and decision.route == "coding" and getattr(self.settings, "mana_coding_research_enabled", False):
+                resume_snapshot = {
+                    "decision": decision.to_dict(), "request": text,
+                    "session_id": context.session_id, "conversation_id": context.conversation_id,
+                    "turn_id": context.turn_id, "user_message_id": context.user_message_id,
+                    "authenticated_user_id": context.authenticated_user_id,
+                    "conversation_context": context.conversation_context,
+                    "workspace_path": str(getattr(self._coding_agent, "working_directory", self.root)),
+                    "options": {key: options[key] for key in ("_selected_model", "_selected_provider", "execution_policy", "protocol_read_only") if key in options},
+                }
+                supervisor = self._lane_coordinator.execution_supervisor
+                def save_coding_resume(task):
+                    supervisor._validate_lease(task, attempt_id=supervisor_attempt_id, lease_token=supervisor_lease_token)
+                    task.provider_metadata["coding_research_gateway"] = resume_snapshot
+                supervisor.store.update_task(lane_task_id, save_coding_resume)
             result = run_with_activity_attempt(
                 process_chat_turn,
                 _activity_supervisor=self._lane_coordinator.execution_supervisor,
@@ -11064,7 +11095,7 @@ class AgentChatGateway:
                 event_sink=sink,
                 callbacks=options.get("callbacks"),
                 agent_decision=mapped,
-                coding_workspace_preparer=None if options.get("_batch_workspace_path") else self._prepare_coding_workspace,
+                coding_workspace_preparer=None if (options.get("_batch_workspace_path") or options.get("_coding_research_workspace")) else self._prepare_coding_workspace,
                 gateway_task_id=lane_task_id,
                 feature_integration_checkpoint=_save_feature_integration_checkpoint,
                 feature_integration_authority_provider=(
@@ -11102,6 +11133,9 @@ class AgentChatGateway:
                 continuation_evaluator=getattr(self, "_continuation_evaluator", None),
                 supervisor_attempt_id=supervisor_attempt_id,
                 supervisor_lease_token=supervisor_lease_token,
+                coding_research_authorizer=(lambda tool: self._lane_coordinator.authorize_tool(lane_task_id, tool)) if lane_task_id else None,
+                coding_research_settings=self.settings,
+                coding_research_waiter=lambda question, decision_id: self._persist_coding_research_clarification(lane_task_id, question, decision_id),
             )
         except BatchPending as pending:
             result = ChatTurnResult(answer=str(pending), mode="batch-waiting", payload={
@@ -11357,6 +11391,84 @@ class AgentChatGateway:
             response_message_id=f"batch_final_{task_id}")
         run["final_delivery_pending"] = False
         operations.save_run(task_id, run)
+
+    def _persist_coding_research_clarification(self, task_id: str, question: str, decision_id: str) -> str:
+        from mana_agent.human_inbox.models import (InboxRequest, InboxRequestType, ReviewerAssignment,
+            ReviewerType, ClarificationField, ResponseOperation)
+        task = self._lane_coordinator.execution_supervisor.get_task(task_id)
+        item = self.human_inbox_service.create(InboxRequest(
+            request_type=InboxRequestType.CLARIFICATION, task_id=task_id, branch_id=task_id,
+            checkpoint_id=task.checkpoint_id, requested_by_agent_id="autonomous_loop",
+            title="Coding investigation needs clarification", summary=question,
+            deduplication_key=f"coding-research:{task_id}:{decision_id}",
+            reviewer=ReviewerAssignment(reviewer_type=ReviewerType.PERSON, reviewer_id="owner"),
+            requested_fields=[ClarificationField(field_id="answer", prompt=question)],
+            allowed_responses=[ResponseOperation.ANSWER], protected_context={"coding_research_task_id": task_id},
+        ))
+        return item.inbox_item_id
+
+    def _resume_coding_research_task(self, task_id: str, response: dict[str, Any]) -> None:
+        """Consume one durable human response on the original coding branch."""
+        from mana_agent.gateway.lane_coordinator import LaneReservation
+        supervisor = self._lane_coordinator.execution_supervisor
+        with self._lane_coordinator._condition:
+            task = supervisor.get_task(task_id)
+            if task.state.value != "queued":
+                return  # Another consumer already owns this durable resume.
+            saved = task.provider_metadata.get("coding_research_gateway")
+            if not saved:
+                raise RuntimeError("Coding clarification has no saved gateway context")
+            execution = self._lane_coordinator.inspect_task(task_id)
+            execution.supervisor_attempt_id = execution.supervisor_lease_token = ""
+            self._lane_coordinator.start(LaneReservation(execution))
+        try:
+            session_id = saved["session_id"]
+            self._bind_runtime_session(session_id)
+            state = self._session(session_id)
+            state["conversation_context"] = saved["conversation_context"]
+            policy = supervisor.get_task(task_id).execution_policy.model_dump(mode="json")
+            state["execution_policy"] = policy
+            context = EntryRouteContext(session_id=session_id, conversation_id=saved["conversation_id"],
+                turn_id=saved["turn_id"], user_message_id=saved["user_message_id"],
+                conversation_context=saved["conversation_context"], authenticated_user_id=saved.get("authenticated_user_id", ""))
+            def record_response(current):
+                supervisor._validate_lease(current, attempt_id=execution.supervisor_attempt_id, lease_token=execution.supervisor_lease_token)
+                research = current.provider_metadata["coding_research"]
+                research["human_response"] = response
+                research.pop("pending_evaluation", None)
+            supervisor.store.update_task(task_id, record_response)
+            recorded_result = supervisor.get_task(task_id).provider_metadata.get("coding_research", {}).get("coding_result", {})
+            workspace = Path(recorded_result.get("workspace_path") or saved["workspace_path"])
+            if not workspace.is_dir():
+                raise RuntimeError("The coding clarification workspace no longer exists")
+            self._coding_agent.working_directory = workspace
+            options = {**saved["options"], "_lane_task_id": task_id,
+                       "_coding_research_workspace": str(workspace), "execution_policy": policy}
+            restored_decision = EntryRoutingDecision(**{**saved["decision"], "execution_policy": TaskExecutionPolicy.model_validate(policy)})
+            result = self._execute_entry_route(decision=restored_decision,
+                context=context, text=saved["request"], state=state, ask_service=self.get_ask_service(),
+                sink=self._event_sink, options=options)
+            if result.payload.get("pending_operation") or self._approval_request_ids(result.payload):
+                return
+            if result.error in CODING_RESEARCH_STOP_ERRORS:
+                self._lane_coordinator.mark_blocked(task_id, reason=result.answer or str(result.error))
+                self._append_session_message(session_id, role="assistant", content=result.answer or str(result.error),
+                    turn_id=saved["turn_id"], message_id=f"coding_research_blocked_{task_id}_{execution.supervisor_attempt_id}",
+                    metadata={"task_id": task_id, "goal_satisfied": False})
+                return
+            failed = bool(result.error) or result.payload.get("goal_satisfied") is False
+            self._finish_lane(task_id, state=LaneTaskState.FAILED if failed else LaneTaskState.COMPLETED,
+                error=str(result.error or "goal_not_satisfied") if failed else "", changed_files=result.changed_files,
+                verification_state={"answer": result.answer, "goal_satisfied": not failed})
+            if failed or supervisor.get_task(task_id).state.value == "completed":
+                self._append_session_message(session_id, role="assistant", content=result.answer or str(result.error or "Coding investigation remains unresolved"),
+                    turn_id=saved["turn_id"], message_id=f"coding_research_resume_{task_id}_{execution.supervisor_attempt_id}",
+                    metadata={"task_id": task_id, "goal_satisfied": not failed})
+        except Exception as exc:
+            current = supervisor.get_task(task_id)
+            if not current.waiting_inbox_item_id:
+                self._finish_lane(task_id, state=LaneTaskState.FAILED, error=str(exc))
+            raise
 
     def _persist_batch_clarification(self, task_id: str, question: str) -> Any:
         """Use the existing durable human-input path for a Batch continuation."""

@@ -349,6 +349,9 @@ class Settings(BaseSettings):
         default=False, alias="MANA_GITHUB_METADATA_ENABLED"
     )
     mana_search_enable_web: bool = Field(default=True, alias="MANA_SEARCH_ENABLE_WEB")
+    mana_coding_research_enabled: bool = Field(default=True, alias="MANA_CODING_RESEARCH_ENABLED")
+    mana_coding_research_max_searches: int = Field(default=12, ge=0, le=200, alias="MANA_CODING_RESEARCH_MAX_SEARCHES")
+    mana_coding_research_max_rounds: int = Field(default=4, ge=0, le=40, alias="MANA_CODING_RESEARCH_MAX_ROUNDS")
     mana_search_enable_github: bool = Field(
         default=True, alias="MANA_SEARCH_ENABLE_GITHUB"
     )

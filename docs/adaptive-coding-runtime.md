@@ -1,5 +1,11 @@
 # Adaptive Coding Runtime
 
+## Unresolved bugs and external evidence
+
+The Main Model can select research at coding turn/yield boundaries after evaluating a typed debugging report, local evidence, attempted fixes and installed versions. Both engines return a report as pending work. Research uses the existing autonomous controller and search providers, then returns an untrusted, sourced recommendation to the same task/backend. A fixed number of failures never triggers a search.
+
+Default task limits are 12 search requests in four rounds, with at most three queries and three source inspections per round. Queries are sanitized; task-scoped results, consumed counters and delivery receipts survive recovery. Missing permissions or provider availability are reported to the Main Model without fallback searches. The existing integration and independent completion gates still apply. Configuration, recovery boundaries, limitations and user-owned verification are documented in [the regression note](regressions/coding-bug-research.md).
+
 Coding turns begin with one validated `ExecutionScopeDecision`. The model owns
 semantic choices: intent, scope level, mutation targets, read-only related
 files, evidence needs, tool families, budgets, mutation strategy, verification,

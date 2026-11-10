@@ -20,6 +20,11 @@ identity, while each retry or reassignment receives a new attempt ID.
 
 ## Lifecycle
 
+Unresolved coding research retains the same task/attempt authority. Search reservations,
+outcomes and continuation delivery receipts are checkpointed; a started coding continuation
+with uncertain effects requires reconciliation rather than replay. Main Model clarification
+uses the durable human inbox and resumes its original branch. See [coding research recovery](regressions/coding-bug-research.md).
+
 Non-terminal states are `created`, `queued`, `leased`, `running`,
 `checkpointing`, `waiting`, `retry_scheduled`, `replanning`, `cancelling`, and
 `completed_pending_verification`. Terminal states are `cancelled`, `failed`,

@@ -108,6 +108,18 @@ class BatchTaskLoop:
         self.config = AutonomousExecutionConfig.model_validate(run["limits"])
         run.setdefault("executed_call_ids", [entry["call_id"] for entry in run.get("trace", []) if entry.get("call_id")])
         run.setdefault("consumed_call_ids", list(run["executed_call_ids"]))
+        # A coding report yields to the Main Model without restarting the Batch
+        # run or replaying its completed tool waves.
+        if run["status"] == "debugging_handoff":
+            ticket = (resume or {}).get("coding_continuation_id")
+            if not ticket or ticket == run.get("research_delivery_id"):
+                return run
+            run["research_delivery_id"] = ticket
+            run["messages"].append({"role": "user", "content": json.dumps((resume or {}).get("coding_research_context") or {}, ensure_ascii=False)})
+            run["phase"] = "work"
+            run["step"] += 1
+            run["status"] = "running"
+            run.pop("debugging_report", None)
         if run["status"] in {"completed", "failed", "cancelled", "waiting_for_user"}:
             return run
         if workspace_fingerprint(root) != run["workspace_fingerprint"]:
@@ -196,6 +208,14 @@ class BatchTaskLoop:
                 run["completed_call_ids"] = []
             else:
                 run["last_answer"] = response["content"]
+                from mana_agent.coding_research_contracts import parse_debugging_envelope
+                _, report = parse_debugging_envelope(response["content"])
+                if report is not None:
+                    run["status"] = "debugging_handoff"
+                    run["debugging_report"] = report.model_dump(mode="json")
+                    run["answer"] = response["content"]
+                    self.store.save_run(task_id, run)
+                    return run
                 run["phase"] = "continuation"
                 run["step"] += 1
             self.store.save_run(task_id, run)

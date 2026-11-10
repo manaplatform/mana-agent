@@ -90,6 +90,8 @@ class SearchRouter:
         memory_context: str = "",
         task_id: str | None = None,
         decision_override: SearchDecision | None = None,
+        use_memory: bool = True,
+        redact_errors: bool = False,
     ) -> SearchRouterResult:
         decision = decision_override or self.decision_engine.decide(
             user_query=user_query,
@@ -100,7 +102,7 @@ class SearchRouter:
         if decision.mode == "none":
             return SearchRouterResult(decision=decision)
         memory_hits: list[SearchMemoryRecord] = []
-        if decision.reuse_memory_first:
+        if use_memory and decision.reuse_memory_first:
             for query in decision.queries:
                 memory_hits.extend(
                     self.memory.find(query=query.query, source_type=query.target, limit=self.config.max_injected_results)
@@ -113,24 +115,31 @@ class SearchRouter:
         results: list[SearchResult] = []
         warnings: list[str] = []
         for query in decision.queries:
-            if self.memory.has_negative(query=query.query, source_type=query.target):
+            if use_memory and self.memory.has_negative(query=query.query, source_type=query.target):
                 warnings.append(f"negative search memory reused for {query.target}:{query.query}")
                 continue
             try:
                 found = self._search(query, max_results=decision.max_results)
             except Exception as exc:
-                warnings.append(str(exc))
-                logger.debug("external search failed", exc_info=True)
+                if redact_errors:
+                    # Provider exceptions can include credential-bearing URLs or
+                    # untrusted response bodies. Coding research exposes only type.
+                    warnings.append(f"external search failed: {type(exc).__name__}")
+                    logger.debug("external search failed: %s", type(exc).__name__)
+                else:
+                    warnings.append(str(exc))
+                    logger.debug("external search failed", exc_info=True)
                 continue
             ranked = rank_results(found, query=query.query)
             results.extend(ranked)
-            self.memory.store_results(
-                original_query=query.query,
-                source_type=query.target,
-                results=ranked,
-                task_id=task_id,
-                ttl_days=self.config.memory_ttl_days,
-            )
+            if use_memory:
+                self.memory.store_results(
+                    original_query=query.query,
+                    source_type=query.target,
+                    results=ranked,
+                    task_id=task_id,
+                    ttl_days=self.config.memory_ttl_days,
+                )
         return SearchRouterResult(
             decision=decision,
             results=rank_results(results, query=user_query)[: self.config.max_injected_results],

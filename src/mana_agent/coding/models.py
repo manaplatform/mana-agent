@@ -11,6 +11,7 @@ from typing import Any, Literal
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from mana_agent.coding_research_contracts import CodingDebuggingReport
 
 
 def _utc_now() -> datetime:
@@ -182,6 +183,8 @@ class CodingTaskResult(BaseModel):
     status: Literal["completed", "failed", "cancelled", "waiting"]
     pending_operation: PendingBatchOperation | None = None
     human_input: dict[str, str] = Field(default_factory=dict)
+    debugging_report: CodingDebuggingReport | None = None
+    continuation_context: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
     changed_files: list[str] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
@@ -344,6 +347,7 @@ __all__ = [
     "CodingStatus",
     "CodingTask",
     "CodingTaskResult",
+    "CodingDebuggingReport",
     "ExternalCodingEngineConfig",
     "InternalCodingEngineConfig",
     "WorkspaceContext",

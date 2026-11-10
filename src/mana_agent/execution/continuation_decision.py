@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from mana_agent.execution_supervisor.models import StrictModel, stable_id
+from mana_agent.coding_research_contracts import CodingResearchPlan, CodingResearchRecommendation
 
 
 class ContinuationDecisionError(RuntimeError):
@@ -43,6 +44,8 @@ class ContinuationDecision(StrictModel):
     renewal_requested: bool = False
     renewal_reason: str = ""
     reason: str = Field(min_length=1)
+    research_plan: CodingResearchPlan | None = None
+    research_recommendation: CodingResearchRecommendation | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -77,6 +80,8 @@ class ContinuationDecision(StrictModel):
 
     @model_validator(mode="after")
     def validate_semantic_invariants(self) -> "ContinuationDecision":
+        if self.research_plan is not None and self.action not in {ContinuationAction.CONTINUE, ContinuationAction.REPLAN}:
+            raise ValueError("research_plan requires CONTINUE or REPLAN")
         if self.action == ContinuationAction.FINALIZE:
             if not self.goal_satisfied:
                 raise ValueError("FINALIZE action requires goal_satisfied=True")
@@ -100,3 +105,19 @@ class ContinuationDecision(StrictModel):
             raise ValueError("renewal_requested=True requires non-empty renewal_reason")
 
         return self
+
+
+class CodingContinuationDecision(ContinuationDecision):
+    """Validate raw coding decisions before legacy alias/default normalization."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_explicit_decision(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            required = {"task_id", "action", "goal_satisfied", "progress_detected", "evidence_summary", "safe_to_continue", "reason"}
+            if required - set(data) or set(data) - set(cls.model_fields):
+                raise ValueError("Coding continuation must explicitly match the decision schema")
+            for key in ("goal_satisfied", "progress_detected", "safe_to_continue"):
+                if type(data[key]) is not bool:
+                    raise ValueError(f"Coding continuation {key} must be boolean")
+        return data

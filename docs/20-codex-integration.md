@@ -6,6 +6,8 @@ decisions, planning, edits, review, and proportional verification. Mana-Agent
 retains the outer chat route, worktree allocation, permissions, event streaming,
 result normalization, and explicit merge control.
 
+For unresolved bugs, Codex may yield a structured debugging report at a turn boundary. The Main Model can research through authorized Mana tools and resume the original Codex thread with source references. This pending handoff does not trigger a forced mutation retry or mark the worktree as a merge candidate. Codex still owns all decisions inside its coding turn. See [coding research](regressions/coding-bug-research.md).
+
 The official Codex SDK is currently TypeScript (`@openai/codex-sdk`) and wraps
 the Codex CLI. There is no official `openai-codex` Python package or
 `AsyncCodex` client. Mana-Agent therefore integrates from Python through the
@@ -86,12 +88,11 @@ MANA_CODEX_MODEL = ""
 # rewrites this, but interactive runs honor the pin.
 ```
 
-Configurations store `MANA_CODING_BACKEND = "codex"`. Coding requests strictly
-require Codex (`MANA_CODEX_ENABLED = true`). Configuring any backend other than
-`codex` or disabling Codex raises a configuration error without fallback; Mana-Agent
-never silently rewrites the choice. Network access remains disabled by policy unless
-a future validated execution decision and sandbox implementation explicitly
-support it.
+In external mode, coding requests require the enabled Codex provider. A selected
+backend failure stops without silently selecting the internal engine. Sandbox
+network access retains its configured policy. Main Model research uses Mana's
+separately authorized search/browser tools and does not grant network access to
+the Codex sandbox.
 
 Codex write turns run in the selected repository root by default, so edits are
 made directly in the checkout opened by Mana-Agent. Set
