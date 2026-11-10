@@ -5,13 +5,59 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const terminal = new Set(["success", "failed", "cancelled", "timed_out"]);
+  const terminal = new Set(["success", "completed", "done", "failed", "error", "cancelled", "timed_out", "rejected", "superseded", "unverified", "interrupted", "failure", "timeout", "skipped", "not_run"]);
   const text = (value) => String(value == null ? "" : value);
+  const parseJsonSafe = (val) => {
+    if (!val || typeof val !== "string") return null;
+    const trimmed = val.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try { return JSON.parse(trimmed); } catch { return null; }
+    }
+    return null;
+  };
   const metaOf = (event) => event.metadata || event.details || event.payload || {};
   const eventType = (event) => text(event.type || event.event_type);
   const eventStatus = (event) => text(event.status || "running");
   const eventSequence = (event) => Number(event.sequence || 0);
   const eventTime = (event) => text(event.started_at || event.timestamp || event.created_at);
+  const privateFields = new Set(["payload", "raw", "raw_payload", "raw_provider_payload", "prompt", "system_prompt", "developer_prompt", "instructions", "messages", "reasoning", "reasoning_content", "reasoning_text", "reasoning_details", "encrypted_content", "lease_token", "lease_token_hash", "protected_context", "environment", "env", "arguments", "args"]);
+  const scrubPrivateFields = (value, depth = 0) => {
+    if (depth > 6) return "[omitted]";
+    if (Array.isArray(value)) return value.slice(0, 100).map((item) => scrubPrivateFields(item, depth + 1));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !privateFields.has(key.toLowerCase())).slice(0, 100).map(([key, item]) => [key, scrubPrivateFields(item, depth + 1)]));
+    return value;
+  };
+
+  const operationKey = (event) => {
+    const meta = metaOf(event);
+    if (eventType(event).startsWith("steering.")) {
+      const request = event.request_id || meta.request_id || event.operation_id;
+      if (request) return `steering:${event.conversation_id || event.session_id || ""}:${request}`;
+    }
+    const op = event.operation_id || meta.operation_id || event.tool_call_id || meta.tool_call_id || meta.call_id || event.call_id || event.step_id || event.event_id || event.id || eventType(event);
+    return [event.task_id || meta.task_id, event.attempt_id || meta.attempt_id, event.agent_id || meta.agent_id, event.subagent_id || meta.subagent_id, op].map(text).join(":");
+  };
+  const acceptsActivityUpdate = (previous, event) => {
+    if (previous.sequence && event.sequence && event.sequence < previous.sequence) return false;
+    if (terminal.has(previous.status) && !terminal.has(event.status)) return false;
+    return !["steering.applied", "steering.rejected", "steering.superseded"].includes(eventType(previous)) || eventType(previous) === eventType(event) || !previous.sequence && event.sequence > 0;
+  };
+  const boundOperations = (events) => {
+    const completed = events.filter((event) => terminal.has(event.status));
+    const retained = new Set(completed.slice(-200));
+    return events.filter((event) => !terminal.has(event.status) || retained.has(event));
+  };
+  const publicActivity = (event) => {
+    const type = eventType(event), meta = metaOf(event);
+    if ((event.visibility || meta.visibility) === "internal" || type.startsWith("reasoning.") || type.startsWith("provider.") && type !== "provider.warning" || type.startsWith("usage.") || type === "subagent.delta" || ["reasoning", "provider", "usage"].includes(event.semantic_kind || meta.semantic_kind) || (event.backend || meta.backend) && (event.semantic_kind || meta.semantic_kind) === "assistant_generation") return false;
+    if (type === "agent.summary") return meta.summary_source === "agent" || (meta.summary_source === "provider" && meta.summary_trusted === true && meta.summary_complete === true && meta.provider === "openai" && meta.transport === "direct_responses");
+    return true;
+  };
+  const visibleActivity = (event, visibility) => {
+    if (visibility === "verbose") return true;
+    if (visibility === "minimal") return !terminal.has(event.status) || /^(turn|steering|approval|recovery)\./.test(event.type) || ["failed", "error", "cancelled"].includes(event.status);
+    return !["command.output", "command.delta", "tool.stdout", "tool.stderr", "tool.progress"].includes(event.type);
+  };
 
   const formatDuration = (ms) => {
     if (ms == null || isNaN(ms)) return "";
@@ -116,6 +162,30 @@
       return true;
     }
     if (name.startsWith("edit_") || name.startsWith("write_")) {
+      return true;
+    }
+    return false;
+  }
+
+  const MUTATION_TOOLS = new Set([
+    "edit_file",
+    "multi_edit_file",
+    "apply_patch",
+    "apply_patch_batch",
+    "write_file",
+    "create_file",
+    "delete_file",
+    "patch",
+    "document_create",
+    "document_update",
+    "document_delete",
+  ]);
+
+  function isMutationTool(toolName) {
+    const name = text(toolName || "").trim().toLowerCase();
+    if (!name) return false;
+    if (MUTATION_TOOLS.has(name)) return true;
+    if (name.startsWith("edit_") || name.startsWith("write_") || name.startsWith("patch_") || name.startsWith("patch.")) {
       return true;
     }
     return false;
@@ -367,12 +437,7 @@
     const meta = metaOf(event);
     const direct = text(event.execution_id || event.turn_id || meta.execution_id || meta.turn_id || meta.client_message_id);
     if (direct) return direct;
-    const userMessages = [...state.messages.values()].filter((m) => m.role === "user");
-    if (userMessages.length > 0) {
-      const latest = userMessages[userMessages.length - 1];
-      return text(latest.execution_id || latest.message_id || latest.id);
-    }
-    return "turn_default";
+    return "";
   }
 
   function applyTraceEvent(state, event) {
@@ -380,7 +445,9 @@
     const type = eventType(event);
     if (!type) return;
     const meta = { ...metaOf(event) };
-    if (event.backend && !meta.backend) meta.backend = event.backend;
+    for (const key of ["backend", "agent_id", "subagent_id", "parent_agent_id", "task_id", "root_task_id", "parent_task_id", "attempt_id", "attempt_generation", "execution_mode"]) {
+      if (event[key] != null && !meta[key]) meta[key] = event[key];
+    }
     const status = eventStatus(event);
     const rawStatus = status.toLowerCase();
     const title = text(event.title);
@@ -392,6 +459,7 @@
     const stepTitle = title || defaultTitle;
 
     const turnId = getTurnId(state, event);
+    if (!turnId) return;
     let trace = resolveTrace(state, turnId);
     if (!trace) {
       trace = createTrace(turnId);
@@ -403,18 +471,16 @@
     if (meta.client_message_id) trace.aliases.add(text(meta.client_message_id));
     if (meta.message_id) trace.aliases.add(text(meta.message_id));
 
-    let stepId;
-    if (phase === "tool") {
-      const toolCallId = text(event.tool_call_id || meta.tool_call_id || meta.call_id || eventId);
-      stepId = toolCallId ? `${trace.turnId}:tool:${toolCallId}` : `${trace.turnId}:tool:${type}`;
-    } else {
-      stepId = `${trace.turnId}:${phase}`;
-    }
+    const owner = [event.task_id || meta.task_id, event.attempt_id || meta.attempt_id, event.subagent_id || event.agent_id || meta.agent_id].map(text).join(":");
+    const operation = event.operation_id || meta.operation_id || event.tool_call_id || meta.tool_call_id || meta.call_id;
+    const stepId = operation ? `${trace.turnId}:${owner}:${operation}` : phase === "tool" ? `${trace.turnId}:tool:${owner}:${eventId}` : `${trace.turnId}:${phase}:${owner}`;
 
     const isTerminalStep = terminal.has(rawStatus) || rawStatus === "completed" || rawStatus === "done";
 
-    if (phase === "completion" || phase === "failure") {
-      if (phase === "completion") {
+    const rootTerminal = !event.subagent_id && (type === "error" && !(event.backend || meta.backend) && !operation || ["turn.finished", "turn.failed", "turn.cancelled", "turn.timeout", "loop.completed", "execution.failed", "execution.cancelled", "execution.timeout"].includes(type) || type === "turn.completed" && !(event.backend || meta.backend) || ["task.completed", "task.failed", "task.cancelled"].includes(type) && (event.task_id || meta.task_id) && (event.task_id || meta.task_id) === (event.root_task_id || meta.root_task_id) && meta.execution_supervisor);
+    if (rootTerminal && terminal.has(rawStatus)) {
+      if (["success", "completed", "done"].includes(rawStatus)) {
+        if (trace.isFailed || trace.isCancelled) return;
         trace.isCompleted = true;
       } else if (rawStatus === "cancelled" || rawStatus === "interrupted" || type.includes("cancelled")) {
         trace.isCancelled = true;
@@ -424,7 +490,8 @@
 
       for (const step of trace.steps) {
         if (step.status === "running") {
-          step.status = trace.isCompleted ? "completed" : (trace.isCancelled ? "cancelled" : "failed");
+          const hasOperation = step.metadata && (step.metadata.operation_id || step.metadata.tool_call_id || step.metadata.call_id);
+          step.status = trace.isCompleted || hasOperation ? "unverified" : (trace.isCancelled ? "cancelled" : "failed");
           if (detail && !step.detail) {
             step.detail = detail;
           }
@@ -435,6 +502,11 @@
         }
       }
       trace.activeStepId = null;
+      for (const activityBox of [trace.mainBox, trace.codingBox]) {
+        if (!activityBox) continue;
+        for (const operation of activityBox.events) if (!terminal.has(operation.status)) operation.status = "unverified";
+        activityBox.status = trace.isCancelled ? "cancelled" : trace.isFailed ? "failed" : "completed";
+      }
     }
 
     let existing = trace.stepById.get(stepId);
@@ -453,29 +525,20 @@
           trace.activeStepId = null;
         }
       } else {
+        if (terminal.has(existing.status)) return existing;
         if (detail) existing.detail = detail;
         if (stepTitle && existing.title === defaultTitle) existing.title = stepTitle;
       }
 
       if (eventId) {
-        const alreadyHas = existing.subEvents.some((se) => text(se.event_id || se.id) === eventId);
+        const alreadyHas = existing.subEvents.some((se) => text(se.event_id || se.id) === eventId && eventType(se) === type && eventStatus(se) === rawStatus && se.producer_sequence === event.producer_sequence);
         if (!alreadyHas) existing.subEvents.push({ ...event });
       } else {
         existing.subEvents.push({ ...event });
       }
+      existing.subEvents = existing.subEvents.slice(-40);
       updateTraceActivityBoxes(trace, event, type, meta, rawStatus, isTerminalStep, stepTitle, detail, durationMs, eventId);
       return existing;
-    }
-
-    if (trace.activeStepId && trace.stepById.has(trace.activeStepId)) {
-      const activeStep = trace.stepById.get(trace.activeStepId);
-      if (activeStep.phase !== phase && activeStep.status === "running") {
-        activeStep.status = "completed";
-        activeStep.endedAt = eventTime(event) || new Date().toISOString();
-        if (activeStep.durationMs == null && activeStep.startedAt) {
-          activeStep.durationMs = Math.max(0, Date.parse(activeStep.endedAt) - Date.parse(activeStep.startedAt));
-        }
-      }
     }
 
     const newStep = {
@@ -502,6 +565,9 @@
 
     trace.steps.push(newStep);
     trace.stepById.set(stepId, newStep);
+    const recentSteps = new Set(trace.steps.slice(-200));
+    trace.steps = trace.steps.filter((step) => !terminal.has(step.status) || recentSteps.has(step));
+    trace.stepById = new Map(trace.steps.map((step) => [step.stepId, step]));
     updateTraceActivityBoxes(trace, event, type, meta, rawStatus, isTerminalStep, stepTitle, detail, durationMs, eventId);
     return newStep;
   }
@@ -513,7 +579,7 @@
 
     const isCoding = isCodingEvent(type, (meta && (meta.tool_name || meta.name)) || (event && event.tool_name), meta);
     const box = isCoding ? trace.codingBox : trace.mainBox;
-    const boxEventId = eventId || `${type}:${Date.now()}`;
+    const boxEventId = operationKey(event);
     const opStatus = isTerminalStep ? (rawStatus === "success" || rawStatus === "done" ? "completed" : rawStatus) : rawStatus;
 
     if (!box.eventIdSet.has(boxEventId)) {
@@ -521,7 +587,9 @@
       box.events.push({
         id: boxEventId,
         type,
-        title: stepTitle,
+        title: `${event.subagent_id || event.agent_id || meta.agent_id || "MainAgent"} — ${stepTitle}`,
+        sequence: eventSequence(event),
+        operation_id: boxEventId,
         tool_name: text((meta && (meta.tool_name || meta.name)) || (event && event.tool_name) || stepTitle),
         status: opStatus,
         detail,
@@ -532,20 +600,31 @@
     } else {
       for (const be of box.events) {
         if (be.id === boxEventId) {
+          if (!acceptsActivityUpdate(be, { ...event, status: opStatus })) break;
+          be.sequence = eventSequence(event);
+          be.type = type;
+          be.metadata = meta;
           be.status = opStatus;
-          if (detail && !be.detail) be.detail = detail;
+          if (detail) be.detail = detail;
           if (durationMs != null) be.durationMs = durationMs;
           break;
         }
       }
     }
 
+    box.events = boundOperations(box.events);
+    box.eventIdSet = new Set(box.events.map((event) => event.id));
     if (isCoding) {
       if (meta && meta.backend) trace.codingBox.backend = text(meta.backend);
       if (meta && (meta.model || (event && event.model))) trace.codingBox.model = text(meta.model || event.model);
-      const filePath = text((event && event.path) || (meta && (meta.path || meta.filePath || (meta.args && meta.args.path) || (meta.arguments && meta.arguments.path))));
-      if (filePath) trace.codingBox.changedFiles.add(filePath);
-      if (meta && Array.isArray(meta.changed_files)) {
+      const parsedArgs = (meta && typeof meta.args === "string" ? parseJsonSafe(meta.args) : (meta && meta.args)) ||
+                         (meta && typeof meta.arguments === "string" ? parseJsonSafe(meta.arguments) : (meta && meta.arguments)) || {};
+      const filePath = text((event && event.path) || (meta && (meta.path || meta.filePath || meta.file_path)) || (parsedArgs && (parsedArgs.path || parsedArgs.filePath || parsedArgs.file_path)));
+      const toolName = text((meta && (meta.tool_name || meta.name)) || (event && event.tool_name));
+      const isMutationType = ["file.changed", "patch.applied"].includes(type) || (isMutationTool(toolName) && (!type.startsWith("tool.") || type === "tool.finished" || type === "tool.completed" || isTerminalStep));
+      const mutation = isMutationType && ["success", "completed", "done"].includes(rawStatus) && !["plan", "plan_only"].includes(event.execution_mode || meta.execution_mode || meta.phase);
+      if (mutation && filePath) trace.codingBox.changedFiles.add(filePath);
+      if (mutation && meta && Array.isArray(meta.changed_files)) {
         for (const cf of meta.changed_files) {
           const cfs = text(cf);
           if (cfs) trace.codingBox.changedFiles.add(cfs);
@@ -554,15 +633,16 @@
       const cmd = text((meta && (meta.command || meta.cmd || (meta.args && meta.args.command))) || (event && event.command));
       if (cmd && !trace.codingBox.commands.includes(cmd)) {
         trace.codingBox.commands.push(cmd);
+        trace.codingBox.commands = trace.codingBox.commands.slice(-200);
       }
     }
     const hasRunning = box.events.some((e) => e.status === "running");
-    if (hasRunning) {
-      box.status = "running";
-    } else if (trace.isCancelled) {
+    if (trace.isCancelled) {
       box.status = "cancelled";
     } else if (box.events.some((e) => e.status === "failed") || trace.isFailed) {
       box.status = "failed";
+    } else if (hasRunning && !trace.isCompleted) {
+      box.status = "running";
     } else if (isTerminalStep || box.events.length > 0) {
       box.status = opStatus === "failed" ? "failed" : "completed";
     }
@@ -578,6 +658,8 @@
       seenSequences: new Set(),
       seenUnsequenced: new Set(),
       lastSequence: 0,
+      activeExecutionId: "",
+      attempts: new Map(),
       socketReady: false,
       submitting: false,
       runStatus: "idle",
@@ -628,7 +710,7 @@
       error: "",
       created_at: text(message.created_at || new Date().toISOString()),
     });
-    if (!state.executionTraces.has(id)) {
+    if (!message.is_steering && !state.executionTraces.has(id)) {
       state.executionTraces.set(id, createTrace(id));
     }
     state.submitting = true;
@@ -638,14 +720,9 @@
 
   function toolId(event) {
     const meta = metaOf(event);
-    return text(
-      event.tool_call_id ||
-      meta.tool_call_id ||
-      meta.call_id ||
-      event.parent_event_id ||
-      event.event_id ||
-      event.id
-    );
+    const operation = text(event.operation_id || meta.operation_id || event.tool_call_id || meta.tool_call_id || meta.call_id || event.parent_event_id || event.event_id || event.id);
+    const owner = [event.task_id || meta.task_id, event.attempt_id || meta.attempt_id, event.agent_id || meta.agent_id, event.subagent_id || meta.subagent_id].filter(Boolean).join(":");
+    return owner && (event.task_id || meta.task_id || event.attempt_id || meta.attempt_id) ? `${owner}:${operation}` : operation;
   }
 
   function assistantId(event) {
@@ -694,10 +771,10 @@
       ...previous,
       id,
       name: text(meta.tool_name || event.tool_name || previous.name || event.title || "tool"),
-      arguments: meta.arguments || meta.args || meta.args_summary || previous.arguments || "",
+      arguments: "",
       status: resolvedStatus,
-      progress,
-      logs,
+      progress: progress.slice(-40),
+      logs: logs.slice(-40),
       result: text(meta.result_summary || (type === "tool.finished" ? summary : previous.result)),
       error: text(event.error || meta.error || (type === "tool.failed" ? summary : previous.error)),
       started_at: text(previous.started_at || eventTime(event)),
@@ -710,7 +787,11 @@
       details: { ...event, metadata: meta },
     });
 
+    const completedTools = [...state.tools.entries()].filter(([, tool]) => terminal.has(tool.status));
+    completedTools.slice(0, -200).forEach(([key]) => state.tools.delete(key));
+
     const turnId = getTurnId(state, event);
+    if (!turnId) return;
     let trace = resolveTrace(state, turnId);
     if (!trace) {
       trace = createTrace(turnId);
@@ -819,15 +900,49 @@
 
   function applyEvent(state, event) {
     if (!event || typeof event !== "object") return state;
+    const publicMetadata = scrubPrivateFields(metaOf(event));
+    event = { ...scrubPrivateFields(event), metadata: publicMetadata };
     const sequence = eventSequence(event);
-    if (sequence && state.seenSequences.has(sequence)) return state;
+    if (sequence && (sequence <= state.lastSequence || state.seenSequences.has(sequence))) return state;
     if (sequence) {
       state.seenSequences.add(sequence);
-      state.lastSequence = Math.max(state.lastSequence, sequence);
+      while (state.seenSequences.has(state.lastSequence + 1)) state.lastSequence += 1;
+      for (const seen of state.seenSequences) if (seen < state.lastSequence - 4000) state.seenSequences.delete(seen);
+      if (state.seenSequences.size > 4001) {
+        state.seenSequences.delete(Math.max(...state.seenSequences));
+        state.needsReplay = true;
+      }
     } else {
-      const key = [event.event_id || event.id, eventType(event), eventStatus(event), eventSummary(event)].join("|");
+      const key = [event.event_id || event.id, eventType(event), eventStatus(event), eventSummary(event), event.producer_sequence].join("|");
       if (state.seenUnsequenced.has(key)) return state;
       state.seenUnsequenced.add(key);
+      if (state.seenUnsequenced.size > 4000) state.seenUnsequenced.delete(state.seenUnsequenced.values().next().value);
+    }
+    if (!publicActivity(event)) return state;
+    const ownerMeta = metaOf(event);
+    const taskId = text(event.task_id || ownerMeta.task_id);
+    const generation = Number(event.attempt_generation || ownerMeta.attempt_generation || 0);
+    const known = state.attempts.get(taskId);
+    if (known && generation && generation < known) return state;
+    if (taskId && generation && ownerMeta.execution_supervisor) {
+      state.attempts.set(taskId, Math.max(known || 0, generation));
+      if (generation > (known || 0) && eventType(event) === "task.started" && taskId === text(event.root_task_id || ownerMeta.root_task_id)) {
+        const trace = resolveTrace(state, getTurnId(state, event));
+        if (trace) { trace.isCompleted = false; trace.isFailed = false; trace.isCancelled = false; }
+      }
+    }
+    if (eventType(event) === "turn.started" || eventType(event) === "message.accepted") state.activeExecutionId = text(event.execution_id || event.turn_id);
+    if (eventType(event).startsWith("steering.")) {
+      const requestId = text(ownerMeta.request_id || event.request_id);
+      const message = state.messages.get(`steering-${requestId}`);
+      const status = eventType(event).split(".").pop();
+      if (message && (!message.steering_recorded || !["applied", "rejected", "superseded"].includes(message.steering_status))) {
+        state.messages.set(message.message_id, { ...message, steering_status: status, steering_recorded: true, status: "success", optimistic: false });
+      } else if (!message && requestId && ownerMeta.text) {
+        applyMessage(state, { message_id: `steering-${requestId}`, role: "user", is_steering: true,
+          steering_status: status, steering_recorded: true, content: ownerMeta.text,
+          execution_id: event.execution_id || event.turn_id, created_at: eventTime(event) });
+      }
     }
     applyTraceEvent(state, event);
     const type = eventType(event);
@@ -902,12 +1017,15 @@
     }
     const activityKey = text(event.event_id || event.id || `sequence-${sequence}`);
     if (!type.startsWith("tool.") && type !== "assistant.delta" && type !== "assistant.started" && type !== "message.accepted") {
-      state.activities.set(`${activityKey}:${type}:${sequence}`, { ...event, sequence });
+      const previous = state.activities.get(operationKey(event));
+      if (!previous || acceptsActivityUpdate(previous, event)) state.activities.set(operationKey(event), { ...event, sequence, started_at: previous && previous.started_at || event.started_at });
+      const completed = [...state.activities.entries()].filter(([, event]) => terminal.has(event.status));
+      for (const [key] of completed.slice(0, Math.max(0, completed.length - 200))) state.activities.delete(key);
     }
     if (type === "turn.finished") {
       state.submitting = false;
       state.runStatus = eventStatus(event);
-    } else if (type === "error" || type.endsWith(".cancelled") || eventStatus(event) === "failed") {
+    } else if ((type === "error" || ["turn.cancelled", "turn.failed", "turn.timeout"].includes(type)) && !event.subagent_id) {
       markRunFailed(state, event);
     } else if (eventStatus(event) === "running") {
       state.runStatus = "running";
@@ -1434,10 +1552,10 @@
 
       const showAllKey = `${key}:show_all`;
       const showAll = activityBoxState.get(showAllKey) === true;
-      const maxEvents = 100;
+      const maxEvents = 40;
       // The request's toast is its only approval surface; the stream must not
       // repeat it as a row. Decision events stay visible as ordinary rows.
-      const allEvents = box.events.filter((ev) => !isHiddenApprovalRow(ev));
+      const allEvents = box.events.filter((ev) => !isHiddenApprovalRow(ev) && visibleActivity(ev, config.activityVisibility || "normal"));
       const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(-maxEvents);
 
       if (allEvents.length > maxEvents && !showAll) {
@@ -1445,7 +1563,7 @@
         expandBtn.type = "button";
         expandBtn.className = "activity-expand-history-btn";
         expandBtn.style.cssText = "font-size:11px;color:#93c5fd;background:none;border:none;cursor:pointer;padding:4px;text-align:left;";
-        expandBtn.textContent = `▲ Show ${allEvents.length - maxEvents} earlier operations...`;
+        expandBtn.textContent = `▲ Show all ${allEvents.length} operations`;
         expandBtn.addEventListener("click", (e) => {
           e.preventDefault();
           activityBoxState.set(showAllKey, true);
@@ -1458,8 +1576,8 @@
       const groups = [];
       for (const ev of eventsToRender) {
         const lastGroup = groups[groups.length - 1];
-        const evTitle = ev.tool_name || ev.title || ev.type;
-        if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.title === evTitle && lastGroup.status === ev.status) {
+        const evTitle = `${ev.metadata && ["agent", "provider"].includes(ev.metadata.summary_source) ? "Summary · " : ev.metadata && ev.metadata.evidence_status === "verified" ? "Verified · " : ""}${ev.title || ev.tool_name || ev.type}`;
+        if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.events[0].id === ev.id && lastGroup.status === ev.status) {
           lastGroup.events.push(ev);
         } else {
           groups.push({ title: evTitle, status: ev.status, events: [ev] });
@@ -1469,6 +1587,8 @@
       for (const grp of groups) {
         const row = document.createElement("div");
         row.className = "activity-event-row";
+        const ownerMeta = (grp.events[0] && grp.events[0].metadata) || {};
+        row.style.marginLeft = `${Math.min(48, ownerMeta.parent_agent_id ? 12 * Math.max(1, (ownerMeta.delegation_path || []).length) : 0)}px`;
 
         const header = document.createElement("div");
         header.className = "activity-event-header";
@@ -1624,10 +1744,10 @@
 
         const showAllKey = `${key}:show_all`;
         const showAll = activityBoxState.get(showAllKey) === true;
-        const maxEvents = 100;
+        const maxEvents = 40;
         // The request's toast is its only approval surface; the stream must not
         // repeat it as a row. Decision events stay visible as ordinary rows.
-        const allEvents = box.events.filter((ev) => !isHiddenApprovalRow(ev));
+        const allEvents = box.events.filter((ev) => !isHiddenApprovalRow(ev) && visibleActivity(ev, config.activityVisibility || "normal"));
         const eventsToRender = (showAll || allEvents.length <= maxEvents) ? allEvents : allEvents.slice(-maxEvents);
 
         if (allEvents.length > maxEvents && !showAll) {
@@ -1635,7 +1755,7 @@
           expandBtn.type = "button";
           expandBtn.className = "activity-expand-history-btn";
           expandBtn.style.cssText = "font-size:11px;color:#93c5fd;background:none;border:none;cursor:pointer;padding:4px;text-align:left;";
-          expandBtn.textContent = `▲ Show ${allEvents.length - maxEvents} earlier operations...`;
+          expandBtn.textContent = `▲ Show all ${allEvents.length} operations`;
           expandBtn.addEventListener("click", (e) => {
             e.preventDefault();
             activityBoxState.set(showAllKey, true);
@@ -1647,8 +1767,8 @@
         const groups = [];
         for (const ev of eventsToRender) {
           const lastGroup = groups[groups.length - 1];
-          const evTitle = ev.tool_name || ev.title || ev.type;
-          if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.title === evTitle && lastGroup.status === ev.status) {
+          const evTitle = ev.title || ev.tool_name || ev.type;
+          if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.events[0].id === ev.id && lastGroup.status === ev.status) {
             lastGroup.events.push(ev);
           } else {
             groups.push({ title: evTitle, status: ev.status, events: [ev] });
@@ -1738,7 +1858,9 @@
         const filesCount = box.changedFiles ? box.changedFiles.size : 0;
         const opsCount = Math.max(box.events.length, box.commands.length);
         const filesText = filesCount > 0 ? `${filesCount} ${filesCount === 1 ? "file" : "files"} changed` : "Code inspected";
-        summaryCard.textContent = `✓ Coding complete · ${filesText} (${opsCount} operations)`;
+        const outcome = trace.isCancelled ? "cancelled" : trace.isFailed ? "failed" : "completed";
+        const marker = trace.isCancelled ? "■" : trace.isFailed ? "✗" : "✓";
+        summaryCard.textContent = `${marker} Coding activity ${outcome} · ${filesText} (${opsCount} operations) · observed; verification recorded separately`;
         node.appendChild(summaryCard);
       }
 
@@ -1747,6 +1869,8 @@
 
     const render = () => {
       renderApprovalDrawer();
+      const selection = typeof window !== "undefined" && typeof window.getSelection === "function" ? window.getSelection() : null;
+      if (selection && !selection.isCollapsed && typeof timeline.contains === "function" && timeline.contains(selection.anchorNode)) return;
       const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
       for (const stream of timeline.querySelectorAll(".activity-stream[data-activity-stream-key]")) {
         rememberActivityStreamPosition(stream, stream.dataset.activityStreamKey);
@@ -1763,12 +1887,19 @@
       rows.sort((a, b) => a.time.localeCompare(b.time) || a.sequence - b.sequence);
 
       const renderedTraces = new Set();
+      const lastAnchors = new Map();
+      for (const row of rows) {
+        if (row.kind === "message" && row.value.role === "user") {
+          const trace = resolveTrace(state, row.value.execution_id || row.value.message_id || row.value.id);
+          if (trace) lastAnchors.set(trace, row.value);
+        }
+      }
       for (const row of rows) {
         if (row.kind === "message") {
           const item = row.value;
           const node = document.createElement("div");
           node.className = `message ${item.role === "user" ? "user" : "assistant"} ${item.status === "failed" ? "failed" : ""} ${item.optimistic ? "sending" : ""}`;
-          addText(node, "div", item.content || (item.status === "streaming" ? "…" : ""));
+          addText(node, "div", item.is_steering ? `⚡ Steering [${item.steering_status || "pending"}]: ${item.content}` : item.content || (item.status === "streaming" ? "…" : ""));
           if (item.attachments && item.attachments.length > 0) {
             const attContainer = document.createElement("div");
             attContainer.className = "message-attachments";
@@ -1790,7 +1921,7 @@
 
           if (item.role === "user") {
             const trace = resolveTrace(state, item.execution_id || item.message_id || item.id);
-            if (trace) {
+            if (trace && lastAnchors.get(trace) === item) {
               renderedTraces.add(trace);
               const mb = renderMainActivityBox(trace);
               if (mb) timeline.appendChild(mb);
@@ -1839,7 +1970,8 @@
           if (cb) timeline.appendChild(cb);
         }
       }
-      submitButton.disabled = !state.socketReady || state.submitting;
+      submitButton.disabled = !state.socketReady || state.submitting && !state.activeExecutionId;
+      submitButton.textContent = state.submitting ? "Steer" : "Send";
       dot.classList.toggle("ok", state.socketReady);
       statusText.textContent = state.socketReady
         ? state.submitting || state.runStatus === "running" || state.runStatus === "starting" ? "Agent is working · live" : "Live events connected"
@@ -1862,7 +1994,34 @@
       }
     };
 
-    const dispatchEvent = (event) => { reduce(state, { type: "event", event }); render(); };
+    let activityRenderTimer = null;
+    const dispatchEvent = (event) => {
+      reduce(state, { type: "event", event });
+      if (state.needsReplay && socket) { state.needsReplay = false; socket.close(1013, "Activity recovery required"); }
+      const type = eventType(event);
+      if (
+        type.includes("approval") ||
+        type.startsWith("computer.") ||
+        type.startsWith("server.") ||
+        type.startsWith("api.") ||
+        type.startsWith("inbox.") ||
+        type === "turn.finished" ||
+        type === "turn.started" ||
+        type === "message.accepted" ||
+        terminal.has(eventStatus(event))
+      ) {
+        if (activityRenderTimer != null) {
+          clearTimeout(activityRenderTimer);
+          activityRenderTimer = null;
+        }
+        render();
+      } else if (activityRenderTimer == null) {
+        activityRenderTimer = setTimeout(() => {
+          activityRenderTimer = null;
+          render();
+        }, 100);
+      }
+    };
     const socketUrl = () => `${config.wsBase}/api/v1/ws/conversations/${encodeURIComponent(config.sessionId)}?root=${encodeURIComponent(config.root)}&replay_limit=1000&after_sequence=${state.lastSequence}${config.token ? `&token=${encodeURIComponent(config.token)}` : ""}`;
     const switchSession = (sessionId) => {
       const replacementId = text(sessionId);
@@ -1881,6 +2040,8 @@
       state.seenSequences.clear();
       state.seenUnsequenced.clear();
       state.lastSequence = 0;
+      state.activeExecutionId = "";
+      state.attempts.clear();
       state.submitting = false;
       state.runStatus = "idle";
       state.error = "";
@@ -1917,6 +2078,12 @@
           reduce(state, { type: "socket", ready: true });
           reconnects = 0;
           render();
+        } else if (packet.type === "activity.backpressure" || packet.type === "canvas.backpressure") {
+          state.error = "Recovering activity history…";
+          socket.close();
+        } else if (packet.type === "socket.replay_complete") {
+          if (state.error === "Recovering activity history…") state.error = "";
+          render();
         } else if (packet.type === "event" || packet.type === "event.replay") {
           dispatchEvent(packet.event);
         }
@@ -1933,7 +2100,32 @@
       event.preventDefault();
       const content = input.value.trim();
       const validAttachments = pendingAttachments.filter((a) => !a.uploading && !a.error);
-      if ((!content && validAttachments.length === 0) || state.submitting || !state.socketReady) return;
+      if ((!content && validAttachments.length === 0) || !state.socketReady) return;
+      if (state.submitting) {
+        if (!content || !state.activeExecutionId) return;
+        if (validAttachments.length) { state.error = "Live steering accepts text only."; render(); return; }
+        const requestId = `steer_${crypto.randomUUID().replaceAll("-", "")}`;
+        const messageId = `steering-${requestId}`;
+        applyOptimistic(state, { message_id: messageId, content, role: "user", is_steering: true,
+          steering_status: "pending", execution_id: state.activeExecutionId, created_at: new Date().toISOString() });
+        input.value = "";
+        render();
+        try {
+          const response = await fetch(`${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/steering`, {
+            method: "POST", headers: { "Content-Type": "application/json", ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}) },
+            body: JSON.stringify({ root: config.root, text: content, request_id: requestId, execution_id: state.activeExecutionId }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.detail || result.error || `HTTP ${response.status}`);
+          const current = state.messages.get(messageId);
+          if (current && current.steering_status === "pending") state.messages.set(messageId, { ...current, steering_status: "queued", optimistic: false });
+        } catch (error) {
+          const current = state.messages.get(messageId);
+          if (current && !["applied", "rejected", "superseded"].includes(current.steering_status)) state.messages.set(messageId, { ...current, steering_status: "rejected", optimistic: false, error: text(error.message) });
+        }
+        render();
+        return;
+      }
       if (pendingAttachments.some((a) => a.uploading)) return;
       const id = `client_${Date.now().toString(36)}_${crypto.randomUUID().replaceAll("-", "")}`;
       const attsToSend = validAttachments.map((a) => ({ ...a }));
@@ -1979,20 +2171,33 @@
         form.requestSubmit();
       }
     });
+    const resumeSelectedActivity = () => { if (!closed) render(); };
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("selectionchange", resumeSelectedActivity);
+    }
     const elapsedTimer = setInterval(() => {
-      const hasRunningTools = [...state.tools.values()].some((tool) => tool.status === "running");
-      const hasRunningTraces = [...state.executionTraces.values()].some((t) => t.steps.some((s) => s.status === "running"));
-      if (hasRunningTools || hasRunningTraces) render();
-    }, 250);
+      if (!state.submitting) return;
+      const active = [...state.tools.values(), ...state.activities.values()]
+        .filter((operation) => !terminal.has(operation.status))
+        .sort((a, b) => Number(b.last_sequence || b.sequence || 0) - Number(a.last_sequence || a.sequence || 0))[0];
+      if (active) {
+        const started = Date.parse(active.started_at || active.timestamp || "");
+        const elapsed = Number.isFinite(started) ? ` · ${Math.max(0, Math.floor((Date.now() - started) / 1000))}s` : "";
+        statusText.textContent = `${active.subagent_id || active.agent_id || "MainAgent"} — ${active.title || active.name || "Working"}${elapsed}`;
+      }
+    }, 1000);
     window.addEventListener("beforeunload", () => {
       closed = true;
       clearInterval(elapsedTimer);
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        document.removeEventListener("selectionchange", resumeSelectedActivity);
+      }
       if (socket) socket.close();
     }, { once: true });
     render();
     connect();
-    return { state, reduce, snapshot: () => snapshot(state), close: () => { closed = true; if (socket) socket.close(); clearInterval(elapsedTimer); } };
+    return { state, reduce, snapshot: () => snapshot(state), close: () => { closed = true; if (socket) socket.close(); clearInterval(elapsedTimer); if (typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("selectionchange", resumeSelectedActivity); if (activityRenderTimer != null) clearTimeout(activityRenderTimer); } };
   }
 
-  return { createState, reduce, snapshot, init, classifyRuntimePhase, isCodingTool };
+  return { createState, reduce, snapshot, init, classifyRuntimePhase, isCodingTool, isMutationTool };
 });

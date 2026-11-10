@@ -137,6 +137,8 @@ def adapt_codex_event(
         parent_event_id=str(payload.get("parentEventId") or item.get("id") or "") or None,
         backend="codex",
         sequence=sequence,
+        producer_sequence=sequence,
+        operation_id=str(item.get("id") or payload.get("itemId") or ""),
         status=status,
         title=_title(event_type, item_type, command, path, semantic_kind),
         summary=summary,

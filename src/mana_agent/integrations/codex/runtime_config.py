@@ -121,6 +121,11 @@ class CodexRuntimeConfig:
             f"approval_policy = {_toml_string(self.approval_policy)}",
             f"sandbox_mode = {_toml_string(self.sandbox_mode)}",
         ]
+        from mana_agent.config.model_capabilities import resolve_model_capability
+        capability = resolve_model_capability(self.provider, self.model, transport=self.transport.value)
+        from mana_agent.chat.activity import native_summary_endpoint
+        if capability.supports_public_reasoning_summaries and native_summary_endpoint(self.base_url):
+            lines.append('model_reasoning_summary = "auto"')
         # Supply explicit limits so Codex does not silently degrade to fallback
         # model metadata for unknown/third-party model ids (e.g. NVIDIA DeepSeek).
         if self.model_context_window is not None and self.model_context_window > 0:

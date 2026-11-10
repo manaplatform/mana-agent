@@ -77,3 +77,28 @@ def test_analyze_command_accepts_unmatched_quote_in_natural_language() -> None:
     assert gateway.requests == [
         "Run the registered analyze workflow: Check the user's requested behavior"
     ]
+
+
+def test_activity_shows_recent_events_without_backward_page_navigation(monkeypatch) -> None:
+    calls = []
+    recent = [{"type": "tool.started", "status": "running", "title": "Reading implementation", "sequence": 12}]
+    def history(**kwargs):
+        calls.append(kwargs)
+        return recent
+    monkeypatch.setattr("mana_agent.services.execution_event_hub.get_execution_event_hub",
+                        lambda: SimpleNamespace(history=history))
+    monkeypatch.setattr("mana_agent.config.user_config.get_setting", lambda name, default=None: default)
+    dispatcher = CommandDispatcher(build_default_registry())
+    context = CommandContext(frontend="cli", session_id="session-1", repository_id="repo-1", capabilities={"chat"})
+
+    result = dispatcher.dispatch("/activity", context)
+    assert result is not None and result.status == "success"
+    assert result.data["events"] == recent
+    assert "Reading implementation" in result.message
+    assert "Earlier:" not in result.message
+    assert "before_sequence" not in calls[0]
+
+    retired = dispatcher.dispatch("/activity history 12", context)
+    assert retired is not None and retired.status == "error"
+    assert retired.message == "Usage: /activity [minimal|normal|verbose]"
+    assert len(calls) == 1

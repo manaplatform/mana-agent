@@ -50,7 +50,7 @@ def event_classification_metadata(event: dict[str, Any]) -> dict[str, Any]:
         _safe_dict(event.get("details")),
         _safe_dict(event.get("payload")),
     ]
-    for field_name in ("backend", "tool_name", "name"):
+    for field_name in ("backend", "tool_name", "name", "task_id", "root_task_id", "parent_task_id", "agent_id", "subagent_id", "attempt_id", "attempt_generation", "operation_id", "execution_mode"):
         value = event.get(field_name)
         if value is None or not str(value).strip():
             value = next(
@@ -419,6 +419,7 @@ class ExecutionTrace:
         self.is_failed: bool = False
         self.is_cancelled: bool = False
         self._seen_sub_event_ids: set[str] = set()
+        self._attempt_generations: dict[str, int] = {}
         # Persistent activity box event streams
         self.main_events: list[dict[str, Any]] = []
         self.coding_events: list[dict[str, Any]] = []
@@ -435,172 +436,138 @@ class ExecutionTrace:
     def get_step(self, step_id: str) -> ExecutionStep | None:
         return self._step_by_id.get(step_id)
 
+    @property
+    def active_steps(self) -> list[ExecutionStep]:
+        return [step for step in self.steps if step.status in {"running", "waiting_approval", "waiting", "queued"}]
+
     def apply_event(self, event: dict[str, Any]) -> ExecutionStep | None:
-        """Apply an event to this turn's trace idempotently."""
-        ev = dict(event)
-        event_type = str(ev.get("event_type") or ev.get("type") or "").strip()
+        """Reduce observed operations without inventing completion of sibling work."""
+        from mana_agent.chat.activity import normalize_activity, operation_key, delivery_key, is_mutation, bound_operations, accepts_activity_update
+        ev = normalize_activity(event)
+        event_type = ev["type"]
         meta = event_classification_metadata(ev)
-        duration_ms = ev.get("duration_ms")
-        event_id = str(ev.get("event_id") or ev.get("id") or "").strip()
-
-        phase, default_title = classify_runtime_phase(event_type, meta)
-        if phase == "lifecycle":
-            # Lifecycle events update turn-level metadata without creating spurious steps
+        task_id = str(ev.get("task_id") or "")
+        generation = int(ev.get("attempt_generation") or 0)
+        known = self._attempt_generations.get(task_id, 0)
+        if generation and known and generation < known:
             return None
-        title = str(ev.get("title") or "").strip()
-        detail = str(ev.get("detail") or ev.get("summary") or ev.get("output_preview") or ev.get("message") or ev.get("error") or "").strip()
-        step_title = title or default_title
-
-        default_status = "failed" if (event_type.endswith(".failed") or event_type.endswith(".error") or phase == "failure" or bool(ev.get("error"))) else "running"
-        raw_status = str(ev.get("status") or default_status).strip().lower()
-
-        # Track categorized events and changed files for persistent activity boxes
-        category = classify_activity_category(event_type, ev.get("tool_name") or meta.get("tool_name"), meta)
+        if task_id and generation and meta.get("execution_supervisor"):
+            self._attempt_generations[task_id] = max(known, generation)
+            if generation > known and event_type == "task.started" and task_id == ev.get("root_task_id"):
+                self.is_completed = self.is_failed = self.is_cancelled = False
+        phase, default_title = classify_runtime_phase(event_type, meta)
+        status = str(ev.get("status") or ("failed" if event_type.endswith((".failed", ".error")) else "running")).lower()
+        detail = str(ev.get("detail") or ev.get("summary") or ev.get("message") or ev.get("error") or "")
+        key = delivery_key(ev)
+        if key in self._seen_sub_event_ids:
+            return self._step_by_id.get(str(ev.get("operation_id") or ""))
+        self._seen_sub_event_ids.add(key)
+        if len(self._seen_sub_event_ids) > 4000:
+            self._seen_sub_event_ids = {key}
+        category = classify_activity_category(event_type, ev.get("tool_name"), meta)
         ev["category"] = category
-        if category == "coding":
-            if event_id and event_id not in self._seen_coding_ids:
-                self._seen_coding_ids.add(event_id)
-                self.coding_events.append(ev)
-            elif not event_id:
-                self.coding_events.append(ev)
-            # Track touched / changed files
-            payload_dict = _safe_dict(ev.get("payload"))
-            args_dict = _safe_dict(payload_dict.get("args")) or _safe_dict(meta.get("args"))
-            raw_path = (
-                ev.get("path")
-                or meta.get("path")
-                or meta.get("filePath")
-                or meta.get("file_path")
-                or payload_dict.get("path")
-                or payload_dict.get("filePath")
-                or payload_dict.get("file_path")
-                or args_dict.get("path")
-                or args_dict.get("filePath")
-                or args_dict.get("file_path")
-            )
-            if raw_path and str(raw_path).strip() and str(raw_path).strip() not in self.changed_files:
-                self.changed_files.append(str(raw_path).strip())
-            for cf in (ev.get("changed_files") or meta.get("changed_files") or []):
-                cf_s = str(cf).strip()
-                if cf_s and cf_s not in self.changed_files:
-                    self.changed_files.append(cf_s)
-        else:
-            if event_id and event_id not in self._seen_main_ids:
-                self._seen_main_ids.add(event_id)
-                self.main_events.append(ev)
-            elif not event_id:
-                self.main_events.append(ev)
-
-        # Determine step ID
-        if phase == "approval":
-            appr_id = str(meta.get("inbox_item_id") or meta.get("permission_request_id") or meta.get("action_id") or event_id or "").strip()
-            step_id = f"{self.turn_id}:approval:{appr_id}" if appr_id else f"{self.turn_id}:approval"
-        elif phase == "tool":
-            tool_call_id = str(ev.get("tool_call_id") or meta.get("tool_call_id") or meta.get("call_id") or "").strip()
-            if not tool_call_id:
-                raw_id = event_id or event_type
-                for suffix in ("-started", "-completed", "-failed", "-success", "-running"):
-                    if raw_id.endswith(suffix):
-                        raw_id = raw_id[:-len(suffix)]
-                        break
-                tool_call_id = raw_id
-            step_id = f"{self.turn_id}:tool:{tool_call_id}" if tool_call_id else f"{self.turn_id}:tool:{event_type}"
-        elif phase in {"routing", "context", "coding", "model", "completion", "failure"}:
-            step_id = f"{self.turn_id}:{phase}"
-        else:
-            step_id = f"{self.turn_id}:{phase}"
-
-        # Status normalization
-        if not raw_status and (event_type.endswith(".failed") or event_type.endswith(".error") or phase == "failure"):
-            raw_status = "failed"
-        is_terminal_step = raw_status in {"success", "completed", "done", "failed", "error", "cancelled"}
-        is_approval_waiting = phase == "approval" or raw_status in {"waiting_approval", "pending_approval", "approval_required"}
-
-        if raw_status in {"failed", "error"}:
-            self.is_failed = True
-        elif raw_status in {"cancelled", "interrupted"}:
-            self.is_cancelled = True
-
-        # If turn finished or failed, mark previous running steps
-        if phase in {"completion", "failure"}:
-            if phase == "completion":
-                if self.is_failed or self.is_cancelled:
-                    # Cannot complete an execution that has already failed or been cancelled
+        collection = self.coding_events if category == "coding" else self.main_events
+        op_key = operation_key(ev)
+        for i, row in enumerate(collection):
+            if operation_key(row) == op_key:
+                if not accepts_activity_update(row, ev):
                     return None
-                self.is_completed = True
-            elif raw_status in {"cancelled", "interrupted"}:
-                self.is_cancelled = True
-            else:
-                self.is_failed = True
+                collection[i] = {**row, **ev}
+                break
+        else:
+            collection.append(ev)
+        collection[:] = bound_operations(collection)
+        if is_mutation(ev):
+            for path in [ev.get("path") or meta.get("path"), *(ev.get("changed_files") or meta.get("changed_files") or [])]:
+                if path and str(path) not in self.changed_files:
+                    self.changed_files.append(str(path))
+        if phase == "lifecycle":
+            return None
 
-            # Clean up any stale running step
-            for st in self.steps:
-                if st.status in {"running", "waiting_approval"}:
-                    st.finish(status="completed" if self.is_completed else ("cancelled" if self.is_cancelled else "failed"))
+        approval = meta.get("inbox_item_id") or meta.get("permission_request_id") or meta.get("action_id")
+        operation = ev.get("operation_id") or ev.get("tool_call_id") or meta.get("tool_call_id") or meta.get("call_id") or ev.get("call_id")
+        actor = ev.get("subagent_id") or ev.get("agent_id") or ""
+        owner = ":".join(str(ev.get(k) or "") for k in ("task_id", "attempt_id")) + ":" + str(actor)
+        if phase == "approval" and approval:
+            step_id = f"{self.turn_id}:approval:{approval}"
+        elif operation:
+            step_id = f"{self.turn_id}:{owner}:{operation}" if owner.strip(":") else f"{self.turn_id}:{phase}:{operation}"
+        elif phase == "tool":
+            legacy = str(ev.get("event_id") or event_type)
+            for suffix in ("-started", "-completed", "-failed", "-success", "-running"):
+                if legacy.endswith(suffix):
+                    legacy = legacy[:-len(suffix)]
+                    break
+            step_id = f"{self.turn_id}:tool:{owner}:{legacy}"
+        else:
+            step_id = f"{self.turn_id}:{phase}" + (f":{owner}" if owner.strip(":") else "")
+
+        # Backend turn completion is distinct from the root goal's terminal result.
+        root_terminal = event_type in {"turn.finished", "turn.cancelled", "turn.timeout", "turn.failed", "loop.completed", "execution.failed", "execution.cancelled", "execution.timeout"} and not ev.get("subagent_id")
+        if event_type == "turn.completed" and not ev.get("backend"):
+            root_terminal = True
+        if (event_type in {"task.completed", "task.failed", "task.cancelled"} and ev.get("task_id") == ev.get("root_task_id")
+                and meta.get("execution_supervisor")):
+            root_terminal = True
+        if event_type == "error" and not ev.get("backend") and not ev.get("subagent_id") and not operation:
+            root_terminal = True
+        if root_terminal:
+            if self.is_failed or self.is_cancelled:
+                return None
+            failed = status in {"failed", "error", "cancelled", "interrupted"}
+            self.is_cancelled = status in {"cancelled", "interrupted"}
+            self.is_failed = failed and not self.is_cancelled
+            self.is_completed = not failed and status in {"success", "completed", "done"}
+            if status in {"waiting", "waiting_approval", "blocked"}:
+                self.is_completed = False
+            for pending in self.active_steps:
+                # A finished root does not prove an unobserved tool outcome.
+                if failed:
+                    has_operation = pending.metadata.get("operation_id") or pending.metadata.get("tool_call_id") or pending.metadata.get("call_id")
+                    pending.finish(status="unverified" if has_operation else "cancelled" if self.is_cancelled else "failed")
+                elif self.is_completed:
+                    pending.finish(status="unverified", detail=pending.detail or "No terminal operation event observed")
             self.active_step_id = None
 
-        if self.is_failed and (phase == "completion" or raw_status in {"completed", "success"}):
-            return None
-
+        terminal = status in {"success", "completed", "done", "failed", "error", "cancelled", "interrupted", "rejected", "superseded", "unverified"}
+        waiting = status in {"waiting_approval", "pending_approval", "approval_required", "waiting_permission"}
+        initial = "waiting_approval" if waiting else status
         existing = self._step_by_id.get(step_id)
-
         if existing is not None:
-            # Update existing step in place
-            if is_terminal_step:
-                existing.finish(status=raw_status, detail=detail or existing.detail)
-                if duration_ms is not None:
-                    existing.duration_ms = int(duration_ms)
-                if self.active_step_id == step_id:
-                    self.active_step_id = None
+            # Late start/progress cannot resurrect a terminal operation.
+            if existing.status in {"completed", "success", "failed", "error", "cancelled", "unverified"} and not terminal:
+                return existing
+            if terminal:
+                existing.finish(status=status, detail=detail or existing.detail)
             else:
-                if is_approval_waiting:
-                    existing.status = "waiting_approval"
-                if detail:
-                    existing.detail = detail
-                if step_title and existing.title == default_title:
-                    existing.title = step_title
-
-            # Collect sub-event for coding or tool
-            if event_id and event_id not in self._seen_sub_event_ids:
-                self._seen_sub_event_ids.add(event_id)
-                existing.sub_events.append(ev)
-            elif not event_id and ev:
-                existing.sub_events.append(ev)
-
+                existing.status = initial
+                existing.detail = detail or existing.detail
+            existing.title = str(ev.get("title") or existing.title)
+            existing.metadata.update(meta)
+            existing.sub_events = (existing.sub_events + [ev])[-40:]
+            if ev.get("duration_ms") is not None:
+                existing.duration_ms = int(ev["duration_ms"])
+            if self.active_step_id == step_id and terminal:
+                self.active_step_id = next((step.step_id for step in reversed(self.active_steps)), None)
             return existing
 
-        # If a previous step of a different phase was still marked running, complete it when new phase starts
-        if self.active_step_id and self.active_step_id in self._step_by_id:
-            active_step = self._step_by_id[self.active_step_id]
-            if active_step.phase != phase and active_step.status == "running":
-                active_step.finish(status="completed")
-
-        # Create new step
-        initial_status = "completed" if is_terminal_step else ("waiting_approval" if is_approval_waiting else "running")
-        step = ExecutionStep(
-            step_id=step_id,
-            turn_id=self.turn_id,
-            phase=phase,
-            title=step_title,
-            status=initial_status,
-            detail=detail,
-            metadata=meta,
-        )
-        if is_terminal_step:
-            step.finish(status=raw_status, detail=detail)
-            if duration_ms is not None:
-                step.duration_ms = int(duration_ms)
+        step = ExecutionStep(step_id=step_id, turn_id=self.turn_id, phase=phase,
+                             title=str(ev.get("title") or default_title), status=initial,
+                             detail=detail, metadata=meta)
+        if terminal:
+            step.finish(status=status, detail=detail)
+            if ev.get("duration_ms") is not None:
+                step.duration_ms = int(ev["duration_ms"])
         else:
             self.active_step_id = step_id
-
-        if event_id:
-            self._seen_sub_event_ids.add(event_id)
-        if ev:
-            step.sub_events.append(ev)
-
+        step.sub_events.append(ev)
         self.steps.append(step)
         self._step_by_id[step_id] = step
         self._step_ids_by_phase[phase] = step_id
+        active_ids = {st.step_id for st in self.active_steps}
+        recent = {st.step_id for st in self.steps[-200:]}
+        self.steps[:] = [st for st in self.steps if st.step_id in active_ids | recent]
+        self._step_by_id = {st.step_id: st for st in self.steps}
         return step
 
     def mark_failed(self, error: str = "Execution failed", *, cancelled: bool = False) -> None:

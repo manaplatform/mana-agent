@@ -12,6 +12,8 @@ building AskService / CodingAgent directly.
 
 from __future__ import annotations
 
+from mana_agent.services.activity_context import activity_turn, run_with_activity_attempt
+
 import asyncio
 from contextlib import nullcontext
 import getpass
@@ -5202,6 +5204,20 @@ class AgentChatGateway:
             "decision_id": decision.decision_id,
         }
 
+    def _publish_steering_admission(self, session_id: str, execution_id: str, request_id: str,
+                                    text: str, sequence: int) -> None:
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        from mana_agent.workspaces.paths import repository_id_for_path
+        try:
+            get_execution_event_hub().publish({
+                "event_id": f"steering-{request_id}-queued", "type": "steering.queued",
+                "title": "Live steering queued", "status": "queued", "operation_id": request_id,
+                "metadata": {"request_id": request_id, "text": text, "steering_sequence": sequence},
+            }, conversation_id=session_id, execution_id=execution_id,
+               repository_id=repository_id_for_path(self.root), authoritative=True)
+        except Exception:
+            logger.warning("Steering admission activity unavailable")
+
     def submit_steering(
         self,
         session_id: str,
@@ -5211,6 +5227,7 @@ class AgentChatGateway:
         scope: str = "execution",
         target_id: str = "",
         request_id: str = "",
+        execution_id: str = "",
     ) -> dict[str, Any]:
         """Submit a live steering instruction to the active execution in this session."""
         from mana_agent.execution.steering import (
@@ -5221,21 +5238,33 @@ class AgentChatGateway:
         )
 
         active = self._lane_coordinator.list_tasks(active_only=True, session_id=session_id)
-        if not active:
-            active = self._lane_coordinator.list_tasks(active_only=True)
+        state = self._session(session_id)
+        requested_turn = str(state.get("activity_execution_id") or "")
+        if execution_id:
+            active = [item for item in active if execution_id in {item.task_id, getattr(item, "trigger_turn_id", "")}]
+            if not active and execution_id != requested_turn:
+                raise ValueError("Steering target does not belong to the active turn in this session")
+        if len(active) > 1:
+            raise ValueError("Specify the execution to steer when several tasks are active")
 
         req_id = request_id or f"steer_{uuid.uuid4().hex[:12]}"
-        kind_enum = SteeringKind(kind) if kind in SteeringKind._value2member_map_ else SteeringKind.GUIDANCE
-        scope_enum = SteeringScope(scope) if scope in SteeringScope._value2member_map_ else SteeringScope.EXECUTION
+        kind_enum = SteeringKind(kind)
+        scope_enum = SteeringScope(scope)
+        if not text.strip() or len(text) > 16000:
+            raise ValueError("Steering text must contain 1 to 16000 characters")
+        if scope_enum != SteeringScope.EXECUTION and (not target_id.strip() or target_id != target_id.strip()):
+            raise ValueError("Task and worker steering require an explicit target")
+        if not req_id.strip() or req_id != req_id.strip() or len(req_id) > 128:
+            raise ValueError("Steering request ID must contain 1 to 128 characters without surrounding whitespace")
 
         if not active:
             # Check whether this session or the gateway has an in-flight turn or active conversation
-            is_active_session = (session_id in self._active) or bool(self._active)
+            is_active_session = session_id in self._active
             sess_state = self._sessions.get(session_id) if session_id else None
             if not is_active_session and (sess_state is None or not sess_state.get("turn_in_progress")):
                 raise RuntimeError("No active execution found to steer.")
 
-            effective_session_id = session_id or (list(self._active)[0] if self._active else "session")
+            effective_session_id = session_id
             state = self._session(effective_session_id)
             pending_list = state.setdefault("pending_steering", [])
             entry = {
@@ -5248,7 +5277,19 @@ class AgentChatGateway:
                 "status": "pending",
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
+            existing = next((item for item in pending_list if item.get("request_id") == req_id), None)
+            if existing is not None:
+                if any(existing.get(key) != entry.get(key) for key in ("text", "kind", "scope", "target_id")):
+                    raise ValueError("Steering request ID already has different content")
+                return {"request_id": req_id, "sequence": pending_list.index(existing) + 1, "duplicate": True,
+                        "execution_id": requested_turn, "status": existing.get("status", "pending")}
+            if sum(item.get("status") == "pending" for item in pending_list) >= SteeringCoordinator.MAX_PENDING:
+                raise ValueError("Too many pending steering instructions")
+            completed = [item for item in pending_list if item.get("status") != "pending"]
+            retained = {id(item) for item in completed[-200:]}
+            pending_list[:] = [item for item in pending_list if item.get("status") == "pending" or id(item) in retained]
             pending_list.append(entry)
+            self._publish_steering_admission(effective_session_id, requested_turn, req_id, text, len(pending_list))
             if callable(self._event_sink):
                 try:
                     self._event_sink(
@@ -5269,17 +5310,19 @@ class AgentChatGateway:
                 "request_id": req_id,
                 "sequence": len(pending_list),
                 "duplicate": False,
-                "execution_id": str(state.get("last_task_id") or ""),
+                "execution_id": requested_turn,
                 "attempt_id": "",
                 "generation": 0,
                 "status": "queued_for_routing",
             }
 
-        execution = active[-1]
+        execution = active[0]
         supervisor = self._lane_coordinator.execution_supervisor
         task = supervisor.get_task(execution.task_id)
 
-        effective_session_id = session_id or task.session_id or "session"
+        if task.session_id != session_id:
+            raise ValueError("Steering target belongs to a different session")
+        effective_session_id = session_id
         submission = SteeringSubmission(
             execution_id=execution.task_id,
             session_id=effective_session_id,
@@ -5299,17 +5342,20 @@ class AgentChatGateway:
             allow_interrupt=True,
         )
         state = self._session(effective_session_id)
-        state.setdefault("pending_steering", []).append({
-            "request_id": req_id,
-            "session_id": effective_session_id,
-            "execution_id": execution.task_id,
-            "text": text,
-            "kind": kind_enum.value,
-            "scope": scope_enum.value,
-            "target_id": target_id if scope_enum != SteeringScope.EXECUTION else "",
-            "status": "pending",
-            "submitted_to_task": True,
-        })
+        pending = state.setdefault("pending_steering", [])
+        if not any(item.get("request_id") == req_id for item in pending):
+            pending.append({
+                "request_id": req_id,
+                "session_id": effective_session_id,
+                "execution_id": execution.task_id,
+                "text": text,
+                "kind": kind_enum.value,
+                "scope": scope_enum.value,
+                "target_id": target_id if scope_enum != SteeringScope.EXECUTION else "",
+                "status": "pending",
+                "submitted_to_task": True,
+            })
+        self._publish_steering_admission(effective_session_id, execution.trigger_turn_id or requested_turn or execution.task_id, req_id, text, sequence)
         if callable(self._event_sink):
             try:
                 self._event_sink(
@@ -5816,6 +5862,7 @@ class AgentChatGateway:
     # ------------------------------------------------------------------
 
     @authenticated_computer_client
+    @activity_turn
     def process_turn(
         self,
         session_id: str,
@@ -6353,6 +6400,12 @@ class AgentChatGateway:
 
 
             else:
+                from mana_agent.services.activity_context import emit_activity
+                emit_activity("agent.routing", title=f"Route selected: {entry_decision.route}", status="success",
+                              operation_id=f"{turn_id}:routing")
+                if entry_decision.public_summary:
+                    emit_activity("agent.summary", title="Execution decision", summary=entry_decision.public_summary,
+                                  status="success", metadata={"summary_source": "agent"})
                 if callable(sink):
                     sink(
                         "routing_completed",
@@ -10989,7 +11042,12 @@ class AgentChatGateway:
             supervisor_lease_token = str(getattr(lane_execution, "supervisor_lease_token", "") or "")
 
         try:
-            result = process_chat_turn(
+            result = run_with_activity_attempt(
+                process_chat_turn,
+                _activity_supervisor=self._lane_coordinator.execution_supervisor,
+                _activity_task_id=lane_task_id,
+                _activity_attempt_id=supervisor_attempt_id,
+                _activity_lease_token=supervisor_lease_token,
                 root=self.root,
                 text=execution_text,
                 execution_context_included=execution_context_included,

@@ -2,6 +2,21 @@
 
 All notable repository changes should be recorded here.
 
+## 0.10.0 — 2026-11-09
+
+- Release metadata: update the package version in `pyproject.toml` from 0.9.2 to 0.10.0.
+- User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.10.0'; print(__version__)"`.
+
+## Unreleased — 2026-11-09
+
+- 2026-11-09 — Activity UI: remove the separate archive buttons/sections from Textual and dashboard, their archive fetch/cache paths, and the CLI backward-page shortcut. Keep general progress in Main Activity and internal coding operations in Coding Activity. Durable replay/API pagination is unchanged; see [regression notes](docs/regressions/agent-activity-visibility.md#2026-11-09-consolidate-activity-presentation). User-owned verification (not run by the agent): `venv/bin/python -m pytest tests/test_execution_trace.py tests/test_chat_command_dispatcher.py -q`; `node --test tests/dashboard/live_chat_approval_ui.test.mjs`.
+
+- Activity / privacy / delivery: add a shared public projection and scoped ownership context across gateway, autonomous execution, specialists, worker IPC, planning, internal coding, and native provider summaries. Preserve raw and bridged reasoning privately. Serialize journal sequence/append, drain ordered callbacks outside locks, observe cross-process appends, recover multipage gaps, and report degraded persistence without cursor holes.
+- TUI / Rich CLI / dashboard: correlate concurrent operations independently, retain bounded presentation history, coalesce repainting at 10 Hz, preserve reading/selection, expose older activity, and add persisted `MANA_ACTIVITY_VISIBILITY` plus `/activity`. Remove fabricated preparation completion, inspected-file mutation claims, and competing coding-log rendering.
+- Steering / API: show an immediate pending user row, keep turn-specific anchors, acknowledge before publishing applied, reject cross-session fallback, and add authenticated text-only `POST /api/v1/conversations/{id}/steering` through the existing owning gateway.
+- Regression protection: add shared Python/JavaScript fixtures and privacy, concurrency, incremental-streaming, journal, cancellation, callback, steering-acknowledgement, and API regressions. See [the durable regression note](docs/regressions/agent-activity-visibility.md) for causes, corrected invariants, limitations, and Do not reintroduce rules. Local source changes only; uncommitted, not deployed, and runtime acceptance remains pending.
+- User-owned verification (not run by the agent): `venv/bin/python -m pytest tests/test_activity_stream.py tests/test_execution_trace.py tests/test_codex_coding_visibility.py -q`; `node --test tests/dashboard/live_chat_reducer.test.mjs`. Integration and preserved safety-suite commands are listed in the regression note.
+
 ## 0.9.1 — 2026-11-05
 
 - Release metadata: update the package version from 0.9.0 to 0.9.1 in `pyproject.toml` and generated distribution metadata.

@@ -42,6 +42,7 @@ from mana_agent.builtin_skills.skill_creator import (
     WorkshopConfig,
 )
 from mana_agent.services.execution_event_hub import get_execution_event_hub
+from mana_agent.services.activity_context import observed_activity
 from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig, SideEffectClassification
 from mana_agent.gateway.feature_integration import FeatureIntegrationCoordinator, WiringDecision, connected_wiring_path
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
@@ -202,6 +203,7 @@ class MainAgent:
             global_memory=getattr(self.memory_service, "learning", None),
         )
 
+    @observed_activity("MainAgent request")
     def run_user_request(
         self,
         user_request: str,
@@ -562,6 +564,7 @@ class MainAgent:
             scope.repository_ids,
         )
 
+    @observed_activity("MainAgent autonomous execution")
     def run_autonomous(
         self,
         user_request: str,

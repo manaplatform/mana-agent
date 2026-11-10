@@ -181,6 +181,29 @@ mana-agent dashboard --root-dir .
 The optional dashboard provides another way to interact with Mana-Agent, inspect activity, and manage workflows.
 
 ---
+### Live agent activity
+
+Textual chat, Rich terminal chat, and the dashboard show observable operations,
+agent explanations when provided, and supported public provider summaries while
+work is running. Activity and Coding Activity stay inside their existing turn
+containers. Concurrent agents retain their own task, attempt, and operation
+identity; backend completion and verified goal completion are separate states.
+
+Use `/activity minimal`, `/activity normal` (default), or `/activity verbose` to
+persist `MANA_ACTIVITY_VISIBILITY` through the existing user configuration.
+Activity appears inside Main Activity and Coding Activity, including internal
+coding operations. `/activity` shows recent activity in terminal chat. In the
+TUI, **Ctrl+End** returns to latest activity. Visibility never
+reveals private reasoning, credentials, prompts, or raw invocation arguments.
+
+During an active TUI or dashboard turn, submit text to steer that execution.
+The user row appears pending immediately and follows recorded delivery and
+acknowledgement. Dashboard steering is text-only and requires the same runtime
+to own the live session. Approval requirements remain unchanged. Plan Mode
+activity describes planning and artifact saving, not completed implementation.
+
+See [activity architecture, limitations, regression rules, and user verification](docs/regressions/agent-activity-visibility.md).
+
 ## License
 
 Mana-Agent is open source under the [MIT License](LICENSE).

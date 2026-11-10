@@ -31,6 +31,7 @@ You must return strictly one valid JSON object conforming to ContinuationDecisio
   "safe_to_continue": true | false,
   "renewal_requested": true | false,
   "renewal_reason": "reason if requesting budget extension, else empty",
+  "public_summary": "Optional concise user-facing progress, finding, or decision; no private reasoning, instructions, or secrets",
   "reason": "justification for this continuation decision"
 }
 

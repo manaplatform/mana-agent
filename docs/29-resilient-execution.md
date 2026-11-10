@@ -303,3 +303,20 @@ Human approval waits are distinct and cannot be bypassed by Batch completion.
 See [Batch execution](26-openai-batch-api.md) and the
 [permanent regression note](regressions/batch-and-followup-context.md) for failure,
 reconciliation, result delivery, and user-owned verification details.
+
+## Activity during recovery
+
+Public activity carries the original supervisor attempt and generation and is
+fenced using the original worker token, running state, and cancellation state.
+Recovery never refreshes a stale publisher's authorization from current state.
+Committed supervisor transitions remain separate from tool observations and
+model explanations. The latter never count as verification evidence.
+
+The shared journal allocates sequence numbers with its append under a portable
+lock. Subscriber callbacks run outside storage/publication locks. WebSocket
+replay reads every forward page through its initial high-water mark; overflow
+requires durable replay from the last contiguous cursor. Private historic
+records are omitted without losing cursor continuity. Storage/recovery failure
+is visible as degraded activity and cannot change execution state. See
+[the activity regression note](regressions/agent-activity-visibility.md) for limits
+and user-owned cancellation/recovery checks.

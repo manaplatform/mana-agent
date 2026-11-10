@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import sqlite3
 from contextlib import contextmanager
 from enum import Enum
@@ -21,6 +22,9 @@ from mana_agent.execution_supervisor.models import StrictModel
 
 if TYPE_CHECKING:
     from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+
+
+logger = logging.getLogger(__name__)
 
 
 class SteeringKind(str, Enum):
@@ -213,6 +217,27 @@ class SteeringCoordinator:
                     results.append(dict(item))
             return results
 
+    def _publish_status(self, execution_id: str, status: str, items: list[dict]) -> None:
+        try:
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+            from mana_agent.services.activity_context import current_activity_context
+            task = self.supervisor.get_task(execution_id)
+            context = current_activity_context()
+            turn = context.execution_id if context and context.conversation_id == task.session_id else task.trigger_turn_id or execution_id
+            for item in items:
+                request_id = str(item.get("request_id") or "")
+                get_execution_event_hub().publish({
+                    "event_id": f"steering-{request_id}-{status}", "type": f"steering.{status}",
+                    "title": f"Live steering {status}", "status": "success" if status == "applied" else status,
+                    "operation_id": request_id, "task_id": execution_id,
+                    "attempt_id": item.get("attempt_id", ""), "attempt_generation": item.get("generation", 0),
+                    "execution_id": turn, "metadata": {"request_id": request_id, "text": item.get("text", ""),
+                        "scope": item.get("scope", "execution"), "steering_sequence": item.get("sequence", 0),
+                        "rejection_reason": item.get("rejection_reason", "")},
+                }, conversation_id=task.session_id, repository_id=task.repository_id, authoritative=True)
+        except Exception:
+            logger.warning("Steering status projection unavailable")
+
     def apply_steering(
         self,
         execution_id: str,
@@ -250,13 +275,15 @@ class SteeringCoordinator:
                 raise LeaseConflictError("execution is not accepting steering apply")
             target_set = set(request_ids)
             for item in task.steering_inputs:
-                if item.get("request_id") in target_set and item.get("status") == "pending":
+                if (item.get("request_id") in target_set and item.get("status") == "pending"
+                        and item.get("attempt_id") == attempt_id and item.get("generation") == generation):
                     item["status"] = "applied"
                     item["applied_at"] = now.isoformat()
                     applied_items.append(dict(item))
             task.updated_at = now
 
         self.supervisor.store.update_task(execution_id, update)
+        self._publish_status(execution_id, "applied", applied_items)
         return applied_items
 
     def reject_steering(
@@ -298,6 +325,7 @@ class SteeringCoordinator:
             task.updated_at = now
 
         self.supervisor.store.update_task(execution_id, update)
+        self._publish_status(execution_id, "rejected", [rejected_item] if rejected_item else [])
         return rejected_item
 
     def supersede_steering(
@@ -329,13 +357,15 @@ class SteeringCoordinator:
             now = self.supervisor.clock()
             target_set = set(request_ids)
             for item in task.steering_inputs:
-                if item.get("request_id") in target_set and item.get("status") == "pending":
+                if (item.get("request_id") in target_set and item.get("status") == "pending"
+                        and item.get("attempt_id") == attempt_id and item.get("generation") == generation):
                     item["status"] = "superseded"
                     item["superseded_at"] = now.isoformat()
                     superseded_items.append(dict(item))
             task.updated_at = now
 
         self.supervisor.store.update_task(execution_id, update)
+        self._publish_status(execution_id, "superseded", superseded_items)
         return superseded_items
 
     def submit(

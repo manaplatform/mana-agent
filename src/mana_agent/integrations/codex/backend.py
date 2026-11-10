@@ -16,6 +16,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
+from mana_agent.chat.activity import ProviderSummaryAssembler
+from mana_agent.config.model_capabilities import resolve_model_capability
 from mana_agent.integrations.codex.client import AsyncCodexAppServer, CodexCancellationOutcome
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.integrations.codex.event_adapter import adapt_codex_event
@@ -524,6 +526,10 @@ class CodexCodingBackend:
                     thread_id,
                     turn_id,
                 )
+                capability = resolve_model_capability(self.settings.provider, self.settings.model or "", transport=self.settings.codex_transport.value)
+                from mana_agent.chat.activity import native_summary_endpoint
+                summaries = ProviderSummaryAssembler(provider=self.settings.provider, transport=self.settings.codex_transport.value,
+                    supported=capability.supports_public_reasoning_summaries and native_summary_endpoint(self.settings.base_url))
                 iterator = self._client.notifications(thread_id).__aiter__()
                 deadline = asyncio.get_running_loop().time() + self.settings.task_timeout_seconds
                 try:
@@ -558,12 +564,38 @@ class CodexCodingBackend:
                                 notification.get("method"),
                             )
                             continue
+                        method = str(notification.get("method") or "")
+                        summary_item = notif_params.get("item") if isinstance(notif_params.get("item"), dict) else {}
+                        item_id = str(notif_params.get("itemId") or summary_item.get("id") or "")
+                        try:
+                            summary_index = max(0, int(notif_params.get("summaryIndex") or 0))
+                        except (TypeError, ValueError):
+                            summary_index = 0
+                        if method == "item/reasoning/summaryTextDelta":
+                            summaries.append(item_id, summary_index, str(notif_params.get("delta") or ""))
+                        completed_summaries = []
+                        if method == "item/reasoning/summaryPartAdded" and summary_index > 0:
+                            completed_summary = summaries.finish(item_id, summary_index - 1)
+                            if completed_summary is not None:
+                                completed_summaries.append(completed_summary)
+                        elif method == "item/completed" and summary_item.get("type") == "reasoning":
+                            completed_summaries = summaries.finish_item(item_id)
+                        for completed_summary in completed_summaries:
+                            sequence += 1
+                            completed_index = completed_summary["metadata"]["summary_index"]
+                            yield AgentEvent(event_id=f"summary-{task.task_id}-{item_id}-{completed_index}",
+                                event_type="agent.summary", task_id=task.task_id, backend="codex", sequence=sequence,
+                                producer_sequence=sequence, operation_id=f"summary:{item_id}:{completed_index}",
+                                title="Reasoning summary", summary=completed_summary["summary"], status="success",
+                                payload=completed_summary["metadata"], visibility="progress", semantic_kind="lifecycle")
                         event = adapt_codex_event(
                             task.task_id,
                             notification,
                             sequence=sequence + 1,
                             model=self.settings.model or "",
                         )
+                        if method.endswith(("Delta", "/delta")):
+                            event = event.model_copy(update={"event_id": f"{event.event_id}-{sequence + 1}", "producer_sequence": sequence + 1})
                         if event.event_id in seen_event_ids:
                             continue
                         seen_event_ids.add(event.event_id)

@@ -121,6 +121,17 @@ def semantic_kind_for_event_type(event_type: str, *, tool_name: str = "") -> Eve
     et = str(event_type or "").strip().lower()
     tool = str(tool_name or "").strip().lower()
 
+    if et == "agent.summary":
+        return EventSemanticKind.LIFECYCLE
+    if et.startswith(("agent.", "loop.", "task.", "subagent.", "worker.", "step.", "investigation.", "discovery.", "recovery.", "activity.", "model.")):
+        return EventSemanticKind.PLAN if et == "agent.planning" else EventSemanticKind.LIFECYCLE
+    if et.startswith(("tool.", "search.")) and not et.startswith("tool.call."):
+        return EventSemanticKind.TOOL_EXECUTION
+    if et.startswith(("verification.", "review.")):
+        return EventSemanticKind.VERIFICATION
+    if et.startswith(("action.approval.", "approval.", "inbox.", "computer.", "server.", "api.")):
+        return EventSemanticKind.LIFECYCLE
+
     if (
         et in {"user.message", "turn.input", "user.input", "message.accepted"}
         or "usermessage" in tool
@@ -255,84 +266,17 @@ def is_user_publishable(visibility: EventVisibility | str) -> bool:
 
 def progress_event_payload(event: Any) -> dict[str, Any]:
     """Return a safe user-facing progress projection (no raw model prose)."""
-    if hasattr(event, "model_dump"):
-        raw = event.model_dump(mode="json")
-    else:
-        raw = dict(event)
-    kind = str(raw.get("semantic_kind") or semantic_kind_for_event_type(
-        str(raw.get("event_type") or ""),
-        tool_name=str(raw.get("tool_name") or ""),
-    ).value)
-    # Never forward assistant generation text fields.
-    if kind == EventSemanticKind.ASSISTANT_GENERATION.value:
-        return {
-            "event_id": raw.get("event_id"),
-            "event_type": "coding.progress",
-            "task_id": raw.get("task_id"),
-            "backend": raw.get("backend"),
-            "sequence": raw.get("sequence"),
-            "status": "running",
-            "title": "Model generating",
-            "summary": "",
-            "semantic_kind": kind,
-            "visibility": EventVisibility.INTERNAL.value,
-            "model": raw.get("model") or "",
-            "thread_id": raw.get("thread_id") or "",
-            "turn_id": raw.get("turn_id") or "",
-            "output_preview": "",
-        }
-    output_preview = ""
-    if kind in {
-        EventSemanticKind.COMMAND.value,
-        EventSemanticKind.TOOL_EXECUTION.value,
-        EventSemanticKind.VERIFICATION.value,
-    }:
-        raw_preview = raw.get("output_preview") or raw.get("summary") or ""
-        if raw_preview:
-            output_preview = _safe_output_preview(str(raw_preview))
-    safe = {
-        "event_id": raw.get("event_id"),
-        "event_type": raw.get("event_type"),
-        "task_id": raw.get("task_id"),
-        "backend": raw.get("backend"),
-        "sequence": raw.get("sequence"),
-        "status": raw.get("status"),
-        "title": raw.get("title") or "",
-        "summary": _safe_progress_text(str(raw.get("summary") or ""), kind=kind),
-        "semantic_kind": kind,
-        "visibility": raw.get("visibility") or EventVisibility.PROGRESS.value,
-        "tool_name": raw.get("tool_name") or "",
-        "command": raw.get("command") or "",
-        "path": raw.get("path") or "",
-        "duration_ms": raw.get("duration_ms"),
-        "model": raw.get("model") or "",
-        "thread_id": raw.get("thread_id") or "",
-        "turn_id": raw.get("turn_id") or "",
-        "error": raw.get("error") or "",
-        "output_preview": output_preview,
-        "token_usage": raw.get("token_usage"),
+    from mana_agent.chat.activity import project_activity, normalize_activity
+
+    projected = project_activity(event)
+    if projected is not None:
+        return projected
+    raw_event = normalize_activity(event)
+    return {
+        "event_id": raw_event.get("event_id"), "event_type": raw_event["type"],
+        "type": raw_event["type"], "visibility": "internal", "summary": "",
+        "output_preview": "", "title": "", "status": raw_event.get("status", "running"),
     }
-    return safe
-
-
-def _safe_progress_text(text: str, *, kind: str) -> str:
-    if kind in {
-        EventSemanticKind.ASSISTANT_GENERATION.value,
-        EventSemanticKind.REASONING.value,
-    }:
-        return ""
-    # Progress lines stay short and structural.
-    cleaned = str(text or "").strip()
-    if len(cleaned) > 240:
-        return cleaned[:240] + "…"
-    return cleaned
-
-
-def _safe_output_preview(text: str, max_chars: int = 4000) -> str:
-    cleaned = str(text or "").strip()
-    if len(cleaned) > max_chars:
-        return cleaned[:max_chars] + "\n... (output truncated)"
-    return cleaned
 
 
 __all__ = [

@@ -137,6 +137,8 @@ class PlanService:
             "event_type": event_type,
             "title": title,
             "status": status,
+            "execution_mode": "plan",
+            "operation_id": event_id,
             "metadata": {"phase": "plan", "tool_name": tool_name} if tool_name else {"phase": "plan"},
         }
         if tool_name:

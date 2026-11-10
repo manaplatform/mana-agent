@@ -342,27 +342,33 @@ class ExecutionSupervisor:
                 return event
             self._last_live_heartbeat[task.task_id] = event.created_at
         if self.event_sink is not None:
-            self.event_sink(event_type, event.model_dump(mode="json"))
-        else:
-            # The shared event hub is the existing transport for TUI,
-            # dashboard, API, and connector observers. Import lazily so the
-            # domain layer remains usable without the optional UI services.
-            from mana_agent.services.execution_event_hub import get_execution_event_hub
-
-            get_execution_event_hub().publish(
-                {
-                    "type": event_type,
-                    "kind": event_type,
-                    "status": "success" if event_type == "task_completed" else "running",
-                    "message": event_type.replace("_", " "),
-                    "execution_id": task.task_id,
-                    "metadata": {
-                        "execution_supervisor": True,
-                        **event.model_dump(mode="json"),
-                    },
-                },
-                persist=False,
-            )
+            try:
+                self.event_sink(event_type, event.model_dump(mode="json"))
+            except Exception:
+                logger.debug("Supervisor activity subscriber failed", exc_info=True)
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        execution_id = context.execution_id if context and context.conversation_id == task.session_id else task.trigger_turn_id or task.task_id
+        public_type = {"task_started": "task.started", "task_created": "task.created",
+                       "task_completed": "task.completed", "task_failed": "task.failed", "task_cancelled": "task.cancelled",
+                       "task_queued": "task.queued", "child_created": "task.created",
+                       "heartbeat": "task.heartbeat", "lease_acquired": "worker.claimed"}.get(event_type, event_type if "." in event_type else "task." + event_type)
+        try:
+            get_execution_event_hub().publish({
+                "event_id": event.event_id, "type": public_type,
+                "title": event_type.replace("_", " ").capitalize(),
+                "status": "success" if event_type == "task_completed" else task.state.value,
+                "execution_id": execution_id, "task_id": task.task_id,
+                "root_task_id": task.root_task_id, "parent_task_id": task.parent_task_id,
+                "attempt_id": task.attempt_id, "attempt_generation": task.attempt_generation,
+                "agent_id": task.assigned_agent or "main", "operation_id": f"{task.task_id}:lifecycle",
+                "metadata": {"execution_supervisor": True, "verification_status": task.verification_status.value,
+                             "evidence_status": "verified" if task.verification_status == VerificationStatus.PASSED else "observed",
+                             "retry_count": task.retry_count},
+            }, conversation_id=task.session_id, repository_id=task.repository_id, authoritative=True)
+        except Exception:
+            logger.warning("Supervisor activity projection unavailable")
         return event
 
     def create_task(

@@ -133,3 +133,14 @@ turn. Updates are scheduled through the existing thread-safe chat history,
 preserve scroll position when the user is inspecting older output, and collapse
 to a compact completed status without copying diagnostics into the assistant's
 final answer.
+
+## Public activity summaries
+
+Codex remains responsible for its inner coding loop. Its observable command,
+file, tool, and lifecycle events use the shared activity projection. Supported
+native OpenAI bindings opt in to public reasoning summaries; summary sections
+are assembled privately and published only when complete. Raw reasoning deltas,
+bridge `reasoning_content`, unknown providers/transports, encrypted continuation
+state, and raw protocol payloads remain private. No extra summarizer call or
+engine switch is introduced. Backend completion does not establish verified goal
+completion. See [activity provenance and regression rules](regressions/agent-activity-visibility.md).

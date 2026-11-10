@@ -117,6 +117,7 @@ class AgentDecision:
     target_surface: TargetSurface = "conversation"
     required_subagents: list[str] = field(default_factory=list)
     reasoning_summary: str = ""
+    public_summary: str = ""
     source: str = "model"
     verifier_passed: bool = False
     verifier_summary: str = ""
@@ -230,7 +231,8 @@ Return JSON only with this schema:
   "target_surface": "conversation|repository|web|browser|local_system|external_service",
   "required_subagents": ["repo_inventory|docs"],
   "runtime_capability_change": true,
-  "reasoning_summary": "short reason"
+  "reasoning_summary": "short reason",
+  "public_summary": "optional concise user-facing explanation without private reasoning or protected context"
 }
 
 The transport fields, including command_hint, are metadata only. Never repeat
@@ -520,6 +522,7 @@ class AgentDecisionEngine:
             requested_effect=requested_effect,  # type: ignore[arg-type]
             target_surface=target_surface,  # type: ignore[arg-type]
             required_subagents=_clean_required_subagents(data.get("required_subagents")),
+            public_summary=str(data.get("public_summary") or "")[:240],
             reasoning_summary=str(data.get("reasoning_summary") or "Model-routed agent decision.")[:500],
             runtime_capability_change=bool(
                 data.get("runtime_capability_change", False)

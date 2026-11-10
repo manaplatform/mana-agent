@@ -85,3 +85,12 @@ PYTHONPATH=src pytest tests/test_tui_approval_realtime.py -q
 PYTHONPATH=src pytest tests/test_computer_control.py -q
 node --test tests/dashboard/live_chat_approval_ui.test.mjs tests/dashboard/live_chat_reducer.test.mjs
 ```
+
+## Shared activity and steering
+
+The public activity projection preserves approval request identity, scope,
+expiration, and safe display fields. Visibility settings affect presentation
+only; existing guarded decisions and exact-request matching still grant any
+required authorization. Steering pending/queued/delivered/applied states are
+observations, never approval grants. Applied is published after the fenced
+acknowledgement commits. See [activity regression contracts](regressions/agent-activity-visibility.md).

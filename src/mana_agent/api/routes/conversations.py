@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, File, Header, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mana_agent.api.exceptions import ManaApiError
 from mana_agent.services.conversation_service import ConversationService
@@ -92,6 +92,40 @@ class ConversationCreateRequest(BaseModel):
     root: str | None = None
     repository_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConversationSteeringRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    root: str | None = None
+    repository_id: str | None = None
+    execution_id: str = Field(min_length=1, max_length=256)
+    request_id: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1, max_length=16000)
+    kind: Literal["guidance", "constraint", "priority", "correction", "scope_change", "replan", "interrupt"] = "guidance"
+    scope: Literal["execution", "task", "worker"] = "execution"
+    target_id: str = Field(default="", max_length=256)
+
+
+@router.post("/conversations/{conversation_id}/steering")
+def submit_conversation_steering(
+    conversation_id: str, payload: ConversationSteeringRequest,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Admit guidance to the existing execution; never start another chat turn."""
+    _require_mutation_token(authorization)
+    service = _service(root=payload.root, repository_id=payload.repository_id)
+    try:
+        service.get_or_raise(conversation_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Conversation not found.") from exc
+    from mana_agent.ui.streamlit_helpers import submit_dashboard_steering
+    try:
+        result = submit_dashboard_steering(conversation_id, root=service.root,
+            execution_id=payload.execution_id, request_id=payload.request_id, text=payload.text,
+            kind=payload.kind, scope=payload.scope, target_id=payload.target_id)
+    except (ValueError, RuntimeError) as exc:
+        raise ManaApiError(409, str(exc)) from exc
+    return {"ok": True, **result}
 
 
 class ConversationListQuery(BaseModel):
@@ -240,11 +274,16 @@ def list_events(
     repository_id: str | None = None,
     execution_id: str = "",
     limit: int = 200,
+    after_sequence: int = 0,
+    before_sequence: int = 0,
 ) -> dict[str, Any]:
+    if after_sequence < 0 or before_sequence < 0 or after_sequence and before_sequence:
+        raise ManaApiError(400, "Use one nonnegative activity cursor.")
     service = _service(root=root, repository_id=repository_id)
     try:
         events = service.list_events(
-            conversation_id, execution_id=execution_id, limit=limit
+            conversation_id, execution_id=execution_id, limit=limit,
+            after_sequence=after_sequence, before_sequence=before_sequence,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise ManaApiError(404, "Conversation not found.") from exc

@@ -232,7 +232,7 @@ def test_execution_trace_chronological_progression_and_in_place_updates() -> Non
         "status": "success",
     })
     assert trace.is_completed is True
-    assert s5.status == "completed"  # Running model step automatically finalized
+    assert s5.status == "unverified"  # Root completion does not prove an unobserved model outcome
     assert s6.status == "completed"
     assert len(trace.steps) == 6
 
@@ -401,6 +401,9 @@ def test_chat_log_places_panel_under_user_message_and_clears_on_new() -> None:
             )
             history.add(asst_ev)
             await pilot.pause()
+            assert panel.trace.is_completed is False
+            history.add(CodingActivityEvent(activity={"type": "turn.finished", "status": "success"}, turn_id="turn-user-1"))
+            await pilot.pause()
             assert panel.trace.is_completed is True
 
             # Clear log on /new
@@ -432,7 +435,7 @@ def test_execution_trace_and_activity_boxes_handle_string_args_without_error() -
         },
     })
     assert len(trace.coding_events) == 1
-    assert "src/mana_agent/app.py" in trace.changed_files
+    assert trace.changed_files == []  # Inspection arguments are not mutation evidence
 
 
 def test_activity_box_stays_open_on_new_activity_and_scrolls_to_latest() -> None:
@@ -617,5 +620,24 @@ def test_execution_panel_steps_view_is_hidden_by_default() -> None:
     assert panel.steps_view.display is False
 
 
+def test_execution_panel_keeps_main_and_internal_coding_activity_without_archive() -> None:
+    panel = ExecutionPanel(turn_id="turn-live-boxes")
+    panel.update_event({
+        "event_id": "main-plan", "type": "agent.planning", "status": "running",
+        "operation_id": "planning", "agent_id": "MainAgent", "title": "Reviewing requirements",
+    })
+    panel.update_event({
+        "event_id": "internal-read", "type": "tool.call.started", "status": "running",
+        "operation_id": "read", "backend": "internal", "tool_name": "read_file",
+        "agent_id": "CodingAgent", "title": "Reading implementation",
+    })
 
-
+    assert [row["event_id"] for row in panel.main_box.events] == ["main-plan"]
+    assert [row["event_id"] for row in panel.coding_box.events] == ["internal-read"]
+    assert "Reviewing requirements" in panel.main_box.activity_log.text
+    assert "Reading implementation" in panel.coding_box.activity_log.text
+    root_widgets = list(panel.compose())
+    assert root_widgets.count(panel.main_box) == 1
+    assert root_widgets.count(panel.coding_box) == 1
+    assert not any("Earlier activity" in str(getattr(widget, "label", "") or getattr(widget, "title", ""))
+                   for widget in root_widgets)

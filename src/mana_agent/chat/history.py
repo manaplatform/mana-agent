@@ -36,9 +36,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from threading import RLock
 from typing import Any
+from dataclasses import replace
 
 from .events import (
     AssistantMessageEvent,
+    ActivityEvent,
     ChatEvent,
     StreamTokenEvent,
     ToolCallEvent,
@@ -52,7 +54,7 @@ Listener = Callable[[ChatEvent], None]
 
 class ChatHistory:
     """
-    Thread-safe(ish) append-only history with pub/sub.
+    Thread-safe conversation history with bounded activity projections and pub/sub.
 
     Listeners are called synchronously on .add() in the order they subscribed.
     Designed to be used from asyncio event loop (Textual) or sync agent code.
@@ -72,8 +74,57 @@ class ChatHistory:
 
         Returns the event (for chaining).
         """
+        from .activity import project_activity, safe_text, operation_key, TERMINAL, accepts_activity_update
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        protected = context.protected_text if context else ()
+        if isinstance(event, ActivityEvent):
+            projected = project_activity(event.activity, protected=context.protected_text if context else ())
+            if projected is None:
+                return event
+            event = replace(event, activity=projected)
+        elif isinstance(event, ToolCallEvent):
+            # Raw invocations belong at the guarded tool boundary, not chat history.
+            event = replace(event, args={}, summary=safe_text(event.summary, 240, protected=protected))
+        elif isinstance(event, ToolResultEvent):
+            res_val = safe_text(event.result, protected=protected) if isinstance(event.result, str) else event.result
+            event = replace(event, result=res_val, summary=safe_text(event.summary, 240, protected=protected),
+                            error=safe_text(event.error, protected=protected) if event.error else None)
         with self._lock:
-            self._events.append(event)
+            if isinstance(event, UserMessageEvent) and event.is_steering and event.request_id:
+                previous = next((row for row in self._events if isinstance(row, UserMessageEvent)
+                                 and row.is_steering and row.request_id == event.request_id), None)
+                if previous is not None:
+                    return previous
+            if isinstance(event, ActivityEvent):
+                if event.activity["type"].startswith("steering."):
+                    metadata = event.activity.get("metadata") or {}
+                    request_id = str(metadata.get("request_id") or event.activity.get("request_id") or "")
+                    status = event.activity["type"].split(".")[-1]
+                    recorded = bool(event.activity.get("sequence"))
+                    for message in self._events:
+                        if isinstance(message, UserMessageEvent) and message.is_steering and message.request_id == request_id:
+                            if not message.steering_recorded or message.steering_status not in {"applied", "rejected", "superseded"}:
+                                message.steering_status = status
+                                message.steering_recorded = recorded
+                key = operation_key(event.activity)
+                for index in range(len(self._events) - 1, -1, -1):
+                    previous = self._events[index]
+                    if isinstance(previous, ActivityEvent) and previous.turn_id == event.turn_id and operation_key(previous.activity) == key:
+                        if not accepts_activity_update(previous.activity, event.activity):
+                            return previous
+                        event = replace(event, activity={**event.activity, "started_at": previous.activity.get("started_at") or event.activity.get("started_at")})
+                        self._events[index] = event
+                        break
+                else:
+                    self._events.append(event)
+                completed = [row for row in self._events if isinstance(row, ActivityEvent) and row.turn_id == event.turn_id
+                             and str(row.activity.get("status")) in TERMINAL]
+                discarded = {id(row) for row in completed[:-200]}
+                if discarded:
+                    self._events[:] = [row for row in self._events if id(row) not in discarded]
+            else:
+                self._events.append(event)
 
             # Streaming assistant accumulation helper
             if isinstance(event, AssistantMessageEvent):
@@ -89,13 +140,13 @@ class ChatHistory:
                     # Mutate the live content so late subscribers / re-renders see full text
                     self._current_assistant.content += event.token
 
-            for listener in list(self._listeners):
-                try:
-                    listener(event)
-                except Exception:
-                    # Never let a bad listener kill the chat loop
-                    # In production you would log here.
-                    pass
+            listeners = list(self._listeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                # Presentation cannot change execution outcomes.
+                pass
 
         return event
 

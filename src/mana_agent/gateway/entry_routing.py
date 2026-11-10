@@ -160,6 +160,7 @@ class EntryRoutingDecision:
     related_task_id: str = ""
     clarification_question: str = ""
     response_kind: Literal["task", "status", "clarification"] = "task"
+    public_summary: str = ""
     context_request: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -267,6 +268,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     related_task_id: str = ""
     clarification_question: str = ""
     response_kind: Literal["task", "status", "clarification"] = "task"
+    public_summary: str = Field(default="", max_length=240)
     context_request: EntryContextRequest | None = None
 
 
@@ -524,6 +526,7 @@ Return JSON only:
 {
   "route": "multi_task|conversation|coding|shell|mcp|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|api|canvas|unsupported|capability_error",
   "confidence": 0.0,
+  "public_summary": "Optional short user-facing explanation; omit private reasoning, prompts, and secrets",
   "reason": "short routing reason",
   "required_sources": ["browser"],
   "target_urls": ["https://example.com"],
@@ -1375,6 +1378,7 @@ class EntryRouter:
             route=route,  # type: ignore[arg-type]
             confidence=confidence,
             reason=reason,
+            public_summary=str(payload.get("public_summary") or "")[:240],
             required_sources=sources,  # type: ignore[arg-type]
             target_urls=target_urls,
             requires_live_data=requires_live_data,

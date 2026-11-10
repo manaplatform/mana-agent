@@ -33,7 +33,7 @@ function fixture(events, response) {
   const mount = new Element();
   mount.querySelector = (selector) => selectors.get(selector);
   selectors.get("form").querySelector = (selector) => selectors.get(selector);
-  globalThis.document = { getElementById: () => mount, createElement: (tag) => new Element(tag) };
+  globalThis.document = { getElementById: () => mount, createElement: (tag) => new Element(tag), addEventListener() {}, removeEventListener() {} };
   globalThis.window = { addEventListener() {} };
   let socket;
   globalThis.WebSocket = class { constructor() { socket = this; } close() {} };
@@ -234,5 +234,26 @@ test("approval action returning terminal or expired error dismisses drawer grace
     await approveBtn.handlers.click();
     assert.equal(drawer.hidden, true);
     assert.equal(chat.state.permissionRequests.get("term-1").status, "expired");
+  } finally { chat.close(); }
+});
+
+
+test("main and internal coding activity render without separate archive controls", () => {
+  const events = [
+    { event_id: "planning", sequence: 1, type: "agent.planning", execution_id: "run", status: "running",
+      title: "Reviewing requirements", agent_id: "MainAgent", operation_id: "planning" },
+    { event_id: "read", sequence: 2, type: "tool.call.started", execution_id: "run", status: "running",
+      title: "Reading implementation", backend: "internal", agent_id: "CodingAgent", operation_id: "read",
+      metadata: { tool_name: "read_file" } },
+  ];
+  const { chat, timeline, calls } = fixture(events, { ok: true, json: async () => ({ events: [] }) });
+  try {
+    const nodes = descendants(timeline);
+    assert.equal(nodes.filter((node) => node.className === "main-activity-box").length, 1);
+    assert.equal(nodes.filter((node) => node.className === "coding-activity-box").length, 1);
+    assert.ok(nodes.some((node) => String(node.textContent || "").includes("Reviewing requirements")));
+    assert.ok(nodes.some((node) => String(node.textContent || "").includes("Reading implementation")));
+    assert.ok(!nodes.some((node) => /earlier activity/i.test(String(node.textContent || ""))));
+    assert.equal(calls.length, 0);
   } finally { chat.close(); }
 });

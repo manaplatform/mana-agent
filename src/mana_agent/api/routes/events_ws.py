@@ -67,32 +67,32 @@ async def conversation_events_ws(
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_limit)
     loop = asyncio.get_running_loop()
 
+    overflow = asyncio.Event()
+
     def _enqueue(payload: dict[str, Any]) -> None:
+        if payload.get("type") == "activity.backpressure":
+            overflow.set()
+            try:
+                queue.put_nowait(payload)  # Wake a receiver even if the prefix already drained.
+            except asyncio.QueueFull:
+                pass
+            return
         try:
             queue.put_nowait(payload)
         except asyncio.QueueFull:
-            try:
-                queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            queue.put_nowait({
-                "type": "canvas.backpressure",
-                "status": "failed",
-                "conversation_id": conversation_id,
-                "message": "Live event queue overflowed; reconnect with the last sequence cursor.",
-            })
+            overflow.set()
 
     def _on_event(payload: dict[str, Any]) -> None:
         if str(payload.get("conversation_id") or "") != conversation_id:
             return
-        if execution_id and str(payload.get("execution_id") or payload.get("turn_id") or "") != execution_id:
+        if payload.get("type") != "activity.backpressure" and execution_id and str(payload.get("execution_id") or payload.get("turn_id") or "") != execution_id:
             return
         try:
             loop.call_soon_threadsafe(_enqueue, payload)
         except RuntimeError:
             logger.debug("websocket loop closed for %s", conversation_id)
 
-    unsubscribe = hub.subscribe(conversation_id, _on_event)
+    unsubscribe = hub.subscribe(conversation_id, _on_event, repository_id=repo_id)
     try:
         await websocket.send_json(
             {
@@ -104,40 +104,34 @@ async def conversation_events_ws(
                 "after_sequence": after_sequence,
             }
         )
-        # Replay durable history so reconnecting clients recover state.
+        # Subscribe first, then replay every page through a fixed high-water mark.
+        # Live duplicates are filtered by sequence; no limited-tail replay gaps.
+        cursor = after_sequence
+        high = hub.history(conversation_id=conversation_id, repository_id=repo_id, limit=1)
+        high_water = int(high[-1].get("sequence") or 0) if high else cursor
         if replay_limit > 0:
-            history = hub.history(
-                conversation_id=conversation_id,
-                execution_id=execution_id or "",
-                limit=replay_limit,
-                repository_id=repo_id,
-                after_sequence=after_sequence,
-            )
-            for item in history:
-                await websocket.send_json({"type": "event.replay", "event": item})
-            await websocket.send_json(
-                {
-                    "type": "socket.replay_complete",
-                    "status": "success",
-                    "conversation_id": conversation_id,
-                    "count": len(history),
-                    "last_sequence": max(
-                        [
-                            after_sequence,
-                            *[
-                                (
-                                    int(item.get("sequence") or 0)
-                                    if str(item.get("sequence") or "0").isdigit()
-                                    else 0
-                                )
-                                for item in history
-                            ],
-                        ]
-                    ),
-                }
-            )
+            while cursor < high_water:
+                history = hub.history(conversation_id=conversation_id, repository_id=repo_id,
+                                      after_sequence=cursor, limit=max(1, replay_limit), forward=True)
+                if not history:
+                    break
+                for item in history:
+                    sequence = int(item.get("sequence") or 0)
+                    if sequence > high_water:
+                        break
+                    # Advance across events outside an optional execution filter.
+                    cursor = sequence
+                    if not execution_id or str(item.get("execution_id") or item.get("turn_id") or "") == execution_id:
+                        await websocket.send_json({"type": "event.replay", "event": item})
+            await websocket.send_json({"type": "socket.replay_complete", "status": "success",
+                                       "conversation_id": conversation_id, "last_sequence": cursor})
 
         while True:
+            if overflow.is_set():
+                await websocket.send_json({"type": "activity.backpressure", "after_sequence": cursor,
+                                           "message": "Activity delivery paused; reconnecting to recover history."})
+                await websocket.close(code=1013, reason="Replay required")
+                break
             # Multiplex: receive client pings and push events.
             receive_task = asyncio.create_task(websocket.receive_text())
             event_task = asyncio.create_task(queue.get())
@@ -164,7 +158,10 @@ async def conversation_events_ws(
                     payload = event_task.result()
                 except Exception:
                     continue
-                await websocket.send_json({"type": "event", "event": payload})
+                sequence = int(payload.get("sequence") or 0)
+                if not sequence or sequence > cursor:
+                    await websocket.send_json({"type": "event", "event": payload})
+                    cursor = max(cursor, sequence)
     except WebSocketDisconnect:
         logger.debug("websocket disconnected conversation=%s", conversation_id)
     except Exception:

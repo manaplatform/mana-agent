@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from mana_agent.multi_agent.agents.base_agent import BaseAgent
+from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
 from mana_agent.evals.recorder import record_current
 
 
 class ReviewerAgent(BaseAgent):
+    @agent_activity
     def verify_runtime_reachability(
         self,
         task_id: str,
@@ -34,6 +35,7 @@ class ReviewerAgent(BaseAgent):
         self.record_evidence(task_id, "Reviewer verified runtime path: " + " → ".join(path))
         return True
 
+    @agent_activity
     def review(self, task_id: str, risk_summary: str) -> None:
         self.record_evidence(task_id, f"Reviewer assessment: {risk_summary}")
         record_current("review.finished", {"task_id": task_id, "reviewer": self.agent_id, "summary": risk_summary})
@@ -42,6 +44,7 @@ class ReviewerAgent(BaseAgent):
         self.taskboard.add_blocker(task_id, f"Reviewer rejected weak evidence: {reason}")
         self.record_evidence(task_id, f"Reviewer rejection: {reason}")
 
+    @agent_activity
     def review_managed_branch(
         self,
         task_id: str,
@@ -73,6 +76,7 @@ class ReviewerAgent(BaseAgent):
         record_current("review.finished", {"task_id": task_id, "reviewer": self.agent_id, "result": result})
         return result
 
+    @agent_activity
     def review_evidence(self, task_id: str, *, route_name: str, requires_verification: bool) -> bool:
         task = self.taskboard.get_task(task_id)
         if task.hierarchy_violations:

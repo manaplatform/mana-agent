@@ -149,9 +149,25 @@ class AgentEvent(BaseModel):
     semantic_kind: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_utc_now)
+    agent_id: str = ""
+    subagent_id: str = ""
+    parent_agent_id: str = ""
+    root_task_id: str = ""
+    parent_task_id: str = ""
+    attempt_id: str = ""
+    attempt_generation: int = 0
+    operation_id: str = ""
+    producer_sequence: int = 0
+    execution_mode: str = ""
 
     @model_validator(mode="after")
     def _redact_and_bound(self) -> "AgentEvent":
+        from mana_agent.coding.event_visibility import classify_coding_event
+        kind, visibility = classify_coding_event(self.event_type, tool_name=self.tool_name)
+        if "visibility" not in self.model_fields_set:
+            object.__setattr__(self, "visibility", visibility.value)
+        if not self.semantic_kind:
+            object.__setattr__(self, "semantic_kind", kind.value)
         object.__setattr__(self, "summary", redact_event_value(self.summary))
         object.__setattr__(self, "error", redact_event_value(self.error))
         object.__setattr__(self, "output_preview", redact_event_value(self.output_preview))

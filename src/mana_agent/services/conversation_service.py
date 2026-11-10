@@ -181,6 +181,8 @@ class ConversationService:
         *,
         execution_id: str = "",
         limit: int = 200,
+        after_sequence: int = 0,
+        before_sequence: int = 0,
     ) -> list[dict[str, Any]]:
         self.get_or_raise(conversation_id)
         return self._hub.history(
@@ -188,6 +190,8 @@ class ConversationService:
             execution_id=execution_id,
             limit=limit,
             repository_id=self.repository_id,
+            after_sequence=after_sequence,
+            before_sequence=before_sequence,
         )
 
     def set_status(self, conversation_id: str, status: str, *, execution_id: str = "") -> ConversationRecord:

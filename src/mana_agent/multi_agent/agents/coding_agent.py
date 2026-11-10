@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mana_agent.multi_agent.agents.base_agent import BaseAgent
+from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
 from mana_agent.multi_agent.core.types import QueueJobType
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 
@@ -13,6 +13,7 @@ class CodingAgent(BaseAgent):
     def execute_tool_directly(self, *args, **kwargs):
         raise PermissionError("CodingAgent must use QueueManager and cannot execute tools directly")
 
+    @agent_activity
     def request_read(self, task_id: str, path: str):
         if self.queue_manager is None:
             self.taskboard.add_blocker(task_id, "QueueManager unavailable for coding agent read request")
@@ -27,6 +28,7 @@ class CodingAgent(BaseAgent):
             priority=50,
         )
 
+    @agent_activity
     def request_batch_read(self, task_id: str, paths: list[str]):
         if self.queue_manager is None:
             self.taskboard.add_blocker(task_id, "QueueManager unavailable for coding agent batch read request")
@@ -41,6 +43,7 @@ class CodingAgent(BaseAgent):
             priority=40,
         )
 
+    @agent_activity
     def request_patch(self, task_id: str, patch: str):
         if self.queue_manager is None:
             self.taskboard.add_blocker(task_id, "QueueManager unavailable for coding agent patch request")

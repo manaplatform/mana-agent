@@ -1148,6 +1148,39 @@ class ToolWorkerClient:
             )
         logger.debug(f"[ToolWorkerClient.run_tools] Full request: {request.model_dump()}")
         _validate_direct_tool_request(request)
+        # Capture the original parent authorization before IPC. Worker replies
+        # cannot adopt the supervisor's later attempt or carry lease credentials.
+        from mana_agent.services.activity_context import current_activity_context, activity_scope
+        original_activity = current_activity_context()
+        if original_activity is not None:
+            actor = {key: request.execution_context[key] for key in ("agent_id", "subagent_id", "parent_agent_id", "agent_role") if request.execution_context.get(key)}
+            request.execution_context = {**request.execution_context, **original_activity.identity(), **actor}
+            original_callback = on_event
+            original_identity = ExecutionContext.from_mapping(request.execution_context).as_dict()
+
+            def observe_worker(event: WorkerEvent) -> None:
+                from mana_agent.services.execution_event_hub import get_execution_event_hub
+                data = event.data or {}
+                phase = {"tool_start": "started", "tool_end": "finished", "tool_error": "failed",
+                         "worker_request_start": "started", "worker_request_end": "finished",
+                         "worker_request_error": "failed"}.get(event.name)
+                if phase is None:
+                    return  # Unrecognized IPC messages are not public activity.
+                operation = str(data.get("event_id") or request.run_id or "")
+                with activity_scope(original_activity):
+                    published = get_execution_event_hub().publish({
+                        **original_identity, "type": f"tool.{phase}", "event_id": f"{operation}-{phase}",
+                        "operation_id": operation, "tool_name": str(data.get("tool") or "tool_worker"),
+                        "title": f"{data.get('tool') or 'tool_worker'} {phase}",
+                        "status": "failed" if phase == "failed" else "success" if phase == "finished" else "running",
+                        "duration_ms": int(float(data.get("duration_seconds") or 0) * 1000),
+                        "error": str(data.get("error") or ""),
+                    })
+                    if original_callback is not None and published.get("visibility") != "internal":
+                        original_callback(WorkerEvent(name=event.name, message=published.get("title", ""),
+                            data={**original_identity, "tool": published.get("tool_name"),
+                                  "event_id": operation, "_activity_published": True}))
+            on_event = observe_worker
         request_started = time.time()
         request_event_id = f"worker-request-{uuid.uuid4().hex}"
 
@@ -1689,9 +1722,8 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
         self._request_id = request_id
         self._emit_reply = emit_reply
         self._execution_context = execution_context or ExecutionContext()
-        self._tool: str | None = None
-        self._t0: float = 0.0
-        self._event_id: str | None = None
+        self._runs: dict[str, tuple[str, float, str]] = {}
+        self._run_lock = threading.RLock()
         self._event_counter = 0
         logger.debug(f"[_WorkerToolEventCallback] Initialized for request {request_id}")
 
@@ -1709,59 +1741,33 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
             )
         )
 
+    def _run_key(self, kwargs: dict[str, Any]) -> str:
+        return str(kwargs.get("run_id") or f"thread-{threading.get_ident()}")
+
     def on_tool_start(self, serialized: dict[str, Any] | None, input_str: str, **kwargs: Any) -> None:
-        _ = kwargs
         tool = str((serialized or {}).get("name") or "tool")
-        self._tool = tool
-        self._t0 = time.time()
-        self._event_counter += 1
-        self._event_id = f"{self._request_id}:{self._event_counter}"
-        args = (input_str or "").strip().replace("\n", " ")
-        if len(args) > 160:
-            args = args[:160] + "…"
-        msg = f"TOOL start: {tool}"
-        if args:
-            msg += f" | args: {args}"
-        self._emit(
-            name="tool_start",
-            message=msg,
-            data={"tool": tool, "args": args, "event_id": self._event_id},
-        )
+        with self._run_lock:
+            self._event_counter += 1
+            event_id = f"{self._request_id}:{self._event_counter}"
+            self._runs[self._run_key(kwargs)] = (tool, time.monotonic(), event_id)
+        self._emit(name="tool_start", message=f"TOOL start: {tool}",
+                   data={"tool": tool, "event_id": event_id})
+
+    def _finish(self, kwargs: dict[str, Any]) -> tuple[str, float, str | None]:
+        with self._run_lock:
+            tool, started, event_id = self._runs.pop(self._run_key(kwargs), ("tool", time.monotonic(), None))
+        return tool, max(0.0, time.monotonic() - started), event_id
 
     def on_tool_end(self, output: str, **kwargs: Any) -> None:
-        _ = kwargs
-        tool = self._tool or "tool"
-        event_id = self._event_id
-        dt = max(0.0, time.time() - self._t0)
-        self._tool = None
-        self._event_id = None
+        tool, duration, event_id = self._finish(kwargs)
         error = structured_tool_error_detail(output)
-        if error:
-            self._emit(
-                name="tool_error",
-                message=f"TOOL error: {tool} - {error}",
-                data={"tool": tool, "duration_seconds": round(dt, 3), "error": error, "event_id": event_id},
-            )
-            return
-        self._emit(
-            name="tool_end",
-            message=f"TOOL end: {tool} ({dt:0.1f}s)",
-            data={"tool": tool, "duration_seconds": round(dt, 3), "event_id": event_id},
-        )
+        self._emit(name="tool_error" if error else "tool_end", message=f"TOOL {'error' if error else 'end'}: {tool}",
+            data={"tool": tool, "duration_seconds": round(duration, 3), "error": error or "", "event_id": event_id})
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        _ = kwargs
-        tool = self._tool or "tool"
-        event_id = self._event_id
-        self._tool = None
-        self._event_id = None
-        err = str(error).strip()
-        msg = f"TOOL error: {tool}" + (f" - {err}" if err else "")
-        self._emit(
-            name="tool_error",
-            message=msg,
-            data={"tool": tool, "error": err, "event_id": event_id},
-        )
+        tool, duration, event_id = self._finish(kwargs)
+        self._emit(name="tool_error", message=f"TOOL error: {tool}",
+            data={"tool": tool, "duration_seconds": round(duration, 3), "error": str(error), "event_id": event_id})
 
 
 # ---------------------------------------------------------------------------

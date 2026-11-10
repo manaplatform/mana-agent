@@ -199,6 +199,15 @@ class CompatibleChatOpenAI(ChatOpenAI):
             default_effort=default_effort,
             nest_under_extra_body=True,
         )
+        from mana_agent.services.activity_context import current_activity_context
+        from mana_agent.config.model_capabilities import resolve_model_capability
+        activity_context = current_activity_context()
+        descriptor = resolve_model_capability(provider, self.model_name, transport="direct_responses")
+        if (activity_context is not None and descriptor.supports_public_reasoning_summaries and self._use_responses_api(payload)
+                and str(getattr(self, "openai_api_base", None) or "https://api.openai.com/v1").rstrip("/") in {"https://api.openai.com", "https://api.openai.com/v1"}):
+            reasoning = dict(payload.get("reasoning") or {})
+            reasoning["summary"] = "auto"
+            payload["reasoning"] = reasoning
         normalized_payload = normalize_reasoning_request_overrides(
             provider, self.model_name, overrides=payload
         )
@@ -301,7 +310,46 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 "retry_attempt": int(self.compatibility_retry_attempted),
             },
         )
+        self._publish_completed_activity_summaries(result)
         return result
+
+    async def _agenerate(self, messages: list[Any], stop: list[str] | None = None, run_manager: Any = None, **kwargs: Any) -> Any:
+        result = await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        self._publish_completed_activity_summaries(result)
+        return result
+
+    def _publish_completed_activity_summaries(self, result: Any) -> None:
+        try:
+            from mana_agent.services.activity_context import current_activity_context, emit_activity
+            from mana_agent.config.model_capabilities import resolve_model_capability
+            if current_activity_context() is None:
+                return
+            descriptor = resolve_model_capability(self.selected_provider, self.model_name, transport="direct_responses")
+            if not descriptor.supports_public_reasoning_summaries:
+                return
+            from types import SimpleNamespace
+            base = str(getattr(self, "openai_api_base", None) or "https://api.openai.com/v1").rstrip("/")
+            if self.selected_provider != "openai" or base not in {"https://api.openai.com", "https://api.openai.com/v1"}:
+                return
+            for generation in getattr(result, "generations", [SimpleNamespace(message=result)]):
+                message = getattr(generation, "message", None)
+                content = getattr(message, "content", None)
+                if not isinstance(content, list):
+                    continue
+                message_id = str(getattr(message, "id", None) or f"local-{id(message)}")
+                for item_index, item in enumerate(content):
+                    if not isinstance(item, dict) or item.get("type") != "reasoning":
+                        continue
+                    for summary_index, summary in enumerate(item.get("summary") or []):
+                        if isinstance(summary, dict) and summary.get("type") == "summary_text":
+                            emit_activity("agent.summary", title="Reasoning summary", summary=str(summary.get("text") or ""),
+                                status="success", event_id=f"summary-{message_id}-{item_index}-{summary_index}",
+                                operation_id=f"summary-{message_id}-{item_index}-{summary_index}",
+                                metadata={"summary_source": "provider", "summary_trusted": True,
+                                    "summary_complete": True, "provider": "openai", "transport": "direct_responses"})
+
+        except Exception:
+            logger.warning("Public provider summary unavailable")
 
     def _stream(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
         yielded = False

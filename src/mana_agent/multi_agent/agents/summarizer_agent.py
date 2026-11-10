@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from mana_agent.multi_agent.agents.base_agent import BaseAgent
+from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
 
 
 class SummarizerAgent(BaseAgent):
+    @agent_activity
     def summarize(self, task_id: str) -> str:
         task = self.taskboard.get_task(task_id)
         files = ", ".join(task.files_touched) if task.files_touched else "none recorded"

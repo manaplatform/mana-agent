@@ -37,6 +37,7 @@ class ContinuationDecision(StrictModel):
     evidence_summary: str = Field(min_length=1)
     remaining_work: str = Field(default="")
     user_message: str = Field(default="")
+    public_summary: str = Field(default="", max_length=240)
     verification_passed: bool = False
     safe_to_continue: bool
     renewal_requested: bool = False
