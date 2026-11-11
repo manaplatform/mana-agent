@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import getpass
 from pathlib import Path
 from types import SimpleNamespace
@@ -719,8 +720,7 @@ def test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease(tm
         )
 
 
-@pytest.mark.asyncio
-async def test_internal_engine_suspends_cleanly_when_waiting_for_approval_without_internal_error(tmp_path, monkeypatch):
+def test_internal_engine_suspends_cleanly_when_waiting_for_approval_without_internal_error(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from mana_agent.coding.internal_engine import InternalCodingEngine
     from mana_agent.coding.models import CodingTask, WorkspaceContext
@@ -758,7 +758,7 @@ async def test_internal_engine_suspends_cleanly_when_waiting_for_approval_withou
         allow_in_place_write=True,
     )
 
-    result = await engine.execute(task, workspace)
+    result = asyncio.run(engine.execute(task, workspace))
     assert result.status == "waiting"
     assert result.human_input
     assert result.human_input.get("inbox_item_id")
