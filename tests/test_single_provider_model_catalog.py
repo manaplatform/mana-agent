@@ -33,6 +33,8 @@ from mana_agent.media.models import MediaType
 from mana_agent.tui.configuration_app import ManaConfigurationApp
 from mana_agent.tui.model_picker import (
     fetch_openai_compatible_models,
+    fetch_provider_model_detail,
+    fetch_provider_models,
     parse_openai_model_records,
 )
 
@@ -278,7 +280,141 @@ def test_model_fetch_error_differentiation(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr("urllib.request.urlopen", not_found_fail)
     with pytest.raises(ModelListFetchFailedError):
-        fetch_openai_compatible_models(base_url="https://api.openai.com/v1", api_key="key")
+        fetch_openai_compatible_models(
+            base_url="https://api.openai.com/v1", api_key="test-api-key"
+        )
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_url"),
+    [
+        ("https://api.anthropic.com", "https://api.anthropic.com/v1/models"),
+        ("https://api.anthropic.com/", "https://api.anthropic.com/v1/models"),
+        ("https://api.anthropic.com/v1", "https://api.anthropic.com/v1/models"),
+        ("https://proxy.example/api/v1", "https://proxy.example/api/v1/models"),
+    ],
+)
+def test_anthropic_model_refresh_uses_versioned_catalog_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    expected_url: str,
+) -> None:
+    """Anthropic catalog refresh must use /v1/models with or without /v1 in base URL."""
+    requests: list[str] = []
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps(
+        {"data": [{"id": "claude-sonnet-4-5", "type": "model"}]}
+    ).encode()
+
+    def fetch(request: Any, **_kwargs: Any) -> MagicMock:
+        requests.append(request.full_url)
+        return response
+
+    monkeypatch.setattr("urllib.request.urlopen", fetch)
+
+    models = fetch_provider_models(
+        provider="anthropic",
+        base_url=base_url,
+        api_key=[REDACTED],
+    )
+
+    assert requests == [expected_url]
+    assert models == [{"id": "claude-sonnet-4-5", "type": "model"}]
+
+
+def test_anthropic_model_detail_uses_versioned_catalog_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps(
+        {"id": "claude-sonnet-4-5", "type": "model"}
+    ).encode()
+
+    def fetch(request: Any, **_kwargs: Any) -> MagicMock:
+        requests.append(request.full_url)
+        return response
+
+    monkeypatch.setattr("urllib.request.urlopen", fetch)
+
+    detail = fetch_provider_model_detail(
+        provider="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        api_key=[REDACTED],
+        model_id="claude-sonnet-4-5",
+    )
+
+    assert requests == ["https://api.anthropic.com/v1/models/claude-sonnet-4-5"]
+    assert detail == {"id": "claude-sonnet-4-5", "type": "model"}
+
+
+def test_anthropic_404_message_does_not_give_openai_base_url_advice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.error
+
+    def not_found(*_args: Any, **_kwargs: Any) -> None:
+        raise urllib.error.HTTPError(
+            url="https://api.anthropic.com/v1/models",
+            code=404,
+            msg="Not Found",
+            hdrs={},
+            fp=MagicMock(read=lambda: b"{}"),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", not_found)
+    with pytest.raises(ModelListFetchFailedError) as exc_info:
+        fetch_provider_models(
+            provider="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key=[REDACTED],
+        )
+
+    message = str(exc_info.value)
+    assert "Anthropic" in message
+    assert "/v1/models" in message
+    assert "OpenAI-compatible" not in message
+
+
+def test_configuration_tui_shows_anthropic_specific_catalog_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.error
+
+    def not_found(*_args: Any, **_kwargs: Any) -> None:
+        raise urllib.error.HTTPError(
+            url="https://api.anthropic.com/v1/models",
+            code=404,
+            msg="Not Found",
+            hdrs={},
+            fp=MagicMock(read=lambda: b"{}"),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", not_found)
+    draft = ConfigurationDraft(
+        original={"MANA_AI_PROVIDER": "anthropic"},
+        values={
+            "MANA_AI_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        },
+    )
+    app = ManaConfigurationApp(draft=draft)
+
+    async def run() -> None:
+        async with app.run_test():
+            from textual.widgets import Button, TabbedContent
+
+            app.query_one(TabbedContent).active = "providers"
+            await app.on_button_pressed(
+                Button.Pressed(app.query_one("#test-provider", Button))
+            )
+            status = str(app.query_one("#provider-status").renderable)
+            assert "/v1/models" in status
+            assert "Anthropic API base URL" in status
+            assert "OpenAI-compatible" not in status
+
+    asyncio.run(run())
 
 
 def test_tui_successful_test_populates_all_capability_dropdowns(monkeypatch: pytest.MonkeyPatch) -> None:

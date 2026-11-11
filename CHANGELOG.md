@@ -2,7 +2,9 @@
 
 All notable repository changes should be recorded here.
 
-## Unreleased — 2026-11-10
+## Unreleased — 2026-11-11
+
+- 2026-11-11 — Configuration / Anthropic catalog refresh: construct Anthropic model-list and model-detail URLs with the required `/v1` API prefix while accepting base URLs both at the host root and already ending in `/v1`. Replace the misleading OpenAI-compatible `/v1` advice on Anthropic HTTP 404 errors with Anthropic-specific catalog endpoint guidance. Add regression coverage for root, trailing-slash, prefixed, and proxy base URLs and update provider configuration documentation. Do not append `/models` directly to Anthropic's default host root or suggest OpenAI URL rules for Anthropic failures. User-owned verification (not run by the agent): `venv/bin/python -m pytest tests/test_single_provider_model_catalog.py -k anthropic -q`.
 
 - 2026-11-10 — Execution architecture and visibility: add deterministic ToolRunner authority, versioned operation requests/results, CodingAgent-owned repository delegation, single-operation worker IPC, incremental command streams, observed mutation diffs, scoped retained-output APIs, and stable details in existing activity boxes. Preserve Codex ownership and supervisor fencing; remove the direct-edit route, generated fallback edits/cleanup, unknown-policy widening, and implicit transport switching. Legacy serialized Redis jobs require explicit current-authority rebinding. See [regression notes and exact user-owned verification commands](docs/regressions/hierarchical-tool-execution.md). Changes are local and uncommitted; automated checks and live/UI/performance acceptance have not been run by the agent.
 

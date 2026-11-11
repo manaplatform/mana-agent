@@ -173,6 +173,11 @@ def _handle_http_error(provider_label: str, exc: urllib.error.HTTPError) -> None
             f"{provider_label} authentication failed (HTTP {code}). Check the API key and account access."
         ) from exc
     if code == 404:
+        if provider_label.casefold() == "anthropic":
+            raise ModelListFetchFailedError(
+                "Anthropic model-list fetch failed: API endpoint was not found (HTTP 404). "
+                "Check the Anthropic API base URL; model listing uses /v1/models."
+            ) from exc
         raise ModelListFetchFailedError(
             f"{provider_label} model-list fetch failed: endpoint was not found (HTTP 404). "
             "Verify the base URL ends with /v1 for OpenAI-compatible hosts."
@@ -196,6 +201,11 @@ def _http_error_message(provider_label: str, exc: urllib.error.HTTPError) -> str
             "Check the API key and account access."
         )
     if code == 404:
+        if provider_label.casefold() == "anthropic":
+            return (
+                "Anthropic model-list fetch failed: API endpoint was not found (HTTP 404). "
+                "Check the Anthropic API base URL; model listing uses /v1/models."
+            )
         return (
             f"{provider_label} model-list fetch failed: endpoint was not found (HTTP 404). "
             "Verify the base URL ends with /v1 for OpenAI-compatible hosts."
@@ -205,6 +215,28 @@ def _http_error_message(provider_label: str, exc: urllib.error.HTTPError) -> str
     if code >= 500:
         return f"{provider_label} model-list fetch failed: service failure (HTTP {code})."
     return f"{provider_label} model-list fetch failed with HTTP {code}."
+
+
+def _provider_url(provider: str, base_url: str, endpoint: str) -> str:
+    """Build a catalog URL using the provider's API path conventions.
+
+    Anthropic's API is rooted at ``/v1`` while its default base URL is the host
+    root. Accept base URLs both with and without that version prefix to avoid
+    producing either ``/models`` or ``/v1/v1/models``.
+    """
+    base = base_url.rstrip("/")
+    if provider.casefold() != "anthropic":
+        return base + endpoint
+
+    parsed = urllib.parse.urlsplit(base)
+    path = parsed.path.rstrip("/")
+    if path == "/v1" or path.endswith("/v1"):
+        path += endpoint
+    else:
+        path += "/v1" + endpoint
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment)
+    )
 
 
 def fetch_openai_compatible_models(
@@ -257,7 +289,9 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
     base = (base_url or definition.default_base_url).rstrip("/")
 
     def _fetch(endpoint: str) -> dict[str, Any]:
-        request = urllib.request.Request(base + endpoint, headers=headers)
+        request = urllib.request.Request(
+            _provider_url(provider, base, endpoint), headers=headers
+        )
         try:
             with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -331,7 +365,7 @@ def fetch_provider_model_detail(
         headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
     base = (base_url or definition.default_base_url).rstrip("/")
     endpoint = f"/models/{urllib.parse.quote(model_id, safe='')}"
-    request = urllib.request.Request(base + endpoint, headers=headers)
+    request = urllib.request.Request(_provider_url(provider, base, endpoint), headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
             payload = json.loads(response.read().decode("utf-8"))
