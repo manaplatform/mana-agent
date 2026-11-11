@@ -1283,6 +1283,8 @@ class AgentChatGateway:
             raise
         self._chat_service = self._stack.chat_service
         self._coding_agent = self._stack.coding_agent
+        from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+        self._execution_registry = AgentRegistry(default_main_agent_id="main")
         self._tools_orchestrator = self._stack.tools_orchestrator
         self.execution_manager = self._stack.execution_manager
         self.routing_authority = self._stack.routing_authority
@@ -10131,12 +10133,64 @@ class AgentChatGateway:
                     break
         return candidates
 
+    def _execute_domain_operation(self, *, tool_name: str, arguments: dict, invoke, read_only: bool = False):
+        """Observe an exact selected domain operation without moving its lane."""
+        from mana_agent.services.activity_context import current_activity_context
+        from mana_agent.multi_agent.agents.tool_runner_agent import bind_tool_authority, ToolRunnerAgent
+        from mana_agent.multi_agent.tools.operation_policy import OperationPolicy
+        from mana_agent.multi_agent.core.types import AgentRole
+        from mana_agent.coding.models import WorkspaceContext
+        from mana_agent.utils.tool_results import json_safe_tool_payload
+        context = current_activity_context()
+        if context is None or not context.task_id or context.execution_registry is None:
+            raise PermissionError("Domain execution requires its current admitted task authority")
+        node = context.execution_registry.find_by_role(AgentRole.TOOL)
+        if context.taskboard is not None:
+            context.taskboard.assign(context.task_id, node.agent_id)
+        authority = bind_tool_authority(registry=context.execution_registry, actor_id=node.agent_id,
+            task_id=context.task_id, workspace=WorkspaceContext(repository_path=self.root, worktree_path=self.root,
+                allow_in_place_write=True, sandbox="readOnly" if context.execution_mode in {"plan", "plan_only"} else "workspaceWrite"),
+            policies={tool_name: OperationPolicy(tool_name, "read_only" if read_only else "external", repository=False)},
+            schemas={tool_name: {"type": "object"}}, authorize=context.authorize_tool, taskboard=context.taskboard)
+        runner = ToolRunnerAgent(authority)
+        identity = f"domain-{uuid.uuid4().hex}"
+        request = runner.request(tool_name, arguments, call_id=identity, decision_id=context.execution_id)
+        values, errors = [], []
+        def execute(selected):
+            try:
+                value = invoke()
+            except Exception as exc:
+                errors.append(exc)
+                raise
+            values.append(value)
+            return {"ok": not bool(getattr(value, "error", None)), "result": json_safe_tool_payload(value)}
+        runner.execute(request, execute)
+        if errors:
+            raise errors[0]
+        return values[0]
+
     def _execute_entry_route(self, **kwargs: Any) -> ChatTurnResult:
         from mana_agent.batch.policy import execution_policy_context
         decision = kwargs["decision"]
         policy = TaskExecutionPolicy.model_validate(kwargs.get("options", {}).get("execution_policy") or decision.execution_policy.model_dump(mode="json"))
         with execution_policy_context(policy):
             try:
+                lane_task_id = str(kwargs.get("options", {}).get("_lane_task_id") or "")
+                inspect_task = getattr(self._lane_coordinator, "inspect_task", None)
+                supervisor = getattr(self._lane_coordinator, "execution_supervisor", None)
+                if lane_task_id and callable(inspect_task) and supervisor is not None:
+                    execution = inspect_task(lane_task_id)
+                    if not execution.supervisor_attempt_id or not execution.supervisor_lease_token:
+                        raise PermissionError("The selected lane has no current supervised execution attempt")
+                    return run_with_activity_attempt(self._execute_entry_route_bound,
+                        _activity_supervisor=supervisor,
+                        _activity_task_id=lane_task_id,
+                        _activity_attempt_id=execution.supervisor_attempt_id,
+                        _activity_lease_token=execution.supervisor_lease_token,
+                        _activity_registry=getattr(self, "_execution_registry", None),
+                        _activity_taskboard=getattr(self._lane_coordinator, "taskboard", None),
+                        _activity_authorize=lambda name: self._lane_coordinator.authorize_tool(lane_task_id, name),
+                        _activity_lane=str(getattr(execution, "owning_lane", "")), **kwargs)
                 return self._execute_entry_route_bound(**kwargs)
             finally:
                 kwargs["state"].pop("_batch_coding_runtime", None)
@@ -10494,16 +10548,14 @@ class AgentChatGateway:
                 if lane_task_id:
                     self._lane_coordinator.authorize_tool(lane_task_id, server_decision.tool_name)
                 if server_decision.tool_name == "server_inspect":
-                    outcome = run_sync(
-                        self.server_management_service.inspect(
-                            server_decision,
-                            session_id=context.session_id,
-                        )
-                    )
+                    outcome = self._execute_domain_operation(tool_name=server_decision.tool_name,
+                        arguments=server_decision.model_dump(mode="json"), read_only=True,
+                        invoke=lambda: run_sync(self.server_management_service.inspect(server_decision, session_id=context.session_id)))
                 else:
                     argv = build_tool_argv(server_decision)
-                    outcome = run_sync(
-                        self.server_management_service.execute(
+                    outcome = self._execute_domain_operation(tool_name=server_decision.tool_name,
+                        arguments=server_decision.model_dump(mode="json"), read_only=server_decision.read_only,
+                        invoke=lambda: run_sync(self.server_management_service.execute(
                             server_decision,
                             argv,
                             session_id=context.session_id,
@@ -10514,7 +10566,7 @@ class AgentChatGateway:
                                 str(key): str(value)
                                 for key, value in dict(server_decision.arguments.get("environment") or {}).items()
                             },
-                        )
+                        ))
                     )
             except ServerApprovalRequired as exc:
                 approval_request_id = f"server_approval_{uuid.uuid4().hex}"
@@ -10793,7 +10845,9 @@ class AgentChatGateway:
                     lane_task_id, "remote_ssh_execute"
                 )
             self._attach_human_inbox_to_remote_execution()
-            job = self.remote_execution_service.submit(request)
+            job = self._execute_domain_operation(tool_name="remote_ssh_execute",
+                arguments=request.model_dump(mode="json"), read_only=bool(getattr(request, "read_only", False)),
+                invoke=lambda: self.remote_execution_service.submit(request))
             if job.state.value == "awaiting_permission":
                 permission = self.remote_execution_service.pending_permissions()[-1]
                 safe_permission = dict(redact_secrets(permission))
@@ -11073,12 +11127,22 @@ class AgentChatGateway:
                     supervisor._validate_lease(task, attempt_id=supervisor_attempt_id, lease_token=supervisor_lease_token)
                     task.provider_metadata["coding_research_gateway"] = resume_snapshot
                 supervisor.store.update_task(lane_task_id, save_coding_resume)
+            state["_coding_execution_runtime"] = {
+                "execution_registry": self._execution_registry,
+                "taskboard": self._lane_coordinator.taskboard,
+                "execution_supervisor": self._lane_coordinator.execution_supervisor,
+                "tool_authorize": (lambda name: self._lane_coordinator.authorize_tool(lane_task_id, name)) if lane_task_id else None,
+            }
             result = run_with_activity_attempt(
                 process_chat_turn,
                 _activity_supervisor=self._lane_coordinator.execution_supervisor,
                 _activity_task_id=lane_task_id,
                 _activity_attempt_id=supervisor_attempt_id,
                 _activity_lease_token=supervisor_lease_token,
+                _activity_registry=self._execution_registry,
+                _activity_taskboard=self._lane_coordinator.taskboard,
+                _activity_authorize=(lambda name: self._lane_coordinator.authorize_tool(lane_task_id, name)) if lane_task_id else None,
+                _activity_lane=str(getattr(lane_execution, "owning_lane", "")) if lane_task_id else "",
                 root=self.root,
                 text=execution_text,
                 execution_context_included=execution_context_included,
@@ -11510,7 +11574,16 @@ class AgentChatGateway:
             workspace_root=self.root,
         )
 
-    def _execute_media_route(
+    def _execute_media_route(self, *, decision: EntryRoutingDecision, context: EntryRouteContext) -> ChatTurnResult:
+        media = MediaOperationDecision.model_validate(decision.media_request)
+        tool_name = {"image.generate": "generate_image", "voice.generate": "generate_voice",
+            "video.generate": "generate_video", "generation.status": "get_media_generation_status",
+            "generation.cancel": "cancel_media_generation"}[media.operation]
+        return self._execute_domain_operation(tool_name=tool_name, arguments=media.model_dump(mode="json"),
+            read_only=media.operation == "generation.status",
+            invoke=lambda: self._execute_media_route_selected(decision=decision, context=context))
+
+    def _execute_media_route_selected(
         self,
         *,
         decision: EntryRoutingDecision,

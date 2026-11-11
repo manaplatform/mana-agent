@@ -126,6 +126,7 @@ class SandboxCapabilities(StrictModel):
     secret_files: bool = False
     secret_environment_variables: bool = False
     persistent_volumes: bool = False
+    command_streaming: bool = False
     artifact_streaming: bool = False
     parallel_execution: bool = False
     shell_execution: bool = False

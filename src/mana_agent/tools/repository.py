@@ -277,10 +277,15 @@ def run_script_once(repo_root: Path, *, script: str, cwd: str | None = None, tim
         workdir = target
     started = time.perf_counter()
     try:
-        completed = subprocess.run(
-            text,
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        from mana_agent.utils.process_stream import run_streaming_process
+        from mana_agent.utils.shell_argv import local_shell_argv
+        native = current_operation() is not None
+        runner = run_streaming_process if native else subprocess.run
+        completed = runner(
+            local_shell_argv(text) if native else text,
             cwd=workdir,
-            shell=True,
+            shell=not native,
             check=False,
             timeout=max(1, min(int(timeout or 120), 900)),
             capture_output=True,
@@ -488,7 +493,10 @@ def _run_check(
         )
     started = time.perf_counter()
     try:
-        completed = subprocess.run(command, cwd=repo_root, capture_output=True, text=True, timeout=timeout, check=False)
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        from mana_agent.utils.process_stream import run_streaming_process
+        runner = run_streaming_process if current_operation() is not None else subprocess.run
+        completed = runner(command, cwd=repo_root, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         return VerificationCheck(
             name=name,

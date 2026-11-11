@@ -122,7 +122,14 @@ def test_ctrl_c_cancels_queued_and_running_tool_jobs(tmp_path: Path) -> None:
         owner_agent_id="agent_coding_1",
     )
 
-    queue_manager = QueueManager(tmp_path, taskboard=taskboard)
+    from mana_agent.multi_agent.core.types import AgentRole
+    from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+    from mana_agent.multi_agent.routing.hierarchy import HierarchyPolicy
+    registry = AgentRegistry()
+    registry.register(AgentRole.CODING, agent_id="agent_coding_1",
+        parent_agent_id=registry.find_by_role(AgentRole.MAIN).agent_id)
+    queue_manager = QueueManager(tmp_path, taskboard=taskboard,
+        hierarchy_policy=HierarchyPolicy(registry, taskboard))
 
     job1 = queue_manager.enqueue(
         task_id=tb_task.task_id,

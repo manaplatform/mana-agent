@@ -13,7 +13,7 @@ from mana_agent.transactional_actions.runtime import default_action_gateway
 
 
 def dispatcher(root: Path, task: str = "task-one") -> ToolExecutionDispatcher:
-    return ToolExecutionDispatcher(
+    return ToolExecutionDispatcher.for_coding_task(
         workspace=WorkspaceContext(repository_path=root, worktree_path=root, working_directory=root,
                                    sandbox="workspaceWrite", allow_in_place_write=True),
         task_id=task,

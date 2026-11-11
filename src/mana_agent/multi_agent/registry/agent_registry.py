@@ -9,7 +9,8 @@ from mana_agent.spirit.registry import default_spirit_ref
 
 
 class AgentRegistry:
-    def __init__(self, *, max_depth: int = 5, max_active_agents: int = 16) -> None:
+    def __init__(self, *, max_depth: int = 5, max_active_agents: int = 16, default_main_agent_id: str | None = None) -> None:
+        self._default_main_agent_id = default_main_agent_id
         self.max_depth = max_depth
         self.max_active_agents = max_active_agents
         self.agents: dict[str, AgentNode] = {}
@@ -20,7 +21,7 @@ class AgentRegistry:
         if self.agents:
             return
         self._bootstrapping_defaults = True
-        main = self.register(AgentRole.MAIN)
+        main = self.register(AgentRole.MAIN, agent_id=self._default_main_agent_id)
         head = self.register(AgentRole.HEAD_DECISION, parent_agent_id=main.agent_id)
         for role in (
             AgentRole.PLANNER,
@@ -31,7 +32,7 @@ class AgentRegistry:
             AgentRole.REVIEWER,
             AgentRole.SUMMARIZER,
         ):
-            self.register(role, parent_agent_id=head.agent_id)
+            self.register(role, parent_agent_id=main.agent_id if role == AgentRole.CODING else head.agent_id)
         self._bootstrapping_defaults = False
 
     def register(

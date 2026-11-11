@@ -2293,60 +2293,8 @@ def _salvage_misplaced_deliverables(
     changed_files: list[str],
     trace: list[dict[str, Any]],
 ) -> list[str]:
-    """Move substantial content written to the wrong path into the required path.
-
-    Returns the stray paths that were relocated (and removed from disk) so the
-    caller can drop them from the reported ``changed_files``.
-    """
-    relocated: list[str] = []
-    for deliverable in deliverables:
-        target_abs = repo_root / deliverable
-        if target_abs.is_file():
-            try:
-                if not _looks_like_stub(target_abs.read_text(encoding="utf-8", errors="replace")):
-                    continue
-            except OSError:
-                continue
-        for stray in _stray_misplacements(deliverable, changed_files):
-            stray_abs = repo_root / stray
-            if not stray_abs.is_file():
-                continue
-            try:
-                content = stray_abs.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if _looks_like_stub(content):
-                continue  # not worth keeping; deterministic generation will replace it
-            if target_abs.exists():
-                result = safe_write_file(
-                    repo_root=repo_root,
-                    path=deliverable,
-                    content=content,
-                    allowed_prefixes=None,
-                    force=True,
-                )
-            else:
-                result = safe_create_file(repo_root=repo_root, path=deliverable, content=content, allowed_prefixes=None)
-            if not bool(result.get("ok")):
-                continue
-            try:
-                stray_abs.unlink()
-            except OSError:
-                pass
-            trace.append(
-                {
-                    "tool_name": "write_file",
-                    "status": "ok",
-                    "path": deliverable,
-                    "changed_files": [deliverable],
-                    "files_changed": [deliverable],
-                    "created_by": "deliverable_relocation",
-                }
-            )
-            changed_files.append(deliverable)
-            relocated.append(stray)
-            break
-    return relocated
+    """Compatibility hook: relocation requires a new explicit coding decision."""
+    return []
 
 
 def _cleanup_stray_deliverables(
@@ -2355,29 +2303,8 @@ def _cleanup_stray_deliverables(
     changed_files: Sequence[str],
     trace: list[dict[str, Any]],
 ) -> list[str]:
-    """Delete leftover wrong-path duplicates once the real deliverable exists."""
-    removed: list[str] = []
-    for deliverable in deliverables:
-        if not _required_file_satisfied(repo_root, deliverable):
-            continue
-        for stray in _stray_misplacements(deliverable, changed_files):
-            stray_abs = repo_root / stray
-            if not stray_abs.is_file():
-                continue
-            try:
-                stray_abs.unlink()
-            except OSError:
-                continue
-            trace.append(
-                {
-                    "tool_name": "cleanup",
-                    "status": "ok",
-                    "path": stray,
-                    "created_by": "stray_deliverable_cleanup",
-                }
-            )
-            removed.append(stray)
-    return removed
+    """Compatibility hook: cleanup cannot independently select a deletion."""
+    return []
 
 
 def _no_op_reason_from_trace(trace: Sequence[dict[str, Any]]) -> str:

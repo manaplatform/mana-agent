@@ -420,7 +420,10 @@ class MultiAgentVerificationExecutor:
 
         root_path = Path(workspace_root or self.workspace_root).resolve()
         bus = MessageBus(root_path)
-        registry = AgentRegistry()
+        registry = getattr(getattr(self.queue_manager, "hierarchy_policy", None), "registry", None) or AgentRegistry()
+        if self.queue_manager is not None:
+            self.queue_manager.hierarchy_policy.registry = registry
+            self.queue_manager.tools_manager.execution_registry = registry
         verifier_node = registry.find_by_role(AgentRole.VERIFIER)
         verifier = VerifierAgent(
             agent_id=verifier_node.agent_id,

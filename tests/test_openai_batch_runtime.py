@@ -493,7 +493,7 @@ def test_batch_policy_and_wait_fields_round_trip_on_task_and_checkpoint():
 def test_readonly_workspace_denies_batch_generated_commands(tmp_path):
     from mana_agent.coding.models import WorkspaceContext
     from mana_agent.coding.programmatic import ToolExecutionDispatcher
-    dispatcher = ToolExecutionDispatcher(WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly"))
+    dispatcher = ToolExecutionDispatcher.for_coding_task(WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly"), task_id="test-coding-task")
     result = dispatcher.dispatch("shell", {"command": "touch forbidden"}, call_id="command")
     assert result["ok"] is False
     assert result["error_code"] == "SANDBOX_VIOLATION"
@@ -508,7 +508,7 @@ def test_distinct_command_calls_do_not_reuse_completed_receipts(tmp_path, monkey
     action_runtime = MagicMock()
     action_runtime.execute.return_value = SimpleNamespace(action=SimpleNamespace(state=SimpleNamespace(value="committed"), action_id="action"), result={"returncode": 0})
     monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: action_runtime)
-    dispatcher = ToolExecutionDispatcher(repo_root=tmp_path, task_id="task")
+    dispatcher = ToolExecutionDispatcher.for_coding_task(repo_root=tmp_path, task_id="task")
     dispatcher.dispatch("shell", {"command": "inspect"}, call_id="first")
     dispatcher.dispatch("shell", {"command": "inspect"}, call_id="second")
     first, second = [call.args[0] for call in action_runtime.execute.call_args_list]

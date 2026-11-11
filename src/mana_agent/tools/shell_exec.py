@@ -615,20 +615,27 @@ class ShellExecutor:
         raw_stderr = ""
 
         try:
-            process = subprocess.Popen(
-                argv,
-                cwd=str(target_cwd),
-                env=env,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                errors="replace",
-            )
-            raw_stdout, raw_stderr = process.communicate(timeout=timeout_seconds)
-            exit_code = process.returncode
-        except subprocess.TimeoutExpired:
+            from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+            from mana_agent.utils.process_stream import run_streaming_process
+            if current_operation() is not None:
+                completed = run_streaming_process(argv, cwd=str(target_cwd), env=env, timeout=timeout_seconds, _protected_values=secret_values)
+                raw_stdout, raw_stderr, exit_code = completed.stdout, completed.stderr, completed.returncode
+            else:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=str(target_cwd),
+                    env=env,
+                    shell=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    errors="replace",
+                )
+                raw_stdout, raw_stderr = process.communicate(timeout=timeout_seconds)
+                exit_code = process.returncode
+        except subprocess.TimeoutExpired as exc:
+            raw_stdout, raw_stderr = str(exc.output or ""), str(exc.stderr or "")
             timed_out = True
             if process is not None:
                 process.kill()

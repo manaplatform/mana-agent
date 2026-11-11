@@ -7,6 +7,13 @@ from mana_agent.coding.internal_engine import InternalCodingEngine
 from mana_agent.coding.models import CodingTask, WorkspaceContext
 
 
+def _registered(name, callback):
+    from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
+    contract = next((c for c in coding_tool_contracts() if c.name.replace(".", "_") == name), None)
+    callback.tool_contract = contract or ToolContract(name=name, description="Test callback", input_schema={"type": "object"}, output_schema={}, error_format={}, required_capability="test_callback", effect="read_only", repository_operation=False)
+    return callback
+
+
 class _Model:
     """Return more than 30 tool rounds before reporting task completion."""
 
@@ -39,7 +46,7 @@ def test_internal_coding_lifecycle_completes_after_more_than_30_model_turns(tmp_
         supports_responses_api=False,
         programmatic_tool_calling_enabled=False,
         max_tool_calls=50,
-        extra_tools={"noop": lambda: "ok"},
+        extra_tools={"noop": _registered("noop", lambda: "ok")},
         global_memory=_Memory(),
         batch_manager=object(),
         parallel_scheduling_enabled=False,

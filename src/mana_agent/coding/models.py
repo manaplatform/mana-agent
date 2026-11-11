@@ -130,7 +130,7 @@ class AgentEvent(BaseModel):
     parent_event_id: str | None = None
     backend: str = "codex"
     sequence: int = Field(default=0, ge=0)
-    status: Literal["queued", "running", "waiting", "success", "failed", "cancelled"] = "running"
+    status: Literal["queued", "running", "waiting", "success", "failed", "cancelled", "waiting_approval", "timed_out", "interrupted"] = "running"
     title: str = ""
     summary: str = ""
     thread_id: str = ""
@@ -158,6 +158,7 @@ class AgentEvent(BaseModel):
     attempt_id: str = ""
     attempt_generation: int = 0
     operation_id: str = ""
+    operation_attempt_id: str = ""
     producer_sequence: int = 0
     execution_mode: str = ""
 

@@ -1,5 +1,10 @@
 # Agent activity visibility and recovery
 
+The [hierarchical execution extension](hierarchical-tool-execution.md) adds
+deterministic authority, retained output, applied mutation evidence, and stable
+operation rows. It preserves these consolidated containers and privacy/replay
+invariants; runtime acceptance of the extension remains pending.
+
 Status: implemented locally, uncommitted, runtime verification pending. Tests and
 performance measurements have not been run by the agent. This note describes
 source changes, not a production deployment or a verified acceptance result.

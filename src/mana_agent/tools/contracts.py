@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,9 @@ class ToolContract(BaseModel):
     error_format: dict[str, Any]
     safety_rules: list[str] = Field(default_factory=list)
     examples: list[dict[str, Any]] = Field(default_factory=list)
+    required_capability: str = ""
+    effect: Literal["unknown", "read_only", "mutation", "command", "external"] = "unknown"
+    repository_operation: bool = True
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -240,6 +243,8 @@ def _git_tool_contracts(common_error: dict[str, Any]) -> list[ToolContract]:
             name=name,
             description=description,
             input_schema=_schema({**properties, "action_approval_id": {"type": "string", "description": "Grant for the exact pending Git action, if approved."}}, required),
+            required_capability="git_execution",
+            effect="read_only" if name in {"git.status", "git.diff", "git.log", "git.show", "git.branch", "git.remote", "git.help"} else "command",
             output_schema=base_output,
             error_format=common_error,
             safety_rules=safety,
@@ -370,6 +375,8 @@ def _document_tool_contracts(common_error: dict[str, Any]) -> list[ToolContract]
             name=name,
             description=description,
             input_schema=_schema(properties, required),
+            required_capability="document",
+            effect="read_only" if name in {"document_detect", "document_query", "document_read", "document_search", "document_inspect", "document_extract", "document_analyze", "document_list", "document_metadata"} else "mutation",
             output_schema=base_output,
             error_format=common_error,
             safety_rules=safety,
@@ -388,8 +395,9 @@ def coding_tool_contracts() -> list[ToolContract]:
         "ok": False,
         "error": {"code": "string", "message": "string", "details": "object"},
     }
-    return [
-        *email_tool_contracts(),
+    email_contracts = [c.model_copy(update={"required_capability": "email", "effect": "external", "repository_operation": False}) for c in email_tool_contracts()]
+    contracts = [
+        *email_contracts,
         ToolContract(
             name="semantic_search",
             description="Search indexed code chunks semantically using the local vector index when available.",
@@ -1362,6 +1370,20 @@ def coding_tool_contracts() -> list[ToolContract]:
             examples=[{"input": {"batch_id": "batch_abc123"}}],
         ),
     ]
+
+
+    from mana_agent.multi_agent.tools.operation_policy import builtin_policy
+    for contract in contracts:
+        policy = builtin_policy(contract.name)
+        if policy is not None and contract.effect == "unknown":
+            contract.required_capability = policy.capability
+            contract.effect = policy.effect
+            contract.repository_operation = policy.repository
+        if contract.name in {"batch_create_job", "batch_submit_requests", "batch_cancel_job", "batch_get_status", "batch_check_status", "batch_list_jobs", "batch_download_results", "batch_retrieve_results"}:
+            contract.required_capability = "batch"
+            contract.effect = "external"
+            contract.repository_operation = False
+    return contracts
 
 
 def coding_tool_contracts_payload() -> dict[str, Any]:

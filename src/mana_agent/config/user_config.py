@@ -60,6 +60,7 @@ MANAGED_SECRET_KEYS = frozenset(NON_PERSISTED_SECRET_KEYS)
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_CONFIG_SCHEMA_VERSION": 2,
+    "MANA_EXECUTION_TRACE_MAX_BYTES": 104_857_600,
     "MANA_ACTIVITY_VISIBILITY": "normal",
     "MANA_USER_ID": "",
     "MANA_AI_PROVIDER": "openai",
@@ -504,6 +505,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_ROUTING_RELIABILITY_DECAY_SECONDS": "mana_routing_reliability_decay_seconds",
     "MANA_ROUTING_MODEL_FAILURE_PENALTY_WEIGHT": "mana_routing_model_failure_penalty_weight",
     "MANA_ROUTING_PROVIDER_FAILURE_PENALTY_WEIGHT": "mana_routing_provider_failure_penalty_weight",
+    "MANA_EXECUTION_TRACE_MAX_BYTES": "mana_execution_trace_max_bytes",
     "MANA_ACTIVITY_VISIBILITY": "mana_activity_visibility",
     "DEFAULT_TOP_K": "default_top_k",
     "LLM_MODEL": "llm_model",

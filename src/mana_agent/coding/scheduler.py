@@ -426,9 +426,11 @@ class ParallelToolExecutor:
                             result = cached
                             is_cached = True
 
+                    if is_cached:
+                        result = await asyncio.to_thread(dispatcher.dispatch, node.tool_name, node.arguments, call_id=node.call_id, _cached_result=result)
                     if not is_cached:
                         # Dispatch tool call asynchronously in worker thread
-                        result = await asyncio.to_thread(dispatcher.dispatch, node.tool_name, node.arguments)
+                        result = await asyncio.to_thread(dispatcher.dispatch, node.tool_name, node.arguments, call_id=node.call_id)
 
                         # Write-invalidation or cache storage
                         if node.kind == OperationKind.WRITE:

@@ -20,6 +20,7 @@ class AgentRole(_ValueEnum):
     REVIEWER = "reviewer"
     TOOL = "tool"
     TOOL_WORKER = "tool_worker"
+    TOOL_RUNNER = "tool_worker"  # persisted compatibility alias; deterministic execution level 3
     RESEARCH = "research"
     SUMMARIZER = "summarizer"
     APPROVAL = "approval"

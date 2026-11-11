@@ -43,7 +43,9 @@ def run_sync(awaitable: Coroutine[Any, Any, T]) -> T:
             result.append(asyncio.run(awaitable))
         except BaseException as exc:
             failure.append(exc)
-    thread = threading.Thread(target=runner, daemon=True)
+    import contextvars
+    caller_context = contextvars.copy_context()
+    thread = threading.Thread(target=lambda: caller_context.run(runner), daemon=True)
     thread.start()
     thread.join()
     if failure:
@@ -143,6 +145,11 @@ class ExecutionManager:
         handle = context.handle
         provider = self.registry.get(handle.provider)
         async with self._global_limit, self._provider_limits[handle.provider]:
+            from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+            operation = current_operation()
+            if operation is not None:
+                capabilities = await provider.capabilities()
+                operation.public["streaming"] = capabilities.command_streaming
             self._transition(handle, SandboxState.RUNNING)
             self._emit("sandbox.command.started", handle, argv0=request.argv[0], timeout_seconds=request.timeout_seconds)
             try:

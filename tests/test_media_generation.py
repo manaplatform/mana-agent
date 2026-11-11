@@ -354,7 +354,8 @@ def test_gateway_dispatches_typed_media_decision(
             "prompt": "A lighthouse",
         },
     )
-    result = gateway._execute_media_route(
+    # This test isolates the selected provider adapter; authority is covered separately.
+    result = gateway._execute_media_route_selected(
         decision=decision,
         context=EntryRouteContext(
             session_id="session_1",

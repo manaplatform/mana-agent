@@ -18,7 +18,12 @@ class Element {
     this.scrollTop = 0;
     this.hidden = false;
   }
-  appendChild(child) { this.children.push(child); return child; }
+  appendChild(child) { if (child.parentNode) child.remove(); this.children.push(child); child.parentNode = this; return child; }
+  insertBefore(child, reference) { if (child === reference) return child; if (child.parentNode) child.remove(); const index = reference ? this.children.indexOf(reference) : this.children.length; this.children.splice(index, 0, child); child.parentNode = this; return child; }
+  remove() { if (this.parentNode) { this.parentNode.children = this.parentNode.children.filter((node) => node !== this); this.parentNode = null; } }
+  get attributes() { return Object.entries(this.dataset).map(([key, value]) => ({ name: `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`, value })); }
+  setAttribute(name, value) { if (name.startsWith("data-")) this.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value; else this[name] = value; }
+  querySelector(selector) { return this.children.find((child) => selector.startsWith(".") && child.className.split(" ").includes(selector.slice(1))) || null; }
   replaceChildren(...children) { this.children = children; }
   addEventListener(type, handler) { this.handlers[type] = handler; }
   get lastElementChild() { return this.children.at(-1); }
@@ -255,5 +260,24 @@ test("main and internal coding activity render without separate archive controls
     assert.ok(nodes.some((node) => String(node.textContent || "").includes("Reading implementation")));
     assert.ok(!nodes.some((node) => /earlier activity/i.test(String(node.textContent || ""))));
     assert.equal(calls.length, 0);
+  } finally { chat.close(); }
+});
+
+test("coding operation DOM and expanded details survive streaming updates", async () => {
+  const owner = { task_id: "task", agent_id: "worker", parent_agent_id: "coding", execution_id: "run", operation_id: "operation", operation_attempt_id: "invocation", backend: "internal" };
+  const initial = { ...owner, type: "tool.started", event_id: "start", sequence: 1, status: "running", metadata: { command: "python streams.py", cwd: "/workspace" } };
+  const { chat, timeline, emit } = fixture([initial], { ok: true, json: async () => ({}) });
+  try {
+    const box = descendants(timeline).find((node) => node.className === "coding-activity-box");
+    const row = descendants(box).find((node) => node.className === "activity-event-row");
+    const details = descendants(row).find((node) => node.className === "activity-event-details");
+    details.open = true;
+    emit({ ...owner, type: "tool.stdout", event_id: "chunk", sequence: 2, status: "running", output_preview: "progress\n", metadata: { stream_channel: "stdout", stream_offset: 0, content_length: 9 } });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const updatedBox = descendants(timeline).find((node) => node.className === "coding-activity-box");
+    assert.equal(updatedBox, box);
+    assert.equal(descendants(updatedBox).find((node) => node.className === "activity-event-row"), row);
+    assert.equal(details.open, true);
+    assert.ok(descendants(updatedBox).some((node) => String(node.textContent || "").includes("progress")));
   } finally { chat.close(); }
 });

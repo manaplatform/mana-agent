@@ -296,7 +296,7 @@ def test_batch_tool_contracts_presence() -> None:
 
 
 def test_tool_dispatcher_executes_batch_tools() -> None:
-    dispatcher = ToolExecutionDispatcher(repo_root=".")
+    dispatcher = ToolExecutionDispatcher.for_coding_task(repo_root=".", task_id="test-coding-task")
 
     # Mock client and store for dispatcher testing
     mock_client = MagicMock()

@@ -718,7 +718,12 @@ class AskAgent:
     @classmethod
     def _evidence_fingerprint(cls, content: Any) -> str:
         """Fingerprint a tool result so repeated identical output is detectable."""
-        text = re.sub(r"\s+", " ", str(content)).strip().lower()
+        payload = cls._coerce_tool_payload(content)
+        if isinstance(payload, dict):
+            cleaned = {k: v for k, v in payload.items() if k not in {"execution", "mutations"}}
+            text = json.dumps(cleaned, sort_keys=True, default=str)
+        else:
+            text = re.sub(r"\s+", " ", str(content)).strip().lower()
         if not text:
             return ""
         return hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -2396,10 +2401,11 @@ class AskAgent:
 
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
+        email_tools = build_email_langchain_tools()
         all_tools = [
             *base_tools,
             *context_tools,
-            *build_email_langchain_tools(),
+            *email_tools,
             *browser_tools,
             *computer_tools,
             *teach_tools,
@@ -2412,6 +2418,24 @@ class AskAgent:
             *batch_tools,
             *list(getattr(self, "tools", []) or []),
         ]
+        # Metadata is assigned at the host registry boundary, never by model arguments.
+        from mana_agent.tools.contracts import coding_tool_contracts
+        registered_contracts = {item.name.replace(".", "_"): item for item in coding_tool_contracts()}
+        for tool in [*base_tools, *email_tools]:
+            contract = registered_contracts.get(tool.name.replace(".", "_"))
+            if contract and contract.required_capability and contract.effect != "unknown":
+                tool.metadata = {**(tool.metadata or {}), "execution_capability": contract.required_capability,
+                    "execution_effect": contract.effect, "repository_operation": contract.repository_operation}
+            if tool.name in {"chunk_file", "ls", "list_tools", "tool_contracts"}:
+                tool.metadata = {**(tool.metadata or {}), "execution_capability": "repository_read",
+                    "execution_effect": "read_only", "repository_operation": True}
+        for group, capability in ((context_tools, "context"), (browser_tools, "browser"),
+                (computer_tools, "computer"), (teach_tools, "teach"), (automation_tools, "automation"),
+                (canvas_tools, "canvas"), (media_tools, "media"), (api_manager_tools, "api"),
+                (mcp_tools, "mcp"), (approval_tools, "approval"), (batch_tools, "batch")):
+            for tool in group:
+                tool.metadata = {**(tool.metadata or {}), "execution_capability": capability,
+                    "execution_effect": "external", "repository_operation": False}
         return all_tools, traces, sources, warnings
 
     def set_context_retrieval_tools(self, tools: Sequence[BaseTool]) -> None:
@@ -2555,6 +2579,13 @@ class AskAgent:
             traces.extend(pending_external_traces)
             self._pending_external_search_traces = []
         tool_map = {tool.name: tool for tool in tools}
+        from mana_agent.multi_agent.runtime.tool_call_gate import ToolCallGate
+        from mana_agent.services.activity_context import current_activity_context
+        execution_context = current_activity_context()
+        delegated_task_id = str(getattr(execution_context, "task_id", "") or transactional_parent_task_id or flow_id or run_id or "")
+        tool_gate = ToolCallGate(root=Path(self.project_root), tools=tool_map, task_id=delegated_task_id,
+            transport=getattr(self, "_operation_transport", None),
+            repository_read_only=bool(getattr(self, "_repository_read_only", False)))
         # Preserve explicitly model-selected registered tools that are not part
         # of the repository alias registry (for example browser_* connectors).
         # Unknown names remain excluded and never widen the policy.
@@ -3163,7 +3194,7 @@ class AskAgent:
                                 provider_id=str(tool_metadata.get("mcp_provider_id") or ""),
                                 tool_name=str(tool_metadata.get("mcp_tool_name") or ""),
                                 arguments=dict(args) if isinstance(args, dict) else {},
-                                invoke=lambda: tool_map[name].invoke(args, config=cfg),
+                                invoke=lambda: tool_gate.invoke(name, args, call_id=str(call.get("id") or ""), config=cfg),
                                 parent_task_id=str(
                                     transactional_parent_task_id
                                     or flow_id
@@ -3234,7 +3265,7 @@ class AskAgent:
                             adapter = CanvasActionAdapter(
                                 tool_name=name,
                                 arguments=dict(args) if isinstance(args, dict) else {},
-                                invoke=lambda: tool_map[name].invoke(args, config=cfg),
+                                invoke=lambda: tool_gate.invoke(name, args, call_id=str(call.get("id") or ""), config=cfg),
                                 parent_task_id=str(
                                     transactional_parent_task_id
                                     or flow_id
@@ -3301,7 +3332,7 @@ class AskAgent:
                             adapter = ApiIntegrationActionAdapter(
                                 tool_name=name,
                                 arguments=dict(args) if isinstance(args, dict) else {},
-                                invoke=lambda: tool_map[name].invoke(args, config=cfg),
+                                invoke=lambda: tool_gate.invoke(name, args, call_id=str(call.get("id") or ""), config=cfg),
                                 parent_task_id=str(
                                     transactional_parent_task_id
                                     or flow_id
@@ -3340,7 +3371,7 @@ class AskAgent:
                                     action_payload["error"] = outcome.action.error or "API integration action verification did not complete"
                                 content = json.dumps(action_payload, ensure_ascii=False, default=str)
                         else:
-                            content = tool_map[name].invoke(args, config=cfg)
+                            content = tool_gate.invoke(name, args, call_id=str(call.get("id") or ""), config=cfg)
                         if governor.enabled and tool_reservation_id:
                             governor.record_tool_call(tool_reservation_id, result=content)
                         if len(traces) == trace_count_before:

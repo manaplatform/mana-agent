@@ -23,7 +23,7 @@ class QueueManager:
         tools_manager: ToolsManager | None = None,
         memory_service: MultiAgentMemoryService | None = None,
         hierarchy_policy: HierarchyPolicy | None = None,
-        default_worker_agent_id: str = "agent_tool_worker_0001",
+        default_worker_agent_id: str = "",
         execution_manager: ExecutionManager | None = None,
     ) -> None:
         self.root = Path(root).resolve()
@@ -33,9 +33,23 @@ class QueueManager:
             root, memory_service=memory_service, execution_manager=execution_manager
         )
         self.hierarchy_policy = hierarchy_policy or HierarchyPolicy(taskboard=self.taskboard)
+        self.tools_manager.execution_registry = self.hierarchy_policy.registry
+        self.tools_manager.execution_taskboard = self.taskboard
         self.default_worker_agent_id = default_worker_agent_id
         self.jobs: dict[str, QueueJob] = {}
         self.locks = LockTable()
+
+    def _worker_for(self, actor_id: str) -> str:
+        from mana_agent.multi_agent.core.types import AgentRole, AgentState
+        registry = self.hierarchy_policy.registry
+        if registry is None or actor_id not in registry.agents:
+            return self.default_worker_agent_id or "agent_tool_worker_0001"
+        worker = registry.agents.get(self.default_worker_agent_id)
+        if worker is not None and worker.role == AgentRole.TOOL_WORKER and worker.parent_agent_id == actor_id and worker.state != AgentState.DONE:
+            return worker.agent_id
+        worker = next((node for node in registry.agents.values() if node.role == AgentRole.TOOL_WORKER
+            and node.parent_agent_id == actor_id and node.state != AgentState.DONE), None)
+        return (worker or registry.register(AgentRole.TOOL_WORKER, parent_agent_id=actor_id)).agent_id
 
     def enqueue(self, job: QueueJob | None = None, **kwargs: Any) -> QueueJob:
         if job is None:
@@ -46,7 +60,7 @@ class QueueManager:
                 kwargs["approved_by_agent_id"] = self._approver_for_task(task_id) or kwargs.get("requested_by_agent_id")
             if not kwargs.get("purpose"):
                 kwargs["purpose"] = f"Run {kwargs.get('job_type', 'tool')} for task {kwargs.get('task_id')}"
-            kwargs.setdefault("assigned_worker_agent_id", self.default_worker_agent_id)
+            kwargs.setdefault("assigned_worker_agent_id", self._worker_for(requested_by))
             self.hierarchy_policy.assert_can_assign_worker(
                 requested_by,
                 str(kwargs.get("assigned_worker_agent_id") or ""),
@@ -92,7 +106,7 @@ class QueueManager:
         elif not job.fingerprint:
             self.hierarchy_policy.assert_can_create_queue_job(job.requested_by_agent_id, task_id=job.task_id)
             if not job.assigned_worker_agent_id:
-                job.assigned_worker_agent_id = self.default_worker_agent_id
+                job.assigned_worker_agent_id = self._worker_for(job.requested_by_agent_id)
             if not job.approved_by_agent_id:
                 job.approved_by_agent_id = self._approver_for_task(job.task_id) or job.requested_by_agent_id
             if not job.parent_agent_id:
@@ -115,6 +129,9 @@ class QueueManager:
             if not job.budget_reserved_ms:
                 job.budget_reserved_ms = 30_000
             job.fingerprint = self._fingerprint_for_job(job)
+        # Prebuilt requests pass the same checks even when they already contain a fingerprint.
+        self.hierarchy_policy.assert_can_create_queue_job(job.requested_by_agent_id, task_id=job.task_id)
+        self.hierarchy_policy.assert_can_assign_worker(job.requested_by_agent_id, job.assigned_worker_agent_id, task_id=job.task_id)
         self._reserve_budget(job)
         if self.memory_service is not None:
             accepted, existing_id = self.memory_service.register_queue_item(
@@ -153,10 +170,19 @@ class QueueManager:
         return job
 
     def run_next(self, worker_agent_id: str | None = None) -> QueueJob | None:
-        worker_id = worker_agent_id or self.default_worker_agent_id
+        pending = next_job(list(self.jobs.values()))
+        if pending is None:
+            return None
+        worker_id = worker_agent_id or pending.assigned_worker_agent_id
         job = self.claim_next(worker_id)
         if job is None:
             return None
+        task = self.taskboard.get_task(job.task_id)
+        expected_root = Path(task.execution_repo_root or task.managed_worktree_path or self.root).resolve()
+        if self.tools_manager.execution_root_for_job(job) != expected_root:
+            raise PermissionError("Queue job workspace differs from its TaskBoard assignment")
+        if self.hierarchy_policy.registry is not None and job.requested_by_agent_id not in self.hierarchy_policy.registry.agents:
+            raise PermissionError("Queue job has no registered specialist owner")
         self.hierarchy_policy.assert_can_execute_tool(
             worker_id,
             job.job_type.value,

@@ -293,10 +293,24 @@ def _latest_mutation_command_error(trace: Sequence[dict[str, Any]]) -> str:
     return ""
 
 
+def _process_result(completed):
+    return {"ok": completed.returncode == 0, "returncode": completed.returncode,
+        "stdout": completed.stdout, "stderr": completed.stderr}
+
+
 def execute_registered_mutation_command(
-    *,
-    repo_root: Path,
-    command: MutationCommand,
+    *, repo_root: Path, command: MutationCommand, task_id: str = "",
+) -> WorkResult:
+    from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
+    payload = execute_host_operation(root=repo_root, task_id=task_id or command.plan_id,
+        tool_name=command.tool_name, arguments=command.tool_args,
+        call_id=f"{command.plan_id}:mutation", effect="mutation",
+        implementation=lambda args: _execute_registered_mutation_command(repo_root=repo_root, command=command).model_dump())
+    return WorkResult.model_validate({key: value for key, value in payload.items() if key not in {"execution", "mutations"}})
+
+
+def _execute_registered_mutation_command(
+    *, repo_root: Path, command: MutationCommand,
 ) -> WorkResult:
     errors = validate_mutation_command(command)
     if errors:
@@ -1112,18 +1126,20 @@ class QueueManager:
         self._decision_provider = decision_provider
 
     def _read_current_files(self, targets: Sequence[str]) -> dict[str, str]:
+        from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
+        from mana_agent.coding.programmatic import ToolExecutionDispatcher
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        task_id = str(getattr(context, "task_id", "") or getattr(self, "_execution_task_id", ""))
+        if not task_id:
+            raise PermissionError("Repository investigation requires an assigned coding task")
+        dispatcher = ToolExecutionDispatcher.for_coding_task(repo_root=self.repo_root, task_id=task_id)
         current: dict[str, str] = {}
         for raw in targets:
             rel = str(raw or "").replace("\\", "/").lstrip("./")
-            if not rel:
-                continue
-            try:
-                path = (self.repo_root / rel).resolve()
-                path.relative_to(self.repo_root)
-                if path.is_file():
-                    current[rel] = path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
+            result = dispatcher.dispatch("read_file", {"path": rel})
+            if result.get("ok"):
+                current[rel] = str(result.get("content") or "")
         return current
 
     @staticmethod
@@ -1236,9 +1252,18 @@ class QueueManager:
                 return command
         return last_command
 
+    def _selected_process(self, argv, **kwargs):
+        from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
+        from mana_agent.utils.process_stream import run_streaming_process
+        result = execute_host_operation(root=self.repo_root,
+            task_id=getattr(self, "_execution_task_id", ""), tool_name="git_generic" if argv[0] == "git" else "verify_selected_commands",
+            arguments={"argv": list(argv), "args": list(argv[1:]) if argv[0] == "git" else [], "cwd": str(self.repo_root)},
+            effect="command", implementation=lambda args: _process_result(run_streaming_process(argv, **kwargs)))
+        return subprocess.CompletedProcess(argv, result.get("returncode", 1), result.get("stdout", ""), result.get("stderr", result.get("error", "")))
+
     def _git_diff_names(self) -> set[str]:
         try:
-            proc = subprocess.run(
+            proc = self._selected_process(
                 ["git", "diff", "--name-only"],
                 cwd=self.repo_root,
                 check=False,
@@ -1254,7 +1279,7 @@ class QueueManager:
 
     def _git_status_names(self) -> set[str]:
         try:
-            proc = subprocess.run(
+            proc = self._selected_process(
                 ["git", "status", "--porcelain"],
                 cwd=self.repo_root,
                 check=False,
@@ -1338,7 +1363,7 @@ class QueueManager:
         trace.append(row)
         if ok:
             try:
-                proc = subprocess.run(
+                proc = self._selected_process(
                     ["git", "diff", "--", rel],
                     cwd=self.repo_root,
                     check=False,
@@ -1661,6 +1686,7 @@ class QueueManager:
 
         _ = (max_no_progress_passes, flow_context)
         store = RunStateStore(repo_root=self.repo_root, run_id=run_id)
+        self._execution_task_id = store.run_id
         baseline_diff = self._git_diff_names()
         baseline_status = self._git_status_names()
         pre_existing_changed_files = sorted(baseline_diff)
@@ -1984,7 +2010,7 @@ class QueueManager:
                 for argv in scope_decision.verification_commands:
                     started = time.perf_counter()
                     try:
-                        proc = subprocess.run(
+                        proc = self._selected_process(
                             [str(arg) for arg in argv],
                             cwd=self.repo_root,
                             check=False,
@@ -2215,7 +2241,7 @@ class QueueManager:
                         trace=blocked_trace,
                     )
                 executed_mutation_commands.add(command_key)
-                result = execute_registered_mutation_command(repo_root=self.repo_root, command=command)
+                result = execute_registered_mutation_command(repo_root=self.repo_root, command=command, task_id=store.run_id)
                 if result.answer:
                     answers.append(result.answer)
                 sources.extend(result.sources)

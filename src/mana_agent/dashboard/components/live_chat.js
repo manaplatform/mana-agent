@@ -35,7 +35,35 @@
       if (request) return `steering:${event.conversation_id || event.session_id || ""}:${request}`;
     }
     const op = event.operation_id || meta.operation_id || event.tool_call_id || meta.tool_call_id || meta.call_id || event.call_id || event.step_id || event.event_id || event.id || eventType(event);
-    return [event.task_id || meta.task_id, event.attempt_id || meta.attempt_id, event.agent_id || meta.agent_id, event.subagent_id || meta.subagent_id, op].map(text).join(":");
+    return [event.task_id || meta.task_id, event.attempt_id || meta.attempt_id, event.agent_id || meta.agent_id, event.subagent_id || meta.subagent_id, event.operation_attempt_id || meta.operation_attempt_id, op].map(text).join(":");
+  };
+  const mergeOperation = (previous, event) => {
+    const oldMeta = metaOf(previous), newMeta = { ...metaOf(event) };
+    for (const key of ["backend", "agent_id", "subagent_id", "parent_agent_id", "task_id", "root_task_id", "parent_task_id", "attempt_id", "attempt_generation", "execution_mode"]) {
+      if (event[key] != null && !newMeta[key]) newMeta[key] = event[key];
+    }
+    const metadata = { ...oldMeta, ...newMeta };
+    if (oldMeta.trace_complete === false) metadata.trace_complete = false;
+    metadata.omitted_bytes = Math.max(Number(oldMeta.omitted_bytes || 0), Number(newMeta.omitted_bytes || 0));
+    const merged = { ...previous, ...event, metadata, details: metadata };
+    for (const key of ["command", "path", "parent_agent_id", "parent_execution_id", "execution_level", "operation_attempt_id"])
+      merged[key] = event[key] || previous[key] || metadata[key];
+    const channel = newMeta.stream_channel || event.stream_channel;
+    if (channel) {
+      const streams = { ...(oldMeta.streams || {}) }, offsets = { ...(oldMeta.stream_offsets || {}) };
+      const offset = Number(newMeta.stream_offset || 0), last = Number(offsets[channel] || 0);
+      if (offset >= last) {
+        const gap = offset > last ? "\n[output omitted; open retained details]\n" : "";
+        let chunk = text(event.output_preview || newMeta.output_preview);
+        if (Array.from(chunk).length < Number(newMeta.content_length || Array.from(chunk).length)) {
+          chunk += "\n[preview truncated; open retained details]\n"; metadata.preview_truncated = true;
+        }
+        streams[channel] = Array.from(text(streams[channel]) + gap + chunk).slice(-64000).join("");
+        offsets[channel] = offset + Number(newMeta.content_length || Array.from(chunk).length);
+      }
+      metadata.streams = streams; metadata.stream_offsets = offsets;
+    }
+    return merged;
   };
   const acceptsActivityUpdate = (previous, event) => {
     if (previous.sequence && event.sequence && event.sequence < previous.sequence) return false;
@@ -56,7 +84,7 @@
   const visibleActivity = (event, visibility) => {
     if (visibility === "verbose") return true;
     if (visibility === "minimal") return !terminal.has(event.status) || /^(turn|steering|approval|recovery)\./.test(event.type) || ["failed", "error", "cancelled"].includes(event.status);
-    return !["command.output", "command.delta", "tool.stdout", "tool.stderr", "tool.progress"].includes(event.type);
+    return Boolean((event.metadata || {}).streams) || !["command.output", "command.delta", "tool.stdout", "tool.stderr", "tool.progress"].includes(event.type);
   };
 
   const formatDuration = (ms) => {
@@ -589,18 +617,20 @@
 
     if (!box.eventIdSet.has(boxEventId)) {
       box.eventIdSet.add(boxEventId);
+      const projected = mergeOperation({}, event);
       box.events.push({
+        ...projected,
         id: boxEventId,
         type,
         title: `${event.subagent_id || event.agent_id || meta.agent_id || "MainAgent"} — ${stepTitle}`,
         sequence: eventSequence(event),
-        operation_id: boxEventId,
+        operation_id: event.operation_id || meta.operation_id || boxEventId,
         tool_name: text((meta && (meta.tool_name || meta.name)) || (event && event.tool_name) || stepTitle),
         status: opStatus,
         detail,
         time: eventTime(event) || new Date().toISOString(),
         durationMs,
-        metadata: meta,
+        metadata: projected.metadata,
       });
     } else {
       for (const be of box.events) {
@@ -608,7 +638,10 @@
           if (!acceptsActivityUpdate(be, { ...event, status: opStatus })) break;
           be.sequence = eventSequence(event);
           be.type = type;
-          be.metadata = meta;
+          const merged = mergeOperation(be, event);
+          merged.id = boxEventId;
+          Object.assign(be, merged);
+          be.metadata = merged.metadata;
           be.status = opStatus;
           if (detail) be.detail = detail;
           if (durationMs != null) be.durationMs = durationMs;
@@ -626,8 +659,8 @@
                          (meta && typeof meta.arguments === "string" ? parseJsonSafe(meta.arguments) : (meta && meta.arguments)) || {};
       const filePath = text((event && event.path) || (meta && (meta.path || meta.filePath || meta.file_path)) || (parsedArgs && (parsedArgs.path || parsedArgs.filePath || parsedArgs.file_path)));
       const toolName = text((meta && (meta.tool_name || meta.name)) || (event && event.tool_name));
-      const isMutationType = ["file.changed", "patch.applied"].includes(type) || (isMutationTool(toolName) && (!type.startsWith("tool.") || type === "tool.finished" || type === "tool.completed" || isTerminalStep));
-      const mutation = isMutationType && ["success", "completed", "done"].includes(rawStatus) && !["plan", "plan_only"].includes(event.execution_mode || meta.execution_mode || meta.phase);
+      const isMutationType = ["file.changed", "patch.applied", "file.edit.applied"].includes(type) || (isMutationTool(toolName) && (!type.startsWith("tool.") || type === "tool.finished" || type === "tool.completed" || isTerminalStep));
+      const mutation = ((meta.mutation && ["applied", "partial"].includes(meta.mutation.status)) || isMutationType && ["success", "completed", "done"].includes(rawStatus)) && !["plan", "plan_only"].includes(event.execution_mode || meta.execution_mode || meta.phase);
       if (mutation && filePath) trace.codingBox.changedFiles.add(filePath);
       if (mutation && meta && Array.isArray(meta.changed_files)) {
         for (const cf of meta.changed_files) {
@@ -1023,7 +1056,7 @@
     const activityKey = text(event.event_id || event.id || `sequence-${sequence}`);
     if (!type.startsWith("tool.") && type !== "assistant.delta" && type !== "assistant.started" && type !== "message.accepted") {
       const previous = state.activities.get(operationKey(event));
-      if (!previous || acceptsActivityUpdate(previous, event)) state.activities.set(operationKey(event), { ...event, sequence, started_at: previous && previous.started_at || event.started_at });
+      if (!previous || acceptsActivityUpdate(previous, event)) state.activities.set(operationKey(event), mergeOperation(previous || {}, { ...event, sequence, started_at: previous && previous.started_at || event.started_at }));
       const completed = [...state.activities.entries()].filter(([, event]) => terminal.has(event.status));
       for (const [key] of completed.slice(0, Math.max(0, completed.length - 200))) state.activities.delete(key);
     }
@@ -1632,7 +1665,7 @@
         if (hasDetails) {
           const det = document.createElement("details");
           det.className = "activity-event-details";
-          const detKey = `${key}:det:${grp.title}:${grp.status}`;
+          const detKey = `${key}:det:${grp.events[0].id}`;
           det.open = activityBoxState.get(detKey) === true;
           det.addEventListener("toggle", () => {
             activityBoxState.set(detKey, det.open);
@@ -1740,6 +1773,16 @@
         node.appendChild(filesContainer);
       }
 
+      const hierarchy = new Map();
+      for (const operation of box.events) {
+        const meta = operation.metadata || {};
+        if (operation.agent_id) hierarchy.set(operation.agent_id, { parent: operation.parent_agent_id || meta.parent_agent_id, status: operation.status });
+      }
+      if (hierarchy.size) {
+        const tree = document.createElement("pre"); tree.className = "execution-hierarchy";
+        tree.textContent = Array.from(hierarchy, ([actor, value]) => `${value.parent ? value.parent + " → " : ""}${actor} · ${value.status}`).join("\n");
+        node.appendChild(tree);
+      }
       if (box.events.length > 0) {
         const stream = document.createElement("div");
         stream.className = "activity-stream";
@@ -1783,6 +1826,7 @@
         for (const grp of groups) {
           const row = document.createElement("div");
           row.className = "activity-event-row";
+          row.dataset.operationKey = grp.events[0].id;
 
           const header = document.createElement("div");
           header.className = "activity-event-header";
@@ -1817,11 +1861,12 @@
             row.appendChild(detailDiv);
           }
 
-          const hasDetails = grp.events.some((e) => (e.metadata && (e.metadata.arguments || e.metadata.args || e.metadata.args_summary || e.metadata.diff || e.metadata.patch)) || (e.detail && e.detail.length > 80) || (e.metadata && e.metadata.error));
+          const hasDetails = grp.events.some((e) => (e.metadata && (e.metadata.cwd || e.metadata.streams || e.metadata.display_arguments || e.metadata.diff || e.metadata.patch)) || (e.detail && e.detail.length > 80) || (e.metadata && e.metadata.error));
           if (hasDetails) {
             const det = document.createElement("details");
             det.className = "activity-event-details";
-            const detKey = `${key}:det:${grp.title}:${grp.status}`;
+            det.dataset.operationKey = `details:${grp.events[0].id}`;
+            const detKey = `${key}:det:${grp.events[0].id}`;
             det.open = activityBoxState.get(detKey) === true;
             det.addEventListener("toggle", () => {
               activityBoxState.set(detKey, det.open);
@@ -1829,11 +1874,63 @@
             addText(det, "summary", "Details");
             for (const e of grp.events) {
               const meta = e.metadata || {};
-              const args = meta.arguments || meta.args || meta.args_summary;
+              const args = meta.display_arguments;
+              if (meta.command) addText(det, "pre", `$ ${meta.command}`, "logs");
+              if (meta.cwd) addText(det, "div", `cwd: ${meta.cwd}`, "logs");
+              if (meta.provenance) addText(det, "div", `Execution: ${meta.provenance}`, "meta");
+              if (meta.diff_scope) addText(det, "div", `Diff source: ${meta.diff_scope}`, "meta");
+              if (meta.exit_code != null) addText(det, "div", `Exit code: ${meta.exit_code}`, "logs");
+              if (meta.termination_reason) addText(det, "div", `Termination: ${meta.termination_reason}`, "logs error");
+              for (const [channel, body] of Object.entries(meta.streams || {})) { addText(det, "div", channel, "meta"); addText(det, "pre", body, "logs"); }
+              if (meta.trace_complete === false) addText(det, "div", `Trace incomplete: ${meta.omitted_bytes || 0} bytes omitted`, "meta");
               if (args) addText(det, "div", `Arguments: ${typeof args === "string" ? args : JSON.stringify(args)}`, "logs");
               if (meta.diff || meta.patch) addText(det, "pre", meta.diff || meta.patch, "logs");
               if (e.detail && e.detail.length > 80) addText(det, "div", `Output: ${e.detail}`, "logs");
               if (meta.error) addText(det, "div", `Error: ${meta.error}`, "logs error");
+            }
+            const operation = grp.events[0];
+            const meta = operation.metadata || {};
+            for (const [label, value] of [["Copy command", meta.command], ["Copy diff", (meta.streams || {}).diff || meta.diff]]) {
+              if (!value) continue;
+              const button = document.createElement("button"); button.type = "button"; button.textContent = label;
+              button.dataset.copyText = value;
+              button.dataset.operationKey = `copy:${label}`;
+              button.addEventListener("click", (event) => {
+                event.preventDefault();
+                if (typeof navigator !== "undefined" && navigator.clipboard) navigator.clipboard.writeText(event.currentTarget.dataset.copyText);
+              });
+              det.appendChild(button);
+            }
+            if (operation.operation_id && (operation.execution_id || trace.turnId)) {
+              const load = document.createElement("button"); load.type = "button"; load.textContent = "Retained output";
+              load.dataset.operationKey = "retained-loader";
+              load.dataset.executionId = operation.execution_id || trace.turnId;
+              load.dataset.operationId = operation.operation_id;
+              load.dataset.attemptId = operation.attempt_id || "";
+              load.dataset.operationAttemptId = operation.operation_attempt_id || meta.operation_attempt_id || "";
+              load.addEventListener("click", async (event) => {
+                event.preventDefault();
+                const button = event.currentTarget;
+                const retained = button.parentNode.querySelector(".retained-output") || addText(button.parentNode, "pre", "", "retained-output logs");
+                const output = retained || button.parentNode.lastElementChild;
+                const offsets = JSON.parse(button.dataset.offsets || "{}");
+                button.disabled = true;
+                try {
+                  for (const channel of ["stdout", "stderr", "combined", "diff", "result"]) {
+                    const query = new URLSearchParams({ root: config.root || "", attempt_id: button.dataset.attemptId,
+                      operation_attempt_id: button.dataset.operationAttemptId, channel, offset: String(offsets[channel] || 0) });
+                    const url = `${config.apiBase}/api/v1/conversations/${encodeURIComponent(config.sessionId)}/executions/${encodeURIComponent(button.dataset.executionId)}/operations/${encodeURIComponent(button.dataset.operationId)}/content?${query}`;
+                    const response = await fetch(url, { headers: config.token ? { Authorization: `Bearer ${config.token}` } : {} });
+                    const page = await response.json();
+                    if (!response.ok) throw new Error(page.detail || page.error || "Retained output unavailable");
+                    if (page.content) output.textContent += `\n--- ${channel} ---\n${page.content}`;
+                    offsets[channel] = page.next_offset;
+                  }
+                  button.dataset.offsets = JSON.stringify(offsets);
+                } catch (error) { output.textContent += `\n${error.message}`; }
+                finally { button.disabled = false; }
+              });
+              det.appendChild(load);
             }
             row.appendChild(det);
           }
@@ -1872,6 +1969,23 @@
       return node;
     };
 
+    const reconcile = (target, fresh) => {
+      if (!target || target.tagName !== fresh.tagName) return fresh;
+      if (fresh.dataset && fresh.dataset.operationKey && target.dataset.operationKey !== fresh.dataset.operationKey) return fresh;
+      if (target.attributes && fresh.attributes) for (const attribute of Array.from(fresh.attributes)) if (attribute.name !== "open") target.setAttribute(attribute.name, attribute.value);
+      const oldChildren = Array.from(target.children || []), newChildren = Array.from(fresh.children || []);
+      if (!newChildren.length) { if (target.textContent !== fresh.textContent) target.textContent = fresh.textContent; return target; }
+      const desired = newChildren.map((child, index) => {
+        const key = child.dataset && child.dataset.operationKey;
+        const old = key ? oldChildren.find((candidate) => candidate.dataset && candidate.dataset.operationKey === key) : oldChildren[index];
+        return reconcile(old, child);
+      });
+      for (const child of oldChildren) if (text(child.className).split(" ").includes("retained-output") && !desired.includes(child)) desired.push(child);
+      for (const child of oldChildren) if (!desired.includes(child)) child.remove();
+      desired.forEach((child, index) => { if (target.children[index] !== child) target.insertBefore(child, target.children[index] || null); });
+      return target;
+    };
+    const timelineNodes = new Map();
     const render = () => {
       renderApprovalDrawer();
       const selection = typeof window !== "undefined" && typeof window.getSelection === "function" ? window.getSelection() : null;
@@ -1880,7 +1994,12 @@
       for (const stream of timeline.querySelectorAll(".activity-stream[data-activity-stream-key]")) {
         rememberActivityStreamPosition(stream, stream.dataset.activityStreamKey);
       }
-      timeline.replaceChildren();
+      const desiredTimeline = [];
+      const appendTimeline = (node, key) => {
+        const previous = timelineNodes.get(key);
+        const kept = reconcile(previous, node);
+        timelineNodes.set(key, kept); desiredTimeline.push(kept);
+      };
       const rows = [];
       for (const message of state.messages.values()) rows.push({ kind: "message", time: message.created_at || "", sequence: 0, value: message });
       for (const activity of state.activities.values()) {
@@ -1922,16 +2041,16 @@
           }
           const meta = item.error ? `${item.status} · ${item.error}` : item.optimistic ? "sending…" : item.status === "streaming" ? "streaming…" : "";
           if (meta) addText(node, "div", meta, `meta ${item.error ? "error" : ""}`);
-          timeline.appendChild(node);
+          appendTimeline(node, `message:${item.message_id || item.id}`);
 
           if (item.role === "user") {
             const trace = resolveTrace(state, item.execution_id || item.message_id || item.id);
             if (trace && lastAnchors.get(trace) === item) {
               renderedTraces.add(trace);
               const mb = renderMainActivityBox(trace);
-              if (mb) timeline.appendChild(mb);
+              if (mb) appendTimeline(mb, `main:${trace.turnId}`);
               const cb = renderCodingActivityBox(trace);
-              if (cb) timeline.appendChild(cb);
+              if (cb) appendTimeline(cb, `coding:${trace.turnId}`);
             }
           }
         } else if (row.kind === "activity") {
@@ -1962,7 +2081,7 @@
             link.style.color = "#93c5fd";
             node.appendChild(link);
           }
-          timeline.appendChild(node);
+          appendTimeline(node, `activity:${event.event_id || event.id}`);
         }
       }
 
@@ -1970,11 +2089,14 @@
         if (!renderedTraces.has(trace)) {
           renderedTraces.add(trace);
           const mb = renderMainActivityBox(trace);
-          if (mb) timeline.appendChild(mb);
+          if (mb) appendTimeline(mb, `main:${trace.turnId}`);
           const cb = renderCodingActivityBox(trace);
-          if (cb) timeline.appendChild(cb);
+          if (cb) appendTimeline(cb, `coding:${trace.turnId}`);
         }
       }
+      for (const child of Array.from(timeline.children || [])) if (!desiredTimeline.includes(child)) child.remove();
+      desiredTimeline.forEach((child, index) => { if (timeline.children[index] !== child) timeline.insertBefore(child, timeline.children[index] || null); });
+      for (const [key, node] of timelineNodes) if (!desiredTimeline.includes(node)) timelineNodes.delete(key);
       submitButton.disabled = !state.socketReady || state.submitting && !state.activeExecutionId;
       submitButton.textContent = state.submitting ? "Steer" : "Send";
       dot.classList.toggle("ok", state.socketReady);

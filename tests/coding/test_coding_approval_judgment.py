@@ -123,7 +123,7 @@ def test_dispatcher_executes_command_when_model_judgment_accepts(tmp_path: Path)
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         workspace=workspace,
         task_id="task_test_approval",
         llm=mock_llm,
@@ -157,7 +157,7 @@ def test_dispatcher_denies_command_when_model_judgment_denies(tmp_path: Path) ->
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         workspace=workspace,
         task_id="task_test_deny",
         llm=mock_llm,
@@ -202,7 +202,7 @@ def test_dispatcher_evaluates_different_task_approval_via_judgment_and_executes_
     import getpass
     gateway = default_action_gateway(tmp_path)
     ws1 = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="workspaceWrite", allow_in_place_write=True)
-    d1 = ToolExecutionDispatcher(workspace=ws1, task_id="task_1")
+    d1 = ToolExecutionDispatcher.for_coding_task(workspace=ws1, task_id="task_1")
     pending = d1.dispatch("run_command", {"command": "python -V"})
     foreign_grant_id = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
 
@@ -214,7 +214,7 @@ def test_dispatcher_evaluates_different_task_approval_via_judgment_and_executes_
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         workspace=workspace,
         task_id="task_active_lineage_999",
     )
@@ -238,7 +238,7 @@ def test_dispatcher_denies_unrelated_command_approval_from_different_task_via_ju
     import getpass
     gateway = default_action_gateway(tmp_path)
     ws1 = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="workspaceWrite", allow_in_place_write=True)
-    d1 = ToolExecutionDispatcher(workspace=ws1, task_id="task_1")
+    d1 = ToolExecutionDispatcher.for_coding_task(workspace=ws1, task_id="task_1")
     pending = d1.dispatch("run_command", {"command": "python -c 'print(\"UNRELATED\")'"})
     foreign_grant_id = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
 
@@ -249,7 +249,7 @@ def test_dispatcher_denies_unrelated_command_approval_from_different_task_via_ju
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         workspace=workspace,
         task_id="task_2",
     )
@@ -279,7 +279,7 @@ def test_dispatcher_ignores_hardcoded_or_unverified_approval_tokens(tmp_path: Pa
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         workspace=workspace,
         task_id="task_legitimate",
     )
@@ -331,7 +331,7 @@ def test_dispatcher_script_error_sends_to_judgment_and_retries_on_accept(tmp_pat
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         workspace=workspace,
         task_id="task_retry_test",
     )
@@ -361,7 +361,7 @@ def test_dispatcher_sends_approval_when_judgment_demands_human_approval(tmp_path
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         workspace=workspace,
         task_id="task_require_human_approval",
         llm=mock_llm,

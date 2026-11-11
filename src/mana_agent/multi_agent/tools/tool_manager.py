@@ -66,6 +66,42 @@ class ToolsManager:
         return self.root
 
     def execute_job(self, job: QueueJob) -> ToolResult:
+        from mana_agent.multi_agent.agents.tool_runner_agent import bind_tool_authority, ToolRunnerAgent
+        from mana_agent.multi_agent.tools.operation_policy import OperationPolicy
+        from mana_agent.coding.models import WorkspaceContext
+        registry = getattr(self, "execution_registry", None)
+        if registry is None:
+            from mana_agent.services.activity_context import current_activity_context
+            context = current_activity_context()
+            registry = getattr(context, "execution_registry", None)
+        if registry is None:
+            return self._execute_bound_job(job)
+        root = self.execution_root_for_job(job)
+        reads = {QueueJobType.REPO_READ, QueueJobType.REPO_SEARCH, QueueJobType.REPO_BATCH_READ,
+                 QueueJobType.GIT_STATUS, QueueJobType.GIT_DIFF}
+        effect = "read_only" if job.job_type in reads else "command" if job.job_type in {QueueJobType.GIT, QueueJobType.SHELL, QueueJobType.RUN_TESTS, QueueJobType.RUN_LINT} else "mutation"
+        policy = OperationPolicy("repository_read" if effect == "read_only" else "repository_execution", effect,
+            repository=job.job_type not in {QueueJobType.DOCUMENT, QueueJobType.BROWSER, QueueJobType.MCP_TOOL, QueueJobType.MCP_RESOURCE_READ})
+        if not policy.repository:
+            policy = OperationPolicy("specialist_execution", "read_only" if job.job_type == QueueJobType.MCP_RESOURCE_READ else "external", repository=False)
+        authority = bind_tool_authority(registry=registry, actor_id=job.requested_by_agent_id,
+            task_id=job.task_id, workspace=WorkspaceContext(repository_path=root, worktree_path=root, allow_in_place_write=True),
+            policies={job.job_type.value: policy}, schemas={job.job_type.value: {"type": "object"}},
+            worker_id=job.assigned_worker_agent_id, taskboard=getattr(self, "execution_taskboard", None))
+        runner = ToolRunnerAgent(authority, workspace_id=job.workspace_id)
+        payload = dict(job.payload)
+        if job.job_type is QueueJobType.GIT:
+            payload["argv"] = ["git", *list((job.payload.get("args") or {}).get("args") or [])]
+        request = runner.request(job.job_type.value, payload, call_id=job.job_id,
+            decision_id=job.job_id, timeout_seconds=float(job.payload.get("timeout_seconds") or 120))
+        def execute(arguments):
+            result = self._execute_bound_job(job)
+            return {**result.result, "ok": result.ok, **({"error": result.error} if result.error else {})}
+        operation = runner.execute(request, execute)
+        return ToolResult(job.job_id, job.task_id, operation.status == "success", operation.result,
+                          operation.termination_reason or None)
+
+    def _execute_bound_job(self, job: QueueJob) -> ToolResult:
         res = self._execute_job_inner(job)
         if not res.ok and res.error:
             learning = getattr(self.memory_service, "learning", None)
@@ -78,10 +114,10 @@ class ToolsManager:
             if learning is not None:
                 try:
                     learning.record_failure(
-                        attempted_action=f"{job.job_type.value}({json.dumps(job.payload, default=str)[:100]})",
+                        attempted_action=f"{job.job_type.value} job {job.job_id}",
                         error=str(res.error),
                         category="TOOL",
-                        context=f"ToolManager job {job.id} for task {job.task_id}",
+                        context=f"ToolsManager job {job.job_id} for task {job.task_id}",
                         execution_id=job.task_id,
                     )
                 except Exception:

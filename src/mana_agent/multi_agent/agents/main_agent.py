@@ -194,6 +194,7 @@ class MainAgent:
             self.workspace_manager = None  # type: ignore[assignment]
         self.decision_room = DecisionRoom(self.root, self.taskboard, self.message_bus)
         self.agents = self._build_agents()
+        self._agent(AgentRole.CODING, CodingAgent).routing_llm = routing_llm
         self.autonomous_controller = AutonomousExecutionController(
             config=AutonomousExecutionConfig(),
             supervisor=self.execution_supervisor,
@@ -799,6 +800,7 @@ class MainAgent:
             child.repository_ids = [repository_id]
             child.workspace_id = self.workspace_context.workspace.workspace_id
             child.session_id = self.workspace_context.session.session_id
+            child.execution_repo_root = str(Path(repo.canonical_path).resolve())
             self.taskboard.save()
             self.taskboard.update_status(child.task_id, TaskStatus.ROUTED, reason="Model-selected repository scope.")
             self.taskboard.update_status(child.task_id, TaskStatus.IN_PROGRESS, reason="Repository worker is collecting context.")
@@ -814,16 +816,12 @@ class MainAgent:
                 hierarchy_policy=self.hierarchy_policy,
                 default_worker_agent_id=worker_agent_id,
             )
-            job = manager.enqueue(
-                task_id=child.task_id,
-                requested_by_agent_id=coding.agent_id,
-                approved_by_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
-                job_type=QueueJobType.REPO_SEARCH,
-                payload={"query": request[:120], "limit": 5, "repository_id": repository_id},
-                purpose=f"Collect model-selected context from repository {repo.name}.",
-            )
-            manager.run_next(worker_agent_id=worker_agent_id)
-            completed = manager.get_job(job.job_id)
+            specialist = CodingAgent(agent_id=coding.agent_id, role=coding.role,
+                parent_agent_id=coding.parent_agent_id, capabilities=coding.capabilities,
+                mailbox=self.message_bus, message_bus=self.message_bus, taskboard=self.taskboard,
+                registry=self.registry, queue_manager=manager)
+            specialist.routing_llm = self.routing_llm
+            completed = specialist.inspect_task(child.task_id, request)
             if completed.status == QueueJobStatus.DONE:
                 self.taskboard.update_status(
                     child.task_id,
@@ -842,7 +840,7 @@ class MainAgent:
         existing = [
             node.agent_id
             for node in self.registry.agents.values()
-            if node.role == AgentRole.TOOL_WORKER and node.state != AgentState.DONE
+            if node.role == AgentRole.TOOL_WORKER and node.parent_agent_id == coding.agent_id and node.state != AgentState.DONE
         ]
         created: list[str] = []
         while len(existing) + len(created) < target_count:
@@ -905,18 +903,7 @@ class MainAgent:
         self.taskboard.save()
 
     def _delegate_initial_tool_work(self, task_id: str, request: str, route_name: str) -> None:
-        coding = self._agent(AgentRole.CODING, CodingAgent)
-        job = self.queue_manager.enqueue(
-            task_id=task_id,
-            requested_by_agent_id=coding.agent_id,
-            approved_by_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
-            job_type=QueueJobType.REPO_SEARCH,
-            payload={"query": request[:120] or route_name, "limit": 5},
-            purpose="CodingAgent sniffs repository/task context before deciding further tool jobs.",
-            priority=60,
-        )
-        self.taskboard.add_evidence(task_id, f"CodingAgent created queue job {job.job_id} for repository context sniffing.")
-        self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
+        self._agent(AgentRole.CODING, CodingAgent).inspect_task(task_id, request)
 
     def _execute_required_wiring_tasks(self, parent_task_id: str, route: RouteDecision, plan) -> None:  # noqa: ANN001
         """Compatibility adapter for the authoritative coordinator lifecycle."""
@@ -927,172 +914,8 @@ class MainAgent:
         FeatureIntegrationCoordinator().run_taskboard_lifecycle(self, parent_task_id, route, plan)
         return
 
-        parent = self.taskboard.get_task(parent_task_id)
-        if not parent.required_wiring_task_ids:
-            return
-        coding = self._agent(AgentRole.CODING, CodingAgent)
-        reviewer = self._agent(AgentRole.REVIEWER, ReviewerAgent)
-        for child_id in list(parent.required_wiring_task_ids):
-            child = self.taskboard.get_task(child_id)
-            if child.integration_role != "wiring":
-                continue
-            if child.status is TaskStatus.DONE:
-                continue
-            child.owner_agent_id = coding.agent_id
-            self.taskboard.assign(child.task_id, coding.agent_id)
-            if child.status is TaskStatus.NEW:
-                self.taskboard.update_status(child.task_id, TaskStatus.ROUTED, reason="MainAgent delegated planned wiring to CodingAgent.")
-            if child.status is TaskStatus.ROUTED:
-                self.taskboard.update_status(child.task_id, TaskStatus.IN_PROGRESS, reason="CodingAgent is executing the required integration lifecycle.")
-
-            # The planner/model supplies the feature identifiers; discovery is
-            # only used to locate evidence around those identifiers.
-            # Search from concrete implementation output and model-selected
-            # files.  Planner prose such as "relevant registry" is not an
-            # integration identifier and must never become a search contract.
-            generic = {
-                "selected implementation files and their downstream callers.",
-                "production construction, registration, routing, and entrypoint wiring.",
-                "relevant registry, factory, dependency-injection, or router.",
-                "configuration that enables or selects the capability.",
-                "a production cli, api, gateway, lifecycle, or supervisor entrypoint.",
-            }
-            parent_changed_files = [
-                *parent.files_touched,
-                *(path for job in self.queue_manager.jobs_for_task(parent.task_id) for path in job.changed_files),
-            ]
-            direct_parent_files = self._validated_execution_files(child, parent_changed_files)
-            direct_read_job = coding.request_batch_read(child.task_id, direct_parent_files) if direct_parent_files else None
-            if direct_read_job is not None:
-                self.queue_manager.run_next(worker_agent_id=direct_read_job.assigned_worker_agent_id)
-            identifiers = list(dict.fromkeys(
-                str(item) for item in (
-                    list(child.files_touched)
-                    + list(parent.implementation_targets)
-                    + getattr(plan, "files_to_inspect", [])
-                    + getattr(plan, "implementation_targets", [])
-                )
-                if str(item).strip() and str(item).strip().lower() not in generic
-            ))
-            if not identifiers:
-                self.taskboard.add_blocker(child.task_id, "INCOMPLETE_FEATURE_WIRING: no model-selected feature identifiers")
-                continue
-            source_refs: list[str] = []
-            source_files: list[str] = []
-            for identifier in identifiers:
-                job = self.queue_manager.enqueue(
-                    task_id=child.task_id,
-                    requested_by_agent_id=coding.agent_id,
-                    approved_by_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
-                    job_type=QueueJobType.REPO_SEARCH,
-                    payload={"query": identifier, "regex": False, "limit": 25},
-                    purpose="Discover feature-specific callers and integration points.",
-                    priority=45,
-                )
-                ran = self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
-                if ran is None or ran.status is not QueueJobStatus.DONE:
-                    continue
-                matches = (ran.result or {}).get("matches", []) if isinstance(ran.result, dict) else []
-                for match in matches:
-                    if not isinstance(match, dict) or not match.get("file"):
-                        continue
-                    ref = f"{match['file']}:{match.get('line', '?')}"
-                    source_refs.append(ref)
-                    source_files.append(str(match["file"]))
-            child.files_to_inspect = list(dict.fromkeys([*direct_parent_files, *source_files]))
-            newly_discovered_files = [
-                path for path in child.files_to_inspect if path not in direct_parent_files
-            ]
-            read_job = coding.request_batch_read(child.task_id, newly_discovered_files) if newly_discovered_files else None
-            if read_job is not None:
-                read_job = self.queue_manager.run_next(worker_agent_id=read_job.assigned_worker_agent_id)
-            decision = self._wiring_decision(child, plan, route, source_refs)
-            child.wiring_outcome = decision.outcome
-            child.wiring_outcome_reason = decision.reason
-            child.wiring_targets = list(dict.fromkeys(decision.wiring_targets))
-            child.runtime_entrypoints = list(dict.fromkeys(decision.runtime_entrypoints))
-            child.configuration_targets = list(dict.fromkeys(decision.configuration_targets))
-            child.reachability_edges = list(decision.edges)
-            parent.wiring_targets = list(dict.fromkeys(parent.wiring_targets + child.wiring_targets))
-            parent.runtime_entrypoints = list(dict.fromkeys(parent.runtime_entrypoints + child.runtime_entrypoints))
-            parent.configuration_targets = list(dict.fromkeys(parent.configuration_targets + child.configuration_targets))
-            self.taskboard.add_evidence(
-                child.task_id,
-                f"Feature-specific wiring outcome={decision.outcome}: {decision.reason}; references: " + ", ".join(source_refs[:12]),
-            )
-            self.taskboard.save()
-            if decision.outcome == "mutation_required" and decision.patch.strip():
-                patch_job = coding.request_patch(child.task_id, decision.patch)
-                ran_patch = None if patch_job is None else self.queue_manager.run_next(worker_agent_id=patch_job.assigned_worker_agent_id)
-                if ran_patch is None or ran_patch.status is not QueueJobStatus.DONE:
-                    child.wiring_outcome = "failed"
-                else:
-                    child.wiring_outcome = "mutation_applied"
-            elif decision.outcome not in {"already_integrated"}:
-                reviewer.reject_weak_evidence(child.task_id, "INCOMPLETE_FEATURE_WIRING: " + (decision.reason or "wiring decision incomplete"))
-                self.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason="INCOMPLETE_FEATURE_WIRING: wiring outcome is incomplete")
-                continue
-            if child.wiring_outcome == "failed":
-                reviewer.reject_weak_evidence(child.task_id, "INCOMPLETE_FEATURE_WIRING: wiring mutation failed")
-                self.taskboard.update_status(child.task_id, TaskStatus.BLOCKED, reason="INCOMPLETE_FEATURE_WIRING: wiring mutation failed")
-                continue
-            child.implementation_verified = child.wiring_outcome in {"mutation_applied", "already_integrated"}
-            self.taskboard.update_status(child.task_id, TaskStatus.VERIFYING, reason="Wiring outcome requires verifier and reviewer evidence.")
-            child_verification = self._agent(AgentRole.VERIFIER, VerifierAgent).execute_verification(
-                child.task_id, self._verification_commands(getattr(plan, "verification_commands", [])),
-            )
-            if not child_verification.passed:
-                reviewer.reject_weak_evidence(child.task_id, child_verification.summary)
-                continue
-            child.verification_provenance = {
-                "verification_id": child_verification.verification_id,
-                "queue_job_ids": list(child.verification_queue_job_ids),
-                "changed_files": list(child.files_touched),
-            }
-            self._record_wiring_reachability(
-                parent_task_id,
-                child_verification,
-                child_task_id=child.task_id,
-                include_parent=False,
-            )
-            if reviewer.review_evidence(child.task_id, route_name="coding", requires_verification=True):
-                self._project_wiring_completion(child.task_id, child_verification)
-                self._record_wiring_reachability(
-                    parent_task_id,
-                    child_verification,
-                    child_task_id=child.task_id,
-                    include_parent=True,
-                )
-
-    def _wiring_decision(self, child, plan, route, source_refs):  # noqa: ANN001
-        if self.routing_llm is None:
-            return WiringDecision(outcome="incomplete", reason="wiring decision model is unavailable")
-        read_evidence = [
-            job.result for job in self.queue_manager.jobs_for_task(child.task_id)
-            if job.job_type is QueueJobType.REPO_BATCH_READ and isinstance(job.result, dict)
-        ]
-        prompt = (
-            "Return a WiringDecision for this feature. Use mutation_required only when a concrete non-empty patch is needed. "
-            "Use already_integrated only with connected edge evidence from production entrypoint to capability. "
-            "Never invent files or edges.\n"
-            f"Task: {child.user_request}\nFeature targets: {getattr(plan, 'implementation_targets', [])}\n"
-            f"Repository references: {source_refs}\nRead evidence: {read_evidence}\n"
-        )
-        structured = getattr(self.routing_llm, "with_structured_output", None)
-        if callable(structured):
-            try:
-                result = structured(WiringDecision).invoke(prompt)
-                return result if isinstance(result, WiringDecision) else WiringDecision.model_validate(result)
-            except Exception:
-                pass
-        raw = self.routing_llm.invoke(prompt)
-        text = extract_model_text(getattr(raw, "content", raw))
-        if text.startswith("```"):
-            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        return WiringDecision.model_validate_json(text)
+    def _wiring_decision(self, child, plan, route, source_refs):
+        return self._agent(AgentRole.CODING, CodingAgent).wiring_decision(child, plan, route, source_refs)
 
     def _project_wiring_completion(self, child_task_id: str, verification) -> None:  # noqa: ANN001
         supervisor = self.execution_supervisor
@@ -1191,104 +1014,11 @@ class MainAgent:
 
     def _delegate_git_intent_work(self, task_id: str, intent: GitIntent) -> None:
         coding = self._agent(AgentRole.CODING, CodingAgent)
-        inspections = [
-            ["status", "--short", "--branch"],
-            ["branch", "--show-current"],
-            ["remote", "-v"],
-            ["diff", "--stat"],
-            ["diff"],
-            ["diff", "--cached", "--stat"],
-            ["log", "-1", "--oneline"],
-        ]
-        results = [self._run_git_job(task_id, coding.agent_id, args, purpose=f"Inspect Git state: git {' '.join(args)}") for args in inspections]
-        if any(job.status == QueueJobStatus.FAILED and _git_args(job)[:1] == ["status"] for job in results):
-            self.taskboard.add_blocker(task_id, "Git workflow blocked: repository status inspection failed or target is not a Git repository.")
-            return
-
-        status = _stdout_for(results, ["status", "--short", "--branch"])
-        current_branch = _stdout_for(results, ["branch", "--show-current"]).strip()
-        remotes = _stdout_for(results, ["remote", "-v"]).strip()
-        diff_stat = _stdout_for(results, ["diff", "--stat"])
-        diff = _stdout_for(results, ["diff"])
-        status_paths = _status_paths(status)
-        if _has_conflicts(status):
-            self.taskboard.add_blocker(task_id, "Git workflow blocked: conflicts are present in repository status.")
-            return
-        if intent.wants_branch:
-            self._handle_branch_intent(task_id, coding.agent_id, intent, status_paths)
-            return
-        if intent.wants_commit:
-            if not status_paths:
-                self.taskboard.add_blocker(task_id, "Git commit result: no changes to commit.")
-            elif _has_untracked(status):
-                self.taskboard.add_blocker(task_id, "Git commit blocked: untracked files are present and were not selected for staging.")
-            else:
-                paths = sorted(status_paths)
-                message = intent.commit_message or self._commit_message_from_diff(diff_stat=diff_stat, diff=diff, paths=paths)
-                intent.commit_message = message
-                self.taskboard.add_evidence(task_id, f"Git commit message generated from diff: {message}")
-                self._run_git_job(task_id, coding.agent_id, ["add", "--", *paths], purpose=f"Stage inspected Git paths: {', '.join(paths)}")
-                self._run_git_job(task_id, coding.agent_id, ["diff", "--cached", "--stat"], purpose="Inspect staged Git diff stat before commit.")
-                self._run_git_job(task_id, coding.agent_id, ["diff", "--cached"], purpose="Inspect staged Git diff before commit.")
-                committed = self._run_git_job(task_id, coding.agent_id, ["commit", "-m", message], purpose="Create Git commit with diff-derived message.")
-                if committed.status != QueueJobStatus.DONE:
-                    self.taskboard.add_blocker(task_id, f"Git commit blocked: {committed.error or committed.result_summary or 'commit failed'}")
-                    return
-        if intent.wants_push:
-            self._handle_push_intent(task_id, coding.agent_id, intent, current_branch=current_branch, remotes=remotes)
-
-    def _handle_branch_intent(self, task_id: str, agent_id: str, intent: GitIntent, status_paths: set[str]) -> None:
-        if status_paths:
-            self.taskboard.add_blocker(task_id, "Git branch creation blocked: working tree has local changes.")
-            return
-        branch = intent.target_branch or ""
-        if not branch:
-            self.taskboard.add_blocker(task_id, "Git branch creation blocked: target branch was not selected by the model decision.")
-            return
-        created = self._run_git_job(task_id, agent_id, ["switch", "-c", branch], purpose=f"Create and switch to Git branch {branch}.")
-        if created.status != QueueJobStatus.DONE:
-            self.taskboard.add_blocker(task_id, f"Git branch creation blocked: {created.error or created.result_summary or 'branch command failed'}")
-
-    def _handle_push_intent(self, task_id: str, agent_id: str, intent: GitIntent, *, current_branch: str, remotes: str) -> None:
-        target = intent.target_branch or current_branch
-        if not remotes:
-            self.taskboard.add_blocker(task_id, "Git push blocked: no remote exists.")
-            return
-        if target and current_branch and current_branch != target:
-            self.taskboard.add_blocker(task_id, f"Git push blocked: current branch is {current_branch}, target branch is {target}.")
-            return
-        upstream = self._run_git_job(task_id, agent_id, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], purpose="Inspect Git upstream before push.")
-        upstream_name = str((upstream.result or {}).get("stdout") or "").strip() if upstream.result else ""
-        compare_ref = upstream_name or (f"origin/{target}" if target else "")
-        if compare_ref:
-            divergence = self._run_git_job(task_id, agent_id, ["rev-list", "--left-right", "--count", f"{compare_ref}...HEAD"], purpose="Inspect Git ahead/behind state before push.")
-            counts = str((divergence.result or {}).get("stdout") or "").strip().split() if divergence.result else []
-            if len(counts) >= 2:
-                behind, ahead = int(counts[0]), int(counts[1])
-                if behind and ahead:
-                    self.taskboard.add_blocker(task_id, "Git push blocked: branch is diverged from remote.")
-                    return
-                if behind:
-                    self.taskboard.add_blocker(task_id, "Git push blocked: branch is behind remote.")
-                    return
-        pushed = self._run_git_job(task_id, agent_id, ["push", "origin", target or current_branch], purpose=f"Push Git branch {target or current_branch} to origin.")
-        if pushed.status != QueueJobStatus.DONE:
-            self.taskboard.add_blocker(task_id, f"Git push blocked: {pushed.error or pushed.result_summary or 'push failed'}")
+        self.taskboard.assign(task_id, coding.agent_id)
+        coding.execute_git_intent(task_id, intent)
 
     def _run_git_job(self, task_id: str, requested_by_agent_id: str, args: list[str], *, purpose: str) -> QueueJob:
-        job = self.queue_manager.enqueue(
-            task_id=task_id,
-            requested_by_agent_id=requested_by_agent_id,
-            approved_by_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
-            job_type=QueueJobType.GIT,
-            payload={"tool": "git.generic", "args": {"args": args}},
-            purpose=purpose,
-            priority=70,
-            requires_write_lock=args[:1] in (["add"], ["commit"], ["push"], ["switch"], ["checkout"], ["branch"]),
-        )
-        self.taskboard.add_evidence(task_id, f"CodingAgent created Git queue job {job.job_id}: git {' '.join(args)}")
-        self.queue_manager.run_next(worker_agent_id=job.assigned_worker_agent_id)
-        return job
+        return self._agent(AgentRole.CODING, CodingAgent).run_git_job(task_id, requested_by_agent_id, args, purpose=purpose)
 
     def _route_with_git_contract(self, task_id: str, intent: GitIntent) -> RouteDecision:
         capabilities = ["repo_state", "git_status", "git_diff", "verification"]
@@ -1311,19 +1041,6 @@ class MainAgent:
             reason_summary="Git intent requires repository-state inspection, queued Git execution, verification, and review.",
             runtime_capability_change=False,
         )
-
-    def _commit_message_from_diff(self, *, diff_stat: str, diff: str, paths: list[str]) -> str:
-        primary = Path(paths[0]).stem.replace("_", "-").replace(" ", "-") if paths else "repository"
-        changed_lines = [line for line in str(diff).splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
-        scope = primary[:40] or "repository"
-        verb = "update" if changed_lines else "record"
-        if any(path.lower().endswith((".md", ".rst", ".txt")) for path in paths):
-            return f"docs: {verb} {scope}"
-        if "test" in " ".join(paths).lower():
-            return f"test: {verb} {scope}"
-        if diff_stat:
-            return f"chore: {verb} {scope}"
-        return f"chore: record {scope} changes"
 
     def _deactivate_subagents(self, task_id: str, subagent_ids: list[str]) -> None:
         for subagent_id in subagent_ids:
@@ -1385,11 +1102,20 @@ class MainAgent:
         return None
 
     def _verification_commands(self, commands: list[str]) -> list[str]:
-        # Prefer python3 so hosts where bare `python` is 2.x do not SyntaxError
-        # on modern packages (astropy, etc.) even if a PATH shim is missing.
-        if (self.root / "src").exists():
-            return ["python3 -m compileall src"]
-        return ["python3 -m compileall ."]
+        valid = []
+        for command in commands:
+            cmd = str(command).strip()
+            if not cmd:
+                continue
+            if "pytest" in cmd and not ((self.root / "tests").is_dir() or (self.root / "test").is_dir()):
+                continue
+            if "compileall src" in cmd and not (self.root / "src").is_dir():
+                valid.append("python3 -m compileall .")
+                continue
+            valid.append(cmd)
+        if not valid:
+            valid = ["python3 -m compileall src"] if (self.root / "src").exists() else ["python3 -m compileall ."]
+        return valid
 
 
 def _git_args(job: QueueJob) -> list[str]:

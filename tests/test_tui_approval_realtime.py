@@ -438,7 +438,7 @@ def test_tool_execution_dispatcher_dispatches_approval_request(tmp_path: Path, m
         worktree_path=tmp_path,
         sandbox="readOnly",
     )
-    dispatcher = ToolExecutionDispatcher(ws)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(ws, task_id="test-coding-task")
 
     # Calling with timeout_seconds=0.01 to test direct execution path without hanging
     result = dispatcher.dispatch(

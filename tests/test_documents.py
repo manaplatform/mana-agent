@@ -221,6 +221,11 @@ def test_document_tool_contracts_and_queue_execution(tmp_path: Path) -> None:
     }.issubset(names)
 
     manager = ToolsManager(tmp_path)
+    from mana_agent.multi_agent.core.types import AgentRole
+    from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+    manager.execution_registry = AgentRegistry()
+    manager.execution_registry.register(AgentRole.TOOL, agent_id="agent_tool",
+        parent_agent_id=manager.execution_registry.find_by_role(AgentRole.MAIN).agent_id)
     task_id = new_task_id()
     job = QueueJob(
         job_id="job_document_create",

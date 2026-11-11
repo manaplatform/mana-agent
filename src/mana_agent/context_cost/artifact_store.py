@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,7 @@ class ContextArtifactStore:
         target = self.root / f"{digest}.json"
         self.root.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            temporary = target.with_suffix(f".{os.getpid()}.tmp")
+            temporary = target.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
             temporary.write_text(json.dumps(record, ensure_ascii=False, sort_keys=True), encoding="utf-8")
             os.chmod(temporary, 0o600)
             os.replace(temporary, target)

@@ -164,6 +164,9 @@ class EventRenderer:
         if event.message:
             label = "decision" if event.type == "agent.decision" else "summary"
             body.add_row(label, event.message)
+        if event.operation_attempt_id or event.metadata.get("operation_attempt_id"):
+            from mana_agent.chat.operations import operation_details
+            body.add_row("execution", Text(operation_details(event.as_dict())))
         if self.trace_mode == "full" and event.metadata:
             body.add_row("metadata", json.dumps(event.metadata, ensure_ascii=False, default=str)[:1200])
         title = f"Step {event.step_id} · {event.title}" if event.step_id else event.title or event.type
@@ -576,7 +579,7 @@ def _inline_tool_line(event: ChatEvent) -> str:
     Start (running) lines are suppressed in InlineChatRenderer to avoid noise;
     live in-progress uses LiveToolActivity which updates the same logical item.
     """
-    tool = _tool_name(event)
+    tool = str(event.metadata.get("command") or event.metadata.get("path") or _tool_name(event))
     status = normalize_event_status(event.status)
     # Prefer explicit action summary or result summary for human readable display
     meta = event.metadata or {}

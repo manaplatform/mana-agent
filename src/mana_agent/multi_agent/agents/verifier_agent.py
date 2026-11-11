@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
 from mana_agent.multi_agent.core.ids import new_decision_id
-from mana_agent.multi_agent.core.types import QueueJobType, VerificationResult
+from mana_agent.multi_agent.core.types import AgentRole, QueueJobType, VerificationResult
 from mana_agent.multi_agent.queue.queue_manager import QueueManager
 from mana_agent.evals.recorder import record_current
 
@@ -56,10 +56,8 @@ class VerifierAgent(BaseAgent):
             text = str(command or "").strip()
             if not text:
                 continue
-            job = self.queue_manager.enqueue(
+            job = self._coding_request(
                 task_id=task_id,
-                requested_by_agent_id=self.agent_id,
-                approved_by_agent_id="agent_main_0001",
                 job_type=QueueJobType.SHELL,
                 payload={"command": text, "verification": True},
                 purpose=f"Execute verification command: {text}",
@@ -111,10 +109,8 @@ class VerifierAgent(BaseAgent):
         queue_job_ids: list[str] = []
         for args in commands:
             text = "git " + " ".join(args)
-            job = self.queue_manager.enqueue(
+            job = self._coding_request(
                 task_id=task_id,
-                requested_by_agent_id=self.agent_id,
-                approved_by_agent_id="agent_main_0001",
                 job_type=QueueJobType.GIT,
                 payload={"tool": "git.generic", "args": {"args": args}, "verification": True},
                 purpose=f"Verify Git outcome: {text}",
@@ -154,6 +150,17 @@ class VerifierAgent(BaseAgent):
         self.taskboard.add_verification_result(task_id, result)
         record_current("verification.finished", {"task_id": task_id, "result": result.to_dict() if hasattr(result, "to_dict") else result.__dict__})
         return result
+
+    def _coding_request(self, task_id: str, **kwargs):
+        from mana_agent.multi_agent.agents.coding_agent import CodingAgent
+        if self.registry is None:
+            raise PermissionError("Verification requires registered CodingAgent delegation")
+        node = self.registry.find_by_role(AgentRole.CODING)
+        self.taskboard.assign(task_id, node.agent_id)
+        coding = CodingAgent(agent_id=node.agent_id, role=node.role, parent_agent_id=node.parent_agent_id,
+            capabilities=node.capabilities, mailbox=self.mailbox, message_bus=self.message_bus,
+            taskboard=self.taskboard, registry=self.registry, queue_manager=self.queue_manager)
+        return coding.request_operation(task_id, **kwargs)
 
 
 def _stdout_for_git_verification(jobs, args: list[str]) -> str:  # noqa: ANN001

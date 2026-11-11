@@ -50,6 +50,22 @@ class _MockSupervisor:
 class _MockTaskBoard:
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
+        self.tasks = {}
+
+    def get_task(self, task_id):
+        if task_id not in self.tasks:
+            self.tasks[task_id] = SimpleNamespace(owner_agent_id=None, assigned_agent_ids=[], assigned_subagent_ids=[],
+                execution_repo_root="", managed_worktree_path="", allowed_tools=[], forbidden_tools=[], evidence=[], files_touched=[])
+        return self.tasks[task_id]
+
+    def assign(self, task_id, actor_id):
+        self.get_task(task_id).assigned_agent_ids.append(actor_id)
+
+    def add_evidence(self, task_id, evidence):
+        self.get_task(task_id).evidence.append(evidence)
+
+    def add_files_touched(self, task_id, paths):
+        self.get_task(task_id).files_touched.extend(paths)
 
     def update_task(self, task_id: str, progress_summary: str, changed_files: list[str]) -> None:
         self.updates.append({"task_id": task_id, "summary": progress_summary, "files": changed_files})
@@ -236,7 +252,7 @@ def test_tool_execution_dispatcher_defaults_model_for_batch_tools(tmp_path: Path
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(
+    dispatcher = ToolExecutionDispatcher.for_coding_task(
         ws,
         task_id="task_disp_test",
         model="gpt-4o-mini",

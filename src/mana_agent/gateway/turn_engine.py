@@ -42,6 +42,7 @@ from mana_agent.multi_agent.runtime.auto_chat import (
     resolve_auto_followup,
     save_auto_chat_state,
 )
+# Compatibility import for legacy embedders; this handler is never dispatched.
 from mana_agent.multi_agent.runtime.small_direct_edit import handle_small_direct_edit
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchQuery
@@ -425,6 +426,8 @@ def is_auto_chat_connector_turn(
         return True
     if any(t.startswith("mcp_") or t == "mcp" for t in tools):
         return True
+    if decision is not None and (decision.repo_context_needed or decision.intent in {"repo_search", "analyze", "review", "verify"}):
+        return False
     # Mode-based: answer/review/verify/analyze are auto-chat, not coding planner
     if auto_chat_mode in (
         AutoChatMode.ANSWER_ONLY,
@@ -476,6 +479,8 @@ def should_use_coding_agent_turn(
         return True
 
     tools = _selected_tools(decision)
+    if decision is not None and (decision.repo_context_needed or decision.intent in {"repo_search", "analyze", "review", "verify"}):
+        return True
     if any(t in _MUTATION_TOOLS for t in tools):
         return True
     if decision is not None and (
@@ -908,32 +913,6 @@ def process_chat_turn(
     if is_plan_execution_request(question):
         auto_chat_mode = AutoChatMode.EDIT
 
-    # Small direct edit (docs-only)
-    small = None
-    if not (session_state.get("execution_policy") or {}).get("required"):
-        small = handle_small_direct_edit(root, question)
-    if small is not None and small.handled:
-        _save_auto_chat_turn_state(
-            root,
-            mode=auto_chat_mode,
-            task=original_question,
-            answer_text=small.answer,
-            sources=[{"path": p} for p in small.changed_files],
-            changed_files=list(small.changed_files),
-            verification="skipped_docs_only" if small.ok else "minimal_check_failed",
-        )
-        return ChatTurnResult(
-            answer=str(small.answer or ""),
-            sources=[{"path": p} for p in small.changed_files],
-            changed_files=list(small.changed_files),
-            mode="small-direct-edit",
-            flow_id=active_flow_id,
-            decision=agent_decision,
-            auto_chat_mode=auto_chat_mode.value,
-            warnings=[] if small.ok else [str(small.error or "edit failed")],
-            payload={"small_direct_edit": True},
-        )
-
     # External research tools selected by model
     selected = list(agent_decision.selected_tools or [])
     if any(t in selected for t in ("web_search", "github_search")) and not any(
@@ -1183,6 +1162,8 @@ def process_chat_turn(
             "user_message_id": user_message_id,
             "dispatch_source": dispatch_source or "process_chat_turn",
             "execution_policy": session_state.get("execution_policy", {}),
+            "execution_runtime": session_state.get("_coding_execution_runtime", {}),
+            "execution_mode": "plan" if force_plan_only else "read_only" if agent_decision and not agent_decision.code_editing_needed and agent_decision.intent not in {"edit"} else "auto",
             "relevant_context": json.dumps(session_state.get("conversation_context", {}), ensure_ascii=False),
             "conversation_context_in_request": bool(execution_context_included or session_state.get("conversation_context", {}).get("messages")),
             "batch_resume": session_state.get("batch_resume", {}),

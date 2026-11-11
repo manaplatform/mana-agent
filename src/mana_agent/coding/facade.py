@@ -152,8 +152,8 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
         import copy
         engine = copy.copy(self._internal_engine)
         engine.extra_tools = dict(self._internal_engine.extra_tools)
-        runtime = kwargs.get("batch_runtime") or {}
-        for name in ("execution_supervisor", "taskboard", "batch_manager", "batch_authorize",
+        runtime = {**(kwargs.get("execution_runtime") or {}), **(kwargs.get("batch_runtime") or {})}
+        for name in ("execution_registry", "tool_authorize", "execution_supervisor", "taskboard", "batch_manager", "batch_authorize",
                      "batch_authority", "batch_autonomous_config", "model", "provider"):
             if name in runtime:
                 setattr(engine, name, runtime[name])
@@ -161,6 +161,10 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             def invoke_context(_tool=tool, **arguments):
                 return _tool.invoke(arguments)
             invoke_context.args_schema = tool.args_schema
+            from mana_agent.tools.contracts import ToolContract
+            invoke_context.tool_contract = ToolContract(name=tool.name, description=tool.description,
+                input_schema=tool.args_schema.model_json_schema(), output_schema={}, error_format={},
+                required_capability="context", effect="read_only", repository_operation=False)
             engine.extra_tools[tool.name] = invoke_context
         policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})
         allowed_files: list[str] = []
@@ -174,9 +178,9 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             task_id=task_id,
             goal=str(kwargs.get("coding_original_goal") or request),
             allowed_files=allowed_files,
-            requires_repository_write=True,
+            requires_repository_write=kwargs.get("execution_mode") not in {"plan", "read_only"},
             execution_policy=policy,
-            execution_mode="batch" if policy.required else "auto",
+            execution_mode="batch" if policy.required else str(kwargs.get("execution_mode") or "auto"),
             relevant_context=str(kwargs.get("relevant_context") or ""),
             context={"batch_resume": kwargs.get("batch_resume") or {},
                      "coding_resume_context": kwargs.get("coding_resume_context") or {},
@@ -188,7 +192,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             repository_path=self.repo_root,
             worktree_path=self.working_directory,
             working_directory=self.working_directory,
-            sandbox="workspaceWrite",
+            sandbox="readOnly" if kwargs.get("execution_mode") in {"plan", "read_only"} else "workspaceWrite",
             allow_in_place_write=True,
         )
 

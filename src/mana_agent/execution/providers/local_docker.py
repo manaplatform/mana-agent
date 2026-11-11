@@ -40,6 +40,12 @@ class LocalDockerProvider(ProviderBase):
 
     async def _run(self, *args: str, timeout: int = 120, input_data: bytes | None = None) -> tuple[int, bytes, bytes]:
         try:
+            from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+            if current_operation() is not None:
+                from mana_agent.utils.process_stream import run_streaming_process
+                completed = await asyncio.to_thread(run_streaming_process, [self.docker_binary, *args],
+                    timeout=timeout, input=input_data)
+                return completed.returncode, completed.stdout.encode(), completed.stderr.encode()
             proc = await asyncio.create_subprocess_exec(
                 self.docker_binary, *args,
                 stdin=asyncio.subprocess.PIPE if input_data is not None else None,
@@ -61,7 +67,7 @@ class LocalDockerProvider(ProviderBase):
             resource_isolation=EnforcementStrength.ENFORCED,
             gpu_execution=True, network_isolation=EnforcementStrength.ENFORCED,
             secret_files=True, secret_environment_variables=True,
-            persistent_volumes=True, artifact_streaming=True, parallel_execution=True,
+            persistent_volumes=True, command_streaming=True, artifact_streaming=True, parallel_execution=True,
         )
 
     async def provision(self, spec: SandboxSpec) -> SandboxHandle:

@@ -37,6 +37,7 @@ class ChatEvent:
     attempt_id: str = ""
     attempt_generation: int = 0
     operation_id: str = ""
+    operation_attempt_id: str = ""
     producer_sequence: int = 0
     execution_mode: str = ""
 
@@ -129,7 +130,7 @@ class ChatEvent:
             "details": dict(self.metadata),
             **{key: getattr(self, key) for key in (
                 "task_id", "root_task_id", "parent_task_id", "parent_agent_id", "attempt_id",
-                "attempt_generation", "operation_id", "producer_sequence", "execution_mode",
+                "attempt_generation", "operation_id", "operation_attempt_id", "producer_sequence", "execution_mode",
             )},
         }
 
