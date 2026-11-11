@@ -677,6 +677,10 @@ def test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease(tm
     gateway.inbox_service = inbox
     monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
 
+    script = tmp_path / "print_999.py"
+    script.write_text("print(999)\n", encoding="utf-8")
+    command = f"python {script.name}"
+
     def execute_in_turn():
         agent = dispatcher(tmp_path, task=task_id)
         registry = AgentRegistry()
@@ -684,7 +688,7 @@ def test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease(tm
         runner = agent.bind_runtime(registry=registry, actor_id=coding_owner.agent_id, task_id=task_id)
 
         # 1. Dispatch command requiring approval
-        pending = agent.dispatch("run_command", {"command": 'python -c "print(999)"'})
+        pending = agent.dispatch("run_command", {"command": command})
         assert pending["permission_required"]
         assert pending["inbox_item_id"]
 
@@ -704,7 +708,7 @@ def test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease(tm
         grant = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
 
         # 3. Dispatch the approved command in the active turn
-        result = agent.dispatch("run_command", {"command": 'python -c "print(999)"', "action_approval_id": grant})
+        result = agent.dispatch("run_command", {"command": command, "action_approval_id": grant})
         assert result["ok"], f"Command execution failed: {result}"
         assert "999" in result["stdout"]
         assert result["action_id"] == pending["action_id"]
