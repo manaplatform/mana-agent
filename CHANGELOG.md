@@ -2,6 +2,16 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased — 2026-11-10
+
+- 2026-11-10 — Coding research: add typed unresolved-bug handoffs for internal/Codex engines and Main Model-selected web/GitHub research through the existing autonomous controller. Default to 12 search requests/four rounds; preserve task identity, completed work, permissions, Batch waits and steering. Add task-scoped cache/limits, sanitized queries, source provenance, durable delivery receipts and branch-specific human clarification. Keep completion/verification gates intact and show research in the existing Coding Activity box. Preserve GitHub issue titles/bodies/timestamps. See [regression and recovery notes](docs/regressions/coding-bug-research.md).
+- 2026-11-10 — Fix & Compatibility: resolve coding research boundary regressions:
+  - Gateway Turn Engine: restrict `research_runtime.decide` invocation to turns producing a `debugging_report` or with prior research decisions/delivery, preserving standard completions and preventing spurious `CODING_RESEARCH_DECISION_INVALID` failures when no research was conducted.
+  - Continuation Evaluator: reconcile placeholder `"task_id"` or empty task IDs to `task_id` in `_validate_explicit_coding_decision`, avoiding false-positive task divergence errors in multi-agent coding flows.
+  - Internal Coding Engine: preserve exact system instruction in the first system message of model tool loops, injecting debugging handoff instructions through user context and requirements.
+  - Gateway & CLI Settings: safely access `mana_coding_research_enabled` using `getattr` across gateway route capability setup and provide research defaults on dummy CLI settings doubles.
+- User-owned verification: `venv/bin/python -m pytest tests/coding/test_bug_research.py tests/gateway/test_coding_bug_research.py tests/execution/test_coding_research_recovery.py -q`; compatibility: `venv/bin/python -m pytest tests/test_search_router.py tests/test_coding_engine_modes.py tests/test_activity_stream_integration.py tests/gateway/test_checkpoint_resume_invariants.py tests/test_cli_smoke.py tests/test_multi_agent_core.py -q`; dashboard: `node --test tests/dashboard/live_chat_reducer.test.mjs`. Live provider/Codex/Batch/UI acceptance is unverified. Changes are local; no commit, publication or deployment is implied.
+
 ## 0.10.0 — 2026-11-09
 
 - Release metadata: update the package version in `pyproject.toml` from 0.9.2 to 0.10.0.

@@ -18,6 +18,17 @@ const event = (sequence, type, extra = {}) => ({
   ...extra,
 });
 
+test("coding research uses the existing coding activity box", () => {
+  const state = createState("research-session");
+  reduce(state, { type: "event", event: event(1, "investigation.coding_research.finding", {
+    title: "Version-specific evidence found", task_id: "coding-task", agent_id: "main",
+    backend: "external", operation_id: "research-1", metadata: { phase: "coding", evidence_status: "unverified" },
+  }) });
+  const trace = snapshot(state).executionTraces[0];
+  assert.equal(trace.codingBox.events.length, 1);
+  assert.equal(trace.mainBox.events.length, 0);
+});
+
 test("shared activity fixture preserves parallel attribution and mutation evidence", () => {
   const rows = JSON.parse(readFileSync(new URL("../fixtures/activity/parallel.json", import.meta.url), "utf8"));
   const state = createState("session_fixture");

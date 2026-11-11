@@ -163,6 +163,9 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_GITHUB_SECRET_REF": "",
     "MANA_GITHUB_METADATA_ENABLED": False,
     "MANA_SEARCH_ENABLE_WEB": True,
+    "MANA_CODING_RESEARCH_ENABLED": True,
+    "MANA_CODING_RESEARCH_MAX_SEARCHES": 12,
+    "MANA_CODING_RESEARCH_MAX_ROUNDS": 4,
     "MANA_SEARCH_ENABLE_GITHUB": True,
     "MANA_SEARCH_MAX_RESULTS": 8,
     "MANA_SEARCH_TIMEOUT_SECONDS": 15,
@@ -510,6 +513,9 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "MANA_GITHUB_SECRET_REF": "mana_github_secret_ref",
     "MANA_GITHUB_METADATA_ENABLED": "mana_github_metadata_enabled",
     "MANA_SEARCH_ENABLE_WEB": "mana_search_enable_web",
+    "MANA_CODING_RESEARCH_ENABLED": "mana_coding_research_enabled",
+    "MANA_CODING_RESEARCH_MAX_SEARCHES": "mana_coding_research_max_searches",
+    "MANA_CODING_RESEARCH_MAX_ROUNDS": "mana_coding_research_max_rounds",
     "MANA_SEARCH_ENABLE_GITHUB": "mana_search_enable_github",
     "MANA_SEARCH_MAX_RESULTS": "mana_search_max_results",
     "MANA_SEARCH_TIMEOUT_SECONDS": "mana_search_timeout_seconds",
@@ -717,6 +723,9 @@ CONFIG_WRITE_ORDER = [
     "MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW",
     "MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS",
     "MANA_SEARCH_ENABLE_WEB",
+    "MANA_CODING_RESEARCH_ENABLED",
+    "MANA_CODING_RESEARCH_MAX_SEARCHES",
+    "MANA_CODING_RESEARCH_MAX_ROUNDS",
     "MANA_SEARCH_ENABLE_GITHUB",
     "MANA_GITHUB_CREDENTIAL_SOURCE",
     "MANA_GITHUB_SECRET_REF",
@@ -1387,8 +1396,12 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
                     f"{name} must be zero (unlimited) or a positive integer."
                 )
             cleaned[name] = value
+    for name, maximum in (("MANA_CODING_RESEARCH_MAX_SEARCHES", 200), ("MANA_CODING_RESEARCH_MAX_ROUNDS", 40)):
+        if name in cleaned:
+            cleaned[name] = validate_positive_int(name, cleaned[name], minimum=0, maximum=maximum)
     for name in (
         "MANA_SEARCH_ENABLE_WEB",
+        "MANA_CODING_RESEARCH_ENABLED",
         "MANA_SEARCH_ENABLE_GITHUB",
         "MANA_LLM_SUPPORTS_RESPONSES_API",
         "MANA_LLM_SUPPORTS_DECISIONS_API",

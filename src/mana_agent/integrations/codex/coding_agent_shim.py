@@ -322,6 +322,7 @@ class CodexCodingAgentShim:
             turn_id=kwargs.get("turn_id"),
             user_message_id=kwargs.get("user_message_id"),
             dispatch_source=kwargs.get("dispatch_source") or "generate",
+            coding_continuation_id=kwargs.get("coding_continuation_id", ""),
         )
 
     def generate_dir_mode(self, request: str, **kwargs: Any) -> dict[str, Any]:
@@ -337,6 +338,7 @@ class CodexCodingAgentShim:
             turn_id=kwargs.get("turn_id"),
             user_message_id=kwargs.get("user_message_id"),
             dispatch_source=kwargs.get("dispatch_source") or "generate_auto_execute",
+            coding_continuation_id=kwargs.get("coding_continuation_id", ""),
         )
 
     def flow_summary(self, flow_id: str | None = None) -> dict[str, Any] | None:
@@ -406,6 +408,7 @@ class CodexCodingAgentShim:
         user_message_id: Any = None,
         dispatch_source: str = "",
         _mutation_recovery: bool = False,
+        coding_continuation_id: str = "",
     ) -> dict[str, Any]:
         """Run a coding turn with bounded mutation recovery (explicit attempt loop).
 
@@ -418,6 +421,8 @@ class CodexCodingAgentShim:
         validate_prepared_repository(self.repo_root, self.working_directory)
 
         auth_key = str(gateway_task_id or turn_id or user_message_id or "").strip()
+        if coding_continuation_id:
+            auth_key = f"{auth_key}:{coding_continuation_id}"
         effective_source = dispatch_source or ("mutation_recovery" if _mutation_recovery else "execute_turn")
         logger.info(
             "codex_lifecycle_transition session_id=%s turn_id=%s task_id=%s dispatch_source=%s transition=%s",
@@ -529,6 +534,7 @@ class CodexCodingAgentShim:
                     gateway_task_id=gateway_task_id,
                     turn_id=turn_id,
                     is_recovery=is_recovery,
+                    coding_continuation_id=coding_continuation_id,
                 )
                 last_payload = payload
                 combined_warnings.extend(str(w) for w in (payload.get("warnings") or []) if str(w).strip())
@@ -627,6 +633,7 @@ class CodexCodingAgentShim:
         gateway_task_id: Any = None,
         turn_id: Any = None,
         is_recovery: bool = False,
+        coding_continuation_id: str = "",
     ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
         # connector must not manufacture a second task identity after routing:
@@ -743,6 +750,8 @@ class CodexCodingAgentShim:
                 "Inspect the repository and produce a decision-complete plan.",
                 "Do not modify repository files.",
             ]
+        from mana_agent.coding_research_contracts import CODING_DEBUGGING_HANDOFF_INSTRUCTION
+        requirements.append(CODING_DEBUGGING_HANDOFF_INSTRUCTION)
         task = CodingTask(
             task_id=task_id,
             goal=goal,
@@ -764,6 +773,7 @@ class CodexCodingAgentShim:
                 "or native coding executor before or after this turn."
             ),
             requires_repository_write=requires_repository_write,
+            context={"coding_research_resume": bool(coding_continuation_id), "coding_continuation_id": coding_continuation_id},
         )
 
         manager: WorkspaceManager | None = None
@@ -777,13 +787,13 @@ class CodexCodingAgentShim:
                 title=goal,
                 assigned_agent_id="codex",
                 session_id=self.session_id,
-                reuse_existing=bool(self.workspace_task_id),
+                reuse_existing=bool(self.workspace_task_id or coding_continuation_id),
             )
             manager.transition(
                 workspace_task_id,
                 WorkspaceStatus.RUNNING,
                 agent_id="codex",
-                force=bool(self.workspace_task_id),
+                force=bool(self.workspace_task_id or coding_continuation_id),
             )
             selected_relative = self.working_directory.relative_to(self.repo_root)
             selected_worktree = Path(managed_workspace.worktree_path) / selected_relative
@@ -909,7 +919,10 @@ class CodexCodingAgentShim:
                 self._active_backend = None
 
         if manager is not None:
-            if result.status == "completed":
+            if result.status == "waiting" and result.debugging_report is not None:
+                # Retain the active worktree for the same task's next turn.
+                pass
+            elif result.status == "completed":
                 manager.transition(
                     self.workspace_task_id or task_id,
                     WorkspaceStatus.MERGE_CANDIDATE,
@@ -947,7 +960,8 @@ class CodexCodingAgentShim:
             },
         )
         # Emit a single terminal user-facing event (never mid-turn drafts).
-        self._emit_terminal_result(payload, task_id=task_id, model=str(self.codex_settings.model or ""))
+        if result.debugging_report is None:
+            self._emit_terminal_result(payload, task_id=task_id, model=str(self.codex_settings.model or ""))
         return payload
 
     def _validate_write_transport_capability(
@@ -1258,6 +1272,9 @@ class CodexCodingAgentShim:
             "backend": result.backend,
             "status": result.status,
             "run_status": result.status,
+            "debugging_report": result.debugging_report.model_dump(mode="json") if result.debugging_report else None,
+            "continuation_context": result.continuation_context,
+            "pending_required_work": result.debugging_report is not None,
             "run_id": result.task_id,
             "task_id": result.task_id,
             "execution_id": result.task_id,

@@ -230,6 +230,10 @@
       return ["context", "Context preparation"];
     }
 
+    if (et.startsWith("investigation.coding_research.")) {
+      return ["coding", "Coding research"];
+    }
+
     // Search
     if (
       et === "search_started" ||
@@ -319,6 +323,7 @@
 
   function isCodingEvent(type, toolName, meta) {
     const et = text(type).toLowerCase();
+    if (et.startsWith("investigation.coding_research.")) return true;
     const tn = text(toolName || (meta && (meta.tool_name || meta.name))).toLowerCase();
     const backend = text(meta && meta.backend).toLowerCase();
     if (backend === "codex" || backend === "internal" || backend === "coding") {

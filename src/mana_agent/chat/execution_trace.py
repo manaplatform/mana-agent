@@ -285,6 +285,11 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
     } or et.startswith(("context.", "budget.", "cost.")):
         return "context", "Context preparation"
 
+    # Coding research shares the active coding box, even when its underlying
+    # tool is web_search. General search remains in Main Activity.
+    if et.startswith("investigation.coding_research."):
+        return "coding", "Coding research"
+
     # Search
     if (
         et in {"search_started", "search_completed", "search_failed", "search"}
@@ -390,6 +395,9 @@ def classify_activity_category(
     et = str(event_type or "").strip().lower()
     tool = str(tool_name or meta.get("tool_name") or meta.get("name") or "").strip()
     backend = str(meta.get("backend") or "").strip().lower()
+
+    if et.startswith("investigation.coding_research."):
+        return "coding"
 
     if backend in {"codex", "internal", "coding"} and not et.startswith(("turn.", "routing", "model")):
         return "coding"

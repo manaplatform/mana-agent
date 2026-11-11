@@ -306,6 +306,8 @@ class CodexCodingBackend:
                         state_hash,
                         task.task_id,
                     )
+                    if task.context.get("coding_research_resume"):
+                        raise CodexExecutionError("Coding research continuation requires its original Codex thread")
                     thread_response = await self._client.request("thread/start", self._thread_params(workspace))
                     thread_id = _response_id(thread_response, "thread")
                     if not thread_id:
@@ -330,6 +332,8 @@ class CodexCodingBackend:
                             {"threadId": self.resume_thread_id, **self._thread_params(workspace)},
                         )
                     except CodexThreadStateMissingError as exc:
+                        if task.context.get("coding_research_resume"):
+                            raise CodexExecutionError("Coding research continuation lost its original thread; reconcile before resuming") from exc
                         stale_thread_id = self.resume_thread_id
                         logger.warning(
                             "codex_thread.recovery session_id=%s repository_id=%s thread_id=%s client_generation=%s session_state_hash=%s task_id=%s stale_thread=%s operation=recovery error=%s; recovering with fresh thread",
@@ -389,6 +393,8 @@ class CodexCodingBackend:
                             if self.session_id:
                                 save_codex_session_thread(self.repository_id, self.session_id, thread_id)
                         except CodexThreadStateMissingError as missing_exc:
+                            if task.context.get("coding_research_resume"):
+                                raise CodexExecutionError("Coding research continuation lost its original thread; reconcile before resuming") from missing_exc
                             stale_thread_id = self.resume_thread_id
                             logger.warning(
                                 "codex_thread.recovery session_id=%s repository_id=%s thread_id=%s client_generation=%s session_state_hash=%s task_id=%s stale_thread=%s operation=recovery error=%s; recovering with fresh thread after restart",

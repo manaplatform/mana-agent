@@ -349,6 +349,20 @@ class AutonomousExecutionController:
         return BatchTaskLoop(self.batch_manager, supervisor=self.supervisor, config=self.config,
                              attempt_id=attempt_id, lease_token=lease_token).advance(**kwargs)
 
+    def coding_research_runtime(self, *, task_id: str, root: Path, attempt_id: str,
+                                lease_token: str, authorize: Any = None, evaluator: Any = None,
+                                backend: str = "coding", **kwargs: Any) -> Any:
+        """Share the coding research step across gateway and autonomous runners."""
+        from mana_agent.coding.research import CodingResearchRuntime
+        return CodingResearchRuntime(
+            task_id=task_id, root=root, supervisor=self.supervisor, taskboard=self.taskboard,
+            attempt_id=attempt_id, lease_token=lease_token,
+            evaluator=evaluator or self.evaluator, authorize=authorize, backend=backend,
+            max_tool_calls=self.config.max_tool_calls, max_model_turns=self.config.max_model_turns,
+            max_no_progress_cycles=self.config.max_no_progress_cycles,
+            **kwargs,
+        )
+
     def pending_steering(
         self,
         task_id: str,
@@ -466,6 +480,21 @@ class AutonomousExecutionController:
             tb_task.supervisor_state = task.state.value
             tb_task.supervisor_state_version = task.state_version
             self.taskboard.save()
+
+        saved_research = task.provider_metadata.get("coding_research")
+        if saved_research:
+            coding_runtime = self.coding_research_runtime(
+                task_id=task_id, root=Path(workspace_root or ctx.get("repository_root") or "."),
+                attempt_id=active_attempt_id or "", lease_token=active_lease_token,
+                authorize=ctx.get("coding_research_authorizer"),
+            )
+            ctx["_coding_research_runtime"] = coding_runtime
+            saved_delivery = coding_runtime.state.get("delivery")
+            if saved_delivery:
+                ctx["_coding_research_delivery"] = {"continuation_id": saved_delivery["id"], "context": saved_delivery["context"]}
+                ctx["coding_research_context"] = saved_delivery["context"]
+            else:
+                ctx["_coding_research_recovered_result"] = coding_runtime.state.get("coding_result")
 
         metrics = initial_metrics or TaskExecutionMetrics(
             task_id=task_id,
@@ -681,8 +710,17 @@ class AutonomousExecutionController:
             step_t0 = time.perf_counter()
             try:
                 try:
-                    raw_step_result = runner(step_index, ctx)
+                    coding_runtime = ctx.get("_coding_research_runtime")
+                    coding_delivery = ctx.pop("_coding_research_delivery", None)
+                    recovered_result = coding_runtime.begin_delivery(coding_delivery["continuation_id"]) if coding_delivery else ctx.pop("_coding_research_recovered_result", None)
+                    raw_step_result = recovered_result if recovered_result is not None else runner(step_index, ctx)
+                    if coding_delivery and recovered_result is None:
+                        coding_runtime.acknowledge_delivery(coding_delivery["continuation_id"], raw_step_result if isinstance(raw_step_result, dict) else {"output": raw_step_result})
                 except TypeError:
+                    if coding_delivery:
+                        # A TypeError after a side effect is not permission to
+                        # invoke the coding runner a second time.
+                        raise
                     raw_step_result = runner(step_index)
                 step_result = raw_step_result if isinstance(raw_step_result, dict) else {"output": raw_step_result}
             except Exception as exc:
@@ -1062,7 +1100,31 @@ class AutonomousExecutionController:
                     logger.warning("Checkpoint after step %d failed: %s", step_index, cp_exc)
 
             # 9. Evaluate Semantic Continuation Decision
-            if self.evaluator is None:
+            if step_result.get("debugging_report") or ctx.get("_coding_research_runtime") is not None or normalize_strategy(strategy_hint) == "coding":
+                def account_coding_boundary(current: TaskRecord) -> None:
+                    self.supervisor._validate_lease(current, attempt_id=active_attempt_id or "", lease_token=active_lease_token)
+                    current.autonomous_model_turns = max(current.autonomous_model_turns, metrics.model_turns)
+                    current.autonomous_tool_calls = max(current.autonomous_tool_calls, metrics.tool_calls)
+                self.supervisor.store.update_task(task_id, account_coding_boundary)
+                coding_runtime = ctx.get("_coding_research_runtime")
+                if coding_runtime is None:
+                    coding_runtime = self.coding_research_runtime(
+                        task_id=task_id, root=Path(workspace_root or ctx.get("repository_root") or "."),
+                        attempt_id=active_attempt_id or "", lease_token=active_lease_token,
+                        authorize=ctx.get("coding_research_authorizer"), backend=step_result.get("backend", "coding"),
+                    )
+                    ctx["_coding_research_runtime"] = coding_runtime
+                coding_runtime.max_model_turns = effective_max_turns
+                coding_runtime.max_tool_calls = effective_max_tools
+                decision = coding_runtime.decide(goal=user_goal, result=step_result)
+                accounted_task = self.supervisor.get_task(task_id)
+                metrics.model_turns = max(metrics.model_turns, accounted_task.autonomous_model_turns)
+                metrics.tool_calls = max(metrics.tool_calls, accounted_task.autonomous_tool_calls)
+                delivery = coding_runtime.prepare_delivery(decision, step_result)
+                if delivery:
+                    ctx["_coding_research_delivery"] = delivery
+                    ctx["coding_research_context"] = delivery["context"]
+            elif self.evaluator is None:
                 tb_task = self.taskboard.get_task(task_id) if self.taskboard is not None else None
                 tb_status = getattr(tb_task, "status", None)
                 if tb_status in {TaskStatus.BLOCKED, "blocked"}:

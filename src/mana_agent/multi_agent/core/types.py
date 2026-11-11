@@ -240,6 +240,7 @@ class TaskBoardItem:
     aggregate_progress: str = ""
     crossed_off: bool = False
     evidence: list[str] = field(default_factory=list)
+    coding_research_state: dict[str, Any] = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     # Explicit implementation-to-runtime contract. Empty values preserve

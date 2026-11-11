@@ -15,6 +15,76 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def coding_research_case(tmp_path):
+    """An isolated, leased task with fake model/provider boundaries; no network."""
+    from types import SimpleNamespace
+    from mana_agent.coding.research import CodingResearchRuntime
+    from mana_agent.execution.continuation_evaluator import ContinuationEvaluator
+    from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+    from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+    from mana_agent.search.models import SearchResult
+    from mana_agent.search.router import SearchRouterResult
+
+    goal = "Resolve dependency initialization error"
+    board = TaskBoard(tmp_path / "board")
+    item = board.create_task(title=goal, user_request=goal, owner_agent_id="coding-worker")
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig(root=tmp_path / "supervisor", startup_recovery=False))
+    supervisor.create_task(task_id=item.task_id, routing_decision_id="research-test", requested_operation="coding", normalized_intent=goal)
+    supervisor.queue(item.task_id)
+    task, lease = supervisor.acquire_lease(item.task_id, owner="test-worker")
+    supervisor.start(item.task_id, attempt_id=task.attempt_id, lease_token=lease)
+
+    class Model:
+        def __init__(self):
+            self.responses, self.calls = [], []
+
+        def invoke(self, messages):
+            self.calls.append(messages)
+            response = self.responses.pop(0)
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+    class Router:
+        def __init__(self):
+            self.calls = []
+            self.results = [SearchResult(source_type="web", title="Upstream migration guide", url="https://docs.example.org/migration",
+                                         summary="Version 2 changed the initialization signature.")]
+            self.warnings = []
+
+        def run(self, **kwargs):
+            self.calls.append(kwargs)
+            return SearchRouterResult(decision=kwargs["decision_override"], results=self.results, warnings=self.warnings)
+
+    model, router = Model(), Router()
+    settings = SimpleNamespace(mana_coding_research_enabled=True, mana_coding_research_max_searches=12,
+                               mana_coding_research_max_rounds=4, mana_search_enable_web=True,
+                               mana_search_enable_github=True, mana_web_search_provider="custom",
+                               mana_web_search_endpoint="https://search.example.org/api")
+
+    def runtime(**kwargs):
+        return CodingResearchRuntime(task_id=item.task_id, root=tmp_path, supervisor=supervisor, taskboard=board,
+            attempt_id=task.attempt_id, lease_token=lease, evaluator=ContinuationEvaluator(model),
+            settings=settings, router=router, authorize=kwargs.pop("authorize", lambda tool: None), **kwargs)
+
+    def decision(action="CONTINUE", **kwargs):
+        return {"task_id": item.task_id, "action": action, "goal_satisfied": action == "FINALIZE",
+                "progress_detected": True, "safe_to_continue": action != "BLOCKED",
+                "evidence_summary": "Observed coding evidence", "reason": "Need external version evidence",
+                "remaining_work": "Continue the existing investigation", **kwargs}
+
+    report = {"unresolved_error": "WidgetInitError in widget 2.0", "local_evidence": ["Read the initializer and installed package metadata"],
+              "attempted_fixes": [], "dependency_versions": {"widget": "2.0"}, "runtime_environment": {"python": "3.12"},
+              "missing_external_information": "Which initializer signature is supported?"}
+    plan = {"objective": "Check widget 2.0 initialization", "queries": [{"target": "web", "query": "widget 2.0 WidgetInitError",
+             "purpose": "Check upstream behavior", "expected_value": "Version-specific migration evidence"}]}
+    return SimpleNamespace(runtime=runtime, model=model, router=router, settings=settings, supervisor=supervisor,
+                           board=board, item=item, task=task, lease=lease, goal=goal, report=report,
+                           plan=plan, decision=decision, result={"status": "waiting", "debugging_report": report, "backend": "internal"})
+
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 

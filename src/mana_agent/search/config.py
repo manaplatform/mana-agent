@@ -103,8 +103,8 @@ class SearchConfig:
         return not self.web_search_configuration_error
 
     @classmethod
-    def from_env(cls) -> "SearchConfig":
-        settings = _settings()
+    def from_env(cls, *, settings: Settings | None = None) -> "SearchConfig":
+        settings = settings if settings is not None else _settings()
         github_source = _str_config(settings, "mana_github_credential_source", "disabled")
         github_ref = _str_config(settings, "mana_github_secret_ref")
         github_token = _str_config(settings, "mana_github_token")

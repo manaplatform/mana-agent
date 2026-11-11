@@ -152,6 +152,17 @@ class GitHubSearchProvider:
             stars = item.get("stargazers_count")
             updated_at = item.get("updated_at")
             fork = bool(item.get("fork", False))
+        elif kind == "issues":
+            # Issue-search responses have no repository object and use title/body,
+            # not code-search name/text_matches. Retain real upstream provenance.
+            url = str(item.get("html_url") or "")
+            segments = urllib.parse.urlparse(url).path.strip("/").split("/")
+            repo = "/".join(segments[:2]) if len(segments) >= 2 else None
+            title = item.get("title") or "GitHub issue"
+            snippet = item.get("body") or ""
+            stars = None
+            updated_at = item.get("updated_at")
+            fork = False
         else:
             repo_obj = item.get("repository") or {}
             repo = repo_obj.get("full_name")
@@ -177,7 +188,13 @@ class GitHubSearchProvider:
             stars=int(stars) if isinstance(stars, int) else None,
             updated_at=str(updated_at) if updated_at else None,
             confidence=confidence,
-            metadata={"fork": fork, "kind": kind},
+            published_at=str(item.get("created_at") or "") or None,
+            metadata={"fork": fork, "kind": kind, **({
+                "issue_body": str(item.get("body") or "")[:12000],
+                "issue_state": item.get("state"),
+                "is_pull_request": bool(item.get("pull_request")),
+                "author_association": item.get("author_association"),
+            } if kind == "issues" else {})},
         )
 
 

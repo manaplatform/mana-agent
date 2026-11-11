@@ -21,6 +21,9 @@ class DummySettings:
     coding_search_budget = 4
     coding_read_budget = 6
     coding_require_read_files = 2
+    mana_coding_research_enabled = False
+    mana_coding_research_max_searches = 12
+    mana_coding_research_max_rounds = 4
 
 
 class _AskServiceWithAgent:

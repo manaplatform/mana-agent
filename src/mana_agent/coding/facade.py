@@ -172,13 +172,16 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
 
         coding_task = CodingTask(
             task_id=task_id,
-            goal=request,
+            goal=str(kwargs.get("coding_original_goal") or request),
             allowed_files=allowed_files,
             requires_repository_write=True,
             execution_policy=policy,
             execution_mode="batch" if policy.required else "auto",
             relevant_context=str(kwargs.get("relevant_context") or ""),
             context={"batch_resume": kwargs.get("batch_resume") or {},
+                     "coding_resume_context": kwargs.get("coding_resume_context") or {},
+                     "coding_research_context": kwargs.get("coding_research_context") or {},
+                     "coding_continuation_id": kwargs.get("coding_continuation_id") or "",
                      "conversation_context_in_request": bool(kwargs.get("conversation_context_in_request"))},
         )
         workspace = WorkspaceContext(
@@ -229,6 +232,8 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             "status": res.status,
             "pending_operation": res.pending_operation.model_dump(mode="json") if res.pending_operation else None,
             "human_input": res.human_input,
+            "debugging_report": res.debugging_report.model_dump(mode="json") if res.debugging_report else None,
+            "continuation_context": res.continuation_context,
             "goal_satisfied": False if res.status == "waiting" else None,
             "changed_files": res.changed_files,
             "commands_run": res.commands_run,
@@ -240,6 +245,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             "backend": "internal",
             "run_id": task_id,
             "flow_id": self._active_flow_id,
+            "workspace_path": str(workspace.worktree_path),
         }
 
 

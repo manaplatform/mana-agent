@@ -18,6 +18,7 @@ from mana_agent.integrations.codex.text_cleanup import (
     looks_like_freeform_tool_garbage,
     sanitize_assistant_visible_text,
 )
+from mana_agent.coding_research_contracts import parse_debugging_envelope
 
 
 # Codex item types that indicate a repository mutation was attempted.
@@ -196,6 +197,18 @@ def parse_codex_result(
     if test_failures:
         warnings.append("Test command failed: " + ", ".join(test_failures))
 
+    debugging_report = None
+    if status == "completed":
+        try:
+            _summary, debugging_report = parse_debugging_envelope(agent_message_text)
+        except ValueError:
+            status = "failed"
+            errors.append("CODING_DEBUGGING_REPORT_INVALID")
+        if debugging_report is not None:
+            # A cooperative yield is pending work, not a successful write or a
+            # mutation failure that should trigger the shim's forced retry.
+            status = "waiting"
+
     # Write-required turns that finish "successfully" with no repository diff are
     # not complete. Mutation success is repository state, not agentMessage prose.
     if (
@@ -258,7 +271,7 @@ def parse_codex_result(
         worker_claimed_at=worker_claimed_at,
         provider_started_at=provider_started_at,
         provider_completed_at=provider_completed_at,
-        task_completed_at=task_completed_at,
+        task_completed_at=None if debugging_report is not None else task_completed_at,
     )
     codex_meta = {
         "interruption_reason": interruption_reason,
@@ -299,9 +312,11 @@ def parse_codex_result(
         worker_claimed_at=worker_claimed_at,
         provider_started_at=provider_started_at,
         provider_completed_at=provider_completed_at,
-        task_completed_at=task_completed_at,
+        task_completed_at=None if debugging_report is not None else task_completed_at,
         duration_breakdown=calculated_breakdown,
         codex_metadata=codex_meta,
+        debugging_report=debugging_report,
+        continuation_context={"coding_continuation_id": task.context.get("coding_continuation_id", "")},
     )
 
 

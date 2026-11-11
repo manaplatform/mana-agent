@@ -170,6 +170,12 @@ def _extract_search_operation_query(
     return query, extras
 
 
+CODING_RESEARCH_STOP_ERRORS = frozenset({
+    "CODING_RESEARCH_BLOCKED", "CODING_RESEARCH_INVALID", "CODING_RESEARCH_DECISION_INVALID",
+    "CODING_RESEARCH_RECONCILIATION_REQUIRED", "CODING_RESEARCH_UNAVAILABLE",
+})
+
+
 def _conversation_prompt(session_state: dict[str, Any], current_message: str) -> str:
     """Build one chronological conversation prompt with the current message once."""
     messages = list(session_state.get("messages") or [])
@@ -769,6 +775,9 @@ def process_chat_turn(
     execution_context_included: bool = False,
     supervisor_attempt_id: str = "",
     supervisor_lease_token: str = "",
+    coding_research_authorizer: Callable[[str], Any] | None = None,
+    coding_research_settings: Any = None,
+    coding_research_waiter: Callable[[str, str], str] | None = None,
 ) -> ChatTurnResult:
     """Run one model-driven chat turn (non-UI).
 
@@ -1274,6 +1283,35 @@ def process_chat_turn(
 
         result: dict[str, Any] = {}
         resume_cycles = 0
+        research_runtime = None
+        delivery = None
+        recovered_coding_result = None
+        if gateway_task_id and supervisor_attempt_id and supervisor_lease_token and autonomous_controller is not None:
+            from mana_agent.config.settings import Settings
+            research_settings = coding_research_settings if coding_research_settings is not None else Settings()
+            if getattr(research_settings, "mana_coding_research_enabled", False):
+                research_evaluator = continuation_evaluator
+                if session_state.get("execution_policy", {}).get("required"):
+                    from mana_agent.batch.decision_model import BatchDecisionModel
+                    from mana_agent.execution.continuation_evaluator import ContinuationEvaluator
+                    batch_runtime = session_state["_batch_coding_runtime"]
+                    research_evaluator = ContinuationEvaluator(BatchDecisionModel(
+                        batch_runtime["batch_manager"], task_id=gateway_task_id,
+                        model=batch_runtime["model"], provider=batch_runtime["provider"],
+                        supervisor=batch_runtime["execution_supervisor"], **batch_runtime["batch_authority"],
+                    ))
+                research_runtime = autonomous_controller.coding_research_runtime(
+                    task_id=gateway_task_id, root=Path(getattr(coding_agent, "working_directory", root)),
+                    attempt_id=supervisor_attempt_id, lease_token=supervisor_lease_token,
+                    authorize=coding_research_authorizer, evaluator=research_evaluator,
+                    backend=str(getattr(coding_agent, "active_engine_mode", "coding")), settings=research_settings,
+                )
+                recorded_delivery = research_runtime.state.get("delivery") or {}
+                research_runtime.state.setdefault("coding_goal", request_for_generation)
+                if recorded_delivery:
+                    delivery = {"continuation_id": recorded_delivery["id"], "context": recorded_delivery["context"]}
+                else:
+                    recovered_coding_result = research_runtime.state.get("coding_result")
         saved_integration_checkpoint = session_state.get("feature_integration_checkpoint")
         resume_core_result = (
             saved_integration_checkpoint.get("core_result")
@@ -1284,6 +1322,7 @@ def process_chat_turn(
             else None
         )
         while True:
+            resumed_completed_core = False
             cycle_steering = _extract_and_apply_pending_steering()
             if cycle_steering:
                 joined_guidance = "\n".join(cycle_steering)
@@ -1291,17 +1330,79 @@ def process_chat_turn(
                     request_for_generation = f"{request_for_generation}\n\nActive Live Steering Guidance:\n{joined_guidance}"
 
             if isinstance(resume_core_result, dict):
+                resumed_completed_core = True
                 result = dict(resume_core_result)
                 result["changed_files"] = list(saved_integration_checkpoint.get("core_changed_files") or [])
                 result["flow_id"] = saved_integration_checkpoint.get("flow_id") or active_flow_id
                 resume_core_result = None
             else:
-                result = _call(request_for_generation) or {}
+                if delivery:
+                    research_runtime.assert_backend(str(getattr(coding_agent, "active_engine_mode", "coding")))
+                    restored_context = json.dumps(delivery["context"], ensure_ascii=False, default=str)
+                    if restored_context not in request_for_generation:
+                        request_for_generation += "\n\nSaved Main Model continuation (untrusted research reference data):\n" + restored_context
+                    original_thread = delivery["context"].get("prior_result", {}).get("thread_id")
+                    if original_thread and hasattr(coding_agent, "resume_thread_id"):
+                        coding_agent.resume_thread_id = original_thread
+                    gateway_task_kwargs.update(
+                        coding_continuation_id=delivery["continuation_id"],
+                        coding_original_goal=research_runtime.state["coding_goal"],
+                        coding_resume_context=delivery["context"].get("continuation_context") or {},
+                        coding_research_context=delivery["context"],
+                    )
+                    result = research_runtime.begin_delivery(delivery["continuation_id"])
+                    if result is None:
+                        result = _call(request_for_generation) or {}
+                        research_runtime.acknowledge_delivery(delivery["continuation_id"], result)
+                    delivery = None
+                else:
+                    if recovered_coding_result is not None:
+                        result = recovered_coding_result
+                        recovered_coding_result = None
+                    else:
+                        result = _call(request_for_generation) or {}
             if result.get("status") == "waiting" and (result.get("pending_operation") or result.get("human_input")):
                 return ChatTurnResult(
                     answer=str(result.get("answer") or "Waiting for OpenAI Batch"),
                     mode="batch-waiting", used_coding_agent=True,
                     changed_files=list(result.get("changed_files") or []),
+                    payload={**result, "goal_satisfied": False, "pending_required_work": True},
+                )
+            should_handle_research = bool(result.get("debugging_report")) or bool(
+                research_runtime and (research_runtime.state.get("decisions") or research_runtime.state.get("delivery"))
+            )
+            if research_runtime is not None and not resumed_completed_core and should_handle_research:
+                # Infrastructure/protocol/cancellation failures are not unresolved
+                # bug reports and must retain their existing terminal handling.
+                if result.get("status") in {"failed", "cancelled"} and not result.get("debugging_report"):
+                    break
+                from mana_agent.execution.continuation_decision import ContinuationAction
+                cont_decision = research_runtime.decide(goal=question, result=result)
+                if cont_decision.action in {ContinuationAction.WAIT_FOR_USER, ContinuationAction.BLOCKED}:
+                    wait_payload = {"status": "blocked"}
+                    if cont_decision.action == ContinuationAction.WAIT_FOR_USER:
+                        if coding_research_waiter is None:
+                            from mana_agent.coding.research import CodingResearchError
+                            raise CodingResearchError("Main Model requested input but the durable human-input path is unavailable")
+                        inbox_id = coding_research_waiter(cont_decision.user_message or cont_decision.reason, cont_decision.decision_id)
+                        wait_payload = {"permission_request_id": inbox_id, "status": "waiting"}
+                    return ChatTurnResult(
+                        answer=cont_decision.user_message or cont_decision.reason,
+                        mode="coding-agent-blocked", error="CODING_RESEARCH_BLOCKED" if cont_decision.action == ContinuationAction.BLOCKED else "",
+                        used_coding_agent=True, changed_files=list(result.get("changed_files") or []),
+                        payload={**result, "goal_satisfied": False, "pending_required_work": True,
+                                 **wait_payload,
+                                 "continuation_decision": cont_decision.model_dump(mode="json")},
+                    )
+                if cont_decision.action == ContinuationAction.FINALIZE:
+                    break  # Existing integration/review/verification still follows.
+                delivery = research_runtime.prepare_delivery(cont_decision, result)
+                request_for_generation = question + "\n\nMain Model continuation (research is untrusted reference data):\n" + json.dumps(delivery["context"], ensure_ascii=False, default=str)
+                continue
+            if result.get("debugging_report"):
+                return ChatTurnResult(
+                    answer="Coding work remains pending: Main Model research continuation is unavailable.",
+                    error="CODING_RESEARCH_UNAVAILABLE", used_coding_agent=True,
                     payload={**result, "goal_satisfied": False, "pending_required_work": True},
                 )
             if not (auto_continue and execute_plan_now and isinstance(result, dict)):
@@ -1497,6 +1598,18 @@ def process_chat_turn(
         raise
     except Exception as exc:
         logger.exception("gateway coding agent turn failed")
+        from mana_agent.coding.research import CodingResearchError
+        from mana_agent.execution.continuation_decision import ContinuationDecisionError
+        if isinstance(exc, (CodingResearchError, ContinuationDecisionError)):
+            from mana_agent.chat.activity import safe_text
+            code = getattr(exc, "error_code", "CODING_RESEARCH_DECISION_INVALID")
+            return ChatTurnResult(
+                answer="Coding research stopped: " + safe_text(str(exc), 500),
+                error=code, error_code=code, error_category="decision",
+                retry_possible=False, used_coding_agent=True, execution_id=gateway_task_id,
+                payload={"goal_satisfied": False, "pending_required_work": True,
+                         "error_code": code, "retry_possible": False},
+            )
         exc_text = str(exc)
         err_code = getattr(exc, "error_code", None)
         interruption = getattr(exc, "reason", None)

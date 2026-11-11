@@ -10,8 +10,10 @@ from mana_agent.execution.continuation_decision import (
     ContinuationAction,
     ContinuationDecision,
     ContinuationDecisionError,
+    CodingContinuationDecision,
 )
 from mana_agent.utils.text import extract_model_text
+from mana_agent.batch.policy import BatchPending
 
 
 _CONTINUATION_PROMPT = """You are Mana-Agent's authoritative semantic continuation evaluator.
@@ -56,8 +58,12 @@ Critical Rules:
 """
 
 
-def _coerce_continuation_decision(response: Any, task_id: str = "") -> ContinuationDecision:
+def _coerce_continuation_decision(response: Any, task_id: str = "", *, strict: bool = False) -> ContinuationDecision:
     if isinstance(response, ContinuationDecision):
+        if strict:
+            _validate_explicit_coding_decision(response.model_dump(), response.model_fields_set, task_id)
+            if response.task_id in {"task_id", ""}:
+                object.__setattr__(response, "task_id", task_id)
         return response
     if isinstance(response, dict):
         payload = dict(response)
@@ -71,6 +77,10 @@ def _coerce_continuation_decision(response: Any, task_id: str = "") -> Continuat
             text = text[start : end + 1]
         data = json.loads(text)
         payload = dict(data) if isinstance(data, dict) else {}
+
+    if strict:
+        _validate_explicit_coding_decision(payload, set(payload), task_id)
+        return ContinuationDecision.model_validate(payload)
 
     if not payload.get("task_id") and task_id:
         payload["task_id"] = task_id
@@ -102,6 +112,20 @@ def _coerce_continuation_decision(response: Any, task_id: str = "") -> Continuat
     return ContinuationDecision.model_validate(payload)
 
 
+def _validate_explicit_coding_decision(payload: dict[str, Any], fields: set[str], task_id: str) -> None:
+    required = {"task_id", "action", "goal_satisfied", "progress_detected", "evidence_summary", "safe_to_continue", "reason"}
+    missing = required - fields
+    if missing or fields - set(ContinuationDecision.model_fields):
+        raise ValueError(f"Coding continuation requires explicit schema fields; missing={sorted(missing)}")
+    if payload.get("task_id") in {"task_id", ""}:
+        payload["task_id"] = task_id
+    elif payload.get("task_id") != task_id:
+        raise ValueError("Coding continuation selected a different task")
+    for key in ("goal_satisfied", "progress_detected", "safe_to_continue"):
+        if type(payload[key]) is not bool:
+            raise ValueError(f"Coding continuation {key} must be a boolean")
+
+
 class ContinuationEvaluator:
     """Evaluates task progress and produces validated ContinuationDecision."""
 
@@ -120,6 +144,7 @@ class ContinuationEvaluator:
         consecutive_no_progress_cycles: int = 0,
         independent_verification_status: str | None = None,
         taskboard_progress: dict[str, Any] | None = None,
+        coding_context: dict[str, Any] | None = None,
     ) -> ContinuationDecision:
         if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
             raise ContinuationDecisionError(
@@ -166,8 +191,14 @@ class ContinuationEvaluator:
                 ],
             }
 
+        system_prompt = _CONTINUATION_PROMPT
+        if coding_context is not None:
+            from mana_agent.coding_research_contracts import CODING_RESEARCH_DECISION_INSTRUCTION
+            system_prompt += "\n" + CODING_RESEARCH_DECISION_INSTRUCTION
+            payload["coding_context"] = coding_context
+
         messages = [
-            SystemMessage(content=_CONTINUATION_PROMPT),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
         ]
 
@@ -178,18 +209,25 @@ class ContinuationEvaluator:
             if callable(structured):
                 try:
                     response = structured(
-                        ContinuationDecision, method="json_schema", strict=True
+                        CodingContinuationDecision if coding_context is not None else ContinuationDecision,
+                        method="json_schema", strict=True
                     ).invoke(messages)
+                except BatchPending:
+                    raise
                 except Exception as exc:
+                    if coding_context is not None:
+                        raise
                     structured_error = exc
 
             if response is None:
+                if coding_context is not None and callable(structured):
+                    raise ValueError("Main Model returned an empty structured coding decision")
                 response = self.llm.invoke(messages)
 
             try:
-                decision = _coerce_continuation_decision(response, task_id=task_id)
+                decision = _coerce_continuation_decision(response, task_id=task_id, strict=coding_context is not None)
             except Exception as coerce_exc:
-                if callable(structured) and structured_error is None:
+                if coding_context is None and callable(structured) and structured_error is None:
                     direct_response = self.llm.invoke(messages)
                     decision = _coerce_continuation_decision(direct_response, task_id=task_id)
                 else:
@@ -211,7 +249,18 @@ class ContinuationEvaluator:
                     raise ValueError("continuation decision selected a different task")
             return decision
 
+        except BatchPending:
+            raise
         except Exception as exc:
+            if coding_context is not None:
+                # Validation exceptions can embed the rejected raw model payload.
+                # Keep actionable field/type diagnostics without echoing secrets.
+                details = type(exc).__name__
+                if isinstance(exc, ValueError) and str(exc).startswith(("Coding continuation", "Main Model returned")):
+                    details = str(exc)
+                if callable(getattr(exc, "errors", None)):
+                    details = "; ".join(f"{'.'.join(map(str, error['loc']))}: {error['type']}" for error in exc.errors(include_input=False, include_context=False))
+                raise ContinuationDecisionError("Main Model coding continuation decision is invalid: " + details) from None
             raise ContinuationDecisionError(
                 f"Model decision failed: continuation_decision. Reason: {exc}"
             ) from exc
