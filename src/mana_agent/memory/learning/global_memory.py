@@ -86,8 +86,8 @@ class GlobalMemory:
                 logger.debug("Skipping non-meaningful or transient error: %s", analysis.get("reason"))
                 return None
 
-            cat = category if isinstance(category, LearningCategory) else LearningCategory(category)
-            scp = scope if isinstance(scope, LearningScope) else LearningScope(scope)
+            cat = category if isinstance(category, LearningCategory) else LearningCategory(str(category).upper())
+            scp = scope if isinstance(scope, LearningScope) else LearningScope(str(scope).upper())
             proj_id = project_id or self.default_project_id
             env_fp = environment_fingerprint or self.default_environment_fingerprint
             sig = analysis.get("failure_signature")

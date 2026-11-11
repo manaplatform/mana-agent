@@ -420,6 +420,12 @@ class LaneCoordinator:
             execution.supervisor_lease_token = ""
             execution.updated_at = _iso()
             self._persist_locked()
+        if execution.state is LaneTaskState.RUNNING:
+            self.transition(
+                task_id,
+                LaneTaskState.WAITING,
+                reason=f"waiting for approval inbox item {inbox_item_id}",
+            )
         self.transition(task_id, LaneTaskState.QUEUED, reason="durable human response received")
         self._dispatch_human_resume(
             task_id,

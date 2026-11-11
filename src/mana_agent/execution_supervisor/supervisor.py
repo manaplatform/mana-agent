@@ -1301,7 +1301,9 @@ class ExecutionSupervisor:
         def resume(task: TaskRecord) -> None:
             if task.attempt_id != attempt_id:
                 raise StaleLeaseError("attempt no longer owns the task")
-            if task.state == ExecutionState.WAITING:
+            if task.waiting_inbox_item_id:
+                raise LeaseConflictError("task is waiting for human inbox response")
+            if task.state in {ExecutionState.WAITING, ExecutionState.QUEUED}:
                 # Re-acquire lease for the resuming attempt since it was released while waiting
                 task.lease_owner = task.lease_owner or f"resumed:{attempt_id}"
                 task.lease_token = _token_hash(lease_token)
@@ -1311,10 +1313,13 @@ class ExecutionSupervisor:
             if task.state == ExecutionState.RUNNING:
                 task.heartbeat_at = task.updated_at = self.clock()
                 return
-            if task.state not in {ExecutionState.LEASED, ExecutionState.WAITING}:
+            if task.state not in {ExecutionState.LEASED, ExecutionState.WAITING, ExecutionState.QUEUED}:
                 raise LeaseConflictError(
                     f"task cannot resume its active attempt from state {task.state.value}"
                 )
+            if task.state == ExecutionState.QUEUED:
+                validate_transition(task.state, ExecutionState.LEASED)
+                task.state = ExecutionState.LEASED
             validate_transition(task.state, ExecutionState.RUNNING)
             task.state = ExecutionState.RUNNING
             task.heartbeat_at = task.updated_at = self.clock()

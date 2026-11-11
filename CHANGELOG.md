@@ -14,6 +14,19 @@ All notable repository changes should be recorded here.
   - Gateway & CLI Settings: safely access `mana_coding_research_enabled` using `getattr` across gateway route capability setup and provide research defaults on dummy CLI settings doubles.
 - User-owned verification: `venv/bin/python -m pytest tests/coding/test_bug_research.py tests/gateway/test_coding_bug_research.py tests/execution/test_coding_research_recovery.py -q`; compatibility: `venv/bin/python -m pytest tests/test_search_router.py tests/test_coding_engine_modes.py tests/test_activity_stream_integration.py tests/gateway/test_checkpoint_resume_invariants.py tests/test_cli_smoke.py tests/test_multi_agent_core.py -q`; dashboard: `node --test tests/dashboard/live_chat_reducer.test.mjs`. Live provider/Codex/Batch/UI acceptance is unverified. Changes are local; no commit, publication or deployment is implied.
 
+## 0.11.0 — 2026-11-11
+
+- Release metadata: bump the package version to 0.11.0 in `pyproject.toml` and generated distribution metadata.
+- Fix & Resilience: resolve `INTERNAL_EXECUTION_FAILED` on human approval resumption during active turns:
+  - Branch Controller Binding: bind `default_human_inbox_service` to active `LaneCoordinator` or `ActivityContext` branch controller instead of instantiating an isolated unlinked supervisor.
+  - Supervisor Attempt Resumption: enable `ExecutionSupervisor.resume_running` to transition `QUEUED` tasks back to `RUNNING` for active attempts, while preventing resumption when a task is waiting for a human inbox response (`task.waiting_inbox_item_id`).
+  - Activity Context Publication: fence `ActivityContext.publication()` to avoid resuming tasks waiting for human input, preventing premature lease reactivation before human approval delivery.
+  - Tool Runner Execution: skip `supervisor.update_action` when a tool operation is suspended awaiting approval (`status == "waiting_approval"`), avoiding spurious `StaleLeaseError` on suspended branch leases.
+  - Lane Coordinator Transitions: enforce running lane tasks transition through `WAITING` before `QUEUED` in `resume_from_human_input`.
+  - Transactional Action Resumption: prioritize shell/command approval handling in `AgentChatGateway.respond_to_transactional_action_command` with direct lane reservation startup.
+  - Regression Coverage: added `test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease` in `tests/coding/test_approval_binding_regressions.py`.
+- User-owned verification: `venv/bin/python -m pytest tests/coding/test_approval_binding_regressions.py -v`; `venv/bin/python -m pytest tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_gateway.py -v`.
+
 ## 0.10.0 — 2026-11-09
 
 - Release metadata: update the package version in `pyproject.toml` from 0.9.2 to 0.10.0.

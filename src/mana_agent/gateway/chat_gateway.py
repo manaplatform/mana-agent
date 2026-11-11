@@ -1152,8 +1152,11 @@ class AgentChatGateway:
         self._human_inbox_service = None
 
         def create_human_inbox_service():
+            from mana_agent.human_inbox import set_default_branch_controller
+            coordinator = getattr(self, "_lane_coordinator", None)
+            set_default_branch_controller(coordinator)
             service = default_human_inbox_service(
-                branch_controller=getattr(self, "_lane_coordinator", None),
+                branch_controller=coordinator,
             )
             service.notification_adapters.append(ChatHistoryNotificationAdapter())
             return service
@@ -3530,6 +3533,26 @@ class AgentChatGateway:
             else:
                 raise ValueError(f"action is in non-approvable state: {action.state.value}")
 
+        if action.tool_name in {"shell", "run_command", "run_script_once"}:
+            if (
+                hasattr(self._lane_coordinator, "inspect_task")
+                and self._lane_coordinator.inspect_task(item.task_id).state == LaneTaskState.QUEUED
+            ):
+                try:
+                    self._lane_coordinator.start(
+                        LaneReservation(self._lane_coordinator.inspect_task(item.task_id))
+                    )
+                except Exception:
+                    pass
+            return {
+                "status": "approved",
+                "inbox_item_id": inbox_item_id,
+                "action_id": action.action_id,
+                "approval_id": grant.approval_id if grant is not None else "",
+                "result": {},
+                "message": f"Exact {action.tool_name} action approved once. {action.tool_name.capitalize()} execution is proceeding.",
+            }
+
         if item.checkpoint_id and action.parent_task_id == item.task_id:
             return {
                 "status": "approved",
@@ -3538,16 +3561,6 @@ class AgentChatGateway:
                 "approval_id": grant.approval_id if grant is not None else "",
                 "result": {},
                 "message": "Exact action approved once. The matching durable branch is resuming the stored action.",
-            }
-
-        if action.tool_name == "shell":
-            return {
-                "status": "approved",
-                "inbox_item_id": inbox_item_id,
-                "action_id": action.action_id,
-                "approval_id": grant.approval_id if grant is not None else "",
-                "result": {},
-                "message": "Exact shell action approved once. Shell execution is proceeding.",
             }
 
         if action.tool_name == "mcp":
@@ -10190,7 +10203,8 @@ class AgentChatGateway:
                         _activity_registry=getattr(self, "_execution_registry", None),
                         _activity_taskboard=getattr(self._lane_coordinator, "taskboard", None),
                         _activity_authorize=lambda name: self._lane_coordinator.authorize_tool(lane_task_id, name),
-                        _activity_lane=str(getattr(execution, "owning_lane", "")), **kwargs)
+                        _activity_lane=str(getattr(execution, "owning_lane", "")),
+                        _activity_coordinator=self._lane_coordinator, **kwargs)
                 return self._execute_entry_route_bound(**kwargs)
             finally:
                 kwargs["state"].pop("_batch_coding_runtime", None)
@@ -11143,6 +11157,7 @@ class AgentChatGateway:
                 _activity_taskboard=self._lane_coordinator.taskboard,
                 _activity_authorize=(lambda name: self._lane_coordinator.authorize_tool(lane_task_id, name)) if lane_task_id else None,
                 _activity_lane=str(getattr(lane_execution, "owning_lane", "")) if lane_task_id else "",
+                _activity_coordinator=self._lane_coordinator,
                 root=self.root,
                 text=execution_text,
                 execution_context_included=execution_context_included,

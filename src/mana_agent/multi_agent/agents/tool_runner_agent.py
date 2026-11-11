@@ -455,12 +455,23 @@ class ToolRunnerAgent:
         supervisor = getattr(context, "supervisor", None)
         action = None
         if supervisor is not None and policy.effect != "read_only":
-            action = supervisor.prepare_action(request.task_id, attempt_id=request.attempt_id,
-                lease_token=context.lease_token, tool_name=request.tool_name,
+            attempt_id = request.attempt_id
+            lease_token = context.lease_token
+            coordinator = getattr(context, "coordinator", None)
+            if coordinator is not None and hasattr(coordinator, "inspect_task"):
+                try:
+                    lane_exec = coordinator.inspect_task(request.task_id)
+                    if lane_exec and lane_exec.supervisor_attempt_id and lane_exec.supervisor_lease_token:
+                        attempt_id = lane_exec.supervisor_attempt_id
+                        lease_token = lane_exec.supervisor_lease_token
+                except Exception:
+                    pass
+            action = supervisor.prepare_action(request.task_id, attempt_id=attempt_id,
+                lease_token=lease_token, tool_name=request.tool_name,
                 action_fingerprint=fingerprint, classification=SideEffectClassification.UNKNOWN,
                 idempotency_key=request.tool_call_id)
             supervisor.update_action(action.action_id, request_state=ActionRequestState.STARTED,
-                attempt_id=request.attempt_id, lease_token=context.lease_token)
+                attempt_id=attempt_id, lease_token=lease_token)
         before = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if policy.effect in {"mutation", "command"} else {}
         operation.emit("tool.started")
         raw: dict[str, Any]
@@ -517,7 +528,7 @@ class ToolRunnerAgent:
             termination_reason=str(raw.get("error") or "") if status != "success" else "",
             mutations=mutations, retained_bytes=operation.retained_bytes, omitted_bytes=operation.omitted_bytes,
             trace_complete=operation.trace_complete)
-        if action is not None:
+        if action is not None and status != "waiting_approval":
             supervisor.update_action(action.action_id,
                 attempt_id=request.attempt_id, lease_token=context.lease_token,
                 request_state=ActionRequestState.SUCCEEDED if status == "success" else ActionRequestState.OUTCOME_UNKNOWN if status in {"cancelled", "timed_out", "interrupted"} or mutations else ActionRequestState.FAILED,
