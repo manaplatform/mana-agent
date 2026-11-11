@@ -315,11 +315,34 @@ def test_anthropic_model_refresh_uses_versioned_catalog_endpoint(
     models = fetch_provider_models(
         provider="anthropic",
         base_url=base_url,
-        api_key=[REDACTED],
+        api_key="x",
     )
 
     assert requests == [expected_url]
     assert models == [{"id": "claude-sonnet-4-5", "type": "model"}]
+
+
+def test_anthropic_catalog_models_are_available_as_agent_models() -> None:
+    """Fetched Claude models must not be dropped by capability filtering."""
+    descriptors = descriptors_from_catalog(
+        "anthropic",
+        [
+            {"id": "claude-sonnet-4-5", "type": "model"},
+            {"id": "claude-future-model", "type": "model"},
+        ],
+    )
+
+    assert [item.id for item in filter_models(descriptors, ModelPurpose.AGENT)] == [
+        "claude-future-model",
+        "claude-sonnet-4-5",
+    ]
+    assert normalize_capabilities("anthropic", "unknown-model") == frozenset()
+    assert normalize_capabilities("anthropic", "claude-embed-v1") == frozenset(
+        {ModelCapability.EMBEDDING}
+    )
+    assert normalize_capabilities(
+        "anthropic", "claude-sonnet-4-5", [ModelCapability.EMBEDDING]
+    ) == frozenset({ModelCapability.EMBEDDING})
 
 
 def test_anthropic_model_detail_uses_versioned_catalog_endpoint(
@@ -340,7 +363,7 @@ def test_anthropic_model_detail_uses_versioned_catalog_endpoint(
     detail = fetch_provider_model_detail(
         provider="anthropic",
         base_url="https://api.anthropic.com/v1",
-        api_key=[REDACTED],
+        api_key="x",
         model_id="claude-sonnet-4-5",
     )
 
@@ -367,7 +390,7 @@ def test_anthropic_404_message_does_not_give_openai_base_url_advice(
         fetch_provider_models(
             provider="anthropic",
             base_url="https://api.anthropic.com",
-            api_key=[REDACTED],
+            api_key="x",
         )
 
     message = str(exc_info.value)
@@ -486,6 +509,58 @@ def test_tui_successful_test_populates_all_capability_dropdowns(monkeypatch: pyt
             assert any(val == "tts-1" for _, val in voice_select._options)
 
     asyncio.run(run())
+
+
+def test_tui_anthropic_provider_test_populates_agent_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the key test from the HTTP response through to the selectors."""
+    requests: list[Any] = []
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps({
+        "data": [
+            {"id": "claude-sonnet-4-5", "type": "model", "capabilities": {"image_input": {"supported": True}}},
+            {"id": "claude-future-model", "type": "model", "capabilities": {"image_input": {"supported": False}}},
+        ],
+        "has_more": False,
+    }).encode()
+
+    def fetch(request: Any, **_kwargs: Any) -> MagicMock:
+        requests.append(request)
+        return response
+
+    monkeypatch.setattr("urllib.request.urlopen", fetch)
+    monkeypatch.setattr("mana_agent.config.catalog_service.save_model_cache", lambda *_args: None)
+    draft = ConfigurationDraft(
+        original={"MANA_AI_PROVIDER": "anthropic"},
+        values={"MANA_AI_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "test-key"},
+    )
+    app = ManaConfigurationApp(draft=draft)
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            from textual.widgets import Button
+
+            button = app.query_one("#test-provider", Button)
+            await app.on_button_pressed(Button.Pressed(button))
+            await pilot.pause()
+
+            assert "Connected · 2 agent" in str(app.query_one("#provider-status").renderable)
+            by_id = {model.id: model for model in app._models}
+            assert ModelCapability.IMAGE_INPUT in by_id["claude-sonnet-4-5"].capabilities
+            assert ModelCapability.IMAGE_INPUT not in by_id["claude-future-model"].capabilities
+            for selector in ("#high-model", "#coding-model", "#fast-model"):
+                options = app.query_one(selector)._options
+                assert {value for _, value in options} >= {
+                    "claude-sonnet-4-5",
+                    "claude-future-model",
+                }
+
+    asyncio.run(run())
+    assert len(requests) == 1
+    assert requests[0].full_url == "https://api.anthropic.com/v1/models"
+    assert requests[0].get_header("X-api-key") == "test-key"
+    assert requests[0].get_header("Anthropic-version") == "2023-06-01"
 
 
 def test_tui_gracefully_handles_zero_models_for_capability(monkeypatch: pytest.MonkeyPatch) -> None:

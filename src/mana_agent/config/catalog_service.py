@@ -134,7 +134,7 @@ class ModelCatalogService:
                 )
                 if detail and isinstance(detail, dict):
                     extracted = extract_capabilities_from_record(detail)
-                    caps = normalize_capabilities(p_lower, target, extracted or detail.get("capabilities"))
+                    caps = normalize_capabilities(p_lower, target, extracted)
                     if caps:
                         return ModelDescriptor(
                             provider=p_lower,

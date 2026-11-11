@@ -718,3 +718,49 @@ def test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease(tm
             _activity_lease_token=lease_token,
         )
 
+
+@pytest.mark.asyncio
+async def test_internal_engine_suspends_cleanly_when_waiting_for_approval_without_internal_error(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CodingTask, WorkspaceContext
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    inbox = default_human_inbox_service()
+    gateway = default_action_gateway(tmp_path)
+    gateway.inbox_service = inbox
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+
+    class MockModelWithTools:
+        def __init__(self):
+            self.turn = 0
+
+        async def ainvoke(self, messages):
+            self.turn += 1
+            if self.turn == 1:
+                return SimpleNamespace(
+                    content="",
+                    tool_calls=[{"name": "run_command", "args": {"command": "git clean -fd"}, "id": "call_clean_1"}],
+                )
+            return SimpleNamespace(content="Done", tool_calls=[])
+
+    engine = InternalCodingEngine(model="test")
+    monkeypatch.setattr(engine, "_get_or_create_llm", lambda: MockModelWithTools())
+
+    task = CodingTask(task_id="task-approval-wait-1", goal="cleanup repository")
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+
+    result = await engine.execute(task, workspace)
+    assert result.status == "waiting"
+    assert result.human_input
+    assert result.human_input.get("inbox_item_id")
+    assert "requires human approval" in result.summary
+

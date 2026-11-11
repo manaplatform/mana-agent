@@ -11,6 +11,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, Switch, TabbedContent, TabPane
+from textual.worker import WorkerFailed
 
 from mana_agent.config.catalog_service import (
     ModelCatalogService,
@@ -733,17 +734,43 @@ class ManaConfigurationApp(App[bool]):
             self._collect()
             status = self.query_one("#provider-status", Static)
             status.update("Testing…")
+
+            def capture_catalog_error(operation: Any) -> Any:
+                try:
+                    return operation()
+                except (
+                    ProviderAuthenticationFailedError,
+                    ProviderConnectionFailedError,
+                    ModelListFetchFailedError,
+                    ProviderValidationError,
+                ) as exc:
+                    return exc
+
             try:
                 models = await self.run_worker(
-                    lambda: self.catalog_service.refresh(
+                    lambda: capture_catalog_error(lambda: self.catalog_service.refresh(
                         provider=str(self.draft.values["MANA_AI_PROVIDER"]),
                         base_url=self._provider_base_url(self.draft.values, str(self.draft.values["MANA_AI_PROVIDER"])),
                         api_key=self._provider_api_key(self.draft.values, str(self.draft.values["MANA_AI_PROVIDER"])),
                         timeout_seconds=int(self.draft.values.get("MANA_SEARCH_TIMEOUT_SECONDS") or 15),
-                    ),
+                    )),
                     thread=True,
                     exclusive=True,
                 ).wait()
+            except WorkerFailed as worker_exc:
+                exc = worker_exc.error
+                self._provider_validated = False
+                if isinstance(exc, ProviderAuthenticationFailedError):
+                    status.update(f"Authentication failed: {exc}")
+                elif isinstance(exc, ProviderConnectionFailedError):
+                    status.update(f"Provider connection failed: {exc}")
+                elif isinstance(exc, ModelListFetchFailedError):
+                    status.update(f"Model-list fetch failed: {exc}")
+                elif isinstance(exc, ProviderValidationError):
+                    status.update(f"Validation failed: {exc}")
+                else:
+                    raise
+                return
             except ProviderAuthenticationFailedError as exc:
                 self._provider_validated = False
                 status.update(f"Authentication failed: {exc}")
@@ -760,6 +787,17 @@ class ManaConfigurationApp(App[bool]):
                 self._provider_validated = False
                 status.update(f"Validation failed: {exc}")
                 return
+            for error_type, label in (
+                (ProviderAuthenticationFailedError, "Authentication failed"),
+                (ProviderConnectionFailedError, "Provider connection failed"),
+                (ModelListFetchFailedError, "Model-list fetch failed"),
+                (ProviderValidationError, "Validation failed"),
+            ):
+                if isinstance(models, error_type):
+                    self._provider_validated = False
+                    status.update(f"{label}: {models}")
+                    return
+
             self._models = models
             self._provider_validated = True
             text_models = filter_models(models, ModelPurpose.AGENT)

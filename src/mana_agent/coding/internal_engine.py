@@ -23,6 +23,38 @@ from typing import Any
 
 from mana_agent.coding.engine import CodingEngine
 from mana_agent.batch.policy import BatchPending, BatchHumanInput
+
+
+class ActionApprovalPending(Exception):
+    """Raised when an internal coding action requires human approval."""
+
+    def __init__(self, action_id: str, inbox_item_id: str, message: str = ""):
+        super().__init__(message or f"Action {action_id} requires human approval.")
+        self.action_id = action_id
+        self.inbox_item_id = inbox_item_id
+
+
+def _check_action_approval(output_str: str) -> None:
+    if not output_str or not isinstance(output_str, str):
+        return
+    if (
+        "awaiting_approval" not in output_str
+        and "permission_required" not in output_str
+        and "waiting_approval" not in output_str
+    ):
+        return
+    try:
+        data = json.loads(output_str)
+    except Exception:
+        return
+    if isinstance(data, dict) and (
+        data.get("permission_required") or data.get("status") in {"awaiting_approval", "waiting_approval"}
+    ):
+        raise ActionApprovalPending(
+            action_id=str(data.get("action_id") or ""),
+            inbox_item_id=str(data.get("inbox_item_id") or ""),
+            message=str(data.get("error") or "Command requires human approval."),
+        )
 from mana_agent.coding.live_events import (
     coding_event_scope,
     coding_execution_context,
@@ -379,6 +411,14 @@ class InternalCodingEngine(CodingEngine):
                 if debugging_report is not None:
                     status = "waiting"
 
+            except ActionApprovalPending as pending:
+                status = "waiting"
+                final_summary = str(pending)
+                human_input = {
+                    "question": str(pending),
+                    "inbox_item_id": pending.inbox_item_id,
+                    "action_id": pending.action_id,
+                }
             except BatchHumanInput as pending:
                 status = "waiting"
                 final_summary = str(pending)
@@ -740,6 +780,7 @@ class InternalCodingEngine(CodingEngine):
                     res_entry = turn_results.get(call_id)
                     output_str = res_entry.get("output", "") if res_entry else json.dumps({"ok": False, "error": "Not executed"})
                     messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+                    _check_action_approval(output_str)
 
                 # Checkpoint with supervisor if present
                 if self.execution_supervisor is not None and hasattr(self.execution_supervisor, "record_action"):
@@ -817,6 +858,7 @@ class InternalCodingEngine(CodingEngine):
                     output_str = fn_output.get("output", "")
 
                     messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+                    _check_action_approval(output_str)
 
                     if session.state.tool_calls_executed >= session.state.max_tool_calls:
                         renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(

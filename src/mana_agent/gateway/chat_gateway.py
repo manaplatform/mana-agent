@@ -1093,6 +1093,8 @@ class AgentChatGateway:
         ctx = gw.get_rich_context(sid)
     """
 
+    _lane_coordinator: Any = None
+
     def __init__(
         self,
         root: str | Path,
@@ -3533,15 +3535,18 @@ class AgentChatGateway:
             else:
                 raise ValueError(f"action is in non-approvable state: {action.state.value}")
 
+        coordinator = getattr(self, "_lane_coordinator", None)
         if action.tool_name in {"shell", "run_command", "run_script_once"}:
             if (
-                hasattr(self._lane_coordinator, "inspect_task")
-                and self._lane_coordinator.inspect_task(item.task_id).state == LaneTaskState.QUEUED
+                coordinator is not None
+                and hasattr(coordinator, "inspect_task")
             ):
                 try:
-                    self._lane_coordinator.start(
-                        LaneReservation(self._lane_coordinator.inspect_task(item.task_id))
-                    )
+                    task_exec = coordinator.inspect_task(item.task_id)
+                    if task_exec and getattr(task_exec, "state", None) == LaneTaskState.QUEUED:
+                        coordinator.start(
+                            LaneReservation(task_exec)
+                        )
                 except Exception:
                     pass
             return {

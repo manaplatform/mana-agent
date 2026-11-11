@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -478,6 +479,42 @@ class ToolExecutionDispatcher:
             try:
                 safe_outcome = action_runtime.execute(safe_adapter, approval_id=approval_id)
             except ApprovalRequired as pending:
+                is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
+                timeout = float(os.environ.get("MANA_APPROVAL_TIMEOUT", "120.0" if not is_test_env else "0.01"))
+                wait_for_approval = getattr(self, "wait_for_approval", True)
+                if wait_for_approval and timeout > 0:
+                    from mana_agent.human_inbox import default_human_inbox_service
+                    from mana_agent.human_inbox.models import InboxStatus
+                    gateway = default_action_gateway(self.repo_root)
+                    inbox_service = gateway.inbox_service or default_human_inbox_service()
+                    inbox_item_id = pending.inbox_item_id or pending.action.inbox_item_id
+                    start_time = time.monotonic()
+                    poll_interval = 0.25
+                    while time.monotonic() - start_time < timeout:
+                        if inbox_item_id:
+                            item = inbox_service.repository.get(inbox_item_id)
+                            if item is not None and item.status == InboxStatus.APPROVED:
+                                grant = gateway.grant_for_approved_inbox(pending.action, item)
+                                safe_outcome = action_runtime.execute(safe_adapter, approval_id=grant.approval_id)
+                                return {
+                                    "ok": safe_outcome.action.state.value == "committed",
+                                    **safe_outcome.result,
+                                    "action_id": safe_outcome.action.action_id,
+                                }
+                            elif item is not None and item.status in {
+                                InboxStatus.DENIED,
+                                InboxStatus.CANCELLED,
+                                InboxStatus.SUPERSEDED,
+                                InboxStatus.EXPIRED,
+                            }:
+                                return {
+                                    "ok": False,
+                                    "approved": False,
+                                    "status": "denied",
+                                    "error": f"Command approval {item.status.value}.",
+                                    "action_id": pending.action.action_id,
+                                }
+                        time.sleep(poll_interval)
                 return {"ok": False, "approved": False, "status": "awaiting_approval",
                         "permission_required": True, "error": "Command requires human approval.",
                         "inbox_item_id": pending.inbox_item_id, "action_id": pending.action.action_id,

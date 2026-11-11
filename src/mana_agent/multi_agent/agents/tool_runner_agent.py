@@ -388,7 +388,12 @@ class ToolRunnerAgent:
             raise ExecutionAuthorityError("Tool request belongs to another execution attempt")
         validate_arguments(request.arguments, a.schemas.get(request.tool_name, {"type": "object"}))
         if a.authorize is not None:
-            a.authorize(request.tool_name)
+            try:
+                a.authorize(request.tool_name)
+            except ExecutionAuthorityError:
+                raise
+            except Exception as exc:
+                raise ExecutionAuthorityError(str(exc)) from exc
         if policy.effect == "command" and request.tool_name in {"git", "git_generic"}:
             from mana_agent.multi_agent.tools.git_tools import classify_git_risk
             arguments = request.arguments.get("args")
