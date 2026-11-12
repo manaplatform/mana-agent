@@ -471,9 +471,16 @@ class ToolRunnerAgent:
                         lease_token = lane_exec.supervisor_lease_token
                 except Exception:
                     pass
+            classification = (
+                SideEffectClassification.READ_ONLY
+                if policy.effect == "read_only"
+                else SideEffectClassification.NON_IDEMPOTENT
+                if policy.effect == "external"
+                else SideEffectClassification.IDEMPOTENT
+            )
             action = supervisor.prepare_action(request.task_id, attempt_id=attempt_id,
                 lease_token=lease_token, tool_name=request.tool_name,
-                action_fingerprint=fingerprint, classification=SideEffectClassification.UNKNOWN,
+                action_fingerprint=fingerprint, classification=classification,
                 idempotency_key=request.tool_call_id)
             supervisor.update_action(action.action_id, request_state=ActionRequestState.STARTED,
                 attempt_id=attempt_id, lease_token=lease_token)
@@ -535,7 +542,7 @@ class ToolRunnerAgent:
             trace_complete=operation.trace_complete)
         if action is not None and status != "waiting_approval":
             supervisor.update_action(action.action_id,
-                attempt_id=request.attempt_id, lease_token=context.lease_token,
+                attempt_id=attempt_id, lease_token=lease_token,
                 request_state=ActionRequestState.SUCCEEDED if status == "success" else ActionRequestState.OUTCOME_UNKNOWN if status in {"cancelled", "timed_out", "interrupted"} or mutations else ActionRequestState.FAILED,
                 result_reference=next((item["reference"] for item in operation.references.get("result", []) if item["reference"]), ""),
                 verification_state={"operation_attempt_id": request.operation_attempt_id, "status": status})

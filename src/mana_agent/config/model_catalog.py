@@ -129,7 +129,16 @@ _MAINTAINED_TOKEN_LIMITS: dict[str, tuple[int, int]] = {
     "o3": (200_000, 100_000),
     "o3-mini": (200_000, 100_000),
     "o4-mini": (200_000, 100_000),
-    # x-AI Grok 4.6 (500k context window)
+    # x-AI Grok models
+    "grok-4": (500_000, 65_536),
+    "grok-4.6": (500_000, 65_536),
+    "grok-3": (500_000, 65_536),
+    "grok-3-mini": (500_000, 65_536),
+    "grok-2": (128_000, 8_192),
+    "grok-2-1212": (128_000, 8_192),
+    "grok-2-vision-1212": (128_000, 8_192),
+    "grok-beta": (128_000, 8_192),
+    "grok-vision-beta": (128_000, 8_192),
     "x-ai/grok-4.6": (500_000, 65_536),
     # NVIDIA NIM / integrate.api DeepSeek V4 (1M context; max_tokens soft cap 65_536).
     "deepseek-ai/deepseek-v4-flash": (1_000_000, 65_536),
@@ -163,7 +172,7 @@ def maintained_token_limits(provider: str, model_id: str) -> tuple[int, int] | N
         return (1_050_000, 128_000)
     if provider_id == "openai" and (lowered.startswith("gpt-6") or "astra" in lowered):
         return (1_050_000, 128_000)
-    if "grok" in lowered or "x-ai" in lowered:
+    if "grok" in lowered or "x-ai" in lowered or provider_id in {"xai", "x-ai"}:
         return (500_000, 65_536)
     if "claude" in lowered or provider_id == "anthropic":
         return (200_000, 16_384)
@@ -222,6 +231,89 @@ _MAINTAINED: dict[str, frozenset[ModelCapability]] = {
     "text-embedding-3-large": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/nv-embedqa-e5-v5": frozenset({ModelCapability.EMBEDDING}),
     "nvidia/llama-3.2-nv-embedqa-1b-v2": frozenset({ModelCapability.EMBEDDING}),
+    "grok-4": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-4.6": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-3": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-3-mini": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-2": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-2-1212": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-2-vision-1212": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-beta": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
+    "grok-vision-beta": frozenset(
+        {
+            ModelCapability.TEXT_GENERATION,
+            ModelCapability.REASONING,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.CODE,
+            ModelCapability.IMAGE_INPUT,
+            ModelCapability.STRUCTURED_OUTPUT,
+        }
+    ),
     "x-ai/grok-4.6": frozenset(
         {
             ModelCapability.TEXT_GENERATION,
@@ -479,6 +571,8 @@ def normalize_capabilities(
     model = str(model_id or "").strip()
     lowered = model.lower()
     provider_id = str(provider or "").strip().lower()
+    if provider_id in {"x-ai", "grok"}:
+        provider_id = "xai"
 
     if lowered.startswith("gpt-image-"):
         return frozenset({ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDITING})
@@ -516,16 +610,19 @@ def normalize_capabilities(
     # text family without classifying arbitrary Anthropic IDs as text models.
     if provider_id == "anthropic" and lowered.startswith("claude-"):
         return frozenset({ModelCapability.TEXT_GENERATION})
+    if provider_id in {"xai", "x-ai", "openrouter"}:
+        if "grok" in lowered or provider_id in {"xai", "x-ai"}:
+            caps_set = {
+                ModelCapability.TEXT_GENERATION,
+                ModelCapability.REASONING,
+                ModelCapability.CODE,
+                ModelCapability.TOOL_CALLING,
+                ModelCapability.STRUCTURED_OUTPUT,
+            }
+            if any(marker in lowered for marker in ("vision", "image")):
+                caps_set.add(ModelCapability.IMAGE_INPUT)
+            return frozenset(caps_set)
     if provider_id == "openrouter":
-        if "grok" in lowered:
-            return frozenset(
-                {
-                    ModelCapability.TEXT_GENERATION,
-                    ModelCapability.REASONING,
-                    ModelCapability.CODE,
-                    ModelCapability.TOOL_CALLING,
-                }
-            )
         if any(marker in lowered for marker in ("claude", "gpt-", "o1", "o3", "o4", "gemini", "deepseek", "qwen", "mistral", "llama")):
             caps_set = {
                 ModelCapability.TEXT_GENERATION,
@@ -555,6 +652,9 @@ def normalize_capabilities(
     # or reasoning capability solely because a model is an LLM; unknown models
     # remain unclassified and stay usable via Advanced/manual entry.
     text_family = (
+        provider_id in {"xai", "x-ai"}
+        and ("grok" in lowered or not lowered.startswith(("image-", "embed")))
+    ) or (
         provider_id == "openai"
         and (
             lowered.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-"))
@@ -976,6 +1076,9 @@ def extract_capabilities_from_record(item: dict[str, Any]) -> set[ModelCapabilit
 
 
 def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, Any]], *, source: str = "discovered") -> list[ModelDescriptor]:
+    p_norm = str(provider or "").strip().lower()
+    if p_norm in {"x-ai", "grok"}:
+        p_norm = "xai"
     result: list[ModelDescriptor] = []
     for record in records:
         if isinstance(record, str):
@@ -987,7 +1090,7 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
         if not model_id:
             continue
         extracted_caps = extract_capabilities_from_record(metadata)
-        capabilities = normalize_capabilities(provider, model_id, extracted_caps)
+        capabilities = normalize_capabilities(p_norm, model_id, extracted_caps)
         context_window = metadata.get("context_length") or metadata.get("context_window")
         max_output_tokens = metadata.get("max_output_tokens") or metadata.get("max_completion_tokens")
         try:
@@ -999,13 +1102,13 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
         except (TypeError, ValueError):
             max_output_tokens = None
         if context_window is None or max_output_tokens is None:
-            maintained = maintained_token_limits(provider, model_id)
+            maintained = maintained_token_limits(p_norm, model_id)
             if maintained is not None:
                 context_window = context_window or maintained[0]
                 max_output_tokens = max_output_tokens or maintained[1]
         available = _is_model_available(metadata)
         result.append(ModelDescriptor(
-            provider=provider,
+            provider=p_norm,
             id=model_id,
             capabilities=capabilities,
             context_window=context_window,
@@ -1042,3 +1145,71 @@ def search_models(
         or needle in model.provider.casefold()
         or needle in model.qualified_id.casefold()
     ]
+
+
+def maintained_models_for_provider(provider: str) -> list[ModelDescriptor]:
+    p_norm = str(provider or "").strip().lower()
+    if p_norm in {"x-ai", "grok"}:
+        p_norm = "xai"
+
+    candidates: list[str] = []
+    if p_norm == "xai":
+        candidates = [
+            "grok-4",
+            "grok-4.6",
+            "grok-3",
+            "grok-3-mini",
+            "grok-2",
+            "grok-2-1212",
+            "grok-2-vision-1212",
+            "grok-beta",
+            "grok-vision-beta",
+        ]
+    elif p_norm == "openai":
+        candidates = [
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-6-luna",
+            "o1",
+            "o3",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-4.5",
+            "text-embedding-3-small",
+            "text-embedding-3-large",
+        ]
+    elif p_norm == "anthropic":
+        candidates = [
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+        ]
+    elif p_norm == "nvidia":
+        candidates = [
+            "deepseek-ai/deepseek-v4-pro",
+            "deepseek-ai/deepseek-v4-flash",
+            "meta-llama/llama-3.3-70b-instruct",
+            "mistralai/mistral-large-2411",
+            "nvidia/nemotron-3-nano-30b-a3b",
+            "nvidia/nv-embedqa-e5-v5",
+            "nvidia/llama-3.2-nv-embedqa-1b-v2",
+        ]
+    elif p_norm == "openrouter":
+        candidates = [
+            "openrouter/auto",
+            "anthropic/claude-3.7-sonnet",
+            "deepseek/deepseek-r1",
+            "google/gemini-2.5-pro",
+            "google/gemini-2.5-flash",
+            "meta-llama/llama-3.3-70b-instruct",
+            "qwen/qwen-2.5-coder-32b-instruct",
+        ]
+    else:
+        candidates = [k for k in _MAINTAINED if k.startswith(f"{p_norm}/")]
+
+    return descriptors_from_catalog(p_norm, candidates, source="maintained")

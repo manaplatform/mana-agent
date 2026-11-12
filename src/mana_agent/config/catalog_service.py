@@ -48,31 +48,55 @@ class ModelCatalogService:
     ) -> list[ModelDescriptor]:
         if not api_key.strip():
             raise ProviderValidationError("Provider authentication is not configured.")
+        prov_norm = str(provider or "").strip().lower()
+        if prov_norm in {"x-ai", "grok"}:
+            prov_norm = "xai"
         try:
             fetch = self.fetcher
             if fetch is None:
                 from mana_agent.tui.model_picker import fetch_provider_models
 
                 fetch = fetch_provider_models
-            model_ids = fetch(provider=provider, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
+            model_ids = fetch(provider=prov_norm, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
         except ProviderValidationError:
             raise
         except Exception as exc:
             raise ProviderValidationError(str(exc)) from exc
-        save_model_cache(provider, base_url, model_ids)
+        save_model_cache(prov_norm, base_url, model_ids)
         try:
             from mana_agent.config.model_capabilities import clear_capability_cache
 
             clear_capability_cache()
         except Exception:
             pass
-        return descriptors_from_catalog(provider, model_ids, source="discovered")
+        return descriptors_from_catalog(prov_norm, model_ids, source="discovered")
 
     def cached(self, *, provider: str, base_url: str) -> list[ModelDescriptor]:
-        cached = load_model_cache(provider, base_url)
+        prov_norm = str(provider or "").strip().lower()
+        if prov_norm in {"x-ai", "grok"}:
+            prov_norm = "xai"
+        eff_base_url = str(base_url or "").strip()
+        if not eff_base_url:
+            try:
+                from mana_agent.config.provider_registry import PROVIDERS
+
+                eff_base_url = PROVIDERS.get(prov_norm).default_base_url
+            except Exception:
+                eff_base_url = ""
+        cached = load_model_cache(prov_norm, eff_base_url)
+        if cached is None and eff_base_url != base_url:
+            cached = load_model_cache(prov_norm, base_url)
         if cached is None:
             return []
-        return descriptors_from_catalog(provider, cached.models, source="cached")
+        return descriptors_from_catalog(prov_norm, cached.models, source="cached")
+
+    def cached_or_maintained(self, *, provider: str, base_url: str = "") -> list[ModelDescriptor]:
+        cached = self.cached(provider=provider, base_url=base_url)
+        if cached:
+            return cached
+        from mana_agent.config.model_catalog import maintained_models_for_provider
+
+        return maintained_models_for_provider(provider)
 
     def get_descriptor(
         self,
@@ -93,6 +117,8 @@ class ModelCatalogService:
         if not target:
             return None
         p_lower = str(provider or "").strip().lower()
+        if p_lower in {"x-ai", "grok"}:
+            p_lower = "xai"
 
         # Resolve credentials if not provided
         eff_base_url = base_url

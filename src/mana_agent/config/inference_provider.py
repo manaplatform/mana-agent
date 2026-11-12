@@ -64,7 +64,8 @@ def resolve_inference_connection(
         provider or getattr(settings, "mana_ai_provider", "openai") or "openai"
     ).strip().lower()
     definition = PROVIDERS.get(provider_id)
-    if provider_id == "openrouter":
+    canonical_provider = definition.id
+    if canonical_provider == "openrouter":
         api_key = str(getattr(settings, "openrouter_api_key", "") or "")
         base_url = str(
             getattr(settings, "openrouter_base_url", "") or definition.default_base_url
@@ -77,19 +78,19 @@ def resolve_inference_connection(
             }.items()
             if value
         }
-    elif provider_id == "nvidia":
+    elif canonical_provider == "nvidia":
         api_key = str(getattr(settings, "nvidia_api_key", "") or "")
         base_url = str(
             getattr(settings, "nvidia_base_url", "") or definition.default_base_url
         )
         headers = dict(definition.default_headers)
-    elif provider_id == "anthropic":
+    elif canonical_provider == "anthropic":
         api_key = str(getattr(settings, "anthropic_api_key", "") or "")
         base_url = str(
             getattr(settings, "anthropic_base_url", "") or definition.default_base_url
         )
         headers = dict(definition.default_headers)
-    elif provider_id == "xai":
+    elif canonical_provider == "xai":
         api_key = str(getattr(settings, "xai_api_key", "") or "")
         base_url = str(
             getattr(settings, "xai_base_url", "") or definition.default_base_url
@@ -107,7 +108,7 @@ def resolve_inference_connection(
             f"Set {definition.api_key_env}."
         )
     return InferenceConnection(
-        provider=provider_id,
+        provider=canonical_provider,
         display_name=definition.display_name,
         api_key=api_key,
         base_url=base_url.rstrip("/"),

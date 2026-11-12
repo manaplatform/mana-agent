@@ -581,7 +581,7 @@ def create_chat_model(
         configuration = kwargs.pop("model_configuration")
     api_mode, capabilities = resolve_model_capabilities(base_url=base_url, provider=provider)
     # Chat Completions-first OpenAI-compatible hosts force chat mode when auto.
-    if str(provider or "").strip().lower() in {"nvidia", "xai"} and api_mode == "auto":
+    if str(provider or "").strip().lower() in {"nvidia", "xai", "x-ai", "grok"} and api_mode == "auto":
         if not capabilities.supports_responses_api:
             api_mode = "chat_completions"
     resolved_provider = str(provider or "").strip().lower()

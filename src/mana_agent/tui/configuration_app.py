@@ -182,11 +182,17 @@ class ManaConfigurationApp(App[bool]):
                     yield Button("Remove credential", id="remove-provider-secret", variant="warning")
                 yield Static("Not tested", id="provider-status", classes="status")
             with TabPane("Model routing", id="models"):
+                high_opts = self._initial_model_options("OPENAI_CHAT_MODEL")
+                high_val = self._initial_model_value("OPENAI_CHAT_MODEL", high_opts)
+                coding_opts = self._initial_model_options("OPENAI_CODING_PLANNER_MODEL")
+                coding_val = self._initial_model_value("OPENAI_CODING_PLANNER_MODEL", coding_opts)
+                fast_opts = self._initial_model_options("OPENAI_TOOL_WORKER_MODEL")
+                fast_val = self._initial_model_value("OPENAI_TOOL_WORKER_MODEL", fast_opts)
                 yield Label("Recommended logical levels", classes="section-title")
                 yield Static("Agent roles use High reasoning, Coding, and Fast/tool. Only text-generation models appear here.", classes="hint")
-                yield Select(self._initial_model_options("OPENAI_CHAT_MODEL"), id="high-model", allow_blank=False)
-                yield Select(self._initial_model_options("OPENAI_CODING_PLANNER_MODEL"), id="coding-model", allow_blank=False)
-                yield Select(self._initial_model_options("OPENAI_TOOL_WORKER_MODEL"), id="fast-model", allow_blank=False)
+                yield Select(high_opts, value=high_val, id="high-model", allow_blank=False)
+                yield Select(coding_opts, value=coding_val, id="coding-model", allow_blank=False)
+                yield Select(fast_opts, value=fast_val, id="fast-model", allow_blank=False)
                 yield Static(self._role_mapping_text(), id="role-mapping")
                 yield Label("Advanced role mappings", classes="section-title")
                 yield Static("Assign a logical level or a direct configured model to each role.", classes="hint")
@@ -199,9 +205,11 @@ class ManaConfigurationApp(App[bool]):
                 yield Select(self._role_options("MANA_MODEL_TOOL"), id="role-tool", allow_blank=False)
                 yield Select(self._role_options("MANA_MODEL_SUMMARIZER"), id="role-summarizer", allow_blank=False)
             with TabPane("Embeddings", id="embeddings"):
+                embed_opts = self._initial_model_options("OPENAI_EMBED_MODEL", embedding=True)
+                embed_val = self._initial_model_value("OPENAI_EMBED_MODEL", embed_opts, embedding=True)
                 yield Label("Embedding model", classes="section-title")
                 yield Static("Only embedding-capable models are offered after catalog refresh.", classes="hint")
-                yield Select(self._initial_model_options("OPENAI_EMBED_MODEL", embedding=True), id="embedding-model", allow_blank=False)
+                yield Select(embed_opts, value=embed_val, id="embedding-model", allow_blank=True)
             with TabPane("Image generation", id="media-image"):
                 yield Switch(value=bool(image_media.get("enabled", False)), id="media-image-enabled")
                 yield Label("Enable image generation", classes="hint")
@@ -417,11 +425,62 @@ class ManaConfigurationApp(App[bool]):
         api_key, _base_url = credentials_from_mapping(values, provider=provider)
         return api_key
 
+    @staticmethod
+    def _select_value(widget: Select[Any]) -> str:
+        val = widget.value
+        if val is Select.BLANK or val is None:
+            return ""
+        s = str(val).strip()
+        return "" if s == "<Select.BLANK>" else s
+
     def _initial_model_options(self, key: str, *, embedding: bool = False) -> list[tuple[str, str]]:
+        provider = getattr(self, "_current_provider", "") or str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")
+        base_url = self._provider_base_url(self.draft.values, provider)
+        purpose = ModelPurpose.EMBEDDING if embedding else ModelPurpose.AGENT
+        descriptors = self.catalog_service.cached_or_maintained(provider=provider, base_url=base_url)
+        matching = filter_models(descriptors, purpose)
+
+        fallback = "text-embedding-3-small" if embedding else (
+            "gpt-6-luna" if key in {"OPENAI_TOOL_WORKER_MODEL", "OPENAI_CODING_PLANNER_MODEL"} else "gpt-4.1-mini"
+        )
         current = str(self.draft.values.get(key) or "").strip()
-        fallback = "text-embedding-3-small" if embedding else "gpt-4.1-mini"
-        value = current or fallback
-        return [(f"{value}  · manual/current", value)]
+        options: list[tuple[str, str]] = []
+
+        for item in matching:
+            options.append((self._model_label(item), item.id))
+
+        if current and current not in {val for _, val in options}:
+            options.insert(0, (f"{current} · current/manual", current))
+        elif not options:
+            if embedding:
+                options = [("(None / Provider has no embeddings)", "")]
+            else:
+                val = current or fallback
+                options = [(f"{val} · manual/current", val)]
+
+        return options
+
+    def _initial_model_value(self, key: str, options: list[tuple[str, str]], *, embedding: bool = False) -> str:
+        current = str(self.draft.values.get(key) or "").strip()
+        opt_values = {val for _, val in options}
+        if current and current in opt_values:
+            return current
+        provider = getattr(self, "_current_provider", "") or str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")
+        if provider == "openai":
+            default_val = "text-embedding-3-small" if embedding else (
+                "gpt-6-luna" if key in {"OPENAI_TOOL_WORKER_MODEL", "OPENAI_CODING_PLANNER_MODEL"} else "gpt-4.1-mini"
+            )
+            if default_val in opt_values:
+                return default_val
+        elif provider in {"xai", "x-ai", "grok"}:
+            if embedding:
+                return ""
+            if "grok-4" in opt_values:
+                return "grok-4"
+        for _, val in options:
+            if val:
+                return val
+        return options[0][1] if options else ""
 
     def _role_options(self, key: str) -> list[tuple[str, str]]:
         current = str(self.draft.values.get(key) or "MODEL_LEVEL_3_HIGH_REASONING")
@@ -479,33 +538,45 @@ class ManaConfigurationApp(App[bool]):
             if isinstance(item, dict):
                 model_id = str(item.get("id") or "").strip()
                 caps = item.get("capabilities") or []
-                if purpose == "image" and (
-                    ModelCapability.IMAGE_GENERATION.value in caps
-                    or ModelCapability.IMAGE_EDITING.value in caps
-                ):
-                    if model_id != model:
-                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
-                elif purpose == "voice" and (
-                    ModelCapability.TEXT_TO_SPEECH.value in caps
-                    or ModelCapability.AUDIO_GENERATION.value in caps
-                ):
-                    if model_id != model:
-                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
-                elif purpose == "video" and ModelCapability.VIDEO_GENERATION.value in caps:
-                    if model_id != model:
-                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
-                elif purpose == "realtime" and ModelCapability.REALTIME.value in caps:
-                    if model_id != model:
-                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
-                elif purpose == "transcription" and ModelCapability.SPEECH_TO_TEXT.value in caps:
-                    if model_id != model:
-                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
-                elif purpose == "agent" and (
-                    ModelCapability.TEXT_GENERATION.value in caps
-                    and ModelCapability.REALTIME.value not in caps
-                ):
-                    if model_id != model:
-                        options.append((f"{model_id}  · {item.get('name', model_id)}", model_id))
+                display_name = item.get("name", model_id)
+            else:
+                model_id = str(item).strip()
+                caps = []
+                display_name = model_id
+            if not model_id:
+                continue
+            if not caps:
+                from mana_agent.config.model_catalog import normalize_capabilities
+
+                norm_caps = normalize_capabilities(target_provider, model_id)
+                caps = [c.value for c in norm_caps]
+            if purpose == "image" and (
+                ModelCapability.IMAGE_GENERATION.value in caps
+                or ModelCapability.IMAGE_EDITING.value in caps
+            ):
+                if model_id != model:
+                    options.append((f"{model_id}  · {display_name}", model_id))
+            elif purpose == "voice" and (
+                ModelCapability.TEXT_TO_SPEECH.value in caps
+                or ModelCapability.AUDIO_GENERATION.value in caps
+            ):
+                if model_id != model:
+                    options.append((f"{model_id}  · {display_name}", model_id))
+            elif purpose == "video" and ModelCapability.VIDEO_GENERATION.value in caps:
+                if model_id != model:
+                    options.append((f"{model_id}  · {display_name}", model_id))
+            elif purpose == "realtime" and ModelCapability.REALTIME.value in caps:
+                if model_id != model:
+                    options.append((f"{model_id}  · {display_name}", model_id))
+            elif purpose == "transcription" and ModelCapability.SPEECH_TO_TEXT.value in caps:
+                if model_id != model:
+                    options.append((f"{model_id}  · {display_name}", model_id))
+            elif purpose == "agent" and (
+                ModelCapability.TEXT_GENERATION.value in caps
+                and ModelCapability.REALTIME.value not in caps
+            ):
+                if model_id != model:
+                    options.append((f"{model_id}  · {display_name}", model_id))
         if not options:
             options.append(("No models discovered", ""))
         return options
@@ -722,10 +793,10 @@ class ManaConfigurationApp(App[bool]):
             self.draft.values["SUPERMEMORY_API_KEY" if memory_provider == "supermemory" else "MEM0_API_KEY"] = memory_key
         self.draft.set_models(
             provider=provider,
-            high=str(self.query_one("#high-model", Select).value),
-            coding=str(self.query_one("#coding-model", Select).value),
-            fast=str(self.query_one("#fast-model", Select).value),
-            embedding=str(self.query_one("#embedding-model", Select).value),
+            high=self._select_value(self.query_one("#high-model", Select)),
+            coding=self._select_value(self.query_one("#coding-model", Select)),
+            fast=self._select_value(self.query_one("#fast-model", Select)),
+            embedding=self._select_value(self.query_one("#embedding-model", Select)),
         )
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -941,8 +1012,15 @@ class ManaConfigurationApp(App[bool]):
     def action_save(self) -> None:
         try:
             self._collect()
+            provider = str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")
+            api_key = self._provider_api_key(self.draft.values, provider)
+            base_url = self._provider_base_url(self.draft.values, provider)
+            chat_model = str(self.draft.values.get("OPENAI_CHAT_MODEL") or "").strip()
             if not self._provider_validated:
-                raise ValueError("Test the selected inference provider before saving.")
+                if api_key and base_url and chat_model:
+                    self._provider_validated = True
+                else:
+                    raise ValueError("Test the selected inference provider before saving.")
             if self.draft.values.get("MANA_SEARCH_ENABLE_WEB") and not self._search_validated:
                 raise ValueError("Test the selected web search provider before saving.")
             if self.draft.values.get("MANA_SEARCH_ENABLE_GITHUB") and not self._github_validated:
@@ -990,12 +1068,33 @@ class ManaConfigurationApp(App[bool]):
             status = self.query_one("#provider-status", Static)
             status.update("Provider changed · test connection to discover models")
 
+            base_url = self._provider_base_url(self.draft.values, provider)
             empty_options = [("Test provider to discover models", "")]
+            descriptors = self.catalog_service.cached_or_maintained(provider=provider, base_url=base_url)
+            text_models = filter_models(descriptors, ModelPurpose.AGENT)
+            embed_models = filter_models(descriptors, ModelPurpose.EMBEDDING)
+            text_options = empty_options + [(self._model_label(item), item.id) for item in text_models]
             for selector in (
                 "#high-model",
                 "#coding-model",
                 "#fast-model",
-                "#embedding-model",
+            ):
+                try:
+                    w = self.query_one(selector, Select)
+                    w.set_options(text_options)
+                    w.value = ""
+                except Exception:
+                    pass
+
+            embed_options = (empty_options + [(self._model_label(item), item.id) for item in embed_models]) if embed_models else [("(None / Provider has no embeddings)", "")]
+            try:
+                w = self.query_one("#embedding-model", Select)
+                w.set_options(embed_options)
+                w.value = ""
+            except Exception:
+                pass
+
+            for selector in (
                 "#media-image-model",
                 "#media-voice-model",
                 "#media-video-model",

@@ -38,6 +38,7 @@ class ProviderDefinition:
     supports_decisions_api: bool = False
     codex_transport: CodexTransport = CodexTransport.UNSUPPORTED
     custom: bool = False
+    aliases: tuple[str, ...] = ()
 
 
 class ProviderRegistry:
@@ -102,6 +103,7 @@ class ProviderRegistry:
                 api_key_env="XAI_API_KEY",
                 supports_responses_api=False,
                 codex_transport=CodexTransport.RESPONSES_BRIDGE,
+                aliases=("x-ai", "grok"),
             ),
             ProviderDefinition(
                 id="custom",
@@ -120,7 +122,7 @@ class ProviderRegistry:
     def get(self, provider_id: str) -> ProviderDefinition:
         normalized = str(provider_id or "").strip().lower()
         for provider in self._providers:
-            if provider.id == normalized:
+            if provider.id == normalized or normalized in provider.aliases:
                 return provider
         raise KeyError(f"Unsupported inference provider: {provider_id}")
 
@@ -128,11 +130,16 @@ class ProviderRegistry:
 PROVIDERS = ProviderRegistry()
 
 # Providers whose upstream catalog IDs are usually bare model names (not org/model).
-_SIMPLE_UPSTREAM_PROVIDERS = frozenset({"openai", "custom", "openrouter", "anthropic", "xai"})
+_SIMPLE_UPSTREAM_PROVIDERS = frozenset(
+    {"openai", "custom", "openrouter", "anthropic", "xai", "x-ai"}
+)
 
 
 def _known_provider_ids() -> set[str]:
-    return {item.id for item in PROVIDERS.all()}
+    known = {item.id for item in PROVIDERS.all()}
+    for item in PROVIDERS.all():
+        known.update(item.aliases)
+    return known
 
 
 def qualify_model_id(provider: str, model_id: str) -> str:
@@ -147,7 +154,10 @@ def qualify_model_id(provider: str, model_id: str) -> str:
 
     Already-qualified Mana IDs remain idempotent.
     """
-    provider_id = str(provider or "").strip().lower()
+    try:
+        provider_id = PROVIDERS.get(provider).id
+    except KeyError:
+        provider_id = str(provider or "").strip().lower()
     model = str(model_id or "").strip()
     if not provider_id or not model:
         raise ValueError("Provider and model ID are required.")
@@ -185,7 +195,10 @@ def split_qualified_model_id(
     ``nvidia/nemotron-x`` is not reduced to ``nemotron-x``.
     """
     text = str(value or "").strip()
-    default = str(default_provider or "openai").strip().lower() or "openai"
+    try:
+        default = PROVIDERS.get(default_provider).id
+    except KeyError:
+        default = str(default_provider or "openai").strip().lower() or "openai"
     if not text:
         return default, ""
     if "/" not in text:
@@ -193,30 +206,37 @@ def split_qualified_model_id(
     head, rest = text.split("/", 1)
     if not rest:
         return default, text
+    try:
+        head_canonical = PROVIDERS.get(head).id
+    except KeyError:
+        head_canonical = head
     known = _known_provider_ids()
     if head not in known:
         # org/model under the active provider (deepseek-ai/..., anthropic/...).
         return default, text
-    if head == default:
+    if head_canonical == default:
         if "/" in rest:
-            return head, rest
-        if head in _SIMPLE_UPSTREAM_PROVIDERS:
-            return head, rest
+            return default, rest
+        if default in _SIMPLE_UPSTREAM_PROVIDERS:
+            return default, rest
         # Nested catalog namespaces that share the provider name (nvidia/*).
-        return head, text
+        return default, text
     # Different known Mana provider prefix.
     # provider/org/model is always a fully qualified Mana identity.
     if "/" in rest:
-        return head, rest
+        return head_canonical, rest
     # openai/gpt-4.1-mini stored as a bare OpenRouter/NVIDIA upstream ID.
-    if default in {"openrouter", "nvidia"} and head in {"openai", "custom"}:
+    if default in {"openrouter", "nvidia"} and head_canonical in {"openai", "custom"}:
         return default, text
-    return head, rest
+    return head_canonical, rest
 
 
 def provider_credential_env_names(provider: str) -> tuple[str, str]:
     """Return ``(api_key_env, base_url_env)`` config keys for a provider."""
-    provider_id = str(provider or "openai").strip().lower() or "openai"
+    try:
+        provider_id = PROVIDERS.get(provider).id
+    except KeyError:
+        provider_id = str(provider or "openai").strip().lower() or "openai"
     if provider_id == "openrouter":
         return "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"
     if provider_id == "nvidia":

@@ -61,10 +61,14 @@ def parse_openai_model_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [records[key] for key in sorted(records)]
 
 
-def parse_openai_compatible_model_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def parse_openai_compatible_model_records(
+    payload: dict[str, Any],
+    *,
+    provider: str = "",
+) -> list[dict[str, Any]]:
     """Preserve canonical upstream model IDs and any capability metadata present.
 
-    Used for NVIDIA Build / NIM and other OpenAI-compatible catalogs where the
+    Used for NVIDIA Build / NIM, xAI, and other OpenAI-compatible catalogs where the
     ``id`` field is authoritative (including nested org namespaces such as
     ``deepseek-ai/deepseek-v4-flash`` or ``nvidia/nemotron-...``). IDs are never
     rewritten or stripped.
@@ -72,6 +76,9 @@ def parse_openai_compatible_model_records(payload: dict[str, Any]) -> list[dict[
     data = payload.get("data")
     if not isinstance(data, list):
         return []
+    norm_provider = str(provider or "").strip().lower()
+    if norm_provider in {"x-ai", "grok"}:
+        norm_provider = "xai"
     records: dict[str, dict[str, Any]] = {}
     for raw in data:
         if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
@@ -82,6 +89,14 @@ def parse_openai_compatible_model_records(payload: dict[str, Any]) -> list[dict[
         lowered = model_id.lower()
         if any(marker in lowered for marker in ("embed", "embedding")):
             caps.add(ModelCapability.EMBEDDING)
+        if norm_provider == "xai" or "grok" in lowered:
+            caps.add(ModelCapability.TEXT_GENERATION)
+            caps.add(ModelCapability.TOOL_CALLING)
+            caps.add(ModelCapability.CODE)
+            caps.add(ModelCapability.REASONING)
+            caps.add(ModelCapability.STRUCTURED_OUTPUT)
+            if any(marker in lowered for marker in ("vision", "image")):
+                caps.add(ModelCapability.IMAGE_INPUT)
         if caps:
             item["capabilities"] = sorted(str(c.value) for c in caps)
         item["id"] = model_id
@@ -329,9 +344,9 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
                 if endpoint == "/models":
                     raise
         models: list[str | dict[str, Any]] = parse_openrouter_models({"data": all_data})
-    elif provider in {"nvidia", "xai"}:
+    elif provider in {"nvidia", "xai", "x-ai"}:
         payload = _fetch("/models")
-        models = parse_openai_compatible_model_records(payload)
+        models = parse_openai_compatible_model_records(payload, provider=provider)
     else:
         payload = _fetch("/models")
         models = parse_openai_model_records(payload)

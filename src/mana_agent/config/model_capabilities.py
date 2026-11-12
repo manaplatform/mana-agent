@@ -103,6 +103,8 @@ def normalize_model_lookup_id(provider: str, model_id: str) -> str:
     be stripped to bare names or treated as OpenAI native models.
     """
     provider_id = str(provider or "").strip().lower()
+    if provider_id in {"x-ai", "grok"}:
+        provider_id = "xai"
     raw = str(model_id or "").strip()
     if not raw:
         return ""
@@ -110,7 +112,9 @@ def normalize_model_lookup_id(provider: str, model_id: str) -> str:
         if raw.lower().startswith("openrouter/"):
             raw = raw[len("openrouter/") :].strip()
         return raw
-    if raw.lower().startswith(f"{provider_id}/"):
+    if raw.lower().startswith(("xai/", "x-ai/")):
+        raw = raw.split("/", 1)[1].strip()
+    elif raw.lower().startswith(f"{provider_id}/"):
         raw = raw[len(f"{provider_id}/") :].strip()
     return raw
 
@@ -1112,6 +1116,36 @@ _MAINTAINED_DESCRIPTORS: dict[tuple[str, str, str], ModelCapabilityDescriptor] =
         capability_source="maintained",
         reasoning_policy=ReasoningEffortPolicy.DISABLED.value,
     ),
+    ("xai", "grok", "direct_responses"): ModelCapabilityDescriptor(
+        provider="xai",
+        model="grok",
+        transport="direct_responses",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+    ),
+    ("xai", "grok", "responses_bridge"): ModelCapabilityDescriptor(
+        provider="xai",
+        model="grok",
+        transport="responses_bridge",
+        supports_tool_calls=True,
+        supports_repository_read=True,
+        supports_repository_write=True,
+        supports_shell=True,
+        supports_structured_output=True,
+        supports_streaming=True,
+        supports_parallel_tools=True,
+        capability_confidence="high",
+        capability_source="maintained",
+        reasoning_policy=ReasoningEffortPolicy.OPTIONAL.value,
+    ),
 }
 
 
@@ -1155,6 +1189,8 @@ class ModelCapabilityRegistry:
     ) -> ModelCapabilityDescriptor:
         """Resolve authoritative capability descriptor for (provider, model, transport)."""
         provider_id = str(provider or "").strip().lower()
+        if provider_id in {"x-ai", "grok"}:
+            provider_id = "xai"
         normalized_model = normalize_model_lookup_id(provider_id, model)
         transport_id = resolve_transport_name(provider_id, transport)
         cache_key = (provider_id, normalized_model, transport_id)
@@ -1316,11 +1352,12 @@ class ModelCapabilityRegistry:
         supported_lower = {str(p).lower() for p in supported_params}
 
         # Check explicit tool calling capability from provider metadata
-        supports_tools = bool(
+        is_grok = provider in {"xai", "x-ai"} or "grok" in model.lower()
+        supports_tools = is_grok or bool(
             supported_lower & {"tools", "tool_choice", "parallel_tool_calls"}
         )
-        supports_parallel = "parallel_tool_calls" in supported_lower
-        supports_structured = bool(
+        supports_parallel = is_grok or ("parallel_tool_calls" in supported_lower)
+        supports_structured = is_grok or bool(
             supported_lower & {"response_format", "structured_outputs"}
             or any("structured" in str(p).lower() for p in supported_lower)
         )

@@ -2717,8 +2717,37 @@ class ExecutionSupervisor:
         with self.store.locked():
             task = self.store.get_task(task_id)
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            hashed_idempotency_key = (
+                _token_hash(f"action:{idempotency_key}") if idempotency_key else ""
+            )
             for existing in self.store.actions_for_task(task_id):
                 if existing.action_fingerprint != action_fingerprint:
+                    continue
+                # If this is the exact same action by idempotency_key:
+                if hashed_idempotency_key and existing.idempotency_key == hashed_idempotency_key:
+                    if existing.request_state in {
+                        ActionRequestState.PREPARED,
+                        ActionRequestState.STARTED,
+                    }:
+                        if existing.attempt_id != attempt_id:
+                            existing.attempt_id = attempt_id
+                            existing.attempt_generation = task.attempt_generation
+                            existing.updated_at = self.clock()
+                            self.store.save_action(existing)
+                        return existing
+                    if existing.request_state == ActionRequestState.SUCCEEDED:
+                        return existing
+                # Read-only actions produce no side effects and are safe to run repeatedly
+                if (
+                    classification == SideEffectClassification.READ_ONLY
+                    or existing.classification == SideEffectClassification.READ_ONLY
+                ):
+                    continue
+                # Actions with local repository or process effect scope can run again if completed
+                if (
+                    existing.request_state == ActionRequestState.SUCCEEDED
+                    and existing.effect_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
+                ):
                     continue
                 if existing.request_state in {
                     ActionRequestState.PREPARED,
@@ -2743,7 +2772,7 @@ class ExecutionSupervisor:
                 attempt_generation=task.attempt_generation,
                 tool_name=tool_name,
                 action_fingerprint=action_fingerprint,
-                idempotency_key=_token_hash(f"action:{idempotency_key}") if idempotency_key else "",
+                idempotency_key=hashed_idempotency_key,
                 classification=classification,
                 request_state=ActionRequestState.PREPARED,
             )
