@@ -1301,7 +1301,9 @@ class ExecutionSupervisor:
         def resume(task: TaskRecord) -> None:
             if task.attempt_id != attempt_id:
                 raise StaleLeaseError("attempt no longer owns the task")
-            if task.state == ExecutionState.WAITING:
+            if task.waiting_inbox_item_id:
+                raise LeaseConflictError("task is waiting for human inbox response")
+            if task.state in {ExecutionState.WAITING, ExecutionState.QUEUED}:
                 # Re-acquire lease for the resuming attempt since it was released while waiting
                 task.lease_owner = task.lease_owner or f"resumed:{attempt_id}"
                 task.lease_token = _token_hash(lease_token)
@@ -1311,10 +1313,13 @@ class ExecutionSupervisor:
             if task.state == ExecutionState.RUNNING:
                 task.heartbeat_at = task.updated_at = self.clock()
                 return
-            if task.state not in {ExecutionState.LEASED, ExecutionState.WAITING}:
+            if task.state not in {ExecutionState.LEASED, ExecutionState.WAITING, ExecutionState.QUEUED}:
                 raise LeaseConflictError(
                     f"task cannot resume its active attempt from state {task.state.value}"
                 )
+            if task.state == ExecutionState.QUEUED:
+                validate_transition(task.state, ExecutionState.LEASED)
+                task.state = ExecutionState.LEASED
             validate_transition(task.state, ExecutionState.RUNNING)
             task.state = ExecutionState.RUNNING
             task.heartbeat_at = task.updated_at = self.clock()
@@ -2709,40 +2714,42 @@ class ExecutionSupervisor:
         classification: SideEffectClassification,
         idempotency_key: str = "",
     ) -> ActionRecord:
-        task = self.store.get_task(task_id)
-        self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
-        for existing in self.store.actions_for_task(task_id):
-            if existing.action_fingerprint != action_fingerprint:
-                continue
-            if existing.request_state in {
-                ActionRequestState.STARTED,
-                ActionRequestState.SUCCEEDED,
-                ActionRequestState.OUTCOME_UNKNOWN,
-            }:
+        with self.store.locked():
+            task = self.store.get_task(task_id)
+            self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            for existing in self.store.actions_for_task(task_id):
+                if existing.action_fingerprint != action_fingerprint:
+                    continue
+                if existing.request_state in {
+                    ActionRequestState.PREPARED,
+                    ActionRequestState.STARTED,
+                    ActionRequestState.SUCCEEDED,
+                    ActionRequestState.OUTCOME_UNKNOWN,
+                }:
+                    raise RetrySafetyError(
+                        "matching consequential action already exists; reconcile its durable receipt before retry"
+                    )
+            if classification in {
+                SideEffectClassification.IDEMPOTENT,
+                SideEffectClassification.CONDITIONALLY_IDEMPOTENT,
+                SideEffectClassification.DEDUPLICATED,
+            } and not idempotency_key:
                 raise RetrySafetyError(
-                    "matching consequential action already exists; reconcile its durable receipt before retry"
+                    f"{classification.value} action requires a durable idempotency key"
                 )
-        if classification in {
-            SideEffectClassification.IDEMPOTENT,
-            SideEffectClassification.CONDITIONALLY_IDEMPOTENT,
-            SideEffectClassification.DEDUPLICATED,
-        } and not idempotency_key:
-            raise RetrySafetyError(
-                f"{classification.value} action requires a durable idempotency key"
+            action = ActionRecord(
+                execution_id=task_id,
+                attempt_id=attempt_id,
+                attempt_generation=task.attempt_generation,
+                tool_name=tool_name,
+                action_fingerprint=action_fingerprint,
+                idempotency_key=_token_hash(f"action:{idempotency_key}") if idempotency_key else "",
+                classification=classification,
+                request_state=ActionRequestState.PREPARED,
             )
-        action = ActionRecord(
-            execution_id=task_id,
-            attempt_id=attempt_id,
-            attempt_generation=task.attempt_generation,
-            tool_name=tool_name,
-            action_fingerprint=action_fingerprint,
-            idempotency_key=_token_hash(f"action:{idempotency_key}") if idempotency_key else "",
-            classification=classification,
-            request_state=ActionRequestState.PREPARED,
-        )
-        self.store.save_action(action)
-        self._emit("action_prepared", task, action_id=action.action_id, tool_name=tool_name)
-        return action
+            self.store.save_action(action)
+            self._emit("action_prepared", task, action_id=action.action_id, tool_name=tool_name)
+            return action
 
     def update_action(
         self,
@@ -2752,21 +2759,28 @@ class ExecutionSupervisor:
         external_receipt: str = "",
         result_reference: str = "",
         verification_state: dict[str, Any] | None = None,
+        attempt_id: str = "",
+        lease_token: str = "",
     ) -> ActionRecord:
-        action = self.store.get_action(action_id)
-        if action is None:
-            raise RetrySafetyError(f"unknown durable action: {action_id}")
-        task = self.store.get_task(action.execution_id)
-        if action.attempt_generation != task.attempt_generation:
-            raise StaleLeaseError("stale attempt generation cannot update an action record")
-        action.request_state = request_state
-        action.external_receipt = external_receipt or action.external_receipt
-        action.result_reference = result_reference or action.result_reference
-        action.verification_state.update(dict(verification_state or {}))
-        action.updated_at = self.clock()
-        self.store.save_action(action)
-        self._emit("action_updated", task, action_id=action_id, request_state=request_state.value)
-        return action
+        with self.store.locked():
+            action = self.store.get_action(action_id)
+            if action is None:
+                raise RetrySafetyError(f"unknown durable action: {action_id}")
+            task = self.store.get_task(action.execution_id)
+            if attempt_id or lease_token:
+                self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+                if action.attempt_id != attempt_id:
+                    raise StaleLeaseError("action belongs to another execution attempt")
+            if action.attempt_generation != task.attempt_generation:
+                raise StaleLeaseError("stale attempt generation cannot update an action record")
+            action.request_state = request_state
+            action.external_receipt = external_receipt or action.external_receipt
+            action.result_reference = result_reference or action.result_reference
+            action.verification_state.update(dict(verification_state or {}))
+            action.updated_at = self.clock()
+            self.store.save_action(action)
+            self._emit("action_updated", task, action_id=action_id, request_state=request_state.value)
+            return action
 
     def prepare_shell_action(
         self,

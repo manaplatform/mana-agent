@@ -1,5 +1,10 @@
 # Resilient Execution Supervisor
 
+Native tool execution uses the [hierarchical ToolRunner boundary](regressions/hierarchical-tool-execution.md)
+with existing action receipts, attempt fencing, and checkpoint/result authority.
+Activity journals and retained-output APIs are observations, never recovery
+instructions. Lost operation replies require reconciliation rather than replay.
+
 Human input uses the durable inbox described in
 [Durable Human-in-the-Loop Inbox](32-durable-human-inbox.md). A supervised branch
 stores `waiting_inbox_item_id`, an explicit approval/clarification wait reason,

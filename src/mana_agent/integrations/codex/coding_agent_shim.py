@@ -312,8 +312,8 @@ class CodexCodingAgentShim:
         }
 
     def generate(self, request: str, **kwargs: Any) -> dict[str, Any]:
-        mode = str(kwargs.get("auto_chat_mode") or "").strip().lower()
-        requires_write = mode not in {"plan", "plan_only"}
+        mode = str(kwargs.get("execution_mode") or kwargs.get("auto_chat_mode") or "").strip().lower()
+        requires_write = mode not in {"plan", "plan_only", "read_only"}
         return self._execute_turn(
             request,
             requires_repository_write=requires_write,
@@ -329,10 +329,10 @@ class CodexCodingAgentShim:
         return self.generate(request, **kwargs)
 
     def generate_auto_execute(self, request: str, **kwargs: Any) -> dict[str, Any]:
-        mode = str(kwargs.get("auto_chat_mode") or "").strip().lower()
+        mode = str(kwargs.get("execution_mode") or kwargs.get("auto_chat_mode") or "").strip().lower()
         return self._execute_turn(
             request,
-            requires_repository_write=mode not in {"plan", "plan_only"},
+            requires_repository_write=mode not in {"plan", "plan_only", "read_only"},
             flow_id=kwargs.get("flow_id"),
             gateway_task_id=kwargs.get("gateway_task_id"),
             turn_id=kwargs.get("turn_id"),
@@ -747,7 +747,7 @@ class CodexCodingAgentShim:
             ]
         else:
             requirements = [
-                "Inspect the repository and produce a decision-complete plan.",
+                "Inspect the repository and satisfy the delegated technical request with observed evidence.",
                 "Do not modify repository files.",
             ]
         from mana_agent.coding_research_contracts import CODING_DEBUGGING_HANDOFF_INSTRUCTION

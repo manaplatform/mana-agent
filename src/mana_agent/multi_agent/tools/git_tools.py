@@ -164,7 +164,10 @@ def _run_raw_git(
     if env is not None:
         merged_env = dict(os.environ)
         merged_env.update(env)
-    return subprocess.run(
+    from mana_agent.utils.process_stream import run_streaming_process
+    from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+    runner = run_streaming_process if current_operation() is not None else subprocess.run
+    return runner(
         ["git", *args],
         cwd=cwd,
         text=True,

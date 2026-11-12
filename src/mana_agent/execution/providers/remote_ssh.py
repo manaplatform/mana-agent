@@ -61,6 +61,12 @@ class RemoteSSHProvider(ProviderBase):
 
     async def _ssh(self, host: dict[str, Any], argv: list[str], timeout: int = 120) -> tuple[int, bytes, bytes]:
         remote_command = shlex.join(argv)
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            from mana_agent.utils.process_stream import run_streaming_process
+            completed = await asyncio.to_thread(run_streaming_process,
+                [self.ssh_binary, *self._base_args(host), self._target(host), remote_command], timeout=timeout)
+            return completed.returncode, completed.stdout.encode(), completed.stderr.encode()
         proc = await asyncio.create_subprocess_exec(
             self.ssh_binary, *self._base_args(host), self._target(host), remote_command,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -75,7 +81,7 @@ class RemoteSSHProvider(ProviderBase):
             resource_isolation=EnforcementStrength.ENFORCED if enforced else EnforcementStrength.BEST_EFFORT,
             network_isolation=EnforcementStrength.ENFORCED if all(h.get("network_wrapper") for h in self.hosts) and self.hosts else EnforcementStrength.NONE,
             secret_files=True, secret_environment_variables=True, persistent_volumes=True,
-            artifact_streaming=True, parallel_execution=True,
+            command_streaming=True, artifact_streaming=True, parallel_execution=True,
         )
 
     async def provision(self, spec: SandboxSpec) -> SandboxHandle:

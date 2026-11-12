@@ -593,6 +593,23 @@ def test_resume_from_waiting_rebinds_lease_without_stale_token_error(
     )
     assert skipped_cp is not None  # Returns existing checkpoint
 
+    # Resuming while waiting for human input is blocked by lease conflict
+    with pytest.raises(LeaseConflictError, match="task is waiting for human inbox response"):
+        supervisor.resume_running(
+            task.task_id,
+            attempt_id=leased.attempt_id,
+            lease_token=token,
+        )
+
+    # Human approval arrives, resolving wait state and queuing task for execution
+    supervisor.resume_from_human_input(
+        task.task_id,
+        inbox_item_id="inbox_test_123",
+        checkpoint_id=cp.checkpoint_id,
+        resume_claim_id="claim_resume_123",
+        structured_response={"action": "approve"},
+    )
+
     # 3. resume_running safely re-binds lease without StaleLeaseError
     resumed = supervisor.resume_running(
         task.task_id,

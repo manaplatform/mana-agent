@@ -55,7 +55,7 @@ class LocalProcessProvider(ProviderBase):
 
     async def capabilities(self) -> SandboxCapabilities:
         return SandboxCapabilities(
-            snapshots=True, native_suspend_resume=os.name == "posix",
+            command_streaming=True, snapshots=True, native_suspend_resume=os.name == "posix",
             resource_isolation=EnforcementStrength.BEST_EFFORT,
             network_isolation=EnforcementStrength.NONE,
             secret_files=True, secret_environment_variables=True,
@@ -108,6 +108,14 @@ class LocalProcessProvider(ProviderBase):
                 if limits.pid_limit and hasattr(resource, "RLIMIT_NPROC"):
                     resource.setrlimit(resource.RLIMIT_NPROC, (limits.pid_limit, limits.pid_limit))
             kwargs["preexec_fn"] = apply_limits
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            from mana_agent.utils.process_stream import run_streaming_process
+            completed = await asyncio.to_thread(run_streaming_process, request.argv, cwd=str(cwd), env=env,
+                timeout=request.timeout_seconds, input=request.stdin, _protected_values=secret_values, **kwargs)
+            return ExecutionResult(exit_code=completed.returncode,
+                stdout=redact_values(completed.stdout, secret_values), stderr=redact_values(completed.stderr, secret_values),
+                started_at=started, completed_at=utc_now(), provider=self.name, sandbox_id=handle.sandbox_id)
         process = await asyncio.create_subprocess_exec(
             *request.argv, cwd=str(cwd), env=env,
             stdin=asyncio.subprocess.PIPE if request.stdin is not None else None,

@@ -124,18 +124,35 @@ def _current_action_digest(action_intent_id: str) -> str | None:
     return None
 
 
+_DEFAULT_BRANCH_CONTROLLER: Any | None = None
+
+
+def set_default_branch_controller(controller: Any | None) -> None:
+    global _DEFAULT_BRANCH_CONTROLLER
+    _DEFAULT_BRANCH_CONTROLLER = controller
+
+
 def default_human_inbox_service(*, branch_controller: Any | None = None) -> HumanInboxService:
     root = mana_home() / "inbox"
     from mana_agent.services.execution_event_hub import get_execution_event_hub
 
     if branch_controller is None:
-        from mana_agent.config.settings import Settings
-        from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
+        from mana_agent.services.activity_context import current_activity_context
+        ctx = current_activity_context()
+        if ctx is not None and getattr(ctx, "coordinator", None) is not None:
+            branch_controller = ctx.coordinator
+        elif ctx is not None and getattr(ctx, "supervisor", None) is not None:
+            branch_controller = ctx.supervisor
+        elif _DEFAULT_BRANCH_CONTROLLER is not None:
+            branch_controller = _DEFAULT_BRANCH_CONTROLLER
+        else:
+            from mana_agent.config.settings import Settings
+            from mana_agent.execution_supervisor import ExecutionSupervisor, ExecutionSupervisorConfig
 
-        supervisor_config = ExecutionSupervisorConfig.from_settings(Settings()).model_copy(
-            update={"startup_recovery": False}
-        )
-        branch_controller = ExecutionSupervisor(supervisor_config)
+            supervisor_config = ExecutionSupervisorConfig.from_settings(Settings()).model_copy(
+                update={"startup_recovery": False}
+            )
+            branch_controller = ExecutionSupervisor(supervisor_config)
 
     hub = get_execution_event_hub()
     publish = lambda payload: hub.publish(payload, persist=False)

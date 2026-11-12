@@ -480,10 +480,12 @@ class ExecutionTrace:
             if operation_key(row) == op_key:
                 if not accepts_activity_update(row, ev):
                     return None
-                collection[i] = {**row, **ev}
+                from mana_agent.chat.operations import merge_operation
+                collection[i] = merge_operation(row, ev)
                 break
         else:
-            collection.append(ev)
+            from mana_agent.chat.operations import merge_operation
+            collection.append(merge_operation({}, ev))
         collection[:] = bound_operations(collection)
         if is_mutation(ev):
             for path in [ev.get("path") or meta.get("path"), *(ev.get("changed_files") or meta.get("changed_files") or [])]:

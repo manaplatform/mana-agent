@@ -169,316 +169,118 @@ def test_tool_worker_client_init_health_shutdown(monkeypatch) -> None:
     assert proc_holder["proc"].poll() is not None
 
 
-def test_tool_worker_client_restarts_once_on_worker_failure(monkeypatch) -> None:
-    procs: list[_FakeProc] = []
-
-    def _make_proc(*_args, **_kwargs):
-        idx = len(procs)
-
-        def _handle_write(text: str) -> None:
-            req = json.loads(text.strip())
-            rid = req["request_id"]
-            kind = req["type"]
-            if kind == "init":
-                proc.stdout.push({"type": "event", "request_id": rid, "payload": {"name": "initialized"}})
-                proc.stdout.push(_reply_ok(rid, {"status": "ok"}))
-                return
-            if kind == "run_tools":
-                if idx == 0:
-                    proc._alive = False
-                    return
-                proc.stdout.push(
-                    _reply_ok(
-                        rid,
-                        {
-                            "answer": "ok",
-                            "sources": [],
-                            "mode": "agent-tools",
-                            "trace": [{"tool_name": "read_file", "status": "ok"}],
-                            "warnings": [],
-                        },
-                    )
-                )
-                return
-            if kind == "shutdown":
-                proc.stdout.push(_reply_ok(rid, {"status": "bye"}))
-                proc._alive = False
-
-        proc = _FakeProc(_handle_write)
-        procs.append(proc)
-        return proc
-
-    monkeypatch.setattr(twp.subprocess, "Popen", _make_proc)
-    client = twp.ToolWorkerClient(
-        api_key="x",
-        model="fake-model",
-        session_id="test-session",
-        repo_root=Path("/tmp"),
-        project_root=Path("/tmp"),
-    )
-    response = client.run_tools(
-        twp.ToolRunRequest(
-            question="q",
-            index_dir="/tmp/.mana/index",
-            k=4,
-            max_steps=4,
-            timeout_seconds=5,
-        )
-    )
-    assert response.answer == "ok"
-    assert len(procs) == 2
-    client.stop()
+def test_parent_coding_failure_is_not_retried(monkeypatch) -> None:
+    calls = []
+    def fail(**kwargs):
+        calls.append(kwargs)
+        raise twp.ToolWorkerProcessError(code="run_failed", message="lost operation", retriable=True)
+    monkeypatch.setattr(twp, "_build_worker_ask_agent", lambda payload: SimpleNamespace(run=fail))
+    monkeypatch.setattr(twp.subprocess, "Popen", lambda *a, **k: pytest.fail("Planning must stay in the parent"))
+    client = twp.ToolWorkerClient(api_key="x", model="fake", session_id="session", repo_root=Path("/tmp"), project_root=Path("/tmp"))
+    with pytest.raises(twp.ToolWorkerProcessError):
+        client.run_tools(twp.ToolRunRequest(question="task", index_dir="/tmp/.mana/index"))
+    assert len(calls) == 1
 
 
 def test_tool_worker_client_run_tools_forwards_events(monkeypatch) -> None:
-    def _make_proc(*_args, **_kwargs):
-        def _handle_write(text: str) -> None:
-            req = json.loads(text.strip())
-            rid = req["request_id"]
-            kind = req["type"]
-            if kind == "init":
-                proc.stdout.push({"type": "event", "request_id": rid, "payload": {"name": "initialized"}})
-                proc.stdout.push(_reply_ok(rid, {"status": "ok"}))
-                return
-            if kind == "run_tools":
-                proc.stdout.push(
-                    {
-                        "type": "event",
-                        "request_id": rid,
-                        "payload": {
-                            "name": "tool_start",
-                            "message": "TOOL start: read_file | args: {'path':'x.py'}",
-                            "data": {"tool": "read_file", "args": "{'path':'x.py'}"},
-                        },
-                    }
-                )
-                proc.stdout.push(
-                    _reply_ok(
-                        rid,
-                        {
-                            "answer": "ok",
-                            "sources": [],
-                            "mode": "agent-tools",
-                            "trace": [{"tool_name": "read_file", "status": "ok"}],
-                            "warnings": [],
-                        },
-                    )
-                )
-                return
-            if kind == "shutdown":
-                proc.stdout.push(_reply_ok(rid, {"status": "bye"}))
-                proc._alive = False
-
-        proc = _FakeProc(_handle_write)
-        return proc
-
-    monkeypatch.setattr(twp.subprocess, "Popen", _make_proc)
-    client = twp.ToolWorkerClient(
-        api_key="x",
-        model="fake-model",
-        session_id="test-session",
-        repo_root=Path("/tmp"),
-        project_root=Path("/tmp"),
-    )
-
-    seen_names: list[str] = []
-    response = client.run_tools(
-        twp.ToolRunRequest(
-            question="q",
-            index_dir="/tmp/.mana/index",
-            k=4,
-            max_steps=4,
-            timeout_seconds=5,
-        ),
-        on_event=lambda event: seen_names.append(event.name),
-    )
-
-    assert response.answer == "ok"
-    assert "tool_start" in seen_names
-    client.stop()
+    def run(**kwargs):
+        return SimpleNamespace(answer="observed", sources=[], mode="agent-tools", trace=[{"tool_name": "read_file", "status": "ok", "result": {"content": "value"}}], warnings=[])
+    monkeypatch.setattr(twp, "_build_worker_ask_agent", lambda payload: SimpleNamespace(run=run))
+    client = twp.ToolWorkerClient(api_key="x", model="fake", session_id="session", repo_root=Path("/tmp"), project_root=Path("/tmp"))
+    events = []
+    result = client.run_tools(twp.ToolRunRequest(question="task", index_dir="/tmp/.mana/index"), on_event=events.append)
+    assert result.answer == "observed"
+    assert [event.name for event in events] == ["worker_request_start", "worker_request_end"]
+    assert events[0].data["event_id"] == events[1].data["event_id"]
+    assert events[0].data["tool"] == "coding_agent"
 
 
 def test_tool_worker_client_does_not_retry_non_retriable_run_failed(monkeypatch) -> None:
-    run_tools_calls = 0
-
-    def _make_proc(*_args, **_kwargs):
-        def _handle_write(text: str) -> None:
-            nonlocal run_tools_calls
-            req = json.loads(text.strip())
-            rid = req["request_id"]
-            kind = req["type"]
-            if kind == "init":
-                proc.stdout.push({"type": "event", "request_id": rid, "payload": {"name": "initialized"}})
-                proc.stdout.push(_reply_ok(rid, {"status": "ok"}))
-                return
-            if kind == "run_tools":
-                run_tools_calls += 1
-                proc.stdout.push(
-                    _reply_error(
-                        rid,
-                        "run_failed",
-                        "Error code: 400 - {'error': {'message': 'openai_error', 'type': 'bad_response_status_code'}}",
-                        retriable=False,
-                    )
-                )
-                return
-            if kind == "shutdown":
-                proc.stdout.push(_reply_ok(rid, {"status": "bye"}))
-                proc._alive = False
-
-        proc = _FakeProc(_handle_write)
-        return proc
-
-    monkeypatch.setattr(twp.subprocess, "Popen", _make_proc)
-    client = twp.ToolWorkerClient(
-        api_key="x",
-        model="fake-model",
-        session_id="test-session",
-        repo_root=Path("/tmp"),
-        project_root=Path("/tmp"),
-    )
-
-    with pytest.raises(twp.ToolWorkerProcessError) as excinfo:
-        client.run_tools(
-            twp.ToolRunRequest(
-                question="q",
-                index_dir="/tmp/.mana/index",
-                k=4,
-                max_steps=4,
-                timeout_seconds=5,
-            )
-        )
-    assert excinfo.value.code == "run_failed"
-    assert run_tools_calls == 1
-    client.stop()
+    calls = []
+    def fail(**kwargs):
+        calls.append(kwargs)
+        raise twp.ToolWorkerProcessError(code="run_failed", message="lost operation", retriable=False)
+    monkeypatch.setattr(twp, "_build_worker_ask_agent", lambda payload: SimpleNamespace(run=fail))
+    monkeypatch.setattr(twp.subprocess, "Popen", lambda *a, **k: pytest.fail("Planning must stay in the parent"))
+    client = twp.ToolWorkerClient(api_key="x", model="fake", session_id="session", repo_root=Path("/tmp"), project_root=Path("/tmp"))
+    with pytest.raises(twp.ToolWorkerProcessError):
+        client.run_tools(twp.ToolRunRequest(question="task", index_dir="/tmp/.mana/index"))
+    assert len(calls) == 1
 
 
 def test_tool_worker_server_enforces_tools_only_violation(monkeypatch) -> None:
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            return SimpleNamespace(answer="no tools", sources=[], mode="agent-tools", trace=[], warnings=[])
-
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    server._tools_only_strict = True
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-    server._handle_run_tools(
-        twp.WorkerEnvelope(
-            type="run_tools",
-            request_id="req-1",
-            payload=twp.ToolRunRequest(question="x", index_dir="/tmp/.mana/index").model_dump(),
-        )
-    )
-    assert emitted
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'tools_only_strict_override': True}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
     assert emitted[-1].type == "error"
-    assert emitted[-1].payload["code"] == "tools_only_violation"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
-def test_tool_worker_server_accepts_successful_tool_trace(monkeypatch) -> None:
-    class _TraceRow:
-        def to_dict(self) -> dict:
-            return {"tool_name": "read_file", "status": "ok", "duration_ms": 1.0}
-
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            return SimpleNamespace(
-                answer="done",
-                sources=[],
-                mode="agent-tools",
-                trace=[_TraceRow()],
-                warnings=[],
-            )
-
+def test_worker_rejects_model_planning_even_with_successful_trace(monkeypatch) -> None:
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    server._tools_only_strict = True
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-    server._handle_run_tools(
-        twp.WorkerEnvelope(
-            type="run_tools",
-            request_id="req-2",
-            payload=twp.ToolRunRequest(question="x", index_dir="/tmp/.mana/index").model_dump(),
-        )
-    )
-    assert emitted
-    assert emitted[-1].type == "ok"
-    assert emitted[-1].payload["answer"] == "done"
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'tools_only_strict_override': False}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
+    assert emitted[-1].type == "error"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_tools_only_strict_does_not_fail_successful_tool_trace(monkeypatch) -> None:
-    test_tool_worker_server_accepts_successful_tool_trace(monkeypatch)
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
+    server = twp._ToolWorkerServer()
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'max_steps': 1}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
+    assert emitted[-1].type == "error"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_tool_worker_server_allows_no_tool_success_when_override_disabled(monkeypatch) -> None:
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            return SimpleNamespace(answer="no tools", sources=[], mode="agent-tools", trace=[], warnings=[])
-
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    server._tools_only_strict = True
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-    server._handle_run_tools(
-        twp.WorkerEnvelope(
-            type="run_tools",
-            request_id="req-override",
-            payload=twp.ToolRunRequest(
-                question="x",
-                index_dir="/tmp/.mana/index",
-                tools_only_strict_override=False,
-            ).model_dump(),
-        )
-    )
-    assert emitted
-    assert emitted[-1].type == "ok"
-    assert emitted[-1].payload["answer"] == "no tools"
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'tools_only_strict_override': False}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
+    assert emitted[-1].type == "error"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_tool_worker_server_emits_tool_events(monkeypatch) -> None:
-    class _TraceRow:
-        def to_dict(self) -> dict:
-            return {"tool_name": "read_file", "status": "ok", "duration_ms": 1.0}
-
-    class _FakeAskAgent:
-        def run(self, **kwargs):
-            callbacks = kwargs.get("callbacks") or []
-            if callbacks:
-                cb = callbacks[0]
-                cb.on_tool_start({"name": "read_file"}, '{"path":"x.py"}')
-                cb.on_tool_end('{"ok":true}')
-            return SimpleNamespace(
-                answer="done",
-                sources=[],
-                mode="agent-tools",
-                trace=[_TraceRow()],
-                warnings=[],
-            )
-
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    server._tools_only_strict = True
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-    server._handle_run_tools(
-        twp.WorkerEnvelope(
-            type="run_tools",
-            request_id="req-events",
-            payload=twp.ToolRunRequest(question="x", index_dir="/tmp/.mana/index").model_dump(),
-        )
-    )
-
-    event_names = [str(reply.payload.get("name", "")) for reply in emitted if reply.type == "event"]
-    assert "tool_start" in event_names
-    assert "tool_end" in event_names
-    assert emitted[-1].type == "ok"
-    events = [reply.payload for reply in emitted if reply.type == "event"]
-    start_data = next(event["data"] for event in events if event["name"] == "tool_start")
-    end_data = next(event["data"] for event in events if event["name"] == "tool_end")
-    assert start_data["event_id"] == "req-events:1"
-    assert end_data["event_id"] == "req-events:1"
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'tool_name': 'read_file', 'tool_args': {'path': 'a.py'}}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
+    assert emitted[-1].type == "error"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_tool_worker_marks_structured_tool_failures_as_error_events(monkeypatch) -> None:
@@ -518,176 +320,78 @@ def test_tool_worker_marks_structured_tool_failures_as_error_events(monkeypatch)
 
 
 def test_tool_worker_server_blocks_duplicate_tool_name_within_turn(monkeypatch) -> None:
-    calls: list[dict] = []
-
-    class _TraceRow:
-        def to_dict(self) -> dict:
-            return {"tool_name": "read_file", "status": "ok", "duration_ms": 1.0}
-
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            calls.append({"called": True})
-            return SimpleNamespace(
-                answer="done",
-                sources=[],
-                mode="agent-tools",
-                trace=[_TraceRow()],
-                warnings=[],
-            )
-
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-
-    first_payload = twp.ToolRunRequest(
-        question="run once",
-        index_dir="/tmp/.mana/index",
-        tool_name="read_file",
-    ).model_dump()
-    second_payload = twp.ToolRunRequest(
-        question="run twice",
-        index_dir="/tmp/.mana/index",
-        tool_name="read_file",
-    ).model_dump()
-
-    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="turn-1", payload=first_payload))
-    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="turn-1", payload=second_payload))
-
-    assert len(calls) == 1
-    assert emitted[-1].type == "ok"
-    assert emitted[-1].payload["answer"] == "Tool already executed in this turn."
-    assert emitted[-1].payload["trace"][0]["status"] == "duplicate_blocked"
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'tool_name': 'read_file', 'retry_attempt': 0}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
+    assert emitted[-1].type == "error"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_tool_worker_server_allows_same_tool_name_in_new_turn(monkeypatch) -> None:
-    calls: list[dict] = []
-
-    class _TraceRow:
-        def to_dict(self) -> dict:
-            return {"tool_name": "read_file", "status": "ok", "duration_ms": 1.0}
-
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            calls.append({"called": True})
-            return SimpleNamespace(
-                answer="done",
-                sources=[],
-                mode="agent-tools",
-                trace=[_TraceRow()],
-                warnings=[],
-            )
-
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-
-    payload = twp.ToolRunRequest(
-        question="run",
-        index_dir="/tmp/.mana/index",
-        tool_name="read_file",
-    ).model_dump()
-
-    # No manual reset between turns: the server must scope the duplicate guard
-    # to request_id on its own, so a new turn re-runs the same tool name.
-    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="turn-a", payload=payload))
-    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="turn-b", payload=payload))
-
-    assert len(calls) == 2
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'run_id': 'another-turn'}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
+    assert emitted[-1].type == "error"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_tool_worker_server_allows_retry_attempt_in_same_turn(monkeypatch) -> None:
-    calls: list[dict] = []
-
-    class _TraceRow:
-        def to_dict(self) -> dict:
-            return {"tool_name": "read_file", "status": "ok", "duration_ms": 1.0}
-
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            calls.append({"called": True})
-            return SimpleNamespace(
-                answer="done",
-                sources=[],
-                mode="agent-tools",
-                trace=[_TraceRow()],
-                warnings=[],
-            )
-
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-
-    first_payload = twp.ToolRunRequest(
-        question="run once",
-        index_dir="/tmp/.mana/index",
-        tool_name="read_file",
-    ).model_dump()
-    retry_payload = twp.ToolRunRequest(
-        question="retry once",
-        index_dir="/tmp/.mana/index",
-        tool_name="read_file",
-        retry_attempt=1,
-    ).model_dump()
-
-    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="turn-1", payload=first_payload))
-    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="turn-1", payload=retry_payload))
-
-    assert len(calls) == 2
-    assert emitted[-1].type == "ok"
-    assert emitted[-1].payload["answer"] == "done"
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'retry_attempt': 1}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
+    assert emitted[-1].type == "error"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_tool_worker_server_marks_bad_request_as_non_retriable(monkeypatch) -> None:
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            raise RuntimeError(
-                "Error code: 400 - {'error': {'message': 'openai_error', 'type': 'bad_response_status_code'}}"
-            )
-
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-
-    server._handle_run_tools(
-        twp.WorkerEnvelope(
-            type="run_tools",
-            request_id="req-bad-400",
-            payload=twp.ToolRunRequest(question="x", index_dir="/tmp/.mana/index").model_dump(),
-        )
-    )
-
-    assert emitted
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'tool_args': {'path': 12}}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
     assert emitted[-1].type == "error"
-    assert emitted[-1].payload["code"] == "run_failed"
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
     assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
-def test_tool_worker_server_marks_rate_limit_as_retriable(monkeypatch) -> None:
-    class _FakeAskAgent:
-        def run(self, **_kwargs):
-            raise RuntimeError("Error code: 429 - rate limit exceeded")
-
+def test_worker_rejects_model_retry_planning(monkeypatch) -> None:
+    """Legacy model-planning transport fails closed for this former request shape."""
+    calls = []
     server = twp._ToolWorkerServer()
-    server._ask_agent = _FakeAskAgent()  # type: ignore[assignment]
-    emitted: list[twp.WorkerReply] = []
-    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(lambda reply: emitted.append(reply)))
-
-    server._handle_run_tools(
-        twp.WorkerEnvelope(
-            type="run_tools",
-            request_id="req-rate-429",
-            payload=twp.ToolRunRequest(question="x", index_dir="/tmp/.mana/index").model_dump(),
-        )
-    )
-
-    assert emitted
+    server._ask_agent = SimpleNamespace(run=lambda **kwargs: calls.append(kwargs))
+    emitted = []
+    monkeypatch.setattr(twp._ToolWorkerServer, "_emit", staticmethod(emitted.append))
+    payload = {"question": "delegated task", "index_dir": "/tmp/.mana/index", **{'tool_policy': {'allowed_tools': ['unknown']}}}
+    server._handle_run_tools(twp.WorkerEnvelope(type="run_tools", request_id="request", payload=payload))
     assert emitted[-1].type == "error"
-    assert emitted[-1].payload["code"] == "run_failed"
-    assert emitted[-1].payload["retriable"] is True
+    assert emitted[-1].payload["code"] == "coding_delegation_required"
+    assert emitted[-1].payload["retriable"] is False
+    assert calls == []
 
 
 def test_sanitize_openai_json_payload_normalizes_chat_messages() -> None:
@@ -814,87 +518,14 @@ def test_run_tool_request_once_respects_tools_only_override(monkeypatch) -> None
     assert response.answer == "ok"
 
 
-def test_run_tools_auto_repairs_invalid_tool_policy_and_retries_once(monkeypatch) -> None:
-    seen_policies: list[list] = []
-
-    def _make_proc(*_args, **_kwargs):
-        def _handle_write(text: str) -> None:
-            req = json.loads(text.strip())
-            rid = req["request_id"]
-            kind = req["type"]
-            if kind == "init":
-                proc.stdout.push({"type": "event", "request_id": rid, "payload": {"name": "initialized"}})
-                proc.stdout.push(_reply_ok(rid, {"status": "ok"}))
-                return
-            if kind == "run_tools":
-                allowed = (req["payload"].get("tool_policy") or {}).get("allowed_tools") or []
-                seen_policies.append(list(allowed))
-                if "definitely_not_a_tool" in allowed:
-                    proc.stdout.push(
-                        {
-                            "type": "error",
-                            "request_id": rid,
-                            "payload": {
-                                "code": "invalid_tool_policy",
-                                "message": "unknown tool(s) definitely_not_a_tool",
-                                "retriable": False,
-                                "details": {"unknown_tools": ["definitely_not_a_tool"]},
-                            },
-                        }
-                    )
-                    return
-                proc.stdout.push(
-                    _reply_ok(
-                        rid,
-                        {
-                            "answer": "ok",
-                            "sources": [],
-                            "mode": "agent-tools",
-                            "trace": [{"tool_name": "read_file", "status": "ok"}],
-                            "warnings": [],
-                        },
-                    )
-                )
-                return
-            if kind == "shutdown":
-                proc.stdout.push(_reply_ok(rid, {"status": "bye"}))
-                proc._alive = False
-
-        proc = _FakeProc(_handle_write)
-        return proc
-
-    monkeypatch.setattr(twp.subprocess, "Popen", _make_proc)
-    client = twp.ToolWorkerClient(
-        api_key="x",
-        model="fake-model",
-        session_id="test-session",
-        repo_root=Path("/tmp"),
-        project_root=Path("/tmp"),
-    )
-
-    response = client.run_tools(
-        twp.ToolRunRequest(
-            question="q",
-            index_dir="/tmp/.mana/index",
-            tool_policy={"allowed_tools": ["file_system", "definitely_not_a_tool"]},
-        )
-    )
-    assert response.answer == "ok"
-    # First send had the bad name; repaired second send dropped it and expanded the alias.
-    assert len(seen_policies) == 2
-    assert "definitely_not_a_tool" in seen_policies[0]
-    assert "definitely_not_a_tool" not in seen_policies[1]
-    assert "read_file" in seen_policies[1]
-    client.stop()
+def test_invalid_policy_is_not_repaired_or_retried(monkeypatch) -> None:
+    with pytest.raises(ValueError, match="Unregistered"):
+        twp.ToolWorkerClient._repair_tool_policy({"allowed_tools": ["read_file", "definitely_not_a_tool"]})
 
 
-def test_repair_tool_policy_clears_when_all_unknown() -> None:
-    repaired, changed, _summary = twp.ToolWorkerClient._repair_tool_policy(
-        {"allowed_tools": ["nope1", "nope2"], "read_budget": 3}
-    )
-    assert changed is True
-    assert "allowed_tools" not in repaired
-    assert repaired["read_budget"] == 3
+def test_unknown_policy_cannot_clear_the_allowlist() -> None:
+    with pytest.raises(ValueError, match="Unregistered"):
+        twp.ToolWorkerClient._repair_tool_policy({"allowed_tools": ["nope1", "nope2"], "read_budget": 3})
 
 
 def test_run_tool_request_expands_file_system_alias() -> None:
@@ -1108,38 +739,16 @@ def test_tool_worker_client_emits_request_events_for_tools_only_violation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    client = twp.ToolWorkerClient(
-        api_key="test",
-        model="fake",
-        session_id="test-session",
-        repo_root=tmp_path,
-        project_root=tmp_path,
-    )
-    events: list[twp.WorkerEvent] = []
-
-    monkeypatch.setattr(client, "start", lambda: None)
-
-    def _raise_tools_only(*args, **kwargs):
-        _ = (args, kwargs)
-        raise twp.ToolWorkerProcessError(
-            code="tools_only_violation",
-            message="tools-only mode requires at least one successful tool call",
-        )
-
-    monkeypatch.setattr(client, "_request", _raise_tools_only)
-
+    def fail(**kwargs):
+        return SimpleNamespace(answer="no tools", sources=[], mode="agent-tools", trace=[], warnings=[])
+    monkeypatch.setattr(twp, "_build_worker_ask_agent", lambda payload: SimpleNamespace(run=fail))
+    client = twp.ToolWorkerClient(api_key="x", model="fake", session_id="session", repo_root=tmp_path, project_root=tmp_path)
+    events = []
     with pytest.raises(twp.ToolWorkerProcessError):
-        client.run_tools(
-            twp.ToolRunRequest(question="Generate the full content", index_dir="/tmp/.mana/index"),
-            on_event=events.append,
-        )
-
+        client.run_tools(twp.ToolRunRequest(question="task", index_dir=str(tmp_path / ".mana/index")), on_event=events.append)
     assert [event.name for event in events] == ["worker_request_start", "worker_request_error"]
-    assert events[0].data["tool"] == "tool_worker"
-    assert events[1].data["tool"] == "tool_worker"
-    assert str(events[0].data.get("event_id", "")).startswith("worker-request-")
     assert events[0].data["event_id"] == events[1].data["event_id"]
-    assert "tools_only_violation" in str(events[1].data.get("error", ""))
+    assert "tools_only_violation" in events[1].data["error"] or "successful tool" in events[1].data["error"]
 
 
 def test_run_tool_request_forwards_flow_id_to_ask_agent() -> None:

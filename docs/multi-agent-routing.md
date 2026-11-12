@@ -1,21 +1,27 @@
 # Multi-Agent Routing
 
-Mana Agent routes every public command and LLM-facing request through
-`mana_agent.multi_agent.MainAgent`. The old command names remain public, but the internal record starts with a
-TaskBoard item, a route decision, agent assignments, and a final SummarizerAgent
-summary.
+Production chat enters through `AgentChatGateway`, lane admission, and the
+Autonomous Loop. The legacy `MainAgent` API remains a separate compatible entry;
+the gateway does not start another MainAgent lifecycle. Both paths share the
+registered execution boundary and existing TaskBoard/supervisor state.
 
 ## Hierarchy
 
+Repository execution now follows MainAgent → CodingAgent → deterministic
+ToolRunnerAgent (persisted role alias `tool_worker`). Other listed specialists
+retain advisory/domain responsibilities; VerifierAgent delegates repository
+execution through CodingAgent while retaining verification judgment. See the
+[authority, compatibility, and user-owned acceptance contract](regressions/hierarchical-tool-execution.md).
+
 ```text
-MainAgent
+MainAgent / admitted gateway task owner
+  ├── CodingAgent
+  │     └── ToolRunnerAgent (deterministic registered execution)
   └── HeadDecisionAgent
         ├── PlannerAgent
         ├── ResearchAgent
-        ├── CodingAgent
-        │     └── CodingSubAgent(s)
-        ├── ToolAgent
-        ├── VerifierAgent
+        ├── ToolAgent ── domain ToolRunner
+        ├── VerifierAgent ── repository checks delegated to CodingAgent
         ├── ReviewerAgent
         └── SummarizerAgent
 ```
@@ -41,10 +47,11 @@ assumptions, rejected options, assigned agents, and verification needs.
 
 ## Queue And Tools
 
-CodingAgent never executes tools directly. It creates QueueManager jobs.
-QueueManager schedules jobs FIFO with priority ordering, serializes write jobs
-with locks, and delegates execution to ToolsManager. ToolsManager wraps the
-existing repository-safe commands and blocks dangerous shell operations such as
+CodingAgent submits selected operations to ToolRunner. Internal sequential,
+parallel, batch, and programmatic calls share the same boundary. Legacy
+QueueManager jobs remain FIFO with priority ordering; ToolsManager adapts them
+to the same runner. Both paths serialize mutations against the assigned workspace.
+ToolsManager retains the existing repository-safe commands and blocks dangerous shell operations such as
 `rm -rf /`, `.env` reads, `printenv`, `git reset --hard`, and `git clean -fd`.
 
 ## Gateway specialist lanes

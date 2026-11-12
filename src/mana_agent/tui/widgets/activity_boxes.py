@@ -15,7 +15,7 @@ from mana_agent.chat.activity import (operation_key, normalize_activity, bound_o
 from typing import Any
 
 from textual.containers import Vertical
-from textual.widgets import Collapsible, Static
+from textual.widgets import Button, Collapsible, Static
 
 from mana_agent.tui.widgets.selectable_text import SelectableText
 from mana_agent.tui.widgets.tool_card import ToolCard, _safe_textual_id
@@ -132,10 +132,13 @@ class _ActivityRendering:
             if operation_key(previous) == key:
                 if not accepts_activity_update(previous, ev):
                     return previous
-                ev = {**previous, **ev, "started_at": previous.get("started_at") or ev.get("started_at")}
+                from mana_agent.chat.operations import merge_operation
+                ev = merge_operation(previous, ev)
                 self.events[i] = ev
                 break
         else:
+            from mana_agent.chat.operations import merge_operation
+            ev = merge_operation({}, ev)
             self.events.append(ev)
         self.events[:] = bound_operations(self.events)
         self._event_ids = {str(row.get("event_id") or "") for row in self.events}
@@ -286,7 +289,8 @@ class MainActivityBox(_ActivityRendering, Vertical):
         }
         if is_approval:
             _resolve_approval(self.events, ev)
-        self._schedule_activity_render(self._render_stream, immediate=is_approval)
+        is_terminal = str(ev.get("status") or "").lower() in _TERMINAL_STATUSES or ev["event_type"].endswith((".terminal", ".finished"))
+        self._schedule_activity_render(self._render_stream, immediate=is_approval or is_terminal)
 
     def _render_stream(self) -> None:
         if not self.activity_log:
@@ -463,6 +467,11 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         self.header = Static("◌ coding · queued", classes="coding-activity-header", markup=False)
         self.changed_files_view = Static("", classes="coding-changed-files", markup=False)
         self.details = Collapsible(title="coding activity", collapsed=False)
+        self.hierarchy_view = Static("", markup=False)
+        self.operation_list = Vertical(classes="coding-operation-list")
+        self.operation_rows: dict[str, Any] = {}
+        self.show_retained_operations = False
+        self.show_operations_button = Button("Show retained operations", classes="show-retained-operations")
         self.activity_log = SelectableText("Waiting for coding engine…", classes="coding-activity-log")
         self.footer = Static("0 coding events", classes="coding-activity-footer", markup=False)
         self._user_collapsed: bool | None = None
@@ -475,11 +484,21 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         yield self.header
         yield self.changed_files_view
         with self.details:
+            yield self.hierarchy_view
+            yield self.operation_list
+            yield self.show_operations_button
             yield self.activity_log
         yield self.footer
 
     def on_mount(self) -> None:
         self.set_interval(1, self._tick_elapsed)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is self.show_operations_button:
+            event.stop()
+            self.show_retained_operations = not self.show_retained_operations
+            event.button.label = "Show recent operations" if self.show_retained_operations else "Show retained operations"
+            self._render_state(self.events[-1] if self.events else {})
 
     def update_event(self, event: dict[str, Any]) -> None:
         """Append or update a coding operation in the box."""
@@ -551,9 +570,28 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         if ev.get("model"):
             self.model = str(ev.get("model"))
 
-        self._schedule_activity_render(lambda: self._render_state(ev), immediate=is_approval)
+        is_terminal = str(ev.get("status") or "").lower() in _TERMINAL_STATUSES or ev_type.endswith((".terminal", ".finished"))
+        self._schedule_activity_render(lambda: self._render_state(ev), immediate=is_approval or is_terminal)
 
     def _render_state(self, event: dict[str, Any]) -> None:
+        from mana_agent.chat.operations import execution_tree
+        from mana_agent.tui.widgets.operation_row import OperationRow
+        self.hierarchy_view.update(execution_tree(self.events))
+        operations = [e for e in self._visible_events() if (e.get("metadata") or {}).get("operation_attempt_id") or e.get("operation_attempt_id")]
+        selected = operations if self.show_retained_operations else [e for e in operations if e in operations[-40:] or str(e.get("status")) not in _TERMINAL_STATUSES]
+        if self.operation_list.is_mounted:
+            keys = {operation_key(e) for e in selected}
+            for key in list(self.operation_rows):
+                if key not in keys:
+                    self.operation_rows.pop(key).remove()
+            for operation in selected:
+                key = operation_key(operation)
+                if key in self.operation_rows:
+                    self.operation_rows[key].update_operation(operation)
+                else:
+                    row = OperationRow(operation)
+                    self.operation_rows[key] = row
+                    self.operation_list.mount(row)
         status = str(event.get("status") or "running").lower()
         title = str(event.get("title") or event.get("event_type") or event.get("type") or "Coding")
         event_auto_approved = bool(
@@ -611,6 +649,8 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         # Activity log (terminal commands, patches, outputs, parallel events)
         lines: list[str] = []
         for row in self._visible_events()[-40:]:
+            if row.get("operation_attempt_id") or (row.get("metadata") or {}).get("operation_attempt_id"):
+                continue
             if row.get("_approval_resolved"):
                 continue
             row_status = str(row.get("status") or "running").lower()

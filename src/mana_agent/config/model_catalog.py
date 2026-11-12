@@ -460,6 +460,21 @@ def normalize_capabilities(
             except ValueError:
                 continue
         if parsed:
+            # Anthropic may report only optional features (for example image
+            # input) rather than listing the model's text output capability.
+            # Preserve explicit non-text product classifications.
+            auxiliary = {
+                ModelCapability.IMAGE_INPUT, ModelCapability.AUDIO_INPUT,
+                ModelCapability.VIDEO_INPUT, ModelCapability.TOOL_CALLING,
+                ModelCapability.REASONING, ModelCapability.STRUCTURED_OUTPUT,
+                ModelCapability.CODE,
+            }
+            if (
+                str(provider or "").strip().lower() == "anthropic"
+                and str(model_id or "").strip().lower().startswith("claude-")
+                and parsed <= auxiliary
+            ):
+                parsed.add(ModelCapability.TEXT_GENERATION)
             return frozenset(parsed)
     model = str(model_id or "").strip()
     lowered = model.lower()
@@ -497,6 +512,10 @@ def normalize_capabilities(
             if capability is ModelCapability.TEXT_TO_SPEECH:
                 return frozenset({ModelCapability.TEXT_TO_SPEECH, ModelCapability.AUDIO_GENERATION})
             return frozenset({capability})
+    # Claude catalog entries often omit capabilities. Recognize the Claude
+    # text family without classifying arbitrary Anthropic IDs as text models.
+    if provider_id == "anthropic" and lowered.startswith("claude-"):
+        return frozenset({ModelCapability.TEXT_GENERATION})
     if provider_id == "openrouter":
         if "grok" in lowered:
             return frozenset(
@@ -764,6 +783,9 @@ def extract_capabilities_from_record(item: dict[str, Any]) -> set[ModelCapabilit
                     capabilities.add(ModelCapability.VIDEO_INPUT)
     elif isinstance(supplied, dict):
         for key, val in supplied.items():
+            # Anthropic represents optional features as {"supported": bool}.
+            if isinstance(val, dict) and "supported" in val:
+                val = val["supported"]
             if val:
                 text = str(key).strip().lower().replace("-", "_")
                 try:
@@ -965,9 +987,7 @@ def descriptors_from_catalog(provider: str, records: Iterable[str | dict[str, An
         if not model_id:
             continue
         extracted_caps = extract_capabilities_from_record(metadata)
-        capabilities = normalize_capabilities(
-            provider, model_id, extracted_caps or metadata.get("capabilities")
-        )
+        capabilities = normalize_capabilities(provider, model_id, extracted_caps)
         context_window = metadata.get("context_length") or metadata.get("context_window")
         max_output_tokens = metadata.get("max_output_tokens") or metadata.get("max_completion_tokens")
         try:

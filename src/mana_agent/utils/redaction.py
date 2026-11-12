@@ -17,6 +17,25 @@ from typing import Any
 
 REDACTED = "***REDACTED***"
 
+
+class PrivateKeyStreamFilter:
+    """Suppress complete PEM/OpenSSH blocks across independently read lines."""
+    def __init__(self) -> None:
+        self.in_private_key = False
+
+    def filter(self, text: str) -> str:
+        public = []
+        for line in text.splitlines(keepends=True):
+            if re.search(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", line):
+                self.in_private_key = True
+                public.append("[PRIVATE KEY REDACTED]\n")
+            if self.in_private_key:
+                if re.search(r"-----END [A-Z ]*PRIVATE KEY-----", line):
+                    self.in_private_key = False
+                continue
+            public.append(line)
+        return "".join(public)
+
 # Keys whose values must always be redacted (compared case-insensitively).
 SENSITIVE_KEYS: frozenset[str] = frozenset(
     {
@@ -34,7 +53,8 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
 
 
 def _is_sensitive_key(key: Any) -> bool:
-    return isinstance(key, str) and key.strip().lower() in SENSITIVE_KEYS
+    return isinstance(key, str) and (key.strip().lower() in SENSITIVE_KEYS
+        or any(key.strip().lower().endswith("_" + suffix) for suffix in SENSITIVE_KEYS))
 
 
 def redact_secrets(value: Any) -> Any:
@@ -53,7 +73,7 @@ def redact_secrets(value: Any) -> Any:
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
             if _is_sensitive_key(key):
-                redacted[key] = REDACTED
+                redacted[key] = item if (item is None or item == "") else REDACTED
             else:
                 redacted[key] = redact_secrets(item)
         return redacted

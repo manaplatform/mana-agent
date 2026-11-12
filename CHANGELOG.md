@@ -2,7 +2,15 @@
 
 All notable repository changes should be recorded here.
 
-## Unreleased — 2026-11-10
+## Unreleased — 2026-11-11
+
+- 2026-11-11 — Test suite / Active turn approval resumption test on Windows: update `test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease` in `tests/coding/test_approval_binding_regressions.py` to execute a script file (`python print_999.py`) rather than an inline command with quotes (`python -c "print(999)"`). This avoids Windows `cmd.exe` quote escaping and argument splitting discrepancies under subprocess execution, ensuring cross-platform test reliability on Windows CI runners. User-owned verification (not run by the agent): `python -m pytest tests/coding/test_approval_binding_regressions.py -k test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease -q`.
+- 2026-11-11 — Test suite / Async approval regression test: convert `test_internal_engine_suspends_cleanly_when_waiting_for_approval_without_internal_error` in `tests/coding/test_approval_binding_regressions.py` from an async coroutine marked with `@pytest.mark.asyncio` to a synchronous pytest function executing via `asyncio.run`. This adheres to repository async testing guidelines (`docs/12-testing.md`) and resolves test failures in CI environments where `pytest-asyncio` is not declared or installed. User-owned verification (not run by the agent): `python -m pytest tests/coding/test_approval_binding_regressions.py -k test_internal_engine_suspends_cleanly_when_waiting_for_approval_without_internal_error -q`.
+
+- 2026-11-11 — Configuration / Anthropic catalog refresh: construct Anthropic model-list and model-detail URLs with the required `/v1` API prefix while accepting base URLs both at the host root and already ending in `/v1`. Replace the misleading OpenAI-compatible `/v1` advice on Anthropic HTTP 404 errors with Anthropic-specific catalog endpoint guidance. Add regression coverage for root, trailing-slash, prefixed, and proxy base URLs and update provider configuration documentation. Do not append `/models` directly to Anthropic's default host root or suggest OpenAI URL rules for Anthropic failures. User-owned verification (not run by the agent): `venv/bin/python -m pytest tests/test_single_provider_model_catalog.py -k anthropic -q`.
+- 2026-11-11 — Anthropic model selection: classify models returned by Anthropic's Messages API catalog as text-generation models. Without provider-specific capability classification, successful key validation fetched Claude models but filtered every one out of the agent model dropdowns, showing zero available models. Add a regression test for both current and future Claude model IDs.
+
+- 2026-11-10 — Execution architecture and visibility: add deterministic ToolRunner authority, versioned operation requests/results, CodingAgent-owned repository delegation, single-operation worker IPC, incremental command streams, observed mutation diffs, scoped retained-output APIs, and stable details in existing activity boxes. Preserve Codex ownership and supervisor fencing; remove the direct-edit route, generated fallback edits/cleanup, unknown-policy widening, and implicit transport switching. Legacy serialized Redis jobs require explicit current-authority rebinding. See [regression notes and exact user-owned verification commands](docs/regressions/hierarchical-tool-execution.md). Changes are local and uncommitted; automated checks and live/UI/performance acceptance have not been run by the agent.
 
 - 2026-11-10 — Coding research: add typed unresolved-bug handoffs for internal/Codex engines and Main Model-selected web/GitHub research through the existing autonomous controller. Default to 12 search requests/four rounds; preserve task identity, completed work, permissions, Batch waits and steering. Add task-scoped cache/limits, sanitized queries, source provenance, durable delivery receipts and branch-specific human clarification. Keep completion/verification gates intact and show research in the existing Coding Activity box. Preserve GitHub issue titles/bodies/timestamps. See [regression and recovery notes](docs/regressions/coding-bug-research.md).
 - 2026-11-10 — Fix & Compatibility: resolve coding research boundary regressions:
@@ -11,6 +19,23 @@ All notable repository changes should be recorded here.
   - Internal Coding Engine: preserve exact system instruction in the first system message of model tool loops, injecting debugging handoff instructions through user context and requirements.
   - Gateway & CLI Settings: safely access `mana_coding_research_enabled` using `getattr` across gateway route capability setup and provide research defaults on dummy CLI settings doubles.
 - User-owned verification: `venv/bin/python -m pytest tests/coding/test_bug_research.py tests/gateway/test_coding_bug_research.py tests/execution/test_coding_research_recovery.py -q`; compatibility: `venv/bin/python -m pytest tests/test_search_router.py tests/test_coding_engine_modes.py tests/test_activity_stream_integration.py tests/gateway/test_checkpoint_resume_invariants.py tests/test_cli_smoke.py tests/test_multi_agent_core.py -q`; dashboard: `node --test tests/dashboard/live_chat_reducer.test.mjs`. Live provider/Codex/Batch/UI acceptance is unverified. Changes are local; no commit, publication or deployment is implied.
+
+## 0.11.0 — 2026-11-11
+
+- Release metadata: bump the package version to 0.11.0 in `pyproject.toml` and generated distribution metadata.
+- Fix & Resilience: resolve `INTERNAL_EXECUTION_FAILED` on human approval resumption during active turns:
+  - Branch Controller Binding: bind `default_human_inbox_service` to active `LaneCoordinator` or `ActivityContext` branch controller instead of instantiating an isolated unlinked supervisor.
+  - Supervisor Attempt Resumption: enable `ExecutionSupervisor.resume_running` to transition `QUEUED` tasks back to `RUNNING` for active attempts, while preventing resumption when a task is waiting for a human inbox response (`task.waiting_inbox_item_id`).
+  - Activity Context Publication: fence `ActivityContext.publication()` to avoid resuming tasks waiting for human input, preventing premature lease reactivation before human approval delivery.
+  - Tool Runner Execution: skip `supervisor.update_action` when a tool operation is suspended awaiting approval (`status == "waiting_approval"`), avoiding spurious `StaleLeaseError` on suspended branch leases.
+  - Lane Coordinator Transitions: enforce running lane tasks transition through `WAITING` before `QUEUED` in `resume_from_human_input`.
+  - Transactional Action Resumption: prioritize shell/command approval handling in `AgentChatGateway.respond_to_transactional_action_command` with direct lane reservation startup.
+  - Regression Coverage: added `test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease` and `test_internal_engine_suspends_cleanly_when_waiting_for_approval_without_internal_error` in `tests/coding/test_approval_binding_regressions.py`.
+  - Non-Full-Access Interactive Approval Wait: in `programmatic.py`, wait for human approval resolution (polling `inbox_service` up to timeout) in interactive runs, executing the command upon approval without aborting the turn.
+  - Model Loop Approval Suspension: in `internal_engine.py`, add `ActionApprovalPending` to safely halt tool loops when an action is awaiting approval, returning clean `status="waiting"` with `human_input` rather than attempting subsequent tool calls on a suspended lane task.
+  - Tool Authorization Safety: in `tool_runner_agent.py`, wrap `a.authorize` exceptions into `ExecutionAuthorityError` to prevent unhandled `LaneCoordinatorError` crashes.
+  - TUI Configuration Provider Worker: in `configuration_app.py`, handle `WorkerFailed` and set `exit_on_error=False` on the provider test worker so validation errors are rendered in the UI without crashing the application.
+- User-owned verification: `venv/bin/python -m pytest tests/coding/test_approval_binding_regressions.py -v`; `venv/bin/python -m pytest tests/gateway/test_lane_coordinator.py tests/gateway/test_chat_gateway.py -v`.
 
 ## 0.10.0 — 2026-11-09
 

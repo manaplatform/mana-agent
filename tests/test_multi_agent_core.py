@@ -60,6 +60,19 @@ from mana_agent.services.memory_service import MultiAgentMemoryService
 from mana_agent.workspaces.paths import mana_home
 
 
+def _bound_queue(root, *, taskboard, **kwargs):
+    """Legacy fixtures explicitly rebind current registered authority."""
+    registry = AgentRegistry()
+    main = registry.find_by_role(AgentRole.MAIN)
+    coding = registry.register(AgentRole.CODING, agent_id="agent_coding_0001", parent_agent_id=main.agent_id)
+    worker_id = kwargs.pop("default_worker_agent_id", "agent_tool_worker_0001")
+    registry.register(AgentRole.TOOL_WORKER, agent_id=worker_id, parent_agent_id=coding.agent_id)
+    for task in list(taskboard.tasks.values()):
+        taskboard.assign(task.task_id, coding.agent_id)
+    return QueueManager(root, taskboard=taskboard, hierarchy_policy=HierarchyPolicy(registry, taskboard),
+        default_worker_agent_id=worker_id, **kwargs)
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=repo, text=True, capture_output=True, check=False)
 
@@ -524,18 +537,18 @@ def test_queue_rejects_duplicate_fingerprint(tmp_path):
     memory = MultiAgentMemoryService(root=tmp_path)
     board = TaskBoard(tmp_path, memory_service=memory)
     task = board.create_task(title="Queue", user_request="run status")
-    queue = QueueManager(tmp_path, taskboard=board, memory_service=memory)
+    queue = _bound_queue(tmp_path, taskboard=board, memory_service=memory)
 
     first = queue.enqueue(
         task_id=task.task_id,
-        requested_by_agent_id="agent_tool_0001",
+        requested_by_agent_id="agent_coding_0001",
         job_type=QueueJobType.GIT_STATUS,
         payload={},
         purpose="Inspect status",
     )
     second = queue.enqueue(
         task_id=task.task_id,
-        requested_by_agent_id="agent_tool_0001",
+        requested_by_agent_id="agent_coding_0001",
         job_type=QueueJobType.GIT_STATUS,
         payload={},
         purpose="Inspect status again",
@@ -631,11 +644,11 @@ def test_tool_result_reused_when_args_same(tmp_path):
     memory = MultiAgentMemoryService(root=tmp_path)
     board = TaskBoard(tmp_path, memory_service=memory)
     task = board.create_task(title="Search", user_request="search needle")
-    queue = QueueManager(tmp_path, taskboard=board, memory_service=memory)
+    queue = _bound_queue(tmp_path, taskboard=board, memory_service=memory)
 
     first = queue.enqueue(
         task_id=task.task_id,
-        requested_by_agent_id="agent_tool_0001",
+        requested_by_agent_id="agent_coding_0001",
         job_type=QueueJobType.REPO_SEARCH,
         payload={"query": "needle"},
     )
@@ -643,7 +656,7 @@ def test_tool_result_reused_when_args_same(tmp_path):
     memory.queue_fingerprints.clear()
     second = queue.enqueue(
         task_id=task.task_id,
-        requested_by_agent_id="agent_tool_0001",
+        requested_by_agent_id="agent_coding_0001",
         job_type=QueueJobType.REPO_SEARCH,
         payload={"query": "needle"},
     )
@@ -855,10 +868,10 @@ def test_git_intent_route_does_not_require_runtime_wiring(tmp_path):
 def test_queue_manager_serializes_write_jobs_and_tracks_status(tmp_path):
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Queue", user_request="run status")
-    queue = QueueManager(tmp_path, taskboard=board)
+    queue = _bound_queue(tmp_path, taskboard=board)
     job = queue.enqueue(
         task_id=task.task_id,
-        requested_by_agent_id="agent_tool",
+        requested_by_agent_id="agent_coding_0001",
         approved_by_agent_id="agent_head_decision_0001",
         job_type=QueueJobType.GIT_STATUS,
         payload={},
@@ -920,7 +933,7 @@ def test_queue_manager_runs_batch_read_through_tools_manager(tmp_path):
     (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Batch read", user_request="read docs")
-    queue = QueueManager(tmp_path, taskboard=board)
+    queue = _bound_queue(tmp_path, taskboard=board)
     job = queue.enqueue(
         task_id=task.task_id,
         requested_by_agent_id="agent_coding_0001",
@@ -946,7 +959,7 @@ def test_queue_job_execution_records_subagent_identity(tmp_path):
     task = board.create_task(title="Batch read", user_request="read docs", owner_agent_id="agent_main_0002")
     worker_id = "subagent_tool_worker_0001"
     board.assign_subagent(task.task_id, worker_id)
-    queue = QueueManager(tmp_path, taskboard=board, default_worker_agent_id=worker_id)
+    queue = _bound_queue(tmp_path, taskboard=board, default_worker_agent_id=worker_id)
     job = queue.enqueue(
         task_id=task.task_id,
         requested_by_agent_id="agent_coding_0001",
@@ -968,7 +981,7 @@ def test_queue_job_default_approver_uses_current_task_owner(tmp_path):
     board = TaskBoard(tmp_path)
     first = board.create_task(title="First", user_request="first", owner_agent_id="agent_main_0001")
     second = board.create_task(title="Second", user_request="second", owner_agent_id="agent_main_0002")
-    queue = QueueManager(tmp_path, taskboard=board)
+    queue = _bound_queue(tmp_path, taskboard=board)
 
     first_job = queue.enqueue(
         task_id=first.task_id,
@@ -1014,7 +1027,7 @@ def test_trace_writer_persists_execution_identity(tmp_path):
 def test_queue_manager_requires_budget_before_every_job(tmp_path):
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Budget", user_request="search")
-    queue = QueueManager(tmp_path, taskboard=board)
+    queue = _bound_queue(tmp_path, taskboard=board)
     job = queue.enqueue(
         task_id=task.task_id,
         requested_by_agent_id="agent_coding_0001",
@@ -1029,7 +1042,7 @@ def test_queue_manager_requires_budget_before_every_job(tmp_path):
 def test_queue_manager_rejects_main_agent_queue_job_creation(tmp_path):
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Policy", user_request="search")
-    queue = QueueManager(tmp_path, taskboard=board)
+    queue = _bound_queue(tmp_path, taskboard=board)
     with pytest.raises(HierarchyViolation):
         queue.enqueue(
             task_id=task.task_id,
@@ -1044,7 +1057,7 @@ def test_batch_read_result_reused_when_args_same(tmp_path):
     (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Cached read", user_request="read docs twice")
-    queue = QueueManager(tmp_path, taskboard=board)
+    queue = _bound_queue(tmp_path, taskboard=board)
 
     first = queue.enqueue(
         task_id=task.task_id,
@@ -1074,7 +1087,7 @@ def test_patch_context_failure_requires_fresh_read(tmp_path):
     (tmp_path / "README.md").write_text("current\n", encoding="utf-8")
     board = TaskBoard(tmp_path)
     task = board.create_task(title="Patch", user_request="edit README.md")
-    queue = QueueManager(tmp_path, taskboard=board)
+    queue = _bound_queue(tmp_path, taskboard=board)
     job = queue.enqueue(
         task_id=task.task_id,
         requested_by_agent_id="agent_coding_0001",

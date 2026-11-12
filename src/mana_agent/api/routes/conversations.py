@@ -67,7 +67,7 @@ def _resolve_root(
     if repository_id:
         try:
             repo = WorkspaceService().store.get_repository(repository_id)
-            path = resolve_user_path(repo.canonical_path)
+            path = _authorize_root_path(repo.canonical_path)
             return path, repository_id
         except FileNotFoundError as exc:
             raise ManaApiError(404, "Repository not found.") from exc
@@ -293,6 +293,41 @@ def list_events(
         "execution_id": execution_id or None,
         "events": events,
     }
+
+
+@router.get("/conversations/{conversation_id}/executions/{execution_id}/operations/{operation_id}")
+def get_operation(conversation_id: str, execution_id: str, operation_id: str,
+                  attempt_id: str = "", operation_attempt_id: str = "", root: str | None = None,
+                  repository_id: str | None = None, authorization: str | None = Header(None)) -> dict[str, Any]:
+    from mana_agent.services.operation_trace import operation_detail
+    _require_mutation_token(authorization)
+    service = _service(root=root, repository_id=repository_id)
+    try:
+        return {"ok": True, "operation": operation_detail(service, conversation_id, execution_id,
+            operation_id, attempt_id, operation_attempt_id)}
+    except (FileNotFoundError, ValueError) as exc:
+        raise ManaApiError(404, "Operation not found in this execution attempt.") from exc
+
+
+@router.get("/conversations/{conversation_id}/executions/{execution_id}/operations/{operation_id}/content")
+def get_operation_content(conversation_id: str, execution_id: str, operation_id: str,
+                          channel: Literal["stdout", "stderr", "combined", "diff", "result"] = "stdout",
+                          attempt_id: str = "", operation_attempt_id: str = "", offset: int = 0,
+                          limit: int = 16000, root: str | None = None, repository_id: str | None = None,
+                          authorization: str | None = Header(None)) -> dict[str, Any]:
+    from mana_agent.services.operation_trace import operation_content
+    from mana_agent.context_cost.artifact_store import ArtifactAccessError
+    _require_mutation_token(authorization)
+    service = _service(root=root, repository_id=repository_id)
+    try:
+        return {"ok": True, **operation_content(service, conversation_id, execution_id, operation_id,
+            attempt_id, channel=channel, offset=offset, limit=limit, operation_attempt_id=operation_attempt_id)}
+    except ArtifactAccessError as exc:
+        raise ManaApiError(403, "Retained output is outside this conversation scope.") from exc
+    except FileNotFoundError as exc:
+        raise ManaApiError(410, "Retained output is no longer available.") from exc
+    except ValueError as exc:
+        raise ManaApiError(400, str(exc)) from exc
 
 
 @router.post("/conversations/{conversation_id}/messages", status_code=201)

@@ -21,20 +21,24 @@ _scoped_subscriber: ContextVar[CodingEventSubscriber | None] = ContextVar(
 _execution: ContextVar[dict[str, object] | None] = ContextVar("mana_coding_execution", default=None)
 
 
-def publish_coding_event(event: AgentEvent) -> None:
+def publish_coding_event(event: AgentEvent) -> bool:
     from mana_agent.chat.activity import project_activity
     from mana_agent.services.activity_context import current_activity_context
     from mana_agent.services.execution_event_hub import get_execution_event_hub
     context = current_activity_context()
+    persisted = True
     if context is not None:
         try:
             public = project_activity(event, protected=context.protected_text)
             if public is not None:
                 published = get_execution_event_hub().publish(public)
                 if published.get("visibility") == "internal":
-                    return
+                    return False
         except Exception:
             logger.warning("Coding activity projection unavailable")
+            persisted = False
+            event = event.model_copy(update={"payload": {**event.payload, "trace_complete": False,
+                "observability_degraded": True}})
     scoped = _scoped_subscriber.get()
     if scoped is not None:
         try:
@@ -48,6 +52,7 @@ def publish_coding_event(event: AgentEvent) -> None:
             callback(event)
         except Exception:
             logger.debug("coding event subscriber raised", exc_info=True)
+    return persisted
 
 
 def subscribe_coding_events(callback: CodingEventSubscriber) -> Callable[[], None]:

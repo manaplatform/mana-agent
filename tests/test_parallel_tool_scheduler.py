@@ -23,7 +23,9 @@ class MockDispatcher:
         self.invocations: list[tuple[str, dict[str, Any]]] = []
         self.fail_tools: set[str] = set()
 
-    def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def dispatch(self, tool_name: str, arguments: dict[str, Any], *, call_id="", _cached_result=None) -> dict[str, Any]:
+        if _cached_result is not None:
+            return {**_cached_result, "cache_hit": True}
         self.invocations.append((tool_name, arguments))
         delay = self.delays.get(tool_name, 0.01)
         time.sleep(delay)
@@ -182,7 +184,7 @@ def test_parallel_executor_approval_denied_skips_downstream_action() -> None:
             self.approved = approved
             self.executed_tools: list[str] = []
 
-        def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        def dispatch(self, tool_name: str, arguments: dict[str, Any], *, call_id="", _cached_result=None) -> dict[str, Any]:
             self.executed_tools.append(tool_name)
             if tool_name == "approval_request":
                 return {

@@ -389,7 +389,7 @@ def test_tool_definitions_conform_to_openai_name_pattern(tmp_path: Path) -> None
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(workspace)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(workspace, task_id="test-coding-task")
     engine = InternalCodingEngine(model="gpt-4o")
 
     # 1. Check internal engine tool definitions

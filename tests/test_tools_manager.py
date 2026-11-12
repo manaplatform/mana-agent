@@ -991,7 +991,7 @@ def test_wrong_path_stub_is_not_rescued(tmp_path: Path) -> None:
     }
 
 
-def test_substantial_wrong_path_content_is_relocated_not_discarded(tmp_path: Path) -> None:
+def test_substantial_wrong_path_content_requires_a_new_coding_decision(tmp_path: Path) -> None:
     (tmp_path / "docs").mkdir()
     (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
     rich = "# Project Overview\n\n" + ("This project does many useful things. " * 20) + "\n"
@@ -1022,11 +1022,10 @@ def test_substantial_wrong_path_content_is_relocated_not_discarded(tmp_path: Pat
         max_steps=1,
     )
 
-    # The agent's real content is preserved, just moved into docs/.
-    assert (tmp_path / "docs" / "01-overview.md").read_text(encoding="utf-8") == rich
-    assert not (tmp_path / "01-overview.md").exists()
-    assert result.run_status == "completed"
-    assert result.changed_files == ["docs/01-overview.md"]
+    # Preserve observed work; a missing target cannot authorize relocation/deletion.
+    assert not (tmp_path / "docs" / "01-overview.md").exists()
+    assert (tmp_path / "01-overview.md").read_text(encoding="utf-8") == rich
+    assert result.run_status != "completed"
 
 
 

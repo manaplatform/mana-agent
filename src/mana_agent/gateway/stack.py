@@ -330,6 +330,7 @@ def build_chat_stack(
     gateway_ask_agent = getattr(ask_service, "ask_agent", None)
     if gateway_ask_agent is not None:
         gateway_ask_agent.context_cost_governor = context_cost_governor
+        gateway_ask_agent._repository_read_only = not (cfg.coding_agent or cfg.coding_agent_instance is not None)
     for model_owner in (
         gateway_ask_agent,
         getattr(ask_service, "qna_chain", None),

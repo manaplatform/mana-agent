@@ -29,10 +29,16 @@ class ActivityContext:
     supervisor: Any = field(default=None, repr=False, compare=False)
     lease_token: str = field(default="", repr=False, compare=False)
     protected_text: tuple[str, ...] = field(default=(), repr=False, compare=False)
+    execution_registry: Any = field(default=None, repr=False, compare=False)
+    authorize_tool: Any = field(default=None, repr=False, compare=False)
+    execution_lane: str = ""
+    taskboard: Any = field(default=None, repr=False, compare=False)
+    parent_task_id: str = ""
+    coordinator: Any = field(default=None, repr=False, compare=False)
 
     def identity(self) -> dict[str, Any]:
         return {key: getattr(self, key) for key in (
-            "conversation_id", "execution_id", "repository_id", "task_id", "root_task_id",
+            "conversation_id", "execution_id", "repository_id", "task_id", "root_task_id", "parent_task_id",
             "agent_id", "subagent_id", "parent_agent_id", "attempt_id", "attempt_generation", "execution_mode",
         ) if getattr(self, key) not in (None, "", 0)}
 
@@ -48,8 +54,24 @@ class ActivityContext:
         from mana_agent.execution_supervisor.models import ExecutionState
         with self.supervisor.store.locked():
             task = self.supervisor.get_task(self.task_id)
-            self.supervisor._validate_lease(task, attempt_id=self.attempt_id, lease_token=self.lease_token)
-            if task.attempt_generation != self.attempt_generation or task.state != ExecutionState.RUNNING or task.cancellation_status is not None:
+            attempt_id = self.attempt_id
+            lease_token = self.lease_token
+            coordinator = getattr(self, "coordinator", None)
+            if coordinator is not None and hasattr(coordinator, "inspect_task"):
+                try:
+                    lane_exec = coordinator.inspect_task(self.task_id)
+                    if lane_exec and lane_exec.supervisor_attempt_id and lane_exec.supervisor_lease_token:
+                        attempt_id = lane_exec.supervisor_attempt_id
+                        lease_token = lane_exec.supervisor_lease_token
+                except Exception:
+                    pass
+            if task.state == ExecutionState.QUEUED and not task.cancellation_status and not task.waiting_inbox_item_id:
+                try:
+                    task = self.supervisor.resume_running(self.task_id, attempt_id=attempt_id, lease_token=lease_token)
+                except Exception:
+                    pass
+            self.supervisor._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
+            if task.state != ExecutionState.RUNNING or task.cancellation_status is not None:
                 raise StaleLeaseError("activity belongs to a retired or cancelled execution attempt")
             yield
 
@@ -133,7 +155,9 @@ def activity_turn(method):
 
 
 def run_with_activity_attempt(callback, *, _activity_supervisor, _activity_task_id: str,
-                              _activity_attempt_id: str, _activity_lease_token: str, **kwargs):
+                              _activity_attempt_id: str, _activity_lease_token: str,
+                              _activity_registry=None, _activity_authorize=None, _activity_lane: str = "", _activity_taskboard=None,
+                              _activity_coordinator=None, **kwargs):
     previous = current_activity_context()
     if previous is None or not _activity_task_id or not _activity_attempt_id:
         return callback(**kwargs)
@@ -141,9 +165,12 @@ def run_with_activity_attempt(callback, *, _activity_supervisor, _activity_task_
     if attempt is None:
         raise ValueError("activity attempt is unavailable")
     task = _activity_supervisor.get_task(_activity_task_id)
-    context = replace(previous, task_id=_activity_task_id, root_task_id=task.root_task_id, attempt_id=_activity_attempt_id,
+    context = replace(previous, task_id=_activity_task_id, root_task_id=task.root_task_id, parent_task_id=task.parent_task_id or "", attempt_id=_activity_attempt_id,
                       attempt_generation=attempt.generation, supervisor=_activity_supervisor,
-                      lease_token=_activity_lease_token)
+                      lease_token=_activity_lease_token, execution_registry=_activity_registry or previous.execution_registry,
+                      authorize_tool=_activity_authorize or previous.authorize_tool,
+                      execution_lane=_activity_lane or previous.execution_lane, taskboard=_activity_taskboard or previous.taskboard,
+                      coordinator=_activity_coordinator or getattr(previous, "coordinator", None))
     with activity_scope(context):
         return callback(**kwargs)
 
@@ -167,7 +194,7 @@ def bind_activity_attempt(supervisor, task_id: str, attempt_id: str, lease_token
     task = supervisor.get_task(task_id)
     attempt = supervisor.store.get_attempt(attempt_id) if attempt_id else None
     generation = attempt.generation if attempt is not None else getattr(task, "attempt_generation", 0)
-    _CONTEXT.set(replace(previous, task_id=task_id, root_task_id=task.root_task_id,
+    _CONTEXT.set(replace(previous, task_id=task_id, root_task_id=task.root_task_id, parent_task_id=task.parent_task_id or "",
                          conversation_id=previous.conversation_id or task.session_id,
                          repository_id=previous.repository_id or task.repository_id,
                          attempt_id=attempt_id or getattr(task, "attempt_id", "") or "",

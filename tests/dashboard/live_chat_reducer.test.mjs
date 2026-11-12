@@ -726,3 +726,29 @@ test("steering user message follows authoritative status without reopening", () 
   reduce(state, { type: "event", event: event(2, "steering.queued", { status: "queued", metadata: { request_id: "request-one" } }) });
   assert.equal(state.messages.get("steering-request-one").steering_status, "applied");
 });
+
+test("stream chunks retain one operation, exact inputs, and repeated output", () => {
+  const state = createState("operation-session");
+  const owner = { task_id: "task", agent_id: "worker", operation_id: "command", operation_attempt_id: "invocation", backend: "internal" };
+  reduce(state, { type: "event", event: event(1, "tool.started", { ...owner, metadata: { command: "python streams.py", cwd: "/workspace" } }) });
+  reduce(state, { type: "event", event: event(2, "tool.stdout", { ...owner, output_preview: "same\n", metadata: { stream_channel: "stdout", stream_offset: 0, content_length: 5 } }) });
+  reduce(state, { type: "event", event: event(3, "tool.stdout", { ...owner, output_preview: "same\n", metadata: { stream_channel: "stdout", stream_offset: 5, content_length: 5 } }) });
+  reduce(state, { type: "event", event: event(4, "tool.completed", { ...owner, status: "success", metadata: { exit_code: 0 } }) });
+  const operations = snapshot(state).executionTraces[0].codingBox.events;
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0].metadata.command, "python streams.py");
+  assert.equal(operations[0].metadata.cwd, "/workspace");
+  assert.equal(operations[0].metadata.streams.stdout, "same\nsame\n");
+  assert.equal(operations[0].metadata.exit_code, 0);
+});
+
+test("parallel streams and operation attempts remain independent", () => {
+  const state = createState("operation-session");
+  const owner = { task_id: "task", agent_id: "worker", backend: "internal" };
+  for (const [index, operation] of ["first", "second"].entries()) {
+    reduce(state, { type: "event", event: event(index + 1, "tool.stdout", { ...owner, operation_id: "command", operation_attempt_id: operation, output_preview: operation, metadata: { stream_channel: "stderr", stream_offset: 0, content_length: operation.length } }) });
+  }
+  const operations = snapshot(state).executionTraces[0].codingBox.events;
+  assert.equal(operations.length, 2);
+  assert.deepEqual(operations.map((row) => row.metadata.streams.stderr), ["first", "second"]);
+});

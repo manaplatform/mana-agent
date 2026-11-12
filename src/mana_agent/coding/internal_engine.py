@@ -23,6 +23,38 @@ from typing import Any
 
 from mana_agent.coding.engine import CodingEngine
 from mana_agent.batch.policy import BatchPending, BatchHumanInput
+
+
+class ActionApprovalPending(Exception):
+    """Raised when an internal coding action requires human approval."""
+
+    def __init__(self, action_id: str, inbox_item_id: str, message: str = ""):
+        super().__init__(message or f"Action {action_id} requires human approval.")
+        self.action_id = action_id
+        self.inbox_item_id = inbox_item_id
+
+
+def _check_action_approval(output_str: str) -> None:
+    if not output_str or not isinstance(output_str, str):
+        return
+    if (
+        "awaiting_approval" not in output_str
+        and "permission_required" not in output_str
+        and "waiting_approval" not in output_str
+    ):
+        return
+    try:
+        data = json.loads(output_str)
+    except Exception:
+        return
+    if isinstance(data, dict) and (
+        data.get("permission_required") or data.get("status") in {"awaiting_approval", "waiting_approval"}
+    ):
+        raise ActionApprovalPending(
+            action_id=str(data.get("action_id") or ""),
+            inbox_item_id=str(data.get("inbox_item_id") or ""),
+            message=str(data.get("error") or "Command requires human approval."),
+        )
 from mana_agent.coding.live_events import (
     coding_event_scope,
     coding_execution_context,
@@ -164,6 +196,7 @@ class InternalCodingEngine(CodingEngine):
         self._task_statuses: dict[str, CodingStatus] = {}
         self._active_sessions: dict[str, ProgrammaticExecutionSession] = {}
         self._cancellation_events: dict[str, asyncio.Event] = {}
+        self._tool_runners: dict[str, Any] = {}
         self.max_auto_renewals: int = 3
         self.renew_tool_calls: int = 50
         self.renew_model_turns: int = 30
@@ -232,6 +265,8 @@ class InternalCodingEngine(CodingEngine):
         seen_names: set[str] = set()
         contracts = coding_tool_contracts()
         for c in contracts:
+            if not dispatcher.is_tool_allowed(c.name):
+                continue
             sanitized_name = re.sub(r"[^a-zA-Z0-9_-]", "_", c.name)
             if sanitized_name in seen_names:
                 continue
@@ -249,6 +284,8 @@ class InternalCodingEngine(CodingEngine):
                 },
             })
         for extra_name, extra_fn in dispatcher.extra_tools.items():
+            if not dispatcher.is_tool_allowed(extra_name):
+                continue
             sanitized_name = re.sub(r"[^a-zA-Z0-9_-]", "_", extra_name)
             if sanitized_name in seen_names:
                 continue
@@ -290,6 +327,20 @@ class InternalCodingEngine(CodingEngine):
             llm=self._get_or_create_llm(),
             completed_operations=(task.context.get("coding_resume_context") or {}).get("executed_operations"),
         )
+        from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+        from mana_agent.multi_agent.core.types import AgentRole
+        registry = getattr(self, "execution_registry", None) or AgentRegistry()
+        coding_owner = registry.find_by_role(AgentRole.CODING)
+        if self.taskboard is not None:
+            self.taskboard.assign(task_id, coding_owner.agent_id)
+        runner = dispatcher.bind_runtime(registry=registry, actor_id=coding_owner.agent_id,
+            task_id=task_id, cancel=cancel_ev.is_set, authorize=getattr(self, "tool_authorize", None), taskboard=self.taskboard)
+        self._tool_runners[task_id] = runner
+        from mana_agent.services.activity_context import emit_activity
+        emit_activity("task.delegated", title="CodingAgent accepted repository work", status="running",
+            task_id=task_id, agent_id=coding_owner.agent_id,
+            parent_agent_id=registry.find_by_role(AgentRole.MAIN).agent_id,
+            operation_id=f"{task_id}:coding-owner", metadata={"execution_level": 2})
         session = ProgrammaticExecutionSession(
             task_id=task_id,
             dispatcher=dispatcher,
@@ -360,6 +411,14 @@ class InternalCodingEngine(CodingEngine):
                 if debugging_report is not None:
                     status = "waiting"
 
+            except ActionApprovalPending as pending:
+                status = "waiting"
+                final_summary = str(pending)
+                human_input = {
+                    "question": str(pending),
+                    "inbox_item_id": pending.inbox_item_id,
+                    "action_id": pending.action_id,
+                }
             except BatchHumanInput as pending:
                 status = "waiting"
                 final_summary = str(pending)
@@ -485,6 +544,7 @@ class InternalCodingEngine(CodingEngine):
                     visibility="terminal",
                 ))
 
+            self._tool_runners.pop(task_id, None)
             self._active_sessions.pop(task_id, None)
             self._cancellation_events.pop(task_id, None)
             return result
@@ -627,11 +687,6 @@ class InternalCodingEngine(CodingEngine):
                         tname = data["tool_name"]
                         args = data.get("arguments", {})
                         session.state.tool_calls_executed += 1
-                        try:
-                            from mana_agent.commands.ui_helpers import emit_tool_event
-                            emit_tool_event("start", tname, args=json.dumps(args, ensure_ascii=False, default=str), event_id=cid)
-                        except Exception:
-                            pass
                     elif event_name == "tool.completed":
                         cid = data["call_id"]
                         tname = data["tool_name"]
@@ -673,11 +728,6 @@ class InternalCodingEngine(CodingEngine):
                             "duration_ms": dur,
                         })
 
-                        try:
-                            from mana_agent.commands.ui_helpers import emit_tool_event
-                            emit_tool_event("end", tname, duration=dur / 1000.0, event_id=cid)
-                        except Exception:
-                            pass
                     elif event_name in {"tool.failed", "tool.skipped"}:
                         cid = data["call_id"]
                         tname = data["tool_name"]
@@ -694,11 +744,6 @@ class InternalCodingEngine(CodingEngine):
                             "output_preview": str(err)[:300],
                             "duration_ms": dur,
                         })
-                        try:
-                            from mana_agent.commands.ui_helpers import emit_tool_event
-                            emit_tool_event("error", tname, duration=dur / 1000.0, error=err, event_id=cid)
-                        except Exception:
-                            pass
                         if self.global_memory is not None:
                             try:
                                 self.global_memory.record_failure(
@@ -735,6 +780,7 @@ class InternalCodingEngine(CodingEngine):
                     res_entry = turn_results.get(call_id)
                     output_str = res_entry.get("output", "") if res_entry else json.dumps({"ok": False, "error": "Not executed"})
                     messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+                    _check_action_approval(output_str)
 
                 # Checkpoint with supervisor if present
                 if self.execution_supervisor is not None and hasattr(self.execution_supervisor, "record_action"):
@@ -812,6 +858,7 @@ class InternalCodingEngine(CodingEngine):
                     output_str = fn_output.get("output", "")
 
                     messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+                    _check_action_approval(output_str)
 
                     if session.state.tool_calls_executed >= session.state.max_tool_calls:
                         renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(

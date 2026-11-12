@@ -11,14 +11,13 @@ REQUIRED_HIERARCHY = {
     "MainAgent": {
         "HeadDecisionAgent": [
             "PlannerAgent",
-            "CodingAgent",
             "VerifierAgent",
             "ReviewerAgent",
             "SummarizerAgent",
         ],
         "CodingAgent": {
             "QueueManager": {
-                "ToolWorkerAgent": ["ToolsManager"],
+                "ToolRunnerAgent": ["ToolsManager"],
             },
         },
     }
@@ -26,28 +25,30 @@ REQUIRED_HIERARCHY = {
 
 
 def _role_from_agent_id(agent_id: str, registry: AgentRegistry | None = None) -> AgentRole | None:
+    # Persisted/display identities are readable, but prefixes confer no authority.
+    node = registry.agents.get(str(agent_id or "")) if registry is not None else None
+    if node is not None and node.state.value != "done":
+        return node.role
     text = str(agent_id or "")
-    if registry is not None and text in registry.agents:
-        return registry.agents[text].role
     if text.startswith("agent_main_") or text == "main":
         return AgentRole.MAIN
     if text.startswith("agent_head_decision_"):
         return AgentRole.HEAD_DECISION
     if text.startswith("agent_planner_"):
         return AgentRole.PLANNER
-    if text.startswith("agent_coding_") or text.startswith("subagent_coding_"):
+    if text.startswith("agent_coding_") or text.startswith("subagent_coding_") or text == "coding":
         return AgentRole.CODING
-    if text.startswith("agent_verifier_"):
+    if text.startswith("agent_verifier_") or text == "verifier":
         return AgentRole.VERIFIER
-    if text.startswith("agent_reviewer_"):
+    if text.startswith("agent_reviewer_") or text == "reviewer":
         return AgentRole.REVIEWER
-    if text.startswith("agent_summarizer_"):
+    if text.startswith("agent_summarizer_") or text == "summarizer":
         return AgentRole.SUMMARIZER
-    if text.startswith("agent_tool_worker_") or text.startswith("subagent_tool_worker_"):
+    if text.startswith("agent_tool_worker_") or text.startswith("subagent_tool_worker_") or text == "tool_worker":
         return AgentRole.TOOL_WORKER
-    if text.startswith("agent_tool_") or text == "agent_tool":
+    if text.startswith("agent_tool_") or text in {"agent_tool", "tool"}:
         return AgentRole.TOOL
-    if text.startswith("agent_research_"):
+    if text.startswith("agent_research_") or text == "research":
         return AgentRole.RESEARCH
     return None
 
@@ -87,7 +88,7 @@ class HierarchyPolicy:
                 task_id,
                 actor_agent_id,
                 f"execute_tool:{tool_name}",
-                "Only ToolWorkerAgent can execute repository tools.",
+                "Only a registered ToolRunnerAgent can execute repository tools.",
                 "Route tool work through QueueManager and assign a ToolWorkerAgent.",
             )
         if not queue_job_id:
@@ -129,6 +130,12 @@ class HierarchyPolicy:
                 "Queue jobs must be assigned by a specialist to a ToolWorkerAgent.",
                 "Ask MainAgent to create workers, then assign through QueueManager.",
             )
+
+        if self.registry is not None and worker_role == AgentRole.TOOL_WORKER:
+            if worker_agent_id in self.registry.agents and self.registry.agents[worker_agent_id].parent_agent_id != actor_agent_id:
+                self._violate(task_id, actor_agent_id, "assign_worker",
+                    "ToolRunner must be registered under its requesting specialist.",
+                    "Bind the worker to the delegated specialist before queue admission.")
 
     def assert_can_finalize_task(self, actor_agent_id: str, *, task_id: str | None = None) -> None:
         if self._role(actor_agent_id) != AgentRole.SUMMARIZER:

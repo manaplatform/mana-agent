@@ -16,7 +16,7 @@ class _BenchmarkingDispatcher:
     def __init__(self, io_delay: float = 0.02) -> None:
         self.io_delay = io_delay
 
-    def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def dispatch(self, tool_name: str, arguments: dict[str, Any], *, call_id="", _cached_result=None) -> dict[str, Any]:
         time.sleep(self.io_delay)
         return {"ok": True, "tool": tool_name}
 

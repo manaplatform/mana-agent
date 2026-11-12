@@ -402,7 +402,7 @@ class FileActionAdapter(ActionAdapter):
 
 
 class ShellActionAdapter(ActionAdapter):
-    def __init__(self, *, argv: list[str], cwd: Path, environment: dict[str, str] | None, expected_outputs: list[str], parent_task_id: str, actor: str, originating_agent: str, idempotency_key: str, transaction_id: str = "", timeout_seconds: int = 120, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run, policy_context: dict[str, Any] | None = None, allow_command_result_verification: bool = False) -> None:
+    def __init__(self, *, argv: list[str], cwd: Path, environment: dict[str, str] | None, expected_outputs: list[str], parent_task_id: str, actor: str, originating_agent: str, idempotency_key: str, transaction_id: str = "", timeout_seconds: int = 120, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None, policy_context: dict[str, Any] | None = None, allow_command_result_verification: bool = False) -> None:
         if not argv or not all(isinstance(item, str) and item for item in argv):
             raise ValueError("shell action requires a non-empty argv list")
         self.argv, self.cwd, self.environment = list(argv), cwd.resolve(), dict(environment or {})
@@ -424,7 +424,12 @@ class ShellActionAdapter(ActionAdapter):
 
     def execute(self, action: ActionIntent) -> dict[str, Any]:
         environment = {**os.environ, **self.environment}
-        completed = self.runner(self.argv, cwd=self.cwd, env=environment, capture_output=True, text=True, shell=False, timeout=self.timeout_seconds, check=False)
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        from mana_agent.utils.process_stream import run_streaming_process
+        active_runner = self.runner or subprocess.run
+        if self.runner is None and current_operation() is not None and getattr(subprocess.run, "__name__", "") == "run":
+            active_runner = run_streaming_process
+        completed = active_runner(self.argv, cwd=self.cwd, env=environment, capture_output=True, text=True, shell=False, timeout=self.timeout_seconds, check=False)
         return {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
 
     def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:

@@ -61,8 +61,7 @@ def _redact_for_persistence(payload):
             for key, value in original.items():
                 if (
                     key in {"lease_token", "lease_token_hash", "idempotency_key"}
-                    and isinstance(value, str)
-                    and _SAFE_TOKEN_HASH.fullmatch(value)
+                    and (value == "" or (isinstance(value, str) and _SAFE_TOKEN_HASH.fullmatch(value)))
                 ):
                     redacted[key] = value
                 elif key in redacted:

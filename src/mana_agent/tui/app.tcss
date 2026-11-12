@@ -206,6 +206,12 @@ CodingActivityBox Collapsible {
     border: none;
 }
 
+CodingActivityBox .coding-operation-list {
+    height: auto;
+    max-height: 32;
+    overflow-y: auto;
+}
+
 /* Scrollbar */
 VerticalScroll > Scrollbar {
     background: #1f2937;

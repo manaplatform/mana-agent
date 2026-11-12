@@ -44,6 +44,14 @@ def run_tool_request_task(
 
     events: list[dict[str, Any]] = [{"event": "started", "at": started}]
     try:
+        from mana_agent.services.activity_context import current_activity_context
+        authority = current_activity_context()
+        if authority is None or not authority.task_id or authority.execution_registry is None:
+            raise ToolWorkerProcessError(code="execution_authority_required",
+                message="Legacy Redis payloads carry no current registered execution authority. Rebind through the admitted CodingAgent/ToolRunner transport before execution; no model or tool was started.",
+                retriable=False)
+        with authority.publication():
+            pass
         response = run_tool_request_once(init_payload=init_payload, request=tool_request)
         events.append({"event": "finished", "at": time.time()})
         return {

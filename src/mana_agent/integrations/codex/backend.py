@@ -245,6 +245,10 @@ class CodexCodingBackend:
                 if task.requires_repository_write
                 else {}
             )
+            from mana_agent.services.operation_trace import BackendTraceRecorder
+            from mana_agent.multi_agent.agents.tool_runner_agent import _snapshot, _mutations
+            backend_trace = BackendTraceRecorder()
+            before_files = await asyncio.to_thread(_snapshot, workspace.worktree_path.resolve(), {}, "codex-turn", 10_485_760) if task.requires_repository_write else {}
             notifications: list[dict[str, Any]] = []
             seen_event_ids: set[str] = set()
             sequence = 0
@@ -600,6 +604,7 @@ class CodexCodingBackend:
                             sequence=sequence + 1,
                             model=self.settings.model or "",
                         )
+                        event = backend_trace.observe(event, notification)
                         if method.endswith(("Delta", "/delta")):
                             event = event.model_copy(update={"event_id": f"{event.event_id}-{sequence + 1}", "producer_sequence": sequence + 1})
                         if event.event_id in seen_event_ids:
@@ -811,6 +816,39 @@ class CodexCodingBackend:
                     provider_completed_at=provider_completed_at,
                     task_completed_at=task_completed_at,
                 )
+
+            if task.requires_repository_write:
+                after_files = await asyncio.to_thread(_snapshot, workspace.worktree_path.resolve(), {}, "codex-turn", 10_485_760)
+                observed = _mutations(before_files, after_files, partial=self._results[task.task_id].status != "completed")
+                diff = "\n".join(item.diff for item in observed if item.diff)
+                if observed:
+                    from mana_agent.chat.activity import safe_text
+                    from mana_agent.services.activity_context import current_activity_context
+                    context = current_activity_context()
+                    diff = safe_text(diff, None, protected=getattr(context, "protected_text", ()))
+                    original_size = len(diff.encode())
+                    room = backend_trace.budget.claim(min(original_size, 10_485_760), backend_trace.settings.mana_execution_trace_max_bytes)
+                    diff = diff.encode()[:room].decode(errors="ignore")
+                    reference = ""
+                    if context and diff:
+                        from mana_agent.context_cost.artifact_store import ContextArtifactStore
+                        try:
+                            reference = ContextArtifactStore().put(diff, session_id=context.conversation_id,
+                                repository_id=context.repository_id, workspace_id="", content_type="execution/diff").artifact_id
+                        except OSError:
+                            pass
+                    yield AgentEvent(event_type="file.edit.applied", task_id=task.task_id, backend="codex",
+                        sequence=sequence + 1, producer_sequence=sequence + 1, status="success",
+                        operation_id=f"{task.task_id}:workspace-diff", operation_attempt_id=turn_id or task.task_id,
+                        title="Observed workspace changes", output_preview=diff[:3000], visibility="progress", semantic_kind="tool_execution",
+                        payload={"diff_scope": "turn", "provenance": "workspace_observation",
+                            "changed_files": [item.path for item in observed], "diff": diff[:3000],
+                            "stream_channel": "diff", "stream_offset": 0, "content_length": len(diff),
+                            "content_reference": reference, "content_bytes": len(diff.encode()),
+                            "omitted_bytes": original_size - len(diff.encode()),
+                            "mutations": [item.model_dump(exclude={"diff"}) for item in observed],
+                            "trace_complete": (not diff or bool(reference)) and original_size == len(diff.encode())
+                                and getattr(before_files, "complete", True) and getattr(after_files, "complete", True), "workspace_id": ""})
 
     async def cancel(self, task_id: str, *, timeout_seconds: float = 2.0) -> CodexCancellationOutcome:
         active = self._active.get(str(task_id))

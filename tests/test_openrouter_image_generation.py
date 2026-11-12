@@ -457,7 +457,8 @@ def test_terminal_model_not_found_produces_non_resumable_no_pending_work(
         },
     )
 
-    turn_result = gateway._execute_media_route(
+    # Provider payload coverage; the gateway gate has dedicated authority regressions.
+    turn_result = gateway._execute_media_route_selected(
         decision=decision,
         context=EntryRouteContext(
             session_id="session_fail",

@@ -105,6 +105,9 @@ class RichToolCallbackHandler(BaseCallbackHandler):
         return str(kwargs.get("run_id") or f"thread-{threading.get_ident()}")
 
     def on_tool_start(self, serialized, input_str: str, **kwargs) -> None:
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            return
         tool = str((serialized or {}).get("name") or "tool")
         event_id = f"callback-{uuid.uuid4().hex}"
         with self._run_lock:
@@ -120,6 +123,9 @@ class RichToolCallbackHandler(BaseCallbackHandler):
         return tool, max(0.0, time.monotonic() - started), event_id
 
     def on_tool_end(self, output: str, **kwargs) -> None:
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            return
         tool, duration, event_id = self._finish(kwargs)
         if error := structured_tool_error_detail(output):
             emit_tool_event("error", tool, duration=duration, error=error, event_id=event_id)
@@ -127,6 +133,9 @@ class RichToolCallbackHandler(BaseCallbackHandler):
             emit_tool_event("end", tool, duration=duration, event_id=event_id)
 
     def on_tool_error(self, error: BaseException, **kwargs) -> None:
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            return
         tool, duration, event_id = self._finish(kwargs)
         emit_tool_event("error", tool, duration=duration, error=str(error), event_id=event_id)
 

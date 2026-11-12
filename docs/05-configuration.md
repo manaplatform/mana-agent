@@ -195,9 +195,9 @@ mana-agent
 
 When no saved user config exists, the CLI prints the Mana banner first, then starts a keyboard-selectable setup wizard. The wizard can:
 
-- Configure first-class providers: **OpenAI**, **OpenRouter**, **NVIDIA** (Build / NIM), or a custom OpenAI-compatible endpoint.
+- Configure first-class providers: **OpenAI**, **OpenRouter**, **NVIDIA** (Build / NIM), **Anthropic**, or a custom OpenAI-compatible endpoint.
 - Enter the selected provider's API key without echoing it back (NVIDIA uses `NVIDIA_API_KEY`, never `OPENAI_API_KEY`).
-- Fetch models dynamically from `GET {provider_base_url}/models`.
+- Fetch models dynamically from the selected provider's model catalog endpoint. Anthropic uses `GET /v1/models`; its base URL may be the API host root or include `/v1`.
 - Select chat, tool-worker, coding-planner, and embedding models.
 - Assign model levels for Mana roles such as main, planner, coding, verifier, reviewer, tool, and summarizer.
 - Configure web and GitHub search providers.
@@ -208,8 +208,13 @@ When no saved user config exists, the CLI prints the Mana banner first, then sta
 1. Create an API key at [Anthropic Console](https://console.anthropic.com/).
 2. Run `mana-agent configure` (or `mana-agent --configure`) and select **Anthropic**.
 3. Set `ANTHROPIC_API_KEY` (never `OPENAI_API_KEY`) and optional `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`).
-4. Default model is `claude-sonnet-5-5`. Other valid models include `claude-opus-5-5` and `claude-haiku-5-5`.
-5. Start Mana-Agent normally; chat, tools, streaming, and multi-agent workflows use the native Messages API with top-level system prompts, `tool_use`/`tool_result` content blocks, and alternating message validation.
+4. Refresh the model catalog from `GET {ANTHROPIC_BASE_URL}/v1/models` (or `/models` when the configured base URL already ends with `/v1`).
+5. Default model is `claude-sonnet-5-5`. Other valid models include `claude-opus-5-5` and `claude-haiku-5-5`.
+6. Start Mana-Agent normally; chat, tools, streaming, and multi-agent workflows use the native Messages API with top-level system prompts, `tool_use`/`tool_result` content blocks, and alternating message validation.
+
+**Catalog refresh troubleshooting:** a 404 is reported with Anthropic-specific
+guidance; do not add `/v1` twice. Catalog requests always target the versioned
+Anthropic endpoint even when `ANTHROPIC_BASE_URL` is the default host root.
 
 ### NVIDIA Build / NVIDIA NIM
 

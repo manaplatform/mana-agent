@@ -33,6 +33,9 @@ class ActivityMetadata(BaseModel):
     attempt_id: str = ""
     attempt_generation: int = Field(default=0, ge=0)
     operation_id: str = ""
+    operation_attempt_id: str = ""
+    parent_execution_id: str = ""
+    execution_level: int = Field(default=0, ge=0, le=3)
     producer_sequence: int = Field(default=0, ge=0)
     execution_mode: str = ""
     summary_source: Literal["observable", "agent", "provider"] = "observable"
@@ -60,7 +63,7 @@ _IDENTITY_FIELDS = (
     "event_id", "id", "parent_event_id", "parent_id", "conversation_id", "session_id",
     "repository_id", "workspace_id", "execution_id", "turn_id", "task_id", "root_task_id",
     "parent_task_id", "agent_id", "subagent_id", "parent_agent_id", "agent_role", "step_id",
-    "attempt_id", "attempt_generation", "operation_id", "producer_sequence", "sequence",
+    "attempt_id", "attempt_generation", "operation_id", "operation_attempt_id", "parent_execution_id", "execution_level", "producer_sequence", "sequence",
     "backend", "model", "thread_id", "execution_mode", "started_at", "timestamp",
     "created_at", "ended_at", "duration_ms", "tool_call_id", "call_id", "request_id",
 )
@@ -82,6 +85,12 @@ _PUBLIC_METADATA = frozenset(_IDENTITY_FIELDS) | frozenset({
     "remaining_cost", "estimated", "input_tokens", "output_tokens", "total_tokens", "token_usage",
     "model_level", "resolved_model", "requested_by_agent_id", "queue_job_id", "delegation_path",
     "replayable", "error", "output_preview", "dropped", "source_sequence", "execution_supervisor",
+    "cwd", "display_argv", "display_arguments", "environment_metadata", "exit_code", "termination_reason",
+    "timeout_seconds", "operation_sequence", "stream_channel", "stream_offset", "content_reference",
+    "content_length", "content_bytes", "output_references", "trace_complete", "retained_bytes", "omitted_bytes",
+    "provenance", "streaming", "mutation", "diff", "added_lines", "removed_lines", "diff_scope",
+    "child_operation_ids",
+    "observability_degraded", "preview_truncated", "mutations",
 })
 _FORBIDDEN = frozenset({
     "payload", "raw", "raw_payload", "instructions", "system_prompt", "developer_prompt", "prompt",
@@ -91,16 +100,20 @@ _FORBIDDEN = frozenset({
 })
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-_CREDENTIAL = re.compile(r"(?i)\b(password|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|authorization|cookie)\s*[:=]\s*([^\s,;]+)")
+_CREDENTIAL = re.compile(r'''(?i)\b(password|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|authorization|cookie)\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)''')
+_CLI_CREDENTIAL = re.compile(r'''(?i)(--(?:password|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|token|authorization|cookie))\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)''')
 
 
-def safe_text(value: Any, limit: int = 4000, *, protected: Iterable[str] = ()) -> str:
+def safe_text(value: Any, limit: int | None = 4000, *, protected: Iterable[str] = ()) -> str:
     text = _CONTROL.sub("", _ANSI.sub("", str(value or "")))
+    text = re.sub(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", "[PRIVATE KEY REDACTED]", text)
+    text = re.sub(r"(https?://)[^\s/@:]+:[^\s/@]+@", r"\1[REDACTED]@", text)
     for secret in protected:
         if secret:
             text = text.replace(secret, "[REDACTED]")
     text = _CREDENTIAL.sub(r"\1=[REDACTED]", str(redact_secrets(text)))
-    return text if len(text) <= limit else text[:limit] + "…"
+    text = _CLI_CREDENTIAL.sub(r"\1 [REDACTED]", text)
+    return text if limit is None or len(text) <= limit else text[:limit] + "…"
 
 
 def _clean(value: Any, *, protected: Iterable[str] = (), depth: int = 0) -> Any:
@@ -245,7 +258,7 @@ def operation_key(event: dict[str, Any]) -> str:
         or meta.get("request_id")
         or (raw.get("title") if (raw.get("sub_operation") or meta.get("sub_operation")) else None)
     )
-    return ":".join(str(raw.get(k) or "") for k in ("task_id", "attempt_id", "agent_id", "subagent_id")) + ":" + str(op or raw["type"])
+    return ":".join(str(raw.get(k) or "") for k in ("task_id", "attempt_id", "agent_id", "subagent_id", "operation_attempt_id")) + ":" + str(op or raw["type"])
 
 
 def accepts_activity_update(previous: dict[str, Any], event: dict[str, Any]) -> bool:
@@ -263,10 +276,12 @@ def accepts_activity_update(previous: dict[str, Any], event: dict[str, Any]) -> 
 def is_mutation(event: dict[str, Any]) -> bool:
     raw = normalize_activity(event)
     tool = str(raw.get("tool_name") or raw.get("title") or "").lower()
-    type_matches = raw["type"] in {"file.changed", "patch.applied"}
+    type_matches = raw["type"] in {"file.changed", "patch.applied", "file.edit.applied"}
     tool_matches = any(m in tool for m in ("edit_file", "write_file", "apply_patch", "modify_file", "create_file"))
     is_mut = type_matches or tool_matches
-    return is_mut and raw.get("status", "success") in {"success", "completed", "done"} and raw.get("execution_mode", raw["metadata"].get("phase")) not in {"plan", "plan_only"}
+    observed_mutation = raw["metadata"].get("mutation")
+    actual = isinstance(observed_mutation, dict) and observed_mutation.get("status") in {"applied", "partial"}
+    return (actual or is_mut and raw.get("status", "success") in {"success", "completed", "done"}) and raw.get("execution_mode", raw["metadata"].get("phase")) not in {"plan", "plan_only"}
 
 
 def visible_activity(event: dict[str, Any], visibility: str = "normal") -> bool:
@@ -275,7 +290,7 @@ def visible_activity(event: dict[str, Any], visibility: str = "normal") -> bool:
         return True
     if visibility == "minimal":
         return str(event.get("status")) not in TERMINAL or et.startswith(("turn.", "approval.", "action.approval.", "steering.", "recovery.")) or str(event.get("status")) in {"failed", "error", "cancelled"}
-    return et not in {"command.output", "command.delta", "tool.stdout", "tool.stderr", "tool.progress"}
+    return bool((event.get("metadata") or {}).get("streams")) or et not in {"command.output", "command.delta", "tool.stdout", "tool.stderr", "tool.progress"}
 
 
 def bound_operations(events: list[dict[str, Any]], recent: int = 200) -> list[dict[str, Any]]:

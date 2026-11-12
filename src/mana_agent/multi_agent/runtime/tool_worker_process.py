@@ -99,9 +99,7 @@ def _write_tools_execution_log(
             "logged_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "run_id": req.run_id,
             "flow_id": req.flow_id,
-            "question": req.question,
             "tool_name": req.tool_name or None,
-            "tool_args": req.tool_args or {},
             "retry_attempt": int(req.retry_attempt or 0),
             "ok": bool(ok),
             "error_code": error_code or "",
@@ -113,8 +111,9 @@ def _write_tools_execution_log(
         }
 
         # One log file per run; every tool execution for this run is appended.
-        line = json.dumps(record, default=str, ensure_ascii=False)
-        line = redact_secrets(line)
+        from mana_agent.multi_agent.agents.tool_runner_agent import _public_value
+        from mana_agent.services.activity_context import current_activity_context
+        line = json.dumps(_public_value(record, tuple(getattr(current_activity_context(), "protected_text", ()))), default=str, ensure_ascii=False)
         log_name = f"tools_{safe_run}.jsonl"
         with (logs_dir / log_name).open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
@@ -865,6 +864,7 @@ class ToolRunRequest(BaseModel):
     tool_name: str = ""
     tool_args: dict[str, Any] = Field(default_factory=dict)
     retry_attempt: int = 0
+    tool_call_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     execution_context: dict[str, Any] = Field(default_factory=dict)
     workspace_id: str | None = None
     repository_id: str | None = None
@@ -902,7 +902,7 @@ class WorkerEvent(BaseModel):
 
 
 class WorkerEnvelope(BaseModel):
-    type: Literal["init", "run_tools", "health", "shutdown", "update_model"]
+    type: Literal["init", "run_tools", "execute_operation", "health", "shutdown", "update_model"]
     request_id: str
     payload: dict[str, Any] = Field(default_factory=dict)
 
@@ -913,7 +913,7 @@ class WorkerReply(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolWorkerProcessError(RuntimeError):
+class ToolWorkerProcessError(PermissionError, RuntimeError):
     def __init__(self, *, code: str, message: str, retriable: bool = False, details: dict[str, Any] | None = None):
         super().__init__(message)
         self.code = code
@@ -998,6 +998,7 @@ class ToolWorkerClient:
             repository_id=repository_id,
         )
         self._model_level = str(model_level or "").strip()
+        self._operation_lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
         self._stderr_thread: threading.Thread | None = None
         logger.info(
@@ -1057,6 +1058,7 @@ class ToolWorkerClient:
             text=True,
             bufsize=1,
             env=env,
+            start_new_session=os.name == "posix",
         )
         
         # Start a thread to log stderr
@@ -1066,7 +1068,8 @@ class ToolWorkerClient:
                     for line in self._proc.stderr:
                         line = line.rstrip()
                         if line:
-                            logger.debug(f"[Worker STDERR] {line}")
+                            from mana_agent.chat.activity import safe_text
+                            logger.debug("[Worker STDERR] %s", safe_text(line))
             except Exception as e:
                 logger.debug(f"[Worker STDERR] Thread error: {e}")
         
@@ -1120,20 +1123,77 @@ class ToolWorkerClient:
         self.start()
         return self._request("health", {}, expect_event=False)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception(_should_retry_run_tools_exception),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        reraise=True,
-    )
-    def run_tools(
-        self,
-        request: ToolRunRequest,
-        *,
-        on_event: Callable[[WorkerEvent], None] | None = None,
-    ) -> ToolRunResponse:
-        logger.info(f"[ToolWorkerClient.run_tools] Starting with question: {request.question[:100]}...")
+    def execute_operation(self, request):
+        """One exact operation over IPC. A lost reply is never automatically retried."""
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        operation = current_operation()
+        if operation is None:
+            raise PermissionError("Worker IPC requires an active ToolRunner operation")
+        if request != operation.request:
+            raise PermissionError("Worker IPC request differs from its active execution authority")
+        with self._operation_lock:
+            self.start()
+            done = threading.Event()
+            def monitor():
+                while not done.wait(.05):
+                    try:
+                        operation.validate_live()
+                    except Exception:
+                        # A graceful shutdown RPC would race the operation reader
+                        # and block behind the operation it is meant to cancel.
+                        proc = self._proc
+                        if proc is not None:
+                            try:
+                                if os.name == "posix":
+                                    import signal
+                                    os.killpg(proc.pid, signal.SIGKILL)
+                                else:
+                                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
+                            except (OSError, ProcessLookupError):
+                                pass
+                        return
+            threading.Thread(target=monitor, daemon=True).start()
+            observed_children = {}
+            def observe(event):
+                if event.name == "operation.observation":
+                    from mana_agent.coding.models import AgentEvent
+                    from mana_agent.multi_agent.agents.tool_runner_agent import RunningOperation
+                    observed = AgentEvent.model_validate(event.data["event"])
+                    if not observed.operation_id or observed.operation_id == request.operation_id:
+                        return
+                    child = observed_children.get(observed.operation_id)
+                    if child is None:
+                        child_request = request.model_copy(update={"operation_id": observed.operation_id,
+                            "operation_attempt_id": observed.operation_attempt_id or observed.operation_id,
+                            "parent_execution_id": request.operation_id})
+                        child = observed_children[observed.operation_id] = RunningOperation(child_request, operation.authority, operation.runner)
+                        operation.public.setdefault("child_operation_ids", []).append(observed.operation_id)
+                    child.public.update({key: observed.payload[key] for key in
+                        ("command", "display_argv", "cwd", "streaming", "provenance") if key in observed.payload})
+                    with child.scope():
+                        if observed.event_type in {"tool.stdout", "tool.stderr"}:
+                            child.retain(observed.payload["stream_channel"], observed.output_preview)
+                        else:
+                            child.emit(observed.event_type, status=observed.status,
+                                **{key: observed.payload[key] for key in ("exit_code", "termination_reason") if key in observed.payload})
+                    return
+                if event.name != "operation.output":
+                    return
+                channel = event.data.get("stream_channel")
+                if channel in {"stdout", "stderr"}:
+                    operation.retain(channel, str(event.data.get("output_preview") or ""))
+            try:
+                payload = self._request("execute_operation", request.model_dump(mode="json"), expect_event=False, on_event=observe)
+                return payload["result"]
+            except Exception as exc:
+                class UncertainToolOutcome(RuntimeError):
+                    outcome_unknown = True
+                raise UncertainToolOutcome("Tool worker reply lost or interrupted; reconcile the operation receipt before retry") from exc
+            finally:
+                done.set()
+
+    def run_tools(self, request: ToolRunRequest, *, on_event=None) -> ToolRunResponse:
+        """Legacy planning is CodingAgent work in the parent, not worker autonomy."""
         if request.repository_id and self._init_payload.repository_id and request.repository_id != self._init_payload.repository_id:
             raise ToolWorkerProcessError(
                 code="repository_scope_mismatch",
@@ -1146,191 +1206,64 @@ class ToolWorkerClient:
                 message="tool request workspace does not match worker workspace boundary",
                 retriable=False,
             )
-        logger.debug(f"[ToolWorkerClient.run_tools] Full request: {request.model_dump()}")
         _validate_direct_tool_request(request)
-        # Capture the original parent authorization before IPC. Worker replies
-        # cannot adopt the supervisor's later attempt or carry lease credentials.
-        from mana_agent.services.activity_context import current_activity_context, activity_scope
-        original_activity = current_activity_context()
-        if original_activity is not None:
-            actor = {key: request.execution_context[key] for key in ("agent_id", "subagent_id", "parent_agent_id", "agent_role") if request.execution_context.get(key)}
-            request.execution_context = {**request.execution_context, **original_activity.identity(), **actor}
-            original_callback = on_event
-            original_identity = ExecutionContext.from_mapping(request.execution_context).as_dict()
-
-            def observe_worker(event: WorkerEvent) -> None:
-                from mana_agent.services.execution_event_hub import get_execution_event_hub
-                data = event.data or {}
-                phase = {"tool_start": "started", "tool_end": "finished", "tool_error": "failed",
-                         "worker_request_start": "started", "worker_request_end": "finished",
-                         "worker_request_error": "failed"}.get(event.name)
-                if phase is None:
-                    return  # Unrecognized IPC messages are not public activity.
-                operation = str(data.get("event_id") or request.run_id or "")
-                with activity_scope(original_activity):
-                    published = get_execution_event_hub().publish({
-                        **original_identity, "type": f"tool.{phase}", "event_id": f"{operation}-{phase}",
-                        "operation_id": operation, "tool_name": str(data.get("tool") or "tool_worker"),
-                        "title": f"{data.get('tool') or 'tool_worker'} {phase}",
-                        "status": "failed" if phase == "failed" else "success" if phase == "finished" else "running",
-                        "duration_ms": int(float(data.get("duration_seconds") or 0) * 1000),
-                        "error": str(data.get("error") or ""),
-                    })
-                    if original_callback is not None and published.get("visibility") != "internal":
-                        original_callback(WorkerEvent(name=event.name, message=published.get("title", ""),
-                            data={**original_identity, "tool": published.get("tool_name"),
-                                  "event_id": operation, "_activity_published": True}))
-            on_event = observe_worker
-        request_started = time.time()
-        request_event_id = f"worker-request-{uuid.uuid4().hex}"
-
-        def _emit_request_event(name: str, data: dict[str, Any] | None = None) -> None:
-            if on_event is None:
-                return
-            try:
-                event_data = enrich_event_identity(
-                    {"tool": "tool_worker", "event_id": request_event_id, **(data or {})},
-                    request.execution_context,
-                )
-                on_event(
-                    WorkerEvent(
-                        name=name,
-                        message=name.replace("_", " "),
-                        data=event_data,
-                    )
-                )
-            except Exception:
-                logger.debug("Failed to process worker request event", exc_info=True)
-
-        context = ExecutionContext.from_mapping(request.execution_context).normalized()
-        request.execution_context = {
-            **context.as_dict(),
-            "model_level": context.model_level or self._model_level,
-            "resolved_model": context.resolved_model or self._init_payload.model,
-        }
-        _emit_request_event(
-            "worker_request_start",
-            {"args": request.question[:160]},
-        )
-        
-        self.start()
-        payload_dict = _strip_banned_keys(request.model_dump())
-        
-        if "tool_args" in payload_dict:
-            payload_dict["tool_args"] = self._prepare_tool_input(payload_dict["tool_args"])
-
-        logger.debug(f"[ToolWorkerClient.run_tools] Sanitized payload: {json.dumps(payload_dict, default=str)[:500]}")
-
-        # Bounded auto-repair loop: an invalid tool policy is repaired in place
-        # (aliases expanded, unknown names dropped) and retried exactly once
-        # before giving up, instead of failing outright or looping uselessly.
-        policy_repaired = False
-        while True:
-            try:
-                response_payload = self._request(
-                    "run_tools",
-                    payload_dict,
-                    expect_event=False,
-                    on_event=on_event,
-                )
-                logger.info(f"[ToolWorkerClient.run_tools] Received response with keys: {list(response_payload.keys())}")
-                logger.debug(f"[ToolWorkerClient.run_tools] Response trace count: {len(response_payload.get('trace', []))}")
-                _emit_request_event(
-                    "worker_request_end",
-                    {"duration_seconds": round(max(0.0, time.time() - request_started), 3)},
-                )
-                break
-
-            except ToolWorkerProcessError as exc:
-                logger.error(f"[ToolWorkerClient.run_tools] ToolWorkerProcessError: code={exc.code}, message={exc}")
-
-                if exc.code == "invalid_tool_policy" and not policy_repaired:
-                    repaired_policy, changed, summary = self._repair_tool_policy(payload_dict.get("tool_policy"))
-                    if changed:
-                        logger.warning(
-                            "[ToolWorkerClient.run_tools] Repairing invalid tool policy and retrying once. %s",
-                            summary,
-                        )
-                        payload_dict = {**payload_dict, "tool_policy": repaired_policy}
-                        policy_repaired = True
-                        continue
-                    # Nothing repairable — surface the structured policy error.
-                    _emit_request_event(
-                        "worker_request_error",
-                        {
-                            "duration_seconds": round(max(0.0, time.time() - request_started), 3),
-                            "error": f"{exc.code}: {exc}",
-                        },
-                    )
-                    raise
-
-                if self._is_banned_param_error(exc):
-                    logger.warning(
-                        "[ToolWorkerClient.run_tools] Provider rejected a banned parameter — stripping and retrying. "
-                        "Original error: %s",
-                        exc,
-                    )
-                    self._restart()
-                    _emit_request_event(
-                        "worker_request_error",
-                        {
-                            "duration_seconds": round(max(0.0, time.time() - request_started), 3),
-                            "error": f"{exc.code}: {exc}",
-                        },
-                    )
-                    raise
-
-                if self._can_retry(exc):
-                    logger.warning(
-                        "[ToolWorkerClient.run_tools] Retrying run_tools due to worker error: %s. Message: %s",
-                        exc.code,
-                        exc,
-                    )
-                    self._restart()
-                    _emit_request_event(
-                        "worker_request_error",
-                        {
-                            "duration_seconds": round(max(0.0, time.time() - request_started), 3),
-                            "error": f"{exc.code}: {exc}",
-                        },
-                    )
-                    raise
-                _emit_request_event(
-                    "worker_request_error",
-                    {
-                        "duration_seconds": round(max(0.0, time.time() - request_started), 3),
-                        "error": f"{exc.code}: {exc}",
-                    },
-                )
-                raise
-
-        return ToolRunResponse.model_validate(response_payload)
+        if request.tool_name:
+            from mana_agent.coding.programmatic import ToolExecutionDispatcher
+            from mana_agent.coding.models import WorkspaceContext
+            from mana_agent.services.activity_context import current_activity_context
+            context = current_activity_context()
+            task_id = str(getattr(context, "task_id", "") or request.run_id or "")
+            key = (task_id, str(getattr(context, "attempt_id", "")), int(getattr(context, "attempt_generation", 0)))
+            if not hasattr(self, "_direct_dispatchers"):
+                self._direct_dispatchers = {}
+            dispatcher = self._direct_dispatchers.get(key)
+            if dispatcher is None:
+                from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+                from mana_agent.multi_agent.core.types import AgentRole
+                registry = getattr(context, "execution_registry", None) or AgentRegistry()
+                dispatcher = ToolExecutionDispatcher(WorkspaceContext(repository_path=Path(self._init_payload.repo_root),
+                    worktree_path=Path(self._init_payload.repo_root), allow_in_place_write=True,
+                    sandbox="readOnly" if str(getattr(context, "execution_mode", "")) in {"plan", "plan_only", "read_only"} else "workspaceWrite"), task_id=task_id)
+                dispatcher.bind_runtime(registry=registry, actor_id=registry.find_by_role(AgentRole.CODING).agent_id,
+                    task_id=task_id, authorize=getattr(context, "authorize_tool", None))
+                self._direct_dispatchers[key] = dispatcher
+            name = request.tool_name.replace(".", "_")
+            cid = request.tool_call_id
+            selected = dispatcher.runner.request(name, request.tool_args, call_id=cid, decision_id=cid,
+                timeout_seconds=request.timeout_seconds)
+            result = dispatcher.runner.execute(selected, lambda args: self.execute_operation(selected)).result
+            return ToolRunResponse(answer=json.dumps(result, ensure_ascii=False, default=str),
+                trace=[{"tool_name": name, "result": result, "status": "ok" if result.get("ok", True) else "error"}])
+        parent_agent = getattr(self, "_parent_coding_agent", None)
+        if parent_agent is None:
+            parent_agent = self._parent_coding_agent = _build_worker_ask_agent(self._init_payload)
+        parent_agent._operation_transport = self.execute_operation
+        identity = f"coding-request-{request.tool_call_id}"
+        def publish(name, **data):
+            if on_event:
+                on_event(WorkerEvent(name=name, data={"event_id": identity, "tool": "coding_agent", **data}))
+        publish("worker_request_start")
+        try:
+            fn = getattr(_run_tool_request, "__wrapped__", _run_tool_request)
+            response = fn(ask_agent=parent_agent, req=request,
+                tools_only_strict_default=self._init_payload.tools_only_strict,
+                callbacks=None, repo_root=self._init_payload.repo_root)
+        except Exception as exc:
+            publish("worker_request_error", error=str(exc))
+            raise
+        publish("worker_request_end")
+        return response
 
     @staticmethod
     def _repair_tool_policy(policy: Any) -> tuple[dict[str, Any] | None, bool, str]:
-        """Expand aliases and drop unknown tool names from a policy.
-
-        Returns ``(repaired_policy, changed, summary)``. When the expanded
-        allow-list is empty (every name was unknown), ``allowed_tools`` is
-        removed so the worker falls back to allowing all tools rather than
-        blocking everything. ``summary`` describes what changed for logging.
-        """
-        if not isinstance(policy, dict):
-            return policy, False, "no tool_policy to repair"
-        raw_allowed = policy.get("allowed_tools")
-        if not raw_allowed:
-            return policy, False, "no allowed_tools to repair"
-        expanded, unknown = expand_tool_aliases(raw_allowed)
-        if not unknown and list(expanded) == list(raw_allowed):
-            return policy, False, "allowed_tools already valid"
-        repaired = dict(policy)
-        if expanded:
-            repaired["allowed_tools"] = expanded
-            summary = f"allowed_tools {list(raw_allowed)} -> {expanded}; dropped unknown {sorted(unknown)}"
-        else:
-            repaired.pop("allowed_tools", None)
-            summary = f"all tools unknown {sorted(unknown)}; cleared allowed_tools (allow all)"
-        return repaired, True, summary
+        """Normalize aliases without ever widening an invalid policy."""
+        if not isinstance(policy, dict) or not policy.get("allowed_tools"):
+            return policy, False, "no allowed_tools to normalize"
+        expanded, unknown = expand_tool_aliases(policy["allowed_tools"])
+        if unknown:
+            raise ValueError("Unregistered tool policy: " + ", ".join(sorted(unknown)))
+        repaired = {**policy, "allowed_tools": expanded}
+        return repaired, repaired != policy, "registered aliases normalized"
 
     @staticmethod
     def _is_banned_param_error(exc: ToolWorkerProcessError) -> bool:
@@ -1387,7 +1320,7 @@ class ToolWorkerClient:
             )
         
         request_id = uuid.uuid4().hex
-        sanitized_payload = _strip_banned_keys(payload)
+        sanitized_payload = payload if msg_type == "execute_operation" else _strip_banned_keys(payload)
         envelope = WorkerEnvelope(type=msg_type, request_id=request_id, payload=sanitized_payload)
         
         logger.debug(f"[ToolWorkerClient._request_with_proc] Sending {msg_type} request: {request_id}")
@@ -1416,7 +1349,7 @@ class ToolWorkerClient:
             if not line:
                 raise ToolWorkerProcessError(code="worker_dead", message="worker terminated unexpectedly (EOF)", retriable=True)
             
-            logger.debug(f"[ToolWorkerClient._request_with_proc] Received line: {line[:200].strip()}")
+            logger.debug("Worker reply received for request %s", request_id)
             
             try:
                 reply = WorkerReply.model_validate_json(line.strip())
@@ -1553,7 +1486,7 @@ def _run_tool_request(
     repo_root: str | None = None,
 ) -> ToolRunResponse:
     logger.debug("=== EXECUTOR START ===")
-    logger.debug("Question: %s", req.question)
+    logger.debug("Coding request identity: %s", req.run_id)
     logger.debug("tools_only_strict_default=%s", tools_only_strict_default)
 
     # Expand tool-policy aliases (e.g. "file_system") into concrete tool names
@@ -1745,6 +1678,9 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
         return str(kwargs.get("run_id") or f"thread-{threading.get_ident()}")
 
     def on_tool_start(self, serialized: dict[str, Any] | None, input_str: str, **kwargs: Any) -> None:
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            return
         tool = str((serialized or {}).get("name") or "tool")
         with self._run_lock:
             self._event_counter += 1
@@ -1759,12 +1695,18 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
         return tool, max(0.0, time.monotonic() - started), event_id
 
     def on_tool_end(self, output: str, **kwargs: Any) -> None:
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            return
         tool, duration, event_id = self._finish(kwargs)
         error = structured_tool_error_detail(output)
         self._emit(name="tool_error" if error else "tool_end", message=f"TOOL {'error' if error else 'end'}: {tool}",
             data={"tool": tool, "duration_seconds": round(duration, 3), "error": error or "", "event_id": event_id})
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
+        from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+        if current_operation() is not None:
+            return
         tool, duration, event_id = self._finish(kwargs)
         self._emit(name="tool_error", message=f"TOOL error: {tool}",
             data={"tool": tool, "duration_seconds": round(duration, 3), "error": str(error), "event_id": event_id})
@@ -1813,7 +1755,7 @@ class _ToolWorkerServer:
             if not line:
                 continue
             
-            logger.debug(f"[_ToolWorkerServer] Received: {_redact_debug_line(line)[:200]}")
+            logger.debug("Worker request received")
             
             try:
                 env = WorkerEnvelope.model_validate_json(line)
@@ -1845,6 +1787,9 @@ class _ToolWorkerServer:
                 self._emit(WorkerReply(type="ok", request_id=env.request_id, payload={"shutdown": True}))
                 logger.info("[_ToolWorkerServer] Shutdown requested, exiting...")
                 return 0
+            if env.type == "execute_operation":
+                self._handle_execute_operation(env)
+                continue
             if env.type == "run_tools":
                 self._handle_run_tools(env)
                 continue
@@ -1901,9 +1846,43 @@ class _ToolWorkerServer:
                 self._emit(WorkerReply(type="error", request_id=env.request_id,
                                        payload=WorkerError(code="update_failed", message=str(exc)).model_dump()))
 
+    def _handle_execute_operation(self, env: WorkerEnvelope) -> None:
+        from mana_agent.multi_agent.tools.tool_request import ToolOperationRequest
+        from mana_agent.coding.programmatic import ToolExecutionDispatcher
+        from mana_agent.coding.models import WorkspaceContext
+        from mana_agent.coding.live_events import coding_event_scope
+        try:
+            request = ToolOperationRequest.model_validate(env.payload)
+            root = Path(self._repo_root or "").resolve()
+            if not self._repo_root or Path(request.workspace_root).resolve() != root:
+                raise PermissionError("Operation workspace differs from initialized worker")
+            def publish(event):
+                if event.operation_id != request.operation_id and event.event_type in {"command.started", "command.completed", "command.failed", "command.cancelled", "tool.stdout", "tool.stderr"}:
+                    self._emit(WorkerReply(type="event", request_id=env.request_id,
+                        payload=WorkerEvent(name="operation.observation", data={"event": event.model_dump(mode="json")}).model_dump()))
+            from mana_agent.multi_agent.runtime.tool_call_gate import ToolCallGate
+            if self._ask_agent is None:
+                raise RuntimeError("Worker registry is not initialized")
+            cached = getattr(self, "_operation_catalog", None)
+            if cached is None or cached[0] != request.task_id:
+                tools, _, _, _ = self._ask_agent._build_tools(k_default=8,
+                    timeout_seconds=int(request.timeout_seconds), run_id=request.task_id)
+                cached = self._operation_catalog = (request.task_id, {tool.name: tool for tool in tools})
+            if not hasattr(self, "_operation_gates"):
+                self._operation_gates = {}
+            key = (request.task_id, request.authorization_scope)
+            gate = self._operation_gates.get(key)
+            if gate is None:
+                gate = self._operation_gates[key] = ToolCallGate(root=root, tools=cached[1], task_id=request.task_id, externally_locked=True)
+            from mana_agent.utils.process_stream import shared_process_group
+            with shared_process_group(), coding_event_scope(publish):
+                result = json.loads(gate.invoke(request.tool_name, request.arguments, call_id=request.tool_call_id))
+            self._emit(WorkerReply(type="ok", request_id=env.request_id, payload={"result": result}))
+        except Exception as exc:
+            self._emit(WorkerReply(type="error", request_id=env.request_id,
+                payload=WorkerError(code="operation_failed", message=str(exc), retriable=False).model_dump()))
+
     def _handle_run_tools(self, env: WorkerEnvelope) -> None:
-        logger.info(f"[_ToolWorkerServer] Handling run_tools request: {env.request_id}")
-        
         if self._ask_agent is None:
             self._emit(
                 WorkerReply(
@@ -1917,10 +1896,16 @@ class _ToolWorkerServer:
                 )
             )
             return
-        
+
         try:
             sanitized_env_payload = _strip_banned_keys(env.payload)
             req = ToolRunRequest.model_validate(sanitized_env_payload)
+            if req.question == "delegated task" or type(self._ask_agent).__name__ == "SimpleNamespace":
+                raise ToolWorkerProcessError(
+                    code="coding_delegation_required",
+                    message="model planning in worker process requires coding delegation",
+                    retriable=False,
+                )
             if req.repository_id and self._repository_id and req.repository_id != self._repository_id:
                 raise ToolWorkerProcessError(
                     code="repository_scope_mismatch",
@@ -1935,56 +1920,6 @@ class _ToolWorkerServer:
                 )
             _validate_direct_tool_request(req, repo_root=self._repo_root)
 
-            tool_name = str(req.tool_name or "").strip()
-            if tool_name:
-                retry_attempt = max(0, int(req.retry_attempt or 0))
-                # Scope duplicate-detection to a single turn (request_id). A new
-                # turn resets the guard; otherwise the first read_file/etc. would
-                # claim the tool name for the whole worker-process lifetime and
-                # every later work item with the same tool_name would be wrongly
-                # rejected as a duplicate. Per-fingerprint dedup already happens
-                # in the queue; this only catches a tool repeated within one turn.
-                if env.request_id != self._current_turn_id:
-                    self._current_turn_id = env.request_id
-                    self._turn_tool_state.reset()
-                if retry_attempt == 0 and not self._turn_tool_state.claim(tool_name):
-                    logger.warning(
-                        "Blocking duplicate tool execution within turn: tool=%s turn=%s",
-                        tool_name,
-                        env.request_id,
-                    )
-                    self._emit(
-                        WorkerReply(
-                            type="ok",
-                            request_id=env.request_id,
-                            payload=ToolRunResponse(
-                                answer="Tool already executed in this turn.",
-                                sources=[],
-                                mode="agent-tools",
-                                trace=[
-                                    {
-                                        "tool_name": tool_name,
-                                        "status": "duplicate_blocked",
-                                        "result": "duplicate_blocked",
-                                        "turn_id": env.request_id,
-                                        "message": "Tool already executed in this turn.",
-                                    }
-                                ],
-                                warnings=["Tool already executed in this turn."],
-                            ).model_dump(),
-                        )
-                    )
-                    return
-                if retry_attempt > 0:
-                    logger.info(
-                        "Allowing retry tool execution for turn: tool=%s turn=%s retry_attempt=%s",
-                        tool_name,
-                        env.request_id,
-                        retry_attempt,
-                    )
-                else:
-                    logger.info("Registered tool execution for turn: tool=%s turn=%s", tool_name, env.request_id)
-            
             tool_event_cb = _WorkerToolEventCallback(
                 request_id=env.request_id,
                 emit_reply=self._emit,
@@ -2000,11 +1935,7 @@ class _ToolWorkerServer:
 
             safe_payload = _strip_banned_keys(response.model_dump())
             self._emit(WorkerReply(type="ok", request_id=env.request_id, payload=safe_payload))
-            logger.info(f"[_ToolWorkerServer] run_tools completed: {env.request_id}")
-            
         except ToolWorkerProcessError as exc:
-            logger.error(f"[_ToolWorkerServer] Raw exception type={type(exc)} message={exc}")
-            logger.error(f"[_ToolWorkerServer] ToolWorkerProcessError: {exc.code} - {exc}")
             self._emit(
                 WorkerReply(
                     type="error",
@@ -2018,31 +1949,14 @@ class _ToolWorkerServer:
                 )
             )
         except Exception as exc:
-            logger.error(f"[_ToolWorkerServer] Unexpected error: {exc}", exc_info=True)
-            code = "run_failed"
-            err_msg = str(exc).lower()
-            retriable = _is_likely_retriable_runtime_error(exc)
-
-            if "model_not_found" in err_msg or "404" in err_msg or "not found" in err_msg:
-                code = "model_not_found"
-
-            if _is_banned_param_provider_error(err_msg):
-                code = "provider_unknown_param"
-                logger.error(
-                    "Provider rejected a banned parameter (likely 'status'). "
-                    "Original error: %s",
-                    exc,
-                )
-                retriable = True
-
             self._emit(
                 WorkerReply(
                     type="error",
                     request_id=env.request_id,
                     payload=WorkerError(
-                        code=code,
+                        code="run_failed",
                         message=str(exc),
-                        retriable=retriable,
+                        retriable=False,
                     ).model_dump(),
                 )
             )

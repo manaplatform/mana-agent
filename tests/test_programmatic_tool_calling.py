@@ -45,7 +45,7 @@ def test_tool_execution_dispatcher_file_ops_and_sandboxing(tmp_path: Path) -> No
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(workspace_write)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(workspace_write, task_id="test-coding-task")
 
     # 1. Write file
     res_w = dispatcher.dispatch("write_file", {"path": "module.py", "content": "def func():\n    return 42\n"})
@@ -69,7 +69,7 @@ def test_tool_execution_dispatcher_file_ops_and_sandboxing(tmp_path: Path) -> No
         sandbox="readOnly",
         allow_in_place_write=True,
     )
-    dispatcher_ro = ToolExecutionDispatcher(workspace_readonly)
+    dispatcher_ro = ToolExecutionDispatcher.for_coding_task(workspace_readonly, task_id="test-coding-task")
     res_blocked = dispatcher_ro.dispatch("write_file", {"path": "blocked.py", "content": "x = 1"})
     assert res_blocked["ok"] is False
     assert res_blocked["error_code"] == "SANDBOX_VIOLATION"
@@ -87,7 +87,9 @@ def test_tool_execution_dispatcher_custom_and_mcp_tools(tmp_path: Path) -> None:
     def custom_echo(text: str) -> dict[str, Any]:
         return {"ok": True, "echo": text.upper()}
 
-    dispatcher = ToolExecutionDispatcher(workspace, extra_tools={"custom_echo": custom_echo})
+    from mana_agent.tools.contracts import ToolContract
+    custom_echo.tool_contract = ToolContract(name="custom_echo", description="Echo", input_schema={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}, output_schema={}, error_format={}, required_capability="echo", effect="read_only", repository_operation=False)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(workspace, extra_tools={"custom_echo": custom_echo}, task_id="test-coding-task")
     res = dispatcher.dispatch("custom_echo", {"text": "mana"})
     assert res["ok"] is True
     assert res["echo"] == "MANA"
@@ -101,7 +103,7 @@ def test_programmatic_session_single_and_parallel_tool_calls(tmp_path: Path) -> 
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(workspace)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(workspace, task_id="test-coding-task")
     session = ProgrammaticExecutionSession(
         task_id="prog_task_1",
         dispatcher=dispatcher,
@@ -158,7 +160,7 @@ def test_programmatic_session_budget_limit(tmp_path: Path) -> None:
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(workspace)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(workspace, task_id="test-coding-task")
     session = ProgrammaticExecutionSession(
         task_id="budget_task",
         dispatcher=dispatcher,
@@ -215,7 +217,7 @@ def test_tool_execution_dispatcher_approval_request_and_shell(tmp_path: Path, mo
         sandbox="workspaceWrite",
         allow_in_place_write=True,
     )
-    dispatcher = ToolExecutionDispatcher(workspace=ws)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(workspace=ws, task_id="test-coding-task")
 
     # Shell execution with echo command
     res_shell = dispatcher.dispatch("run_command", {"command": "echo 'hello internal engine'"})

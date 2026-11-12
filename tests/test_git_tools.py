@@ -217,6 +217,11 @@ def test_git_state_memory_invalidates_on_status_change(tmp_path: Path) -> None:
 def test_queue_tools_manager_executes_git_namespace(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
     manager = ToolsManager(repo)
+    from mana_agent.multi_agent.core.types import AgentRole
+    from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+    manager.execution_registry = AgentRegistry()
+    manager.execution_registry.register(AgentRole.CODING, agent_id="agent-1",
+        parent_agent_id=manager.execution_registry.find_by_role(AgentRole.MAIN).agent_id)
     job = QueueJob(
         job_id="job-1",
         task_id="task-1",

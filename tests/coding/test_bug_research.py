@@ -219,8 +219,12 @@ def test_internal_resume_refuses_repeating_a_completed_side_effect(tmp_path):
     workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, allow_in_place_write=True)
     args = {"path": "app.py", "content": "existing mutation"}
     calls = []
-    dispatcher = ToolExecutionDispatcher(workspace, extra_tools={"write_file": lambda **kw: calls.append(kw)},
-        completed_operations=[{"tool": "write_file", "fingerprint": operation_fingerprint("write_file", args)}])
+    def write_file(**kw):
+        calls.append(kw)
+    from mana_agent.tools.contracts import coding_tool_contracts
+    write_file.tool_contract = next(c for c in coding_tool_contracts() if c.name == "write_file")
+    dispatcher = ToolExecutionDispatcher.for_coding_task(workspace, extra_tools={"write_file": write_file},
+        completed_operations=[{"tool": "write_file", "fingerprint": operation_fingerprint("write_file", args)}], task_id="test-coding-task")
     result = dispatcher.dispatch("write_file", args)
     assert result["error_code"] == "RECOVERY_RECONCILIATION_REQUIRED"
     assert not calls

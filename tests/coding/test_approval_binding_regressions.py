@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import getpass
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from mana_agent.transactional_actions.runtime import default_action_gateway
 
 
 def dispatcher(root: Path, task: str = "task-one") -> ToolExecutionDispatcher:
-    return ToolExecutionDispatcher(
+    return ToolExecutionDispatcher.for_coding_task(
         workspace=WorkspaceContext(repository_path=root, worktree_path=root, working_directory=root,
                                    sandbox="workspaceWrite", allow_in_place_write=True),
         task_id=task,
@@ -622,4 +623,148 @@ def test_git_commit_fenced_index_isolates_concurrent_git_add(tmp_path, monkeypat
     # Verify that concurrent.txt remains staged in the working index
     st = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True)
     assert "A  concurrent.txt" in st.stdout
+
+
+def test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease(tmp_path, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+    from mana_agent.execution_supervisor.models import CheckpointRecord, ExecutionState, TaskRecord, AttemptRecord
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor, _token_hash
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.human_inbox.models import ResponseOperation, ResponseSubmission
+    from mana_agent.services.activity_context import ActivityContext, activity_scope, run_with_activity_attempt
+    from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+    from mana_agent.multi_agent.core.types import AgentRole
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig(root=tmp_path / "supervisor", lease_seconds=60))
+    task_id = "task-turn-approval-1"
+    attempt_id = "attempt-turn-approval-1"
+    lease_token = "lease-token-valid-12345"
+    checkpoint_id = "cp-turn-1"
+
+    now = datetime.now(timezone.utc)
+    task = supervisor.store.create_task(
+        TaskRecord(
+            task_id=task_id,
+            attempt_id=attempt_id,
+            attempt_generation=1,
+            checkpoint_id=checkpoint_id,
+            state=ExecutionState.RUNNING,
+            lease_owner="worker:test",
+            lease_token=_token_hash(lease_token),
+            lease_expires_at=now + timedelta(seconds=60),
+            started_at=now,
+        )
+    )
+    attempt = AttemptRecord(
+        attempt_id=attempt_id,
+        task_id=task_id,
+        number=1,
+        generation=1,
+        state="running",
+        lease_owner="worker:test",
+        lease_token=_token_hash(lease_token),
+        lease_expires_at=now + timedelta(seconds=60),
+    )
+    supervisor.store.save_attempt(attempt)
+    supervisor.store.save_checkpoint(
+        CheckpointRecord(checkpoint_id=checkpoint_id, task_id=task_id, attempt_id=attempt_id, state_version=0)
+    )
+
+    inbox = default_human_inbox_service(branch_controller=supervisor)
+    gateway = default_action_gateway(tmp_path)
+    gateway.inbox_service = inbox
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+
+    script = tmp_path / "print_999.py"
+    script.write_text("print(999)\n", encoding="utf-8")
+    command = f"python {script.name}"
+
+    def execute_in_turn():
+        agent = dispatcher(tmp_path, task=task_id)
+        registry = AgentRegistry()
+        coding_owner = registry.find_by_role(AgentRole.CODING)
+        runner = agent.bind_runtime(registry=registry, actor_id=coding_owner.agent_id, task_id=task_id)
+
+        # 1. Dispatch command requiring approval
+        pending = agent.dispatch("run_command", {"command": command})
+        assert pending["permission_required"]
+        assert pending["inbox_item_id"]
+
+        # 2. Human approves via inbox
+        item = inbox.repository.get(pending["inbox_item_id"])
+        inbox.respond(
+            ResponseSubmission(
+                inbox_item_id=pending["inbox_item_id"],
+                operation=ResponseOperation.APPROVE,
+                actor_id=getpass.getuser(),
+                channel="test",
+                idempotency_key=f"app_{pending['inbox_item_id']}",
+                expected_version=item.version,
+                current_action_digest=gateway.store.get_action(pending["action_id"]).approval_digest(),
+            )
+        )
+        grant = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
+
+        # 3. Dispatch the approved command in the active turn
+        result = agent.dispatch("run_command", {"command": command, "action_approval_id": grant})
+        assert result["ok"], f"Command execution failed: {result}"
+        assert "999" in result["stdout"]
+        assert result["action_id"] == pending["action_id"]
+
+    root_ctx = ActivityContext(conversation_id="conv-1", execution_id="exec-1")
+    with activity_scope(root_ctx):
+        run_with_activity_attempt(
+            execute_in_turn,
+            _activity_supervisor=supervisor,
+            _activity_task_id=task_id,
+            _activity_attempt_id=attempt_id,
+            _activity_lease_token=lease_token,
+        )
+
+
+def test_internal_engine_suspends_cleanly_when_waiting_for_approval_without_internal_error(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CodingTask, WorkspaceContext
+    from mana_agent.human_inbox import default_human_inbox_service
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    inbox = default_human_inbox_service()
+    gateway = default_action_gateway(tmp_path)
+    gateway.inbox_service = inbox
+    monkeypatch.setattr("mana_agent.transactional_actions.runtime.default_action_gateway", lambda root: gateway)
+
+    class MockModelWithTools:
+        def __init__(self):
+            self.turn = 0
+
+        async def ainvoke(self, messages):
+            self.turn += 1
+            if self.turn == 1:
+                return SimpleNamespace(
+                    content="",
+                    tool_calls=[{"name": "run_command", "args": {"command": "git clean -fd"}, "id": "call_clean_1"}],
+                )
+            return SimpleNamespace(content="Done", tool_calls=[])
+
+    engine = InternalCodingEngine(model="test")
+    monkeypatch.setattr(engine, "_get_or_create_llm", lambda: MockModelWithTools())
+
+    task = CodingTask(task_id="task-approval-wait-1", goal="cleanup repository")
+    workspace = WorkspaceContext(
+        repository_path=tmp_path,
+        worktree_path=tmp_path,
+        working_directory=tmp_path,
+        sandbox="workspaceWrite",
+        allow_in_place_write=True,
+    )
+
+    result = asyncio.run(engine.execute(task, workspace))
+    assert result.status == "waiting"
+    assert result.human_input
+    assert result.human_input.get("inbox_item_id")
+    assert "requires human approval" in result.summary
 

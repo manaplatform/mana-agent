@@ -7,7 +7,7 @@ DEFAULT_CAPABILITIES: dict[AgentRole, list[str]] = {
     AgentRole.HEAD_DECISION: ["decision", "risk_analysis"],
     AgentRole.PLANNER: ["planning"],
     AgentRole.RESEARCH: ["repo_search", "repo_read"],
-    AgentRole.CODING: ["coding", "patch_generation"],
+    AgentRole.CODING: ["coding", "patch_generation", "repository_read", "repository_write", "shell_execution", "git_execution", "test_execution"],
     AgentRole.TOOL: ["tool_execution"],
     AgentRole.TOOL_WORKER: ["tool_execution"],
     AgentRole.VERIFIER: ["verification"],

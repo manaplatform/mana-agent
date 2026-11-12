@@ -96,13 +96,31 @@ def adapt_codex_event(
     turn = payload.get("turn")
     turn_id = str(payload.get("turnId") or (turn.get("id") if isinstance(turn, dict) else "") or "")
     status = _status(method, event_type, item)
-    command = _first_text(item, "command", "cmd") or _first_text(payload, "command")
+    import shlex
+    original_command = item.get("command", payload.get("command", ""))
+    command = shlex.join(str(v) for v in original_command) if isinstance(original_command, list) else _first_text(item, "command", "cmd") or _first_text(payload, "command")
     path = _first_text(item, "path", "filePath") or _first_text(payload, "path", "filePath")
-    output = _first_text(payload, "delta", "output", "text") or _first_text(item, "output", "text")
+    output = str(payload.get("delta") or payload.get("output") or item.get("aggregatedOutput") or item.get("output") or "")
     summary = _summary(payload, item)
     usage = _usage(payload)
     error = _error(payload) or _error(item) if status == "failed" or event_type == "error" else ""
     event_id = _event_id(notification)
+    if sequence and method.endswith(("Delta", "/delta")):
+        event_id = f"{event_id}-{sequence}"
+    if item.get("exitCode") is not None and item.get("exitCode") != 0:
+        status = "failed"
+    public_details = {"cwd": item.get("cwd", payload.get("cwd", "")),
+        "exit_code": item.get("exitCode"), "provenance": "codex_backend_owned",
+        "display_argv": original_command if isinstance(original_command, list) else [],
+        "operation_attempt_id": str(item.get("id") or payload.get("itemId") or ""),
+        "diff_scope": "provider_reported"}
+    if method == "item/commandExecution/outputDelta":
+        public_details["stream_channel"] = payload.get("stream") if payload.get("stream") in {"stdout", "stderr"} else "combined"
+        summary = "Command output"
+    changes = item.get("changes")
+    if isinstance(changes, list) and status in {"success", "failed"}:
+        public_details["changed_files"] = [str(change.get("path")) for change in changes if isinstance(change, dict) and change.get("path")]
+        public_details["diff"] = "\n".join(str(change.get("diff") or "") for change in changes if isinstance(change, dict))
 
     semantic_kind, visibility = classify_coding_event(
         event_type,
@@ -139,6 +157,7 @@ def adapt_codex_event(
         sequence=sequence,
         producer_sequence=sequence,
         operation_id=str(item.get("id") or payload.get("itemId") or ""),
+        operation_attempt_id=str(item.get("id") or payload.get("itemId") or ""),
         status=status,
         title=_title(event_type, item_type, command, path, semantic_kind),
         summary=summary,
@@ -155,7 +174,7 @@ def adapt_codex_event(
         output_preview=output,
         visibility=visibility.value,  # type: ignore[arg-type]
         semantic_kind=semantic_kind.value,
-        payload=payload,
+        payload={**payload, **public_details},
     )
 
 

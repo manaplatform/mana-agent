@@ -1,5 +1,10 @@
 # Coding runtime: Codex (External Mode)
 
+The [hierarchical execution extension](regressions/hierarchical-tool-execution.md)
+keeps Codex's inner tool loop intact. Its operation records carry backend
+provenance; combined output and turn-wide observed diffs retain their actual
+scope. Native internal tools execute through the deterministic ToolRunner gate.
+
 Mana-Agent supports dual selectable coding engines: `external` (OpenAI Codex app-server, preserved as default) and `internal` (Mana-Agent native AI orchestration with OpenAI Programmatic Tool Calling).
 In External Mode, one Codex turn owns repository inspection, coding
 decisions, planning, edits, review, and proportional verification. Mana-Agent

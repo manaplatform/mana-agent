@@ -362,7 +362,7 @@ Route semantics:
 - shell: local shell/terminal command execution in the workspace environment using the shell or
   run_command tool (such as running shell commands, terminal tools, scripts, CLI utilities,
   diagnostics, nmap, network checks, or system status). Never select coding for shell command execution.
-- coding: repository engineering workflows handled by the Codex coding path, including edits,
+- coding: repository engineering workflows handled by the selected coding backend, including edits,
   implementation, plan-only design for repository changes, continuing an active plan without
   applying it, and verification/testing of the repository code. Never select coding for plain
   shell or terminal command execution. Planning a CLI flag or similar repository change is coding,
@@ -436,7 +436,7 @@ Route semantics:
 - search: current public-web discovery, mentions, competitors, indexing, or other search-visible
   information. Search snippets never substitute for browser page inspection.
 - github: connected/public GitHub information.
-- repository: read-only local repository questions or inspection (find definitions, review architecture,
+- repository: read-only local repository questions, analysis, review, or inspection through CodingAgent's restricted execution role (find definitions, review architecture,
   read project files such as pyproject.toml, inspect source without editing). Prefer repository over
   computer when the target is the managed workspace/repository rather than an arbitrary desktop path.
 - memory: explicitly requested persisted memory retrieval. When

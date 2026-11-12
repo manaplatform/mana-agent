@@ -194,7 +194,7 @@ def handle_small_direct_edit(root: Path, request: str) -> SmallEditResult:
     )
     if not ok:
         answer = f"Small direct edit failed while patching {path}: {patch_result.get('error') or 'unknown error'}"
-        return SmallEditResult(handled=True, ok=False, answer=answer, trace=trace, error=str(patch_result.get("error") or ""))
+        return SmallEditResult(handled=True, ok=False, answer=answer, trace=trace, error=str(patch_result.get('error') or ""))
 
     _all_after, after_window = _read_range(target, start=max(1, (match_index + 1) - 2), end=(match_index + 1) + 2)
     confirmed_line = ""

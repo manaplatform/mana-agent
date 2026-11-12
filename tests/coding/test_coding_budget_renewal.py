@@ -9,6 +9,13 @@ from mana_agent.coding.internal_engine import InternalCodingEngine
 from mana_agent.coding.models import CodingTask, WorkspaceContext
 
 
+def _registered(name, callback):
+    from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
+    contract = next((c for c in coding_tool_contracts() if c.name.replace(".", "_") == name), None)
+    callback.tool_contract = contract or ToolContract(name=name, description="Test callback", input_schema={"type": "object"}, output_schema={}, error_format={}, required_capability="test_callback", effect="read_only", repository_operation=False)
+    return callback
+
+
 class _ProgressiveModel:
     """Simulates an LLM that modifies files and continues for several tool rounds."""
 
@@ -99,7 +106,7 @@ def test_internal_engine_renews_budget_when_progress_accepted(tmp_path: Path) ->
         supports_responses_api=False,
         programmatic_tool_calling_enabled=False,
         max_tool_calls=3,
-        extra_tools={"noop": lambda: "ok"},
+        extra_tools={"noop": _registered("noop", lambda: "ok")},
         global_memory=_DummyMemory(),
         batch_manager=object(),
         parallel_scheduling_enabled=False,
@@ -134,7 +141,7 @@ def test_internal_engine_rejects_renewal_without_progress(tmp_path: Path) -> Non
         supports_responses_api=False,
         programmatic_tool_calling_enabled=False,
         max_tool_calls=3,
-        extra_tools={"noop": lambda: "ok"},
+        extra_tools={"noop": _registered("noop", lambda: "ok")},
         global_memory=_DummyMemory(),
         batch_manager=object(),
         parallel_scheduling_enabled=False,
@@ -214,8 +221,8 @@ def test_internal_engine_renews_budget_for_non_file_git_operations(tmp_path: Pat
         programmatic_tool_calling_enabled=False,
         max_tool_calls=2,
         extra_tools={
-            "git_push": lambda **_kwargs: {"ok": True, "output": "Everything up-to-date"},
-            "git_status": lambda **_kwargs: {"ok": True, "output": "On branch main"},
+            "git_push": _registered("git_push", lambda **_kwargs: {"ok": True, "output": "Everything up-to-date"}),
+            "git_status": _registered("git_status", lambda **_kwargs: {"ok": True, "output": "On branch main"}),
         },
         global_memory=_DummyMemory(),
         batch_manager=object(),
@@ -267,7 +274,7 @@ def test_internal_engine_operational_task_completes_when_model_returns_empty_con
         programmatic_tool_calling_enabled=False,
         max_tool_calls=10,
         extra_tools={
-            "git_push": lambda **_kwargs: {"ok": True, "stdout": "pushed to origin/main"},
+            "git_push": _registered("git_push", lambda **_kwargs: {"ok": True, "stdout": "pushed to origin/main"}),
         },
         global_memory=_DummyMemory(),
         batch_manager=object(),
