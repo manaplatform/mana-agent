@@ -353,7 +353,7 @@ class CodingResearchRuntime:
 
     def _protected(self) -> tuple[str, ...]:
         return tuple(str(getattr(self.settings, key, "") or "") for key in (
-            "openai_api_key", "mana_web_search_api_key", "mana_github_token", "mana_api_key", "anthropic_api_key", "openrouter_api_key"
+            "openai_api_key", "mana_web_search_api_key", "mana_github_token", "mana_api_key", "anthropic_api_key", "openrouter_api_key", "xai_api_key"
         ) if len(str(getattr(self.settings, key, "") or "")) >= 8)
 
     def _sanitized_plan(self, plan: CodingResearchPlan) -> CodingResearchPlan:

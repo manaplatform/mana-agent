@@ -95,6 +95,15 @@ class ProviderRegistry:
                 codex_transport=CodexTransport.UNSUPPORTED,
             ),
             ProviderDefinition(
+                id="xai",
+                display_name="xAI (Grok)",
+                auth_method=AuthenticationMethod.API_KEY,
+                default_base_url="https://api.x.ai/v1",
+                api_key_env="XAI_API_KEY",
+                supports_responses_api=False,
+                codex_transport=CodexTransport.RESPONSES_BRIDGE,
+            ),
+            ProviderDefinition(
                 id="custom",
                 display_name="OpenAI-compatible provider",
                 auth_method=AuthenticationMethod.API_KEY,
@@ -119,7 +128,7 @@ class ProviderRegistry:
 PROVIDERS = ProviderRegistry()
 
 # Providers whose upstream catalog IDs are usually bare model names (not org/model).
-_SIMPLE_UPSTREAM_PROVIDERS = frozenset({"openai", "custom", "openrouter", "anthropic"})
+_SIMPLE_UPSTREAM_PROVIDERS = frozenset({"openai", "custom", "openrouter", "anthropic", "xai"})
 
 
 def _known_provider_ids() -> set[str]:
@@ -214,4 +223,6 @@ def provider_credential_env_names(provider: str) -> tuple[str, str]:
         return "NVIDIA_API_KEY", "NVIDIA_BASE_URL"
     if provider_id == "anthropic":
         return "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"
+    if provider_id == "xai":
+        return "XAI_API_KEY", "XAI_BASE_URL"
     return "OPENAI_API_KEY", "OPENAI_BASE_URL"

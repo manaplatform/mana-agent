@@ -96,6 +96,12 @@ class ConfigurationDraft:
                     values.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com",
                     values.get("ANTHROPIC_API_KEY"),
                 )
+            if provider == "xai":
+                return (
+                    provider,
+                    values.get("XAI_BASE_URL") or "https://api.x.ai/v1",
+                    values.get("XAI_API_KEY"),
+                )
             return provider, values.get("OPENAI_BASE_URL"), values.get("OPENAI_API_KEY")
         old_identity = (
             *provider_identity(self.original),

@@ -195,13 +195,21 @@ mana-agent
 
 When no saved user config exists, the CLI prints the Mana banner first, then starts a keyboard-selectable setup wizard. The wizard can:
 
-- Configure first-class providers: **OpenAI**, **OpenRouter**, **NVIDIA** (Build / NIM), **Anthropic**, or a custom OpenAI-compatible endpoint.
+- Configure first-class providers: **OpenAI**, **OpenRouter**, **NVIDIA** (Build / NIM), **Anthropic**, **xAI (Grok)**, or a custom OpenAI-compatible endpoint.
 - Enter the selected provider's API key without echoing it back (NVIDIA uses `NVIDIA_API_KEY`, never `OPENAI_API_KEY`).
 - Fetch models dynamically from the selected provider's model catalog endpoint. Anthropic uses `GET /v1/models`; its base URL may be the API host root or include `/v1`.
 - Select chat, tool-worker, coding-planner, and embedding models.
 - Assign model levels for Mana roles such as main, planner, coding, verifier, reviewer, tool, and summarizer.
 - Configure web and GitHub search providers.
 - Save a masked config summary for review.
+
+### xAI (Grok)
+
+1. Create an API key in the [xAI Console](https://console.x.ai/).
+2. Run `mana-agent configure` (or `mana-agent --configure`) and select **xAI (Grok)**.
+3. Enter `XAI_API_KEY`; it is stored separately from OpenAI credentials. The default API base URL is `https://api.x.ai/v1` and can be overridden with `XAI_BASE_URL`.
+4. Validate the connection to fetch model IDs from the OpenAI-compatible `/models` endpoint, then assign role models.
+5. Mana stores model IDs with the `xai/` provider prefix and sends the upstream Grok model ID to xAI using Chat Completions.
 
 ### Anthropic (Claude)
 
@@ -311,7 +319,7 @@ Use `--no-interactive` in CI or scripts:
 mana-agent --no-interactive chat --root-dir .
 ```
 
-In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if the selected provider's key is missing (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `NVIDIA_API_KEY`, or `ANTHROPIC_API_KEY`).
+In non-interactive mode, Mana-Agent does not open menus or prompts. Commands that require model configuration fail clearly if the selected provider's key is missing (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `NVIDIA_API_KEY`, `ANTHROPIC_API_KEY`, or `XAI_API_KEY`).
 
 ## Memory providers
 

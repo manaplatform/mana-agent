@@ -329,7 +329,7 @@ def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout
                 if endpoint == "/models":
                     raise
         models: list[str | dict[str, Any]] = parse_openrouter_models({"data": all_data})
-    elif provider == "nvidia":
+    elif provider in {"nvidia", "xai"}:
         payload = _fetch("/models")
         models = parse_openai_compatible_model_records(payload)
     else:

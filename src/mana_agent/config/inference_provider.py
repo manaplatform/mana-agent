@@ -89,6 +89,12 @@ def resolve_inference_connection(
             getattr(settings, "anthropic_base_url", "") or definition.default_base_url
         )
         headers = dict(definition.default_headers)
+    elif provider_id == "xai":
+        api_key = str(getattr(settings, "xai_api_key", "") or "")
+        base_url = str(
+            getattr(settings, "xai_base_url", "") or definition.default_base_url
+        )
+        headers = dict(definition.default_headers)
     else:
         api_key = str(getattr(settings, "openai_api_key", "") or "")
         base_url = str(

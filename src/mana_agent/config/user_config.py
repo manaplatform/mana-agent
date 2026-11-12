@@ -45,6 +45,7 @@ SECRET_KEYS = {
     "OPENROUTER_API_KEY",
     "NVIDIA_API_KEY",
     "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
     "MANA_GITHUB_TOKEN",
     "MANA_WEB_SEARCH_API_KEY",
     "MANA_API_TOKEN",
@@ -74,6 +75,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "OPENROUTER_PROVIDER_PREFERENCES": {},
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "XAI_BASE_URL": "https://api.x.ai/v1",
     "ANTHROPIC_CHAT_MODEL": "claude-sonnet-5-5",
     "OPENAI_CHAT_MODEL": "gpt-4.1-mini",
     "OPENAI_TOOL_WORKER_MODEL": "",
@@ -468,6 +470,8 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "NVIDIA_BASE_URL": "nvidia_base_url",
     "ANTHROPIC_API_KEY": "anthropic_api_key",
     "ANTHROPIC_BASE_URL": "anthropic_base_url",
+    "XAI_API_KEY": "xai_api_key",
+    "XAI_BASE_URL": "xai_base_url",
     "ANTHROPIC_CHAT_MODEL": "anthropic_chat_model",
     "OPENAI_CHAT_MODEL": "openai_chat_model",
     "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
@@ -1170,6 +1174,8 @@ def is_user_config_valid() -> bool:
         api_key = effective.get("NVIDIA_API_KEY", "")
     elif provider == "anthropic":
         api_key = effective.get("ANTHROPIC_API_KEY", "")
+    elif provider == "xai":
+        api_key = effective.get("XAI_API_KEY", "")
     else:
         api_key = effective.get("OPENAI_API_KEY", "")
     return bool(

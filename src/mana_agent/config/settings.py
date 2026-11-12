@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     anthropic_base_url: str = Field(
         default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL"
     )
+    xai_api_key: str = Field(default="", alias="XAI_API_KEY")
+    xai_base_url: str = Field(default="https://api.x.ai/v1", alias="XAI_BASE_URL")
     anthropic_chat_model: str = Field(
         default="claude-sonnet-5-5", alias="ANTHROPIC_CHAT_MODEL"
     )

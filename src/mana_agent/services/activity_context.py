@@ -134,7 +134,7 @@ def activity_turn(method):
         state["activity_execution_id"] = turn_id
         settings = getattr(gateway, "settings", None)
         protected = tuple(str(getattr(settings, name, "") or "") for name in (
-            "openai_api_key", "openrouter_api_key", "nvidia_api_key", "anthropic_api_key", "mana_github_token", "mana_api_token"
+            "openai_api_key", "openrouter_api_key", "nvidia_api_key", "anthropic_api_key", "xai_api_key", "mana_github_token", "mana_api_token"
         ) if len(str(getattr(settings, name, "") or "")) >= 8)
         context = ActivityContext(conversation_id=session_id, execution_id=turn_id, protected_text=protected,
                                   repository_id=repository_id_for_path(gateway.root),

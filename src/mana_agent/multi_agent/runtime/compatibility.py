@@ -580,8 +580,8 @@ def create_chat_model(
     if "model_configuration" in kwargs:
         configuration = kwargs.pop("model_configuration")
     api_mode, capabilities = resolve_model_capabilities(base_url=base_url, provider=provider)
-    # NVIDIA and other Chat Completions-first hosts force chat mode when auto.
-    if str(provider or "").strip().lower() == "nvidia" and api_mode == "auto":
+    # Chat Completions-first OpenAI-compatible hosts force chat mode when auto.
+    if str(provider or "").strip().lower() in {"nvidia", "xai"} and api_mode == "auto":
         if not capabilities.supports_responses_api:
             api_mode = "chat_completions"
     resolved_provider = str(provider or "").strip().lower()
