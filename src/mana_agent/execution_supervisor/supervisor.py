@@ -48,6 +48,7 @@ from mana_agent.execution_supervisor.models import (
     ExecutionEvent,
     ExecutionState,
     HumanRecoveryDecisionAction,
+    infer_effect_scope,
     LOCAL_REPOSITORY_TOOLS,
     LostLeaseOutcome,
     ParentProgress,
@@ -2713,6 +2714,7 @@ class ExecutionSupervisor:
         action_fingerprint: str,
         classification: SideEffectClassification,
         idempotency_key: str = "",
+        effect_scope: ActionEffectScope | None = None,
     ) -> ActionRecord:
         with self.store.locked():
             task = self.store.get_task(task_id)
@@ -2744,9 +2746,17 @@ class ExecutionSupervisor:
                 ):
                     continue
                 # Actions with local repository or process effect scope can run again if completed
+                existing_scope = existing.effect_scope
+                if existing_scope in {ActionEffectScope.UNKNOWN, ActionEffectScope.UNKNOWN.value}:
+                    existing_scope = infer_effect_scope(
+                        existing.tool_name, classification=existing.classification
+                    )
+                    if existing_scope != existing.effect_scope:
+                        existing.effect_scope = existing_scope
+                        self.store.save_action(existing)
                 if (
                     existing.request_state == ActionRequestState.SUCCEEDED
-                    and existing.effect_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
+                    and existing_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
                 ):
                     continue
                 if existing.request_state in {
@@ -2766,6 +2776,9 @@ class ExecutionSupervisor:
                 raise RetrySafetyError(
                     f"{classification.value} action requires a durable idempotency key"
                 )
+            inferred_scope = effect_scope
+            if inferred_scope is None or inferred_scope in {ActionEffectScope.UNKNOWN, ActionEffectScope.UNKNOWN.value}:
+                inferred_scope = infer_effect_scope(tool_name, classification=classification)
             action = ActionRecord(
                 execution_id=task_id,
                 attempt_id=attempt_id,
@@ -2774,6 +2787,7 @@ class ExecutionSupervisor:
                 action_fingerprint=action_fingerprint,
                 idempotency_key=hashed_idempotency_key,
                 classification=classification,
+                effect_scope=inferred_scope,
                 request_state=ActionRequestState.PREPARED,
             )
             self.store.save_action(action)

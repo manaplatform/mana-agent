@@ -13,15 +13,14 @@ class AcpPermissionBroker:
         self._pending: dict[str, set[asyncio.Task[Any]]] = {}
 
     async def request(self, *, session_id: str, call_id: str, title: str, tool_name: str, raw_input: Any = None) -> bool:
-        from acp.helpers import start_tool_call
-        from acp.schema import PermissionOption
+        from acp.schema import PermissionOption, ToolCallUpdate
 
         grant_key = (session_id, tool_name)
         if grant_key in self._session_grants:
             return True
-        tool_call = start_tool_call(
-            call_id,
-            title,
+        tool_call = ToolCallUpdate(
+            tool_call_id=call_id,
+            title=title,
             kind="other",
             status="pending",
             raw_input=raw_input,

@@ -86,8 +86,12 @@ class ManaAcpAgent:
         return NewSessionResponse(session_id=state.acp_session_id, modes=self._mode_state(state.mode), config_options=self._config_options(state))
 
     async def load_session(self, cwd: str, session_id: str, mcp_servers: list[Any] | None = None, additional_directories: list[str] | None = None, **_: Any) -> Any:
-        from acp.helpers import update_agent_message_text, update_user_message_text
-        from acp.schema import LoadSessionResponse
+        from acp.schema import (
+            AgentMessageChunk,
+            LoadSessionResponse,
+            TextContentBlock,
+            UserMessageChunk,
+        )
 
         if not self.session_load_enabled:
             raise ValueError("ACP session loading is disabled by local policy.")
@@ -96,7 +100,11 @@ class ManaAcpAgent:
         state = self.sessions.load_session(session_id, cwd=cwd, additional_directories=additional_directories, mcp_servers=mcp_servers)
         record_current("protocol.acp.session.loaded", {"session_id": session_id})
         for message in self.sessions.history(session_id):
-            update = update_user_message_text(message["content"]) if message.get("role") == "user" else update_agent_message_text(message["content"])
+            update = (
+                UserMessageChunk(content=TextContentBlock(type="text", text=str(message["content"])))
+                if message.get("role") == "user"
+                else AgentMessageChunk(content=TextContentBlock(type="text", text=str(message["content"])))
+            )
             if message.get("role") in {"user", "assistant"}:
                 await self.client.session_update(session_id=session_id, update=update)
         await self._send_commands(session_id)
@@ -115,8 +123,7 @@ class ManaAcpAgent:
         )
 
     async def prompt(self, session_id: str, prompt: list[Any], **_: Any) -> Any:
-        from acp.helpers import update_agent_message_text
-        from acp.schema import PromptResponse
+        from acp.schema import AgentMessageChunk, PromptResponse, TextContentBlock
 
         state = self.sessions.get(session_id)
         if state.closed:
@@ -171,7 +178,10 @@ class ManaAcpAgent:
                 self._turns.pop(session_id, None)
                 ask_service.mcp_server_overrides = prior_mcp
         if result.answer:
-            await self.client.session_update(session_id=session_id, update=update_agent_message_text(result.answer))
+            await self.client.session_update(
+                session_id=session_id,
+                update=AgentMessageChunk(content=TextContentBlock(type="text", text=str(result.answer))),
+            )
         if result.error:
             record_current("protocol.acp.prompt.finished", {"session_id": session_id, "stop_reason": "refusal"})
             return PromptResponse(stop_reason="refusal")
@@ -199,8 +209,7 @@ class ManaAcpAgent:
         return CloseSessionResponse()
 
     async def set_session_mode(self, session_id: str, mode_id: str, **_: Any) -> Any:
-        from acp.helpers import update_current_mode
-        from acp.schema import SetSessionModeResponse
+        from acp.schema import CurrentModeUpdate, SetSessionModeResponse
 
         if mode_id not in {item[0] for item in self.MODES}:
             raise ValueError("Unsupported Mana session mode.")
@@ -208,7 +217,7 @@ class ManaAcpAgent:
         state.mode = mode_id
         state.read_only = mode_id in {"review", "read-only"}
         self.sessions._save()  # noqa: SLF001
-        await self.client.session_update(session_id=session_id, update=update_current_mode(mode_id))
+        await self.client.session_update(session_id=session_id, update=CurrentModeUpdate(current_mode_id=mode_id))
         return SetSessionModeResponse()
 
     async def set_config_option(self, config_id: str, session_id: str, value: str | bool, **_: Any) -> Any:
@@ -250,8 +259,7 @@ class ManaAcpAgent:
         return [SessionConfigOptionBoolean(id="read-only", name="Read only", description="Deny mutation-capable routes.", current_value=state.read_only, type="boolean")]
 
     async def _send_commands(self, session_id: str) -> None:
-        from acp.helpers import update_available_commands
-        from acp.schema import AvailableCommand
+        from acp.schema import AvailableCommand, AvailableCommandsUpdate
 
         commands = [
             AvailableCommand(name=name, description=description)
@@ -263,7 +271,7 @@ class ManaAcpAgent:
                 ("clear", "Clear the visible conversation."),
             )
         ]
-        await self.client.session_update(session_id=session_id, update=update_available_commands(commands))
+        await self.client.session_update(session_id=session_id, update=AvailableCommandsUpdate(available_commands=commands))
 
     @staticmethod
     def _prompt_text(blocks: list[Any]) -> str:

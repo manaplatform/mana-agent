@@ -115,6 +115,24 @@ LOCAL_REPOSITORY_TOOLS = frozenset(
         "replace_file_content",
         "patch",
         "git_apply",
+        "batch_write_files",
+        "batch_apply_patches",
+        "batch_move_files",
+        "batch_delete_files",
+        "git_add",
+        "git_commit",
+        "git_create_branch",
+        "git_switch",
+        "git_checkout",
+        "git_merge",
+        "git_rebase",
+        "git_revert",
+        "git_reset",
+        "git_clean",
+        "git_tag",
+        "git_config",
+        "git_generic",
+        "git_branch",
     }
 )
 
@@ -145,10 +163,14 @@ class ActionRecord(StrictModel):
             from mana_agent.utils.tool_results import json_safe_tool_payload
 
             data["verification_state"] = json_safe_tool_payload(data["verification_state"])
-        if "effect_scope" not in data or not data["effect_scope"]:
+        if (
+            "effect_scope" not in data
+            or not data["effect_scope"]
+            or data["effect_scope"] in {ActionEffectScope.UNKNOWN, ActionEffectScope.UNKNOWN.value}
+        ):
             tool = str(data.get("tool_name") or "")
             classification = data.get("classification")
-            if tool == "shell":
+            if tool in {"shell", "run_command", "run_script_once", "verify_project"}:
                 if classification in {
                     SideEffectClassification.READ_ONLY.value,
                     SideEffectClassification.READ_ONLY,
@@ -166,6 +188,24 @@ class ActionRecord(StrictModel):
                 "list_dir",
                 "directory_list",
                 "file_read",
+                "list_files",
+                "repo_search",
+                "repo_batch_search",
+                "repo_batch_read",
+                "batch_read_files",
+                "batch_search_files",
+                "batch_list_files",
+                "find_symbols",
+                "call_graph",
+                "semantic_search",
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_show",
+                "git_help",
+                "read_skill",
+                "conversation_context_read",
+                "memory_read",
             } or classification in {
                 SideEffectClassification.READ_ONLY.value,
                 SideEffectClassification.READ_ONLY,
@@ -177,6 +217,7 @@ class ActionRecord(StrictModel):
                 "send_email",
                 "webhook_trigger",
                 "external_api_call",
+                "git_push",
             } or classification in {
                 SideEffectClassification.NON_IDEMPOTENT.value,
                 SideEffectClassification.NON_IDEMPOTENT,
@@ -197,11 +238,14 @@ def infer_effect_scope(
         from mana_agent.tools.shell_exec import is_read_only_command
 
         commands = (args or {}).get("commands") or []
-        if tool_name == "shell" and commands and all(is_read_only_command(c) for c in commands):
+        cmd = (args or {}).get("cmd") or (args or {}).get("command") or (args or {}).get("script")
+        if cmd and isinstance(cmd, str):
+            commands = [cmd]
+        if tool_name in {"shell", "run_command", "run_script_once"} and commands and all(is_read_only_command(c) for c in commands):
             classification = SideEffectClassification.READ_ONLY
         elif tool_name in LOCAL_REPOSITORY_TOOLS:
             classification = SideEffectClassification.NON_IDEMPOTENT
-        elif tool_name == "shell":
+        elif tool_name in {"shell", "run_command", "run_script_once", "verify_project"}:
             classification = SideEffectClassification.NON_IDEMPOTENT
         else:
             classification = SideEffectClassification.READ_ONLY

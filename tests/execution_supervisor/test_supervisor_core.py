@@ -1587,6 +1587,88 @@ def test_local_action_can_reexecute_after_completion(runtime):
     assert action2.request_state == ActionRequestState.PREPARED
 
 
+def test_run_command_action_can_reexecute_after_completion(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    action1 = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="run_command",
+        action_fingerprint="run_command:git status --short",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_cmd_1",
+    )
+    assert action1.effect_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
+    supervisor.update_action(action1.action_id, request_state=ActionRequestState.SUCCEEDED)
+
+    # Re-executing run_command with identical fingerprint must succeed once previous succeeded
+    action2 = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="run_command",
+        action_fingerprint="run_command:git status --short",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_cmd_2",
+    )
+    assert action2.action_id != action1.action_id
+    assert action2.request_state == ActionRequestState.PREPARED
+
+
+def test_existing_unknown_effect_scope_is_reconciled_on_reexecution(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    action1 = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="run_command",
+        action_fingerprint="run_command:git status --short",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_legacy_1",
+    )
+    # Simulate an older record persisted with UNKNOWN effect_scope
+    action1.effect_scope = ActionEffectScope.UNKNOWN
+    action1.request_state = ActionRequestState.SUCCEEDED
+    supervisor.store.save_action(action1)
+
+    # Preparing the action again must reconcile the UNKNOWN effect_scope and allow re-execution
+    action2 = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="run_command",
+        action_fingerprint="run_command:git status --short",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_legacy_2",
+    )
+    assert action2.action_id != action1.action_id
+    assert action2.request_state == ActionRequestState.PREPARED
+    # The stored legacy record should now also be healed
+    reloaded1 = supervisor.store.get_action(action1.action_id)
+    assert reloaded1.effect_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
+
+
+def test_git_and_batch_tools_infer_local_repository_scope(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    for tool_name in ("git_commit", "git_add", "batch_write_files", "run_script_once", "verify_project"):
+        action = supervisor.prepare_action(
+            task.task_id,
+            attempt_id=attempt_id,
+            lease_token=token,
+            tool_name=tool_name,
+            action_fingerprint=f"fp:{tool_name}",
+            classification=SideEffectClassification.IDEMPOTENT,
+            idempotency_key=f"call_{tool_name}",
+        )
+        assert action.effect_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
+
+
 def test_prepared_action_reattaches_with_matching_idempotency_key(runtime):
     supervisor, clock, tmp_path = runtime
     task = create(supervisor, tmp_path)

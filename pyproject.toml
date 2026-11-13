@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mana-agent"
-version = "0.12.0"
+version = "0.12.2"
 description = "Autonomous multi-agent AI software engineering platform for repository understanding, planning, coding, debugging, testing, and verified task execution."
 readme = "README.md"
-requires-python = ">=3.10,<3.15"  # Support Python 3.10 through 3.14 (3.14.x); some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
+requires-python = ">=3.10,<=3.15.2"  # Support Python 3.10 through 3.14 (3.14.x); some langchain/pydantic stacks may have warnings on 3.14+ (see CHANGELOG)
 license = { text = "MIT" }
 
 dependencies = [
@@ -75,10 +75,10 @@ teach-desktop = [
 ]
 mem0 = ["mem0ai>=2.0,<3.0", "keyring>=24.0,<26.0"]
 supermemory = ["supermemory>=3.56,<4.0", "keyring>=24.0,<26.0"]
-acp = ["agent-client-protocol>=0.11,<0.12"]
+acp = ["agent-client-protocol>=1.0.0,<2.0.0"]
 a2a = ["a2a-sdk[http-server]>=1.1,<2.0"]
 protocols = [
-  "agent-client-protocol>=0.11,<0.12",
+  "agent-client-protocol>=1.0.0,<2.0.0",
   "a2a-sdk[http-server]>=1.1,<2.0",
 ]
 execution-kubernetes = ["kubernetes>=30,<35"]
@@ -128,7 +128,7 @@ full = [
   "keyring>=24.0,<26.0",
   "mem0ai>=2.0,<3.0",
   "supermemory>=3.56,<4.0",
-  "agent-client-protocol>=0.11,<0.12",
+  "agent-client-protocol>=1.0.0,<2.0.0",
   "a2a-sdk[http-server]>=1.1,<2.0",
   "sounddevice>=0.5,<1.0",
   "numpy>=1.24,<3.0",

@@ -2,11 +2,31 @@
 
 All notable repository changes should be recorded here.
 
+## 0.12.2 — 2026-11-13
+
+- Protocols / ACP SDK 1.0.0 Migration:
+  - Schema-based updates: migrate from deprecated/removed `acp.helpers` (`update_agent_message_text`, `update_user_message_text`, `start_tool_call`, `update_tool_call`, `update_available_commands`, `update_current_mode`) to official `acp.schema` classes (`AgentMessageChunk`, `UserMessageChunk`, `TextContentBlock`, `ToolCallStart`, `ToolCallProgress`, `ToolCallUpdate`, `AvailableCommandsUpdate`, `CurrentModeUpdate`).
+  - Event mapping: update `AcpEventMapper.map()` to emit `UserMessageChunk`, `AgentMessageChunk`, `ToolCallStart`, and `ToolCallProgress` models.
+  - Permission broker: update `AcpPermissionBroker.request()` to construct typed `ToolCallUpdate` models for fail-closed client permission requests.
+  - Release metadata: bump package version to 0.12.2 in `pyproject.toml`.
+  - User-owned verification (not run by the agent): `pytest tests/test_acp_protocol.py -v`.
+
+## 0.12.1 — 2026-11-13
+
+- Release metadata: bump the package version to 0.12.1 in `pyproject.toml` (single-source version consumed by `mana_agent._version.get_version()` and the distribution metadata).
+
 ## 0.12.0 — 2026-11-13
 
 - Release metadata: bump the package version to 0.12.0 in `pyproject.toml` and generated distribution metadata.
 
 ## Unreleased — 2026-11-13
+
+- 2026-11-13 — Execution Supervisor / Consequential Action Fencing Fix for Local Commands:
+  - Command Effect Scope Resolution: in `ActionRecord.infer_effect_scope` and `infer_effect_scope`, map local command tools (`run_command`, `run_script_once`, `verify_project`), local repository tools (such as `batch_write_files`, `batch_apply_patches`, `batch_move_files`, `batch_delete_files`, and local Git operations `git_add`, `git_commit`, `git_create_branch`, etc.) to `LOCAL_PROCESS` (for read-only commands) and `LOCAL_REPOSITORY` (for mutating/idempotent commands) rather than falling through to `UNKNOWN`.
+  - Supervisor Action Reconciliation & Self-Healing: in `ExecutionSupervisor.prepare_action()`, dynamically infer the effect scope for existing action records that have `UNKNOWN` effect scope (including legacy records persisted on disk), healing their stored scope and allowing completed local actions to re-execute without raising `RetrySafetyError("matching consequential action already exists; reconcile its durable receipt before retry")`.
+  - Tool Runner Command Classification: in `ToolRunnerAgent._execute()`, inspect command arguments for `run_command`, `shell`, and `run_script_once` using `is_read_only_command`, setting `SideEffectClassification.READ_ONLY` for non-mutating shell invocations (such as `git status --short`).
+  - User-owned verification (not run by the agent): `pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_execution_hierarchy.py -k "test_run_command_action_can_reexecute_after_completion or test_existing_unknown_effect_scope_is_reconciled_on_reexecution or test_git_and_batch_tools_infer_local_repository_scope or test_local_action_can_reexecute_after_completion" -v`.
+
 
 - 2026-11-13 — Execution Supervisor / Consequential Action Reconciliation & In-Flight Resumption:
   - Resumed Action Re-Attachment: in `ExecutionSupervisor.prepare_action()`, when an in-flight action (`request_state in {PREPARED, STARTED}`) matches an existing action's durable `idempotency_key`, re-attach to the existing action record and adopt the active attempt generation rather than failing closed with `RetrySafetyError("matching consequential action already exists; reconcile its durable receipt before retry")`.
