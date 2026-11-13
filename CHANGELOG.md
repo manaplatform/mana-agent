@@ -2,6 +2,15 @@
 
 All notable repository changes should be recorded here.
 
+## 0.12.2 — 2026-11-13
+
+- Protocols / ACP SDK 1.0.0 Migration:
+  - Schema-based updates: migrate from deprecated/removed `acp.helpers` (`update_agent_message_text`, `update_user_message_text`, `start_tool_call`, `update_tool_call`, `update_available_commands`, `update_current_mode`) to official `acp.schema` classes (`AgentMessageChunk`, `UserMessageChunk`, `TextContentBlock`, `ToolCallStart`, `ToolCallProgress`, `ToolCallUpdate`, `AvailableCommandsUpdate`, `CurrentModeUpdate`).
+  - Event mapping: update `AcpEventMapper.map()` to emit `UserMessageChunk`, `AgentMessageChunk`, `ToolCallStart`, and `ToolCallProgress` models.
+  - Permission broker: update `AcpPermissionBroker.request()` to construct typed `ToolCallUpdate` models for fail-closed client permission requests.
+  - Release metadata: bump package version to 0.12.2 in `pyproject.toml`.
+  - User-owned verification (not run by the agent): `pytest tests/test_acp_protocol.py -v`.
+
 ## 0.12.1 — 2026-11-13
 
 - Release metadata: bump the package version to 0.12.1 in `pyproject.toml` (single-source version consumed by `mana_agent._version.get_version()` and the distribution metadata).
