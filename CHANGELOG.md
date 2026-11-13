@@ -2,6 +2,28 @@
 
 All notable repository changes should be recorded here.
 
+## 0.12.0 — 2026-11-13
+
+- Release metadata: bump the package version to 0.12.0 in `pyproject.toml` and generated distribution metadata.
+
+## Unreleased — 2026-11-13
+
+- 2026-11-13 — Execution Supervisor / Consequential Action Reconciliation & In-Flight Resumption:
+  - Resumed Action Re-Attachment: in `ExecutionSupervisor.prepare_action()`, when an in-flight action (`request_state in {PREPARED, STARTED}`) matches an existing action's durable `idempotency_key`, re-attach to the existing action record and adopt the active attempt generation rather than failing closed with `RetrySafetyError("matching consequential action already exists; reconcile its durable receipt before retry")`.
+  - Local Tool Re-Execution: allowed actions with local scope (`LOCAL_REPOSITORY`, `LOCAL_PROCESS`) or `READ_ONLY` classification that previously succeeded to execute again in subsequent turns (e.g. running multiple test commands or workspace inspections within a task), while maintaining strict retry fencing on `EXTERNAL_CONSEQUENTIAL` and `OUTCOME_UNKNOWN` side effects.
+  - Tool Runner Lease Synchronization: in `tool_runner_agent.py`, use resolved lane executor lease credentials (`attempt_id`, `lease_token`) across both `prepare_action` and terminal `update_action`, and assign explicit effect classification (`NON_IDEMPOTENT` for external effects, `IDEMPOTENT` for mutation/command effects) to prevent unhandled `StaleLeaseError` and ambiguous action classifications.
+  - User-owned verification (not run by the agent): `pytest tests/execution_supervisor/test_supervisor_core.py tests/gateway/test_execution_hierarchy.py tests/coding/test_approval_binding_regressions.py tests/test_shell_executor.py -v`.
+
+- 2026-11-13 — Configuration / Model selection and default model routing:
+  - Configuration TUI Model Selection: in `configuration_app.py`, populate `#high-model`, `#coding-model`, `#fast-model`, and `#embedding-model` dropdown options from cached or maintained provider models via `ModelCatalogService.cached_or_maintained()`, allowing users to select any available model rather than locking dropdowns to a single option. When switching providers, candidate models for the new provider are immediately populated.
+  - Decoupled Embedding Updates: in `ConfigurationDraft.set_models()`, decouple chat/coding/tool model updates from the embedding model. Providers lacking embedding models (such as xAI or Anthropic) now cleanly save `MANA_PRIMARY_MODEL`, `OPENAI_CHAT_MODEL`, `OPENAI_CODING_PLANNER_MODEL`, and `OPENAI_TOOL_WORKER_MODEL` instead of silently dropping the entire model configuration.
+  - Default Model Configuration: updated baseline defaults to `OPENAI_CHAT_MODEL = gpt-4.1-mini`, `OPENAI_TOOL_WORKER_MODEL = gpt-6-luna`, and `OPENAI_CODING_PLANNER_MODEL = gpt-6-luna` across `DEFAULT_USER_CONFIG`, `Settings`, and `configuration_app.py`.
+  - Structured Output for Grok Models & Router Capability Fix: resolved `RoutingFailure` ("required capabilities are unsupported: structured_output") on xAI models (including `xai/grok-build-0.1`, `grok-2`, `grok-4`, `grok-beta`):
+    - Added `ModelCapability.STRUCTURED_OUTPUT` across `normalize_capabilities`, `_MAINTAINED`, and `parse_openai_compatible_model_records` for all xAI / Grok models.
+    - Added maintained capability descriptors for `("xai", "grok", ...)` in `model_capabilities.py` with `supports_structured_output=True`, `supports_tool_calls=True`, and `supports_parallel_tools=True`.
+    - Handled provider alias normalization in `normalize_model_lookup_id` and `ModelCapabilityRegistry.resolve`.
+  - User-owned verification (not run by the agent): `pytest tests/test_xai_provider.py -v`.
+
 ## Unreleased — 2026-11-11
 
 - 2026-11-11 — Test suite / Active turn approval resumption test on Windows: update `test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease` in `tests/coding/test_approval_binding_regressions.py` to execute a script file (`python print_999.py`) rather than an inline command with quotes (`python -c "print(999)"`). This avoids Windows `cmd.exe` quote escaping and argument splitting discrepancies under subprocess execution, ensuring cross-platform test reliability on Windows CI runners. User-owned verification (not run by the agent): `python -m pytest tests/coding/test_approval_binding_regressions.py -k test_active_turn_resumes_cleanly_after_human_approval_without_stale_lease -q`.

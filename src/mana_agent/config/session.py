@@ -55,24 +55,42 @@ class ConfigurationDraft:
             "MANA_AI_PROVIDER": provider,
             "MANA_CONFIGURED_PROVIDERS": sorted(set([provider, *configured])),
         }
-        # Model selectors are empty until a provider catalog has been tested.
+        # Model selectors may be empty until a provider catalog has been tested or selected.
         # Keep the last valid model configuration untouched in that transient
         # state instead of passing empty IDs to qualify_model_id().
-        if str(high or "").strip() and str(embedding or "").strip():
+        high_clean = str(high or "").strip()
+        coding_clean = str(coding or "").strip() or high_clean
+        fast_clean = str(fast or "").strip() or high_clean
+        embedding_clean = str(embedding or "").strip()
+
+        prov_norm = str(provider or "").strip().lower()
+        if prov_norm in {"x-ai", "grok"}:
+            prov_norm = "xai"
+        embedding_required = prov_norm not in {"xai", "anthropic"}
+
+        has_valid_high = bool(high_clean and high_clean != "<Select.BLANK>")
+        has_valid_embedding = bool(embedding_clean and embedding_clean != "<Select.BLANK>")
+
+        if has_valid_high and (has_valid_embedding or not embedding_required):
             updates.update(
                 {
-                    "MANA_PRIMARY_MODEL": qualify_model_id(provider, high),
-                    "MANA_EMBEDDING_MODEL": qualify_model_id(provider, embedding),
-                    "OPENAI_CHAT_MODEL": high,
-                    "LLM_MODEL": high,
-                    "OPENAI_CODING_PLANNER_MODEL": coding,
-                    "OPENAI_TOOL_WORKER_MODEL": fast,
-                    "OPENAI_EMBED_MODEL": embedding,
-                    "MODEL_LEVEL_3_HIGH_REASONING": high,
-                    "MODEL_LEVEL_2_CODING": coding,
-                    "MODEL_LEVEL_1_FAST_TOOL": fast,
+                    "MANA_PRIMARY_MODEL": qualify_model_id(provider, high_clean),
+                    "OPENAI_CHAT_MODEL": high_clean,
+                    "LLM_MODEL": high_clean,
+                    "OPENAI_CODING_PLANNER_MODEL": coding_clean,
+                    "OPENAI_TOOL_WORKER_MODEL": fast_clean,
+                    "MODEL_LEVEL_3_HIGH_REASONING": high_clean,
+                    "MODEL_LEVEL_2_CODING": coding_clean,
+                    "MODEL_LEVEL_1_FAST_TOOL": fast_clean,
                 }
             )
+            if has_valid_embedding:
+                updates.update(
+                    {
+                        "MANA_EMBEDDING_MODEL": qualify_model_id(provider, embedding_clean),
+                        "OPENAI_EMBED_MODEL": embedding_clean,
+                    }
+                )
         self.values.update(updates)
 
     def save(self) -> None:
@@ -95,6 +113,12 @@ class ConfigurationDraft:
                     provider,
                     values.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com",
                     values.get("ANTHROPIC_API_KEY"),
+                )
+            if provider in {"xai", "x-ai", "grok"}:
+                return (
+                    "xai",
+                    values.get("XAI_BASE_URL") or "https://api.x.ai/v1",
+                    values.get("XAI_API_KEY"),
                 )
             return provider, values.get("OPENAI_BASE_URL"), values.get("OPENAI_API_KEY")
         old_identity = (

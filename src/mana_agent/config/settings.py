@@ -103,15 +103,17 @@ class Settings(BaseSettings):
     anthropic_base_url: str = Field(
         default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL"
     )
+    xai_api_key: str = Field(default="", alias="XAI_API_KEY")
+    xai_base_url: str = Field(default="https://api.x.ai/v1", alias="XAI_BASE_URL")
     anthropic_chat_model: str = Field(
         default="claude-sonnet-5-5", alias="ANTHROPIC_CHAT_MODEL"
     )
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_tool_worker_model: str | None = Field(
-        default=None, alias="OPENAI_TOOL_WORKER_MODEL"
+        default="gpt-6-luna", alias="OPENAI_TOOL_WORKER_MODEL"
     )
     openai_coding_planner_model: str | None = Field(
-        default=None, alias="OPENAI_CODING_PLANNER_MODEL"
+        default="gpt-6-luna", alias="OPENAI_CODING_PLANNER_MODEL"
     )
     # Left unset by default so the embedding model can be auto-selected from the
     # active base URL (see ``resolve_embed_model``). An explicit value always wins.

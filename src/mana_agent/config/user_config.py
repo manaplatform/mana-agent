@@ -45,6 +45,7 @@ SECRET_KEYS = {
     "OPENROUTER_API_KEY",
     "NVIDIA_API_KEY",
     "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
     "MANA_GITHUB_TOKEN",
     "MANA_WEB_SEARCH_API_KEY",
     "MANA_API_TOKEN",
@@ -74,10 +75,11 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "OPENROUTER_PROVIDER_PREFERENCES": {},
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "XAI_BASE_URL": "https://api.x.ai/v1",
     "ANTHROPIC_CHAT_MODEL": "claude-sonnet-5-5",
     "OPENAI_CHAT_MODEL": "gpt-4.1-mini",
-    "OPENAI_TOOL_WORKER_MODEL": "",
-    "OPENAI_CODING_PLANNER_MODEL": "",
+    "OPENAI_TOOL_WORKER_MODEL": "gpt-6-luna",
+    "OPENAI_CODING_PLANNER_MODEL": "gpt-6-luna",
     "OPENAI_EMBED_MODEL": "",
     "OPENAI_BATCH_ENABLED": True,
     "OPENAI_BATCH_MODE": "auto",
@@ -468,6 +470,8 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "NVIDIA_BASE_URL": "nvidia_base_url",
     "ANTHROPIC_API_KEY": "anthropic_api_key",
     "ANTHROPIC_BASE_URL": "anthropic_base_url",
+    "XAI_API_KEY": "xai_api_key",
+    "XAI_BASE_URL": "xai_base_url",
     "ANTHROPIC_CHAT_MODEL": "anthropic_chat_model",
     "OPENAI_CHAT_MODEL": "openai_chat_model",
     "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
@@ -1170,6 +1174,8 @@ def is_user_config_valid() -> bool:
         api_key = effective.get("NVIDIA_API_KEY", "")
     elif provider == "anthropic":
         api_key = effective.get("ANTHROPIC_API_KEY", "")
+    elif provider in {"xai", "x-ai", "grok"}:
+        api_key = effective.get("XAI_API_KEY", "")
     else:
         api_key = effective.get("OPENAI_API_KEY", "")
     return bool(
@@ -1373,6 +1379,12 @@ def validate_config_values(values: dict[str, Any]) -> dict[str, Any]:
         )
     if cleaned.get("NVIDIA_BASE_URL"):
         cleaned["NVIDIA_BASE_URL"] = validate_base_url(str(cleaned["NVIDIA_BASE_URL"]))
+    if cleaned.get("XAI_BASE_URL"):
+        cleaned["XAI_BASE_URL"] = validate_base_url(str(cleaned["XAI_BASE_URL"]))
+    if cleaned.get("MANA_AI_PROVIDER"):
+        raw_p = str(cleaned["MANA_AI_PROVIDER"] or "").strip().lower()
+        if raw_p in {"x-ai", "grok"}:
+            cleaned["MANA_AI_PROVIDER"] = "xai"
     if cleaned.get("MANA_WORKER_GATEWAY_PUBLIC_URL"):
         cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"] = validate_base_url(
             str(cleaned["MANA_WORKER_GATEWAY_PUBLIC_URL"])
@@ -1501,7 +1513,10 @@ class CachedModels:
 
 
 def provider_cache_key(provider: str, base_url: str) -> str:
-    seed = f"{provider.strip().lower()}|{base_url.rstrip('/')}"
+    p = str(provider or "").strip().lower()
+    if p in {"x-ai", "grok"}:
+        p = "xai"
+    seed = f"{p}|{base_url.rstrip('/')}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
 
@@ -1513,7 +1528,18 @@ def load_model_cache(provider: str, base_url: str) -> CachedModels | None:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    item = data.get(provider_cache_key(provider, base_url))
+    key = provider_cache_key(provider, base_url)
+    item = data.get(key)
+    if not isinstance(item, dict):
+        raw_p = str(provider or "").strip().lower()
+        alt_p = "xai" if raw_p == "x-ai" else ("x-ai" if raw_p == "xai" else None)
+        if alt_p:
+            alt_key = hashlib.sha256(f"{alt_p}|{base_url.rstrip('/')}".encode("utf-8")).hexdigest()[:24]
+            item = data.get(alt_key)
+    if not isinstance(item, dict) and not str(base_url or "").strip():
+        raw_p = str(provider or "").strip().lower()
+        if raw_p in {"xai", "x-ai", "grok"}:
+            item = data.get(provider_cache_key("xai", "https://api.x.ai/v1"))
     if not isinstance(item, dict):
         return None
     models = [
@@ -1543,9 +1569,15 @@ def save_model_cache(
                 data = loaded
         except (OSError, json.JSONDecodeError):
             data = {}
-    data[provider_cache_key(provider, base_url)] = {
-        "provider": provider,
-        "base_url": base_url.rstrip("/"),
+    p_norm = str(provider or "").strip().lower()
+    if p_norm in {"x-ai", "grok"}:
+        p_norm = "xai"
+    eff_base_url = str(base_url or "").rstrip("/")
+    if not eff_base_url and p_norm == "xai":
+        eff_base_url = "https://api.x.ai/v1"
+    data[provider_cache_key(p_norm, eff_base_url)] = {
+        "provider": p_norm,
+        "base_url": eff_base_url,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "models": sorted(
             {

@@ -1558,6 +1558,64 @@ def test_consequential_action_duplicate_and_stale_generation_are_fenced(runtime)
         )
 
 
+def test_local_action_can_reexecute_after_completion(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    action1 = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="shell",
+        action_fingerprint="pytest:tests/test_foo.py",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_1",
+    )
+    supervisor.update_action(action1.action_id, request_state=ActionRequestState.SUCCEEDED)
+
+    # Re-executing the same local command in a subsequent tool call must succeed
+    action2 = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="shell",
+        action_fingerprint="pytest:tests/test_foo.py",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_2",
+    )
+    assert action2.action_id != action1.action_id
+    assert action2.request_state == ActionRequestState.PREPARED
+
+
+def test_prepared_action_reattaches_with_matching_idempotency_key(runtime):
+    supervisor, clock, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    action = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="shell",
+        action_fingerprint="python:main.py",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_same",
+    )
+    supervisor.update_action(action.action_id, request_state=ActionRequestState.STARTED)
+
+    # Resuming the in-flight action with the same idempotency key must re-attach cleanly
+    reattached = supervisor.prepare_action(
+        task.task_id,
+        attempt_id=attempt_id,
+        lease_token=token,
+        tool_name="shell",
+        action_fingerprint="python:main.py",
+        classification=SideEffectClassification.IDEMPOTENT,
+        idempotency_key="tool_call_same",
+    )
+    assert reattached.action_id == action.action_id
+    assert reattached.request_state == ActionRequestState.STARTED
+
+
 def test_completed_file_result_is_reverified_against_recorded_hash(runtime):
     supervisor, _clock, tmp_path = runtime
     output = tmp_path / "reverify.txt"

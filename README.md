@@ -136,7 +136,7 @@ python -m pip install -e .
 mana-agent --configure
 ```
 
-Configure your model provider, credentials, model preferences, and supported capabilities.
+Configure your model provider, credentials, model preferences, and supported capabilities. The setup CLI includes OpenAI-compatible providers such as xAI (Grok); see [provider configuration](docs/05-configuration.md#xai-grok) for setup details.
 
 ### 3. Start
 
