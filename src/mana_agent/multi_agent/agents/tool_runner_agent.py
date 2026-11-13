@@ -471,11 +471,21 @@ class ToolRunnerAgent:
                         lease_token = lane_exec.supervisor_lease_token
                 except Exception:
                     pass
+            is_read_only = False
+            if request.tool_name in {"run_command", "shell", "run_script_once"}:
+                try:
+                    from mana_agent.tools.shell_exec import is_read_only_command
+                    cmd = (request.arguments or {}).get("cmd") or (request.arguments or {}).get("command") or (request.arguments or {}).get("script")
+                    commands = (request.arguments or {}).get("commands") or ([cmd] if cmd else [])
+                    if commands and all(is_read_only_command(c) for c in commands):
+                        is_read_only = True
+                except Exception:
+                    pass
             classification = (
                 SideEffectClassification.READ_ONLY
-                if policy.effect == "read_only"
+                if policy.effect == "read_only" or is_read_only
                 else SideEffectClassification.NON_IDEMPOTENT
-                if policy.effect == "external"
+                if policy.effect == "external" or request.tool_name in {"git_push", "cloud_deploy", "send_payment", "send_email", "webhook_trigger", "external_api_call"}
                 else SideEffectClassification.IDEMPOTENT
             )
             action = supervisor.prepare_action(request.task_id, attempt_id=attempt_id,
