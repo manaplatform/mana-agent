@@ -2,6 +2,10 @@
 
 All notable repository changes should be recorded here.
 
+## 0.12.1 — 2026-11-13
+
+- Release metadata: bump the package version to 0.12.1 in `pyproject.toml` (single-source version consumed by `mana_agent._version.get_version()` and the distribution metadata).
+
 ## 0.12.0 — 2026-11-13
 
 - Release metadata: bump the package version to 0.12.0 in `pyproject.toml` and generated distribution metadata.
