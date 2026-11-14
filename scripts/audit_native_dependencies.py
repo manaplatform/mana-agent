@@ -15,7 +15,7 @@ def forbidden(name: str) -> bool:
 def audit_sources(root: Path) -> list[str]:
     failures = []
     for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             modules = [node.module or ""] if isinstance(node, ast.ImportFrom) else [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
             for module in modules:
@@ -72,7 +72,7 @@ def main() -> int:
     result = {"verified": not failures, "graph": graph, "failures": failures}
     rendered = json.dumps(result, indent=2)
     if options.output:
-        options.output.write_text(rendered + "\n")
+        options.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
     return int(bool(failures))
 
