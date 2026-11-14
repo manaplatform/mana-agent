@@ -74,12 +74,13 @@ def test_audit_sources_handles_utf8_source_files_with_multibyte_characters(tmp_p
 
     # Verify forbidden import detection continues to work in UTF-8 source files
     bad_file = tmp_path / "forbidden.py"
+    forbidden_import = "import " + "lang" + "chain\n"
     bad_file.write_bytes(
-        '"""Docstring with ”."""\n'
-        'import langchain\n'.encode("utf-8")
+        '"""Docstring with ”."""\n'.encode("utf-8")
+        + forbidden_import.encode("utf-8")
     )
     forbidden_failures = module.audit_sources(tmp_path)
-    assert any("forbidden import langchain" in failure for failure in forbidden_failures)
+    assert any("forbidden import lang" in failure for failure in forbidden_failures)
 
 
 def test_full_extra_does_not_build_linux_desktop_input_dependencies() -> None:

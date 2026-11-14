@@ -43,6 +43,13 @@ class Message(BaseModel):
     def __init__(self, content: Any = "", **values: Any) -> None:
         super().__init__(content=content, **values)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_payload(cls, data: Any) -> Any:
+        if isinstance(data, dict) and ("kwargs" in data or "additional_kwargs" in data):
+            raise ValueError("Unsupported legacy message payload")
+        return data
+
     @field_validator("content", mode="before")
     @classmethod
     def normalize_content_blocks(cls, value: Any) -> Any:
@@ -105,6 +112,8 @@ def messages_from_records(values: Any) -> list[Message]:
         version = record.pop("schema_version", 1)
         if version != 1:
             raise ValueError("Unsupported inference message record version")
+        if "kwargs" in record or "additional_kwargs" in record:
+            raise ValueError("Unsupported legacy message payload")
         if record.get("content") is None and record.get("role") == "assistant" and record.get("tool_calls"):
             record["content"] = ""
         # Version-one durable history used type/content for the two conversational roles.

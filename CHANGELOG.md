@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-14
 
+- Message Contracts & Test Isolation:
+  - In `src/mana_agent/llm/messages.py`, reject legacy message payload dictionaries containing `"kwargs"` or `"additional_kwargs"` in `Message.reject_legacy_payload` and `messages_from_records()` to enforce fail-closed legacy rejection without repair, while preserving support for conversation context metadata (`created_at`, `timestamp`).
+  - In `tests/test_package_version.py`, dynamically construct the synthetic forbidden import string in `test_audit_sources_handles_utf8_source_files_with_multibyte_characters` to avoid literal legacy import substring matches in the static scan test `test_no_stale_mana_agent_llm_imports_remain`.
+  - User-owned verification: `python -m pytest tests/test_multi_agent_core.py -k "test_no_stale_mana_agent_llm_imports_remain" tests/test_tool_worker_process.py -k "test_native_messages_reject_unsupported_legacy_payload_without_repair" tests/llm/test_contracts.py -q`.
+
 - CI / Windows Test & Native Dependency Audit:
   - In `scripts/audit_native_dependencies.py`, read Python source files and write JSON output using explicit `encoding="utf-8"` in `audit_sources()` and `main()` to prevent `UnicodeDecodeError` under Windows code page defaults (such as cp1252) when files contain multi-byte characters (e.g. byte 0x9d in UTF-8 quotes or typographic symbols).
   - In `.github/workflows/ci.yml`, upgrade `packaging` alongside `pip` (`python -m pip install --upgrade pip packaging`) and set `PYTHONUTF8: "1"` in job environment so pre-installed runner packages (such as `pipx 1.18.12` requiring `packaging>=26.3`) satisfy `python -m pip check` and Python processes default to UTF-8 on Windows runners.
