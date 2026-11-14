@@ -53,26 +53,22 @@ class ModelCatalogService:
         if prov_norm in {"x-ai", "grok"}:
             prov_norm = "xai"
         try:
-            if self.fetcher is not None:
-                model_ids = self.fetcher(provider=prov_norm, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
+            fetch = self.fetcher
+            if fetch is None:
+                from mana_agent.tui.model_picker import fetch_provider_models
+
+                fetch = fetch_provider_models
+            model_ids = fetch(provider=prov_norm, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
+            save_model_cache(prov_norm, base_url, model_ids)
+            try:
                 from mana_agent.llm.discovery import ModelMetadataResolver
                 resolver = ModelMetadataResolver()
                 for record in model_ids:
                     resolver.resolve(record["id"] if isinstance(record, dict) else record, prov_norm, record if isinstance(record, dict) else None)
-                save_model_cache(prov_norm, base_url, model_ids)
-            else:
-                from mana_agent.llm.discovery import ModelDiscoveryService
-                profiles = ModelDiscoveryService().discover_models(provider=prov_norm, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
-                model_ids = [{"id": profile.model_id, **profile.metadata} for profile in profiles]
+            except Exception:
+                pass
         except ProviderValidationError:
             raise
-        except httpx.HTTPStatusError as exc:
-            code = exc.response.status_code
-            if code in {401, 403}:
-                raise ProviderAuthenticationFailedError(f"Provider rejected model discovery credentials (HTTP {code}).") from exc
-            raise ModelListFetchFailedError(f"Provider model discovery returned HTTP {code}.") from exc
-        except httpx.RequestError as exc:
-            raise ProviderConnectionFailedError(f"Provider model discovery failed ({type(exc).__name__}).") from exc
         except Exception as exc:
             raise ProviderValidationError(str(exc)) from exc
         return descriptors_from_catalog(prov_norm, model_ids, source="discovered")
@@ -96,8 +92,16 @@ class ModelCatalogService:
             return []
         return descriptors_from_catalog(prov_norm, cached.models, source="cached")
 
+    def cached_or_maintained(self, *, provider: str, base_url: str = "") -> list[ModelDescriptor]:
+        cached = self.cached(provider=provider, base_url=base_url)
+        if cached:
+            return cached
+        from mana_agent.config.model_catalog import maintained_models_for_provider
+
+        return maintained_models_for_provider(provider)
+
     def cached_profiles(self, *, provider: str, base_url: str = "") -> list[ModelDescriptor]:
-        return self.cached(provider=provider, base_url=base_url)
+        return self.cached_or_maintained(provider=provider, base_url=base_url)
 
     def get_descriptor(
         self,

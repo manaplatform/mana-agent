@@ -14,20 +14,63 @@ from mana_agent.batch.validation import validate_batch_selection
 
 
 def response_message(body: dict[str, Any], schema: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Native normalization; the durable loop retains separate protocol receipts."""
-    from mana_agent.llm.providers.openai import OpenAIProvider
-    from mana_agent.llm.types import InferenceRequest
-    protocol = "chat_completions" if "choices" in body else "responses"
-    adapter = OpenAIProvider(provider="openai", api_key="", base_url="", endpoint=protocol)
-    response = adapter.normalize(body, InferenceRequest(provider="openai", model=body.get("model") or "batch-receipt", messages=[], response_schema=schema))
-    if response.refusal or response.protocol_pending or not (response.content or response.tool_calls):
-        raise ValueError("Batch response did not return a complete public assistant result")
-    message = {"role": "assistant", "content": response.content}
-    if response.tool_calls:
-        message["tool_calls"] = [{"id": call.id, "type": "function", "function": {"name": call.name,
-            "arguments": json.dumps(call.args, ensure_ascii=False)}, **({"caller": call.caller} if call.caller else {})} for call in response.tool_calls]
-    if response.continuation:
-        message["_response_items"] = response.continuation.items
+    """Decode only public assistant output and function calls, never reasoning."""
+    if body.get("error") or body.get("status") in {"failed", "incomplete", "cancelled"}:
+        raise ValueError("Batch model response failed or was incomplete")
+    if "choices" in body:
+        choices = body["choices"]
+        if len(choices) != 1 or choices[0].get("finish_reason") not in {"stop", "tool_calls"}:
+            raise ValueError("Batch response must contain one complete assistant choice")
+        message = dict(choices[0].get("message") or {})
+        if message.get("role") != "assistant":
+            raise ValueError("Batch completion did not return an assistant message")
+        if message.get("refusal"):
+            raise ValueError("Batch model refused the request")
+        if isinstance(message.get("content"), list):
+            parts = message["content"]
+            if any(part.get("type") != "text" for part in parts):
+                raise ValueError("Batch completion returned unsupported assistant content")
+            message["content"] = "".join(str(part.get("text") or "") for part in parts)
+    else:
+        texts: list[str] = []
+        calls: list[dict[str, Any]] = []
+        protocol_items: list[dict[str, Any]] = []
+        for item in body.get("output") or []:
+            if item.get("type") == "message":
+                protocol_items.append(item)
+                for part in item.get("content") or []:
+                    if part.get("type") == "refusal":
+                        raise ValueError("Batch model refused the request")
+                    if part.get("type") == "output_text":
+                        texts.append(str(part.get("text") or ""))
+            elif item.get("type") == "function_call":
+                protocol_items.append(item)
+                calls.append({"id": item.get("call_id"), "type": "function", "function": {
+                    "name": item.get("name"), "arguments": item.get("arguments"),
+                }})
+            elif item.get("type") == "reasoning":
+                if not item.get("encrypted_content"):
+                    raise ValueError("Batch reasoning continuation requires its opaque encrypted receipt")
+                protocol_items.append({key: value for key, value in item.items() if key != "content"})
+            else:
+                raise ValueError("Batch response returned an unsupported output item")
+        message = {"role": "assistant", "content": "".join(texts) or body.get("output_text") or body.get("content") or ""}
+        if calls:
+            message["tool_calls"] = calls
+        if protocol_items:
+            message["_response_items"] = protocol_items
+    calls = message.get("tool_calls") or []
+    ids: set[str] = set()
+    for call in calls:
+        if call.get("type") != "function" or not call.get("id") or call["id"] in ids or not call.get("function", {}).get("name"):
+            raise ValueError("Batch response contains invalid or duplicate tool calls")
+        ids.add(call["id"])
+        args_raw = call["function"]["arguments"]
+        args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+        if not isinstance(args, dict):
+            raise ValueError("Batch function arguments must be an object")
+    if not calls and not str(message.get("content") or "").strip():
+        raise ValueError("Empty Batch model output is not completion evidence")
     return message
 
 

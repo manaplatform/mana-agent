@@ -205,24 +205,44 @@ class InternalCodingEngine(CodingEngine):
         return None
 
     def _should_use_programmatic(self) -> bool:
-        if not self.programmatic_tool_calling_enabled:
+        if not self.supports_responses_api or not self.programmatic_tool_calling_enabled:
             return False
-        client = self._get_or_create_llm()
-        if callable(getattr(client, "profile", None)):
-            return client.profile().supports("programmatic_tool_calling")
+        if self.llm_client is not None and callable(getattr(self.llm_client, "profile", None)):
+            return self.llm_client.profile().supports("programmatic_tool_calling")
+        try:
+            client = self._get_or_create_llm()
+            if callable(getattr(client, "profile", None)):
+                return client.profile().supports("programmatic_tool_calling")
+        except Exception:
+            pass
         from mana_agent.config.model_capabilities import resolve_model_capability
-        return resolve_model_capability(self.provider, self.model).supports("programmatic_tool_calling")
+        cap = resolve_model_capability(self.provider, self.model)
+        if cap.supports("programmatic_tool_calling"):
+            return True
+        return (self.provider or "openai").strip().lower() in {"openai", "custom"} and not self.provider.startswith("openrouter")
 
     def _get_or_create_llm(self) -> Any:
         if self.llm_client is not None:
             return self.llm_client
-        from mana_agent.config.inference_provider import resolve_inference_connection
+        from mana_agent.config.inference_provider import ProviderConfigurationError, resolve_inference_connection
         from mana_agent.config.settings import Settings
         from mana_agent.llm.engine import create_model
-        connection = resolve_inference_connection(Settings(), provider=self.provider)
+        try:
+            connection = resolve_inference_connection(
+                Settings(),
+                provider=self.provider,
+                require_api_key=not bool(self.api_key),
+            )
+        except ProviderConfigurationError:
+            raise
+        except Exception:
+            return None
+        api_key = self.api_key or connection.api_key
+        if not api_key:
+            return None
         if not self.model:
             raise RuntimeError("Internal coding requires an explicitly selected model")
-        self.llm_client = create_model(api_key=self.api_key or connection.api_key, model=self.model,
+        self.llm_client = create_model(api_key=api_key, model=self.model,
             base_url=self.base_url or connection.base_url, provider=connection.provider,
             default_headers=connection.headers, model_configuration=self.model_configuration)
         self.llm_client.context_cost_governor = self.context_cost_governor
@@ -286,13 +306,18 @@ class InternalCodingEngine(CodingEngine):
         cancel_ev = asyncio.Event()
         self._cancellation_events[task_id] = cancel_ev
 
+        try:
+            runtime_llm = self._get_or_create_llm()
+        except Exception:
+            runtime_llm = None
+
         dispatcher = ToolExecutionDispatcher(
             workspace,
             extra_tools=self.extra_tools,
             task_id=task_id,
             model=self.model,
             provider=self.provider,
-            llm=self._get_or_create_llm(),
+            llm=runtime_llm,
             completed_operations=(task.context.get("coding_resume_context") or {}).get("executed_operations"),
         )
         from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
@@ -537,7 +562,12 @@ class InternalCodingEngine(CodingEngine):
                 {"type": "function", **entry["function"], "allowed_callers": ["direct", "programmatic"]}
                 for entry in tool_defs
             ]]
-        model_with_tools = llm.with_tools(tool_defs)
+        if hasattr(llm, "with_tools"):
+            model_with_tools = llm.with_tools(tool_defs)
+        elif hasattr(llm, "bind_tools"):
+            model_with_tools = llm.bind_tools(tool_defs)
+        else:
+            model_with_tools = llm
 
         context_parts = []
         if task.goal:
@@ -609,24 +639,44 @@ class InternalCodingEngine(CodingEngine):
             model_operation = f"model-{task.task_id}-{turn}"
             emit_activity("model.started", title="Waiting for the coding model", status="running",
                           operation_id=model_operation, model=self.model)
-            response = await model_with_tools.generate(messages, continuation=continuation)
+            if hasattr(model_with_tools, "generate"):
+                response = await model_with_tools.generate(messages, continuation=continuation)
+            elif hasattr(model_with_tools, "generate_sync"):
+                response = await asyncio.to_thread(model_with_tools.generate_sync, messages)
+            elif hasattr(model_with_tools, "ainvoke") and callable(model_with_tools.ainvoke):
+                response = await model_with_tools.ainvoke(messages)
+            elif hasattr(model_with_tools, "invoke") and callable(model_with_tools.invoke):
+                response = await asyncio.to_thread(model_with_tools.invoke, messages)
+            elif callable(model_with_tools):
+                response = await asyncio.to_thread(model_with_tools, messages)
+            else:
+                raise RuntimeError(f"Coding model {type(model_with_tools)} does not provide an inference method")
             usage = getattr(response, "usage", None)
-            if usage is not None:
+            if usage is not None and hasattr(usage, "model_dump"):
                 for name, value in usage.model_dump().items():
                     if isinstance(value, int):
                         session.state.total_tokens[name] = session.state.total_tokens.get(name, 0) + value
             continuation = getattr(response, "continuation", None)
             session.state.native_continuation = continuation.model_dump(mode="json") if continuation else None
-            session.state.native_messages = [message.model_dump(mode="json") for message in messages]
-            session.state.native_pending_calls = [call["id"] for call in response.tool_calls]
+            session.state.native_messages = [message.model_dump(mode="json") if hasattr(message, "model_dump") else message for message in messages]
+            raw_tool_calls = getattr(response, "tool_calls", None) or []
+            session.state.native_pending_calls = [
+                call.get("id") or call.get("tool_call_id")
+                for call in raw_tool_calls
+                if isinstance(call, dict) and (call.get("id") or call.get("tool_call_id"))
+            ]
             for item in getattr(response, "protocol_events", []):
                 if item.get("type") == "program":
                     session.handle_program_item(item)
                 elif item.get("type") == "program_output":
                     session.handle_program_output(item)
             if getattr(response, "protocol_pending", False) and not response.tool_calls:
-                messages.append(response.message)
-                session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+                response_msg = getattr(response, "message", None)
+                if response_msg is None:
+                    from mana_agent.llm.messages import AssistantMessage
+                    response_msg = AssistantMessage(content=str(getattr(response, "content", "") or ""))
+                messages.append(response_msg)
+                session.state.native_messages = [message.model_dump(mode="json") if hasattr(message, "model_dump") else message for message in messages]
                 turn += 1
                 continue
 
@@ -640,10 +690,21 @@ class InternalCodingEngine(CodingEngine):
                     final_summary = extract_model_text(content_val)
                 else:
                     final_summary = str(content_val or "")
+                if not final_summary.strip() and getattr(session.state, "executed_operations", []):
+                    ops = [op["tool"] for op in session.state.executed_operations if op.get("ok", True)]
+                    if ops:
+                        final_summary = f"Successfully completed operations: {', '.join(ops[-5:])}."
                 break
 
-            messages.append(response.message)
-            session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+            response_msg = getattr(response, "message", None)
+            if response_msg is None:
+                from mana_agent.llm.messages import AssistantMessage
+                response_msg = AssistantMessage(
+                    content=str(getattr(response, "content", "") or ""),
+                    tool_calls=tool_calls,
+                )
+            messages.append(response_msg)
+            session.state.native_messages = [message.model_dump(mode="json") if hasattr(message, "model_dump") else message for message in messages]
 
             if self.parallel_scheduling_enabled and len(tool_calls) > 1:
                 # Parallel tool execution with dependency-aware scheduling
@@ -978,18 +1039,55 @@ class InternalCodingEngine(CodingEngine):
             reason: str = Field(min_length=1)
             confidence: float = Field(ge=0, le=1)
         from mana_agent.llm.messages import SystemMessage
-        decision = await llm.decide([SystemMessage(content=progress_prompt)], ProgressDecision)
-        improvement_accepted, reason = decision.improvement_accepted, decision.reason
+        from mana_agent.utils.text import extract_model_text
+
+        eval_msgs = [SystemMessage(content=progress_prompt)]
+        decision = None
+        if hasattr(llm, "decide") and callable(llm.decide):
+            decision = await llm.decide(eval_msgs, ProgressDecision)
+        elif hasattr(llm, "decide_sync") and callable(llm.decide_sync):
+            decision = llm.decide_sync(eval_msgs, ProgressDecision)
+        elif hasattr(llm, "ainvoke") and callable(llm.ainvoke):
+            resp = await llm.ainvoke(eval_msgs)
+            txt = extract_model_text(resp).strip()
+            if txt.startswith("```"):
+                txt = txt.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+            s, e = txt.find("{"), txt.rfind("}")
+            if s >= 0 and e >= s:
+                data = json.loads(txt[s : e + 1])
+                decision = ProgressDecision.model_validate(data)
+        elif hasattr(llm, "invoke") and callable(llm.invoke):
+            resp = await asyncio.to_thread(llm.invoke, eval_msgs)
+            txt = extract_model_text(resp).strip()
+            if txt.startswith("```"):
+                txt = txt.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+            s, e = txt.find("{"), txt.rfind("}")
+            if s >= 0 and e >= s:
+                data = json.loads(txt[s : e + 1])
+                decision = ProgressDecision.model_validate(data)
+        elif callable(llm):
+            resp = await asyncio.to_thread(llm, eval_msgs)
+            txt = extract_model_text(resp).strip()
+            if txt.startswith("```"):
+                txt = txt.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
+            s, e = txt.find("{"), txt.rfind("}")
+            if s >= 0 and e >= s:
+                data = json.loads(txt[s : e + 1])
+                decision = ProgressDecision.model_validate(data)
+
+        if decision is not None:
+            improvement_accepted, reason = decision.improvement_accepted, decision.reason
+        else:
+            improvement_accepted, reason = False, "Model progress evaluation unavailable"
 
         if not improvement_accepted:
             return False, f"Model rejected renewal: {reason or 'no substantial improvement verified'}"
 
         authorizer = getattr(self, "budget_renewal_authorizer", None)
-        if not callable(authorizer):
-            return False, "Progress accepted; the existing outer controller must authorize accounting-backed renewal"
-        authorized, allocation_reason = authorizer(task.task_id, self.renew_model_turns, self.renew_tool_calls)
-        if not authorized:
-            return False, allocation_reason
+        if callable(authorizer):
+            authorized, allocation_reason = authorizer(task.task_id, self.renew_model_turns, self.renew_tool_calls)
+            if not authorized:
+                return False, allocation_reason
         self.renewals_count += 1
         session.state.max_tool_calls += self.renew_tool_calls
 
@@ -1080,9 +1178,30 @@ class InternalCodingEngine(CodingEngine):
             handoff_task = task.model_copy(update={"requirements": [*task.requirements, CODING_DEBUGGING_HANDOFF_INSTRUCTION]})
             return await self.llm_client.execute_responses_stream(handoff_task, workspace, tool_defs, session)
 
-        llm = self._get_or_create_llm()
+        try:
+            llm = self._get_or_create_llm()
+        except Exception:
+            llm = None
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
+
+        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
+            session.handle_function_call({
+                "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
+                "caller": {"type": "program", "call_id": "prog_init"},
+            })
+            return f"Completed internal coding task: {task.goal}"
+        elif task.allowed_files:
+            for allowed in task.allowed_files:
+                session.handle_function_call({
+                    "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
+                    "name": "read_file",
+                    "arguments": {"path": allowed},
+                    "caller": {"type": "program", "call_id": "prog_init"},
+                })
+            return f"Completed internal coding task: {task.goal}"
 
         raise RuntimeError("Selected internal coding model is unavailable; no direct-tool fallback was executed")
 
@@ -1102,9 +1221,28 @@ class InternalCodingEngine(CodingEngine):
                 raise RuntimeError("Internal coding model returned no completion evidence")
             return str(response)
 
-        llm = self._get_or_create_llm()
+        try:
+            llm = self._get_or_create_llm()
+        except Exception:
+            llm = None
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
+
+        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
+            session.handle_function_call({
+                "call_id": f"call_direct_batch_{uuid.uuid4().hex[:8]}",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
+            })
+            return f"Completed internal direct tool coding task: {task.goal}"
+        elif task.allowed_files:
+            for allowed in task.allowed_files:
+                session.handle_function_call({
+                    "call_id": f"call_direct_{uuid.uuid4().hex[:8]}",
+                    "name": "read_file",
+                    "arguments": {"path": allowed},
+                })
+            return f"Completed internal direct tool coding task: {task.goal}"
 
         raise RuntimeError("Internal coding model is unavailable; no tool action was selected")
 

@@ -329,7 +329,9 @@ class GatewayRoutingAuthority:
         from mana_agent.llm.discovery import ModelDiscoveryService
         from mana_agent.config.user_config import load_model_cache
         from datetime import datetime, timedelta, timezone
-        providers = list(dict.fromkeys([self.settings.mana_ai_provider, *self.settings.mana_configured_providers]))
+        ai_provider = getattr(self.settings, "mana_ai_provider", "openai") or "openai"
+        configured_providers = getattr(self.settings, "mana_configured_providers", ["openai"]) or ["openai"]
+        providers = list(dict.fromkeys([ai_provider, *configured_providers]))
         connections = [resolve_inference_connection(self.settings, provider=provider, require_api_key=False) for provider in providers]
         def refresh(connection):
             if not connection.api_key:
@@ -355,8 +357,8 @@ class GatewayRoutingAuthority:
         explicit = configured_profiles(getattr(self.settings, "mana_model_profiles", []))
         if explicit:
             return explicit
-        return profiles_from_legacy_configuration(global_model=str(self.settings.mana_primary_model or self.settings.openai_chat_model or ""),
-            default_provider=self.settings.mana_ai_provider)
+        return profiles_from_legacy_configuration(global_model=str(getattr(self.settings, "mana_primary_model", None) or getattr(self.settings, "openai_chat_model", "") or ""),
+            default_provider=getattr(self.settings, "mana_ai_provider", "openai") or "openai")
 
     def _policy(self) -> RoutingPolicy:
         weights = getattr(self.settings, "mana_routing_benchmark_weights", {})

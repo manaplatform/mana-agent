@@ -925,6 +925,7 @@ class ManaConfigurationApp(App[bool]):
             self._models = models
             self._provider_validated = True
             text_models = filter_models(models, ModelPurpose.AGENT)
+            embedding_models = filter_models(models, ModelPurpose.EMBEDDING)
             media_models = {
                 "#media-image-model": filter_models(models, ModelPurpose.IMAGE),
                 "#media-voice-model": filter_models(models, ModelPurpose.VOICE),
@@ -934,17 +935,22 @@ class ManaConfigurationApp(App[bool]):
             }
             for selector in ("#high-model", "#coding-model", "#fast-model"):
                 widget = self.query_one(selector, Select)
-                current = self._select_value(widget)
-                widget.set_options(self._inference_model_options(models, current=current))
-                widget.value = current
+                current = str(widget.value) if widget.value != Select.BLANK else ""
+                options = [(self._model_label(item), item.id) for item in text_models]
+                if not options:
+                    options = [("No compatible models discovered", "")]
+                elif current and current not in {value for _, value in options}:
+                    options.append((f"{current} · manual", current))
+                widget.set_options(options)
+                widget.value = current if current in {value for _, value in options} else options[0][1]
             for selector, compatible in media_models.items():
                 widget = self.query_one(selector, Select)
                 current = str(widget.value) if widget.value != Select.BLANK else ""
                 options = [(self._model_label(item), item.id) for item in compatible]
-                if current and current not in {value for _, value in options}:
-                    options.append((f"{current} · manual", current))
                 if not options:
                     options = [("No compatible models discovered", "")]
+                elif current and current not in {value for _, value in options}:
+                    options.append((f"{current} · manual", current))
                 widget.set_options(options)
                 widget.value = current if current in {value for _, value in options} else options[0][1]
             delegation_widget = self.query_one("#live-delegation-model", Select)
@@ -955,7 +961,7 @@ class ManaConfigurationApp(App[bool]):
             delegation_widget.set_options(del_options)
             delegation_widget.value = current_del if current_del in {val for _, val in del_options} else ""
             status.update(
-                f"Connected · {len(models)} models, {len(text_models)} with text generation evidence, "
+                f"Connected · {len(text_models)} agent, {len(embedding_models)} embedding, "
                 f"{len(media_models['#media-image-model'])} image, "
                 f"{len(media_models['#media-voice-model'])} voice, "
                 f"{len(media_models['#media-video-model'])} video, "
@@ -1110,8 +1116,9 @@ class ManaConfigurationApp(App[bool]):
 
             base_url = self._provider_base_url(self.draft.values, provider)
             empty_options = [("Test provider to discover models", "")]
-            descriptors = self.catalog_service.cached_profiles(provider=provider, base_url=base_url)
-            text_options = self._inference_model_options(descriptors)
+            descriptors = self.catalog_service.cached_or_maintained(provider=provider, base_url=base_url)
+            text_models = filter_models(descriptors, ModelPurpose.AGENT)
+            text_options = empty_options + [(self._model_label(item), item.id) for item in text_models]
             for selector in (
                 "#high-model",
                 "#coding-model",

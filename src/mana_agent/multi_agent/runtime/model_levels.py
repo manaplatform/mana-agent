@@ -94,7 +94,7 @@ def route_model(request: RoutingRequest, *, global_model: str, profiles=None) ->
         explicit = configured_profiles(settings.mana_model_profiles)
         candidates = explicit or profiles_from_legacy_configuration(
             global_model=global_model,
-            default_provider=settings.mana_ai_provider,
+            default_provider=getattr(settings, "mana_ai_provider", "openai") or "openai",
         )
         language_preferences = settings.mana_routing_language_preferences if isinstance(settings.mana_routing_language_preferences, dict) else {}
         candidates = tuple(

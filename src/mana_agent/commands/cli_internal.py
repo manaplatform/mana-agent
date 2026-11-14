@@ -236,9 +236,9 @@ def _build_project_llm_analyzer():
     return build_llm_analyzer(
         ModelConfig(
             api_key=api_key,
-            model=str(config.get("OPENAI_CHAT_MODEL", "") or ""),
+            model=str(config.get("OPENAI_CHAT_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini"),
             base_url=base_url or None,
-            provider=provider,
+            provider=provider if provider != "openai" else None,
         )
     )
 

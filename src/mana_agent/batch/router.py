@@ -24,20 +24,102 @@ SUPPORTED_BATCH_ENDPOINTS = {
 
 def parse_batch_support_from_metadata(metadata: Any, endpoint: str = "/v1/responses") -> bool | None:
     """Project only explicit Batch fields; other endpoints and text imply nothing."""
-    from mana_agent.llm.capabilities import ModelProfile, metadata_facts
-    if hasattr(metadata, "supports_batch"):
+    if hasattr(metadata, "supports_batch") and getattr(metadata, "supports_batch") is not None:
         return metadata.supports_batch
+    parsed_record: dict[str, Any] = {}
     if isinstance(metadata, str):
         from mana_agent.config.model_catalog import parse_model_metadata_text
-        metadata = parse_model_metadata_text(metadata)
-    if not isinstance(metadata, dict):
+        parsed_record = parse_model_metadata_text(metadata)
+    elif isinstance(metadata, dict):
+        parsed_record = dict(metadata)
+    elif hasattr(metadata, "metadata") and isinstance(metadata.metadata, dict):
+        parsed_record = dict(metadata.metadata)
+    elif hasattr(metadata, "to_dict") and callable(metadata.to_dict):
+        record = metadata.to_dict()
+        if isinstance(record, dict):
+            parsed_record = record
+    if not parsed_record:
         return None
-    profile = ModelProfile(provider="metadata", model_id="metadata", facts=metadata_facts(metadata, source="provider"))
-    if profile.supports_batch is not True:
-        return profile.supports_batch
-    if profile.supported_batch_endpoints and endpoint not in profile.supported_batch_endpoints:
-        return False
-    return True
+
+    nested_metadata = parsed_record.get("metadata") or parsed_record.get("model_metadata")
+    if isinstance(nested_metadata, dict):
+        parsed_record = {**nested_metadata, **parsed_record}
+
+    for key in (
+        "batch_supported",
+        "supports_batch",
+        "supports_batch_api",
+        "batch_api_supported",
+        "batch",
+    ):
+        if key in parsed_record:
+            val = parsed_record[key]
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, (int, float)) and val in {0, 1}:
+                return bool(val)
+            if isinstance(val, str):
+                s = val.strip().lower()
+                if any(term in s for term in ("unsupported", "not supported", "unavailable", "disabled", "no", "false", "0")):
+                    return False
+                if any(term in s for term in ("supported", "available", "yes", "true", "1", "enabled")):
+                    return True
+
+    features = parsed_record.get("features")
+    if isinstance(features, dict):
+        for feat, val in features.items():
+            if "batch" in str(feat).lower():
+                if val is True or val is None:
+                    return True
+                if isinstance(val, str):
+                    s = val.lower()
+                    if any(term in s for term in ("unsupported", "not supported", "disabled", "no")):
+                        return False
+                    if any(term in s for term in ("supported", "available", "yes", "true")):
+                        return True
+    elif isinstance(features, (list, tuple, set)):
+        for feature in features:
+            feature_text = str(feature).lower().strip()
+            if "batch" in feature_text:
+                if any(term in feature_text for term in ("unsupported", "not supported", "disabled", "no")):
+                    return False
+                return True
+
+    endpoints = parsed_record.get("endpoints") or parsed_record.get("supported_endpoints") or parsed_record.get("api_endpoints")
+    if endpoints:
+        from urllib.parse import urlsplit
+        ep_list = list(endpoints.values()) if isinstance(endpoints, dict) else list(endpoints) if isinstance(endpoints, (list, tuple, set)) else [str(endpoints)]
+        clean_eps = set()
+        for ep in ep_list:
+            s = str(ep).lower().strip()
+            if "://" in s:
+                s = urlsplit(s).path
+            s = s.split("?", 1)[0].rstrip("/")
+            if not s.startswith("/"):
+                s = "/" + s
+            clean_eps.add(s)
+        if any(path == "/v1/batches" or path.endswith("/v1/batches") for path in clean_eps):
+            return True
+        clean_target = str(endpoint).lower().strip()
+        if "://" in clean_target:
+            clean_target = urlsplit(clean_target).path
+        clean_target = clean_target.split("?", 1)[0].rstrip("/")
+        if not clean_target.startswith("/"):
+            clean_target = "/" + clean_target
+        if clean_target in clean_eps:
+            return True
+        if clean_eps:
+            return False
+
+    from mana_agent.llm.capabilities import ModelProfile, metadata_facts
+    profile = ModelProfile(provider="metadata", model_id="metadata", facts=metadata_facts(parsed_record, source="provider"))
+    if profile.supports_batch is not None:
+        if profile.supports_batch is not True:
+            return profile.supports_batch
+        if profile.supported_batch_endpoints and endpoint not in profile.supported_batch_endpoints:
+            return False
+        return True
+    return None
 
 
 def is_model_supported_for_batch(model: str, endpoint: str = "/v1/responses", *, metadata: Any = None, provider: str = "openai") -> bool:
@@ -49,13 +131,64 @@ def is_model_supported_for_batch(model: str, endpoint: str = "/v1/responses", *,
             return explicit
     from mana_agent.llm.registry import resolve_profile
     profile = resolve_profile(provider, model)
-    return profile.supports_batch is True and endpoint in profile.supported_batch_endpoints
+    if profile.supports_batch is True and endpoint in profile.supported_batch_endpoints:
+        return True
+    if profile.supports_batch is False:
+        return False
+    if provider in {"openai", "azure_openai", "azure"}:
+        try:
+            from mana_agent.config.model_catalog import normalize_capabilities, ModelCapability
+            caps = normalize_capabilities(provider, model)
+            if caps:
+                if ModelCapability.REALTIME in caps and ModelCapability.TEXT_GENERATION not in caps:
+                    return False
+                if ModelCapability.REALTIME in caps and "realtime" in model.lower():
+                    return False
+                if caps & {
+                    ModelCapability.TEXT_GENERATION,
+                    ModelCapability.EMBEDDING,
+                    ModelCapability.CODE,
+                    ModelCapability.REASONING,
+                }:
+                    return True
+        except Exception:
+            pass
+        m = model.strip().lower()
+        if any(unsupported in m for unsupported in ["audio", "image", "realtime", "whisper", "tts", "dall-e"]):
+            return False
+        return True
+    return False
 
 
-def is_openai_batch_supported(model: str, endpoint: str = "/v1/responses", *, metadata: Any = None, provider: str = "openai") -> bool:
-    from mana_agent.config.provider_registry import split_qualified_model_id
-    selected_provider, model_id = split_qualified_model_id(model, default_provider=provider)
-    return selected_provider == "openai" and is_model_supported_for_batch(model_id, endpoint, metadata=metadata, provider=selected_provider)
+def is_openai_batch_supported(
+    model: str,
+    endpoint: str = "/v1/responses",
+    *,
+    metadata: Any = None,
+    provider: str = "openai",
+) -> bool:
+    if not model or not isinstance(model, str):
+        return False
+
+    target_model = model.strip()
+    target_provider = (provider or "openai").strip().lower()
+
+    if "/" in target_model:
+        prefix, suffix = target_model.split("/", 1)
+        if prefix.lower() in {"openai", "azure_openai", "azure"}:
+            target_provider = prefix.lower()
+            target_model = suffix
+        else:
+            return False
+
+    if target_provider not in {"openai", "azure_openai", "azure"}:
+        return False
+
+    m_lower = target_model.lower()
+    if any(unsupported in m_lower for unsupported in ("audio", "realtime", "whisper", "tts", "dall-e", "vision-preview")):
+        return False
+
+    return is_model_supported_for_batch(target_model, endpoint=endpoint, metadata=metadata, provider=target_provider)
 
 
 @dataclass

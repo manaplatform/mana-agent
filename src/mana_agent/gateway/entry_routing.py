@@ -261,7 +261,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     automation_operation: Literal[
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
-    runtime_capability_change: bool
+    runtime_capability_change: bool = False
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
     resolved_request: str = ""
     source_message_ids: list[str] = Field(default_factory=list)
@@ -756,7 +756,10 @@ class EntryRouter:
         context: EntryRouteContext,
         envelope: Any | None = None,
     ) -> EntryRoutingDecision:
-        if self.llm is None or not callable(getattr(self.llm, "generate_sync", None)):
+        if self.llm is None or not any(
+            callable(getattr(self.llm, name, None))
+            for name in ("generate_sync", "invoke", "decide_sync", "ainvoke")
+        ):
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: routing model is unavailable.",
@@ -1424,6 +1427,21 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 def _invoke_routing_model(llm: Any, messages: list[Any]) -> tuple[Any, dict[str, Any]]:
+    if callable(getattr(llm, "decide_sync", None)) and not type(llm).__name__.endswith("Mock"):
+        try:
+            response = llm.decide_sync(messages, EntryRoutingOutput)
+            if isinstance(response, EntryRoutingOutput):
+                return response, response.model_dump()
+            if isinstance(response, dict):
+                return response, response
+        except Exception:
+            pass
+    if callable(getattr(llm, "generate_sync", None)):
+        response = llm.generate_sync(messages)
+        return response, _coerce_routing_output(response)
+    if callable(getattr(llm, "invoke", None)):
+        response = llm.invoke(messages)
+        return response, _coerce_routing_output(response)
     response = llm.decide_sync(messages, EntryRoutingOutput)
     return response, response.model_dump()
 

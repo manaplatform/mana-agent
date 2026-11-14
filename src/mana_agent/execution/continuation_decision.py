@@ -31,7 +31,7 @@ class ContinuationDecision(StrictModel):
     """
 
     decision_id: str = Field(default_factory=lambda: stable_id("continuation_dec"))
-    task_id: str = Field(min_length=1)
+    task_id: str = Field(default="task_id", min_length=1)
     action: ContinuationAction
     goal_satisfied: bool
     progress_detected: bool
@@ -53,6 +53,13 @@ class ContinuationDecision(StrictModel):
         if not isinstance(data, dict):
             return data
         payload = dict(data)
+        if isinstance(payload.get("action"), str):
+            try:
+                payload["action"] = ContinuationAction(payload["action"])
+            except ValueError:
+                pass
+        if not payload.get("task_id"):
+            payload["task_id"] = "task_id"
         if not payload.get("reason"):
             for candidate in ("reasoning", "rationale", "explanation", "justification"):
                 if payload.get(candidate):
@@ -70,6 +77,8 @@ class ContinuationDecision(StrictModel):
         if not payload.get("remaining_work") and payload.get("suggested_next_steps"):
             steps = payload["suggested_next_steps"]
             payload["remaining_work"] = ", ".join(steps) if isinstance(steps, list) else str(steps)
+        if not payload.get("task_id"):
+            payload["task_id"] = "task_id"
         if not payload.get("reason"):
             payload["reason"] = payload.get("evidence_summary") or "continuation evaluated"
 
@@ -114,10 +123,17 @@ class CodingContinuationDecision(ContinuationDecision):
     @classmethod
     def require_explicit_decision(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            payload = dict(data)
             required = {"task_id", "action", "goal_satisfied", "progress_detected", "evidence_summary", "safe_to_continue", "reason"}
-            if required - set(data) or set(data) - set(cls.model_fields):
+            if required - set(payload) or set(payload) - set(cls.model_fields):
                 raise ValueError("Coding continuation must explicitly match the decision schema")
             for key in ("goal_satisfied", "progress_detected", "safe_to_continue"):
-                if type(data[key]) is not bool:
+                if type(payload[key]) is not bool:
                     raise ValueError(f"Coding continuation {key} must be boolean")
+            if isinstance(payload.get("action"), str):
+                try:
+                    payload["action"] = ContinuationAction(payload["action"])
+                except ValueError:
+                    pass
+            return payload
         return data

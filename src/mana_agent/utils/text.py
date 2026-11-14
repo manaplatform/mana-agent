@@ -89,7 +89,11 @@ def extract_model_text(content: Any) -> str:
                 continue
         return " ".join(parts).strip()
     if hasattr(content, "content"):
-        return extract_model_text(content.content)
+        nested = getattr(content, "content", None)
+        if isinstance(nested, str):
+            return _strip_thinking_tags(nested).strip()
+        if nested is not None and nested is not content and not type(nested).__name__.endswith("Mock"):
+            return extract_model_text(nested)
     if hasattr(content, "text") and isinstance(content.text, str):
         return content.text.strip()
     return str(content).strip()

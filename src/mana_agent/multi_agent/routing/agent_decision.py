@@ -378,11 +378,68 @@ class AgentDecisionEngine:
                 UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             ], schema)
             proposed = self._decision_from_payload(data)
+            review_payload = {
+                "user_request": request,
+                "command_hint": command_hint,
+                "proposed_decision": proposed.to_dict(),
+                "repository_guidance": repository_guidance,
+                "memory_context": memory_context,
+                "operation_constraint": operation_constraint,
+                "available_tools": self.tool_descriptions,
+            }
             reviewed_data = self.llm.decide_sync([
                 SystemMessage(content=AGENT_DECISION_REVIEW_PROMPT),
-                UserMessage(content=json.dumps({**payload, "proposed_decision": proposed.to_dict()}, ensure_ascii=False, sort_keys=True)),
+                UserMessage(content=json.dumps(review_payload, ensure_ascii=False, sort_keys=True)),
             ], schema)
             reviewed = self._decision_from_payload(reviewed_data)
+            verification = verify_agent_decision(
+                reviewed,
+                user_request=request,
+                tool_descriptions=self.tool_descriptions,
+                require_flow_action=bool(memory_context.strip()),
+            )
+            if not verification.passed:
+                try:
+                    repair_payload = {
+                        "user_request": request,
+                        "command_hint": command_hint,
+                        "proposed_decision": reviewed.to_dict(),
+                        "verification_errors": verification.warnings,
+                        "repository_guidance": repository_guidance,
+                        "memory_context": memory_context,
+                        "operation_constraint": operation_constraint,
+                        "available_tools": self.tool_descriptions,
+                    }
+                    repair_data = self.llm.decide_sync([
+                        SystemMessage(
+                            content=(
+                                AGENT_DECISION_REVIEW_PROMPT
+                                + "\nThe previous reviewed decision failed validation. "
+                                "Return a corrected, verifier-valid decision; do not omit "
+                                "required capabilities for the requested effect."
+                            )
+                        ),
+                        UserMessage(content=json.dumps(repair_payload, ensure_ascii=False, sort_keys=True)),
+                    ], schema)
+                    repaired = self._decision_from_payload(repair_data)
+                    repaired_verification = verify_agent_decision(
+                        repaired,
+                        user_request=request,
+                        tool_descriptions=self.tool_descriptions,
+                        require_flow_action=bool(memory_context.strip()),
+                    )
+                    if repaired_verification.passed:
+                        reviewed = repaired
+                except Exception as repair_exc:
+                    record_current(
+                        "model.decision.repair_failed",
+                        {
+                            "boundary": "agent_decision",
+                            "error_type": type(repair_exc).__name__,
+                            "error": str(repair_exc),
+                            "verification_errors": verification.warnings,
+                        },
+                    )
             record_current(
                 "model.decision",
                 {

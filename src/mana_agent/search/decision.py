@@ -13,6 +13,19 @@ from mana_agent.search.prompts import SEARCH_ROUTER_PROMPT
 
 
 EXPLICIT_NO_SEARCH = re.compile(r"\b(do not|don't|dont|without|no)\s+(web\s+)?search\b", re.I)
+WEB_HINTS = re.compile(
+    r"\b(web search|search web|latest|current|today|new version|official docs|documentation|best practice|unknown api|unknown package|pricing|release)\b",
+    re.I,
+)
+GITHUB_HINTS = re.compile(
+    r"\b(search github|github search|find repo|like [\w.-]+/[\w.-]+|repo:[\w.-]+/[\w.-]+|open-source|production examples?|how do other repos|implementation in git)\b",
+    re.I,
+)
+LOCAL_ONLY_HINTS = re.compile(
+    r"\b(rewrite|branch name|git command|local repo|this repo|update|edit|fix|add tests?|run tests?|explain this file)\b",
+    re.I,
+)
+SEARCH_INTERNET_HINT = re.compile(r"\b(search\s+internet|internet\s+search)\b", re.I)
 PRIVATE_SNIPPET_HINTS = re.compile(
     r"(```|BEGIN (RSA|OPENSSH|PRIVATE)|api[_-]?key|token\s*=|password\s*=|/Users/|\.env|customer|private url)",
     re.I,
@@ -56,8 +69,66 @@ class SearchDecisionEngine:
             max_results=max_results,
         )
         if model_decision is None:
-            raise RuntimeError("Search model decision is unavailable or invalid; no search target was selected")
-        decision = model_decision
+            if SEARCH_INTERNET_HINT.search(text):
+                raise RuntimeError("Search model decision is unavailable or invalid; no search target was selected")
+            decision = self._guardrail_decision(text, max_results=max_results)
+        else:
+            decision = model_decision
+        if not self.config.enable_web:
+            decision.targets = [target for target in decision.targets if target != "web"]
+            decision.queries = [query for query in decision.queries if query.target != "web"]
+        if not self.config.enable_github:
+            decision.targets = [target for target in decision.targets if target != "github"]
+            decision.queries = [query for query in decision.queries if query.target != "github"]
+        decision.needs_search = bool(decision.targets) and decision.mode != "none"
+        decision.mode = self._mode_from_targets(decision.targets) if decision.needs_search else "none"
+        return decision
+
+    def _guardrail_decision(self, text: str, *, max_results: int | None) -> SearchDecision:
+        wants_web = bool(WEB_HINTS.search(text))
+        wants_github = bool(GITHUB_HINTS.search(text))
+        if not wants_web and not wants_github and LOCAL_ONLY_HINTS.search(text):
+            return self._none("Task appears answerable from local repository context.")
+        if wants_web and wants_github:
+            targets: list[SearchTarget] = ["web", "github"]
+        elif wants_github:
+            targets = ["github"]
+        elif wants_web:
+            targets = ["web"]
+        else:
+            targets = []
+        if not targets:
+            return self._none("No clear external search need was detected.")
+        return SearchDecision(
+            needs_search=True,
+            targets=targets,
+            reason="External search hints were present in the user task.",
+            confidence=0.65,
+            queries=[self._query_for_target(text, target) for target in targets],
+            reuse_memory_first=True,
+            max_results=max_results or self.config.max_results,
+            mode=self._mode_from_targets(targets),
+        )
+
+    def _query_for_target(self, text: str, target: SearchTarget) -> SearchQuery:
+        repo = _first_match(REPO_REF_RE, text)
+        org = _first_match(ORG_RE, text)
+        user = _first_match(USER_RE, text)
+        language = _first_match(LANG_RE, text)
+        path = _first_match(PATH_RE, text)
+        cleaned = _sanitize_public_query(text)
+        if target == "github":
+            return SearchQuery(
+                query=cleaned,
+                target="github",
+                github_kind="code" if repo or path or language else "repositories",
+                repo=repo,
+                org=org,
+                user=user,
+                language=language,
+                path=path,
+            )
+        return SearchQuery(query=cleaned, target="web")
         if not self.config.enable_web:
             decision.targets = [target for target in decision.targets if target != "web"]
             decision.queries = [query for query in decision.queries if query.target != "web"]

@@ -30,13 +30,15 @@ class ToolCall(BaseModel):
 
 
 class Message(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     role: Literal["system", "developer", "user", "assistant", "tool"]
     content: str | list[dict[str, Any]] = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
     tool_call_id: str | None = None
     caller: dict[str, Any] | None = None
     name: str | None = None
+    message_id: str | None = None
+    turn_id: str | None = None
 
     def __init__(self, content: Any = "", **values: Any) -> None:
         super().__init__(content=content, **values)

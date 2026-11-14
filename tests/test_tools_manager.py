@@ -151,6 +151,8 @@ def test_mutation_fallback_allowlist_blocks_discovery_tools() -> None:
 
 
 def test_write_file_rejected_without_approved_mutation_plan(tmp_path: Path) -> None:
+    from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerProcessError
+
     req = ToolRunRequest(
         question="write",
         index_dir=str(tmp_path),

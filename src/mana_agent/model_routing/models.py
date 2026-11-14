@@ -216,10 +216,10 @@ class ModelProfile:
     reliability_score: float = 0.8
     supported_languages: frozenset[str] = frozenset()
     benchmark_scores: dict[str, float] = field(default_factory=dict)
-    can_patch: bool = False
-    can_structured_output: bool = False
-    can_tool_call: bool = False
-    can_verify: bool = False
+    can_patch: bool = True
+    can_structured_output: bool = True
+    can_tool_call: bool = True
+    can_verify: bool = True
     available: bool = True
     configuration: dict[str, Any] = field(default_factory=dict, compare=False)
     source_level: str = ""
@@ -230,7 +230,7 @@ class ModelProfile:
             raise ValueError("model profile requires provider, model_id, and supported_roles")
         if self.context_window < 0 or self.max_output_tokens < 0:
             raise ValueError("context_window and max_output_tokens cannot be negative")
-        if self.max_output_tokens > self.context_window:
+        if self.context_window > 0 and self.max_output_tokens > self.context_window:
             raise ValueError("max_output_tokens cannot exceed context_window")
         if min(self.input_cost_per_million, self.output_cost_per_million, self.logical_cost_per_1k_tokens) < 0:
             raise ValueError("model costs cannot be negative")

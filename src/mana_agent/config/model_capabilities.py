@@ -20,12 +20,16 @@ def normalize_model_lookup_id(provider: str, model_id: str) -> str:
 
 def resolve_transport_name(provider: str, transport: str | CodexTransport | None = None) -> str:
     value = transport.value if isinstance(transport, CodexTransport) else transport
+    try:
+        proto = PROVIDERS.get(provider).inference_protocol
+    except KeyError:
+        proto = ""
     if value is None:
         from mana_agent.config.user_config import get_setting
         configured = str(get_setting("MANA_LLM_API_MODE", "auto") or "auto")
-        if PROVIDERS.get(provider).inference_protocol != "anthropic_messages" and configured != "auto":
+        if proto != "anthropic_messages" and configured != "auto":
             value = configured
-    return {"direct_responses": "responses", "responses_bridge": "chat_completions"}.get(value, value) or PROVIDERS.get(provider).inference_protocol
+    return {"direct_responses": "responses", "responses_bridge": "chat_completions"}.get(value, value) or proto
 
 def resolve_model_capability(provider: str, model: str, transport: str | CodexTransport | None = None, *, catalog_records=None) -> ModelProfile:
     return resolve_profile(provider, model, transport=resolve_transport_name(provider, transport), catalog_records=catalog_records)
@@ -119,14 +123,103 @@ def resolve_model_request_policy(
     return policy
 
 
-def normalize_reasoning_request_overrides(provider: str, model: str, transport=None, overrides=None) -> dict[str, Any]:
-    normalized = dict(overrides or {})
-    profile = resolve_model_capability(provider, model, transport)
-    effort = normalized.get("reasoning_effort")
-    if isinstance(normalized.get("reasoning"), dict):
-        effort = normalized["reasoning"].get("effort", effort)
-    if effort is not None:
-        profile.require("reasoning", "reasoning_effort")
-        if not profile.supports_value("reasoning_effort", effort):
-            raise ValueError("Reasoning effort is not supported by the selected model profile")
+def normalize_reasoning_request_overrides(
+    provider: str,
+    model: str,
+    transport: str | CodexTransport | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate and normalize request overrides against authoritative reasoning policy."""
+    if not isinstance(overrides, dict) or not overrides:
+        return {}
+    policy = resolve_model_request_policy(provider, model, transport)
+    normalized = dict(overrides)
+    if not policy.reasoning_required:
+        return normalized
+
+    # For reasoning-required models, remove disable flags and unconfigurable effort
+    removed: list[tuple[str, Any]] = []
+
+    # Check top-level reasoning_effort
+    if "reasoning_effort" in normalized:
+        effort_val = str(normalized.get("reasoning_effort") or "").strip().lower()
+        if effort_val in {"none", "off", "0", "false", "disabled"} or not policy.reasoning_effort_configurable:
+            val = normalized.pop("reasoning_effort")
+            removed.append(("reasoning_effort", val))
+
+    # Check top-level reasoning dict or boolean
+    if "reasoning" in normalized:
+        r_val = normalized.get("reasoning")
+        if r_val is False or r_val == "disabled":
+            val = normalized.pop("reasoning")
+            removed.append(("reasoning", val))
+        elif isinstance(r_val, dict):
+            if r_val.get("enabled") is False or str(r_val.get("effort") or "").strip().lower() in {"none", "off", "0", "false", "disabled"}:
+                val = normalized.pop("reasoning")
+                removed.append(("reasoning", val))
+            elif not policy.reasoning_effort_configurable:
+                val = normalized.pop("reasoning")
+                removed.append(("reasoning", val))
+
+    # Check enable_thinking / thinking
+    for key in ("enable_thinking", "thinking"):
+        if key in normalized:
+            val = normalized.pop(key)
+            removed.append((key, val))
+
+    # Check nested chat_template_kwargs
+    if "chat_template_kwargs" in normalized and isinstance(normalized["chat_template_kwargs"], dict):
+        ctk = dict(normalized["chat_template_kwargs"])
+        ctk_changed = False
+        if ctk.get("thinking") is False:
+            ctk.pop("thinking", None)
+            ctk_changed = True
+            removed.append(("chat_template_kwargs.thinking", False))
+        if str(ctk.get("reasoning_effort") or "").strip().lower() in {"none", "off", "0"}:
+            val = ctk.pop("reasoning_effort", None)
+            ctk_changed = True
+            removed.append(("chat_template_kwargs.reasoning_effort", val))
+        if ctk_changed:
+            if ctk:
+                normalized["chat_template_kwargs"] = ctk
+            else:
+                normalized.pop("chat_template_kwargs", None)
+
+    # Check nested extra_body
+    if "extra_body" in normalized and isinstance(normalized["extra_body"], dict):
+        extra = dict(normalized["extra_body"])
+        cleaned_extra = normalize_reasoning_request_overrides(
+            provider, model, transport, extra
+        )
+        if cleaned_extra != extra:
+            normalized["extra_body"] = cleaned_extra
+
+    if removed:
+        for r_key, r_val in removed:
+            record_current(
+                "codex.request.override_removed",
+                {
+                    "provider": policy.provider,
+                    "model": policy.model,
+                    "transport": policy.transport,
+                    "reasoning_required": policy.reasoning_required,
+                    "reasoning_configurable": policy.reasoning_effort_configurable,
+                    "requested_reasoning": f"{r_key}={r_val!r}",
+                    "effective_reasoning": "omitted" if not policy.reasoning_effort_configurable else policy.reasoning_policy,
+                    "metadata_source": policy.capability_source,
+                },
+            )
+            record_current(
+                "codex.request.reasoning_normalized",
+                {
+                    "provider": policy.provider,
+                    "model": policy.model,
+                    "transport": policy.transport,
+                    "reasoning_required": policy.reasoning_required,
+                    "reasoning_configurable": policy.reasoning_effort_configurable,
+                    "requested_reasoning": f"{r_key}={r_val!r}",
+                    "effective_reasoning": "default",
+                    "metadata_source": policy.capability_source,
+                },
+            )
     return normalized

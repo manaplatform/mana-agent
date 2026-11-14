@@ -113,9 +113,18 @@ def judge_approval_request(
     ]
 
     try:
-        if not callable(getattr(llm, "decide_sync", None)):
+        if callable(getattr(llm, "decide_sync", None)):
+            return llm.decide_sync(messages, ModelApprovalJudgment)
+        elif callable(getattr(llm, "invoke", None)):
+            raw = llm.invoke(messages)
+            text = getattr(raw, "content", raw)
+            return ModelApprovalJudgment.model_validate_json(text)
+        elif callable(getattr(llm, "generate_sync", None)):
+            raw = llm.generate_sync(messages)
+            text = getattr(raw, "content", raw)
+            return ModelApprovalJudgment.model_validate_json(text)
+        else:
             raise RuntimeError("The selected approval model lacks native structured decisions")
-        return llm.decide_sync(messages, ModelApprovalJudgment)
     except Exception as exc:
         logger.warning("Model approval judgment evaluation failed: %s", exc)
         return ModelApprovalJudgment(

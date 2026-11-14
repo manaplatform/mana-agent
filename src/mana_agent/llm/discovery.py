@@ -210,7 +210,9 @@ class ModelDiscoveryService:
 
     async def discover_configured(self, settings: Any) -> dict[str, Any]:
         from mana_agent.config.inference_provider import resolve_inference_connection
-        providers = list(dict.fromkeys([settings.mana_ai_provider, *settings.mana_configured_providers]))
+        ai_provider = getattr(settings, "mana_ai_provider", "openai") or "openai"
+        configured_providers = getattr(settings, "mana_configured_providers", ["openai"]) or ["openai"]
+        providers = list(dict.fromkeys([ai_provider, *configured_providers]))
         semaphore = asyncio.Semaphore(2)
         async def fetch(provider):
             async with semaphore:

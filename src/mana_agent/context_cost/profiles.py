@@ -86,6 +86,12 @@ class ModelTokenProfileResolver:
         direct = self._profiles.get(identity.key)
         if direct is not None:
             return direct
+        matches = [item for item in self._profiles.values() if item.identity.model == identity.model]
+        if len(matches) == 1 and (
+            matches[0].identity.provider.casefold() == identity.provider.casefold()
+            or identity.provider.casefold() in {"", "unknown"}
+        ):
+            return matches[0]
         try:
             from mana_agent.llm.registry import resolve_profile
             native = resolve_profile(identity.provider, identity.model)
@@ -102,8 +108,17 @@ class ModelTokenProfileResolver:
                 )
         except Exception:
             pass
-        raise UnknownModelProfileError(
-            f"Model token metadata is unavailable for {identity.key}. Configure exact model capability limits; no generic unknown-model limit is used."
+        if self.unknown_policy != "conservative" or not self.unknown_context_window or not self.unknown_max_output_tokens:
+            raise UnknownModelProfileError(
+                f"Model token metadata is unavailable for {identity.key}. Configure exact model capability limits; no generic unknown-model limit is used."
+            )
+        return ModelTokenProfile(
+            identity=identity,
+            context_window=int(self.unknown_context_window),
+            max_output_tokens=int(self.unknown_max_output_tokens),
+            source="configured-unknown-model-policy",
+            confidence="low",
+            metadata={"unknown_model": True},
         )
 
     @staticmethod
@@ -131,7 +146,7 @@ class ModelTokenProfileResolver:
             cached_input_price_per_million=_decimal(getattr(source, "cached_input_cost_per_million", None) or combined.get("cached_input_price_per_million") or pricing.get("cached_input_per_million")),
             output_price_per_million=_decimal(getattr(source, "output_cost_per_million", None) or combined.get("output_price_per_million") or pricing.get("output_per_million")),
             reasoning_price_per_million=_decimal(getattr(source, "reasoning_cost_per_million", None) or combined.get("reasoning_price_per_million") or pricing.get("reasoning_per_million")),
-            supports_usage_reporting=bool(combined.get("supports_usage_reporting", False)),
+            supports_usage_reporting=bool(combined.get("supports_usage_reporting", True)),
             source=str(getattr(source, "source", "") or getattr(source, "source_level", "") or "configured"),
             confidence=str(combined.get("token_profile_confidence") or "high"),
             metadata=combined,

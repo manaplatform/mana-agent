@@ -50,3 +50,30 @@ def test_native_tool_does_not_coerce_wrong_input_types():
     tool = ToolBinding.from_callable(count)
     with pytest.raises(ValueError):
         tool.call({"value": "3"})
+
+
+def test_user_message_accepts_message_id_and_turn_id_and_ignores_extra():
+    msg = UserMessage(
+        content="hello",
+        message_id="user-7512573df588",
+        turn_id="turn-62fbf1316d5d",
+        created_at="2026-11-14T19:00:00Z",
+    )
+    assert msg.message_id == "user-7512573df588"
+    assert msg.turn_id == "turn-62fbf1316d5d"
+    assert msg.content == "hello"
+
+    restored = messages_from_records([
+        {
+            "role": "user",
+            "content": "restored query",
+            "message_id": "user-7512573df588",
+            "turn_id": "turn-62fbf1316d5d",
+            "timestamp": "2026-11-14T19:00:00Z",
+        }
+    ])
+    assert len(restored) == 1
+    assert restored[0].message_id == "user-7512573df588"
+    assert restored[0].turn_id == "turn-62fbf1316d5d"
+    assert restored[0].content == "restored query"
+

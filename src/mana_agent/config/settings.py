@@ -37,6 +37,38 @@ def mana_home() -> Path:
         return candidate
 
 
+# Default embedding models per provider. The chat and embedding endpoints share a
+# single base URL, so when no embedding model is configured explicitly we pick a
+# provider-appropriate default based on that URL (an OpenAI embedding model does
+# not exist on NVIDIA's API and vice versa).
+OPENAI_DEFAULT_EMBED_MODEL = "text-embedding-3-small"
+NVIDIA_DEFAULT_EMBED_MODEL = "nvidia/nv-embedqa-e5-v5"
+OPENROUTER_DEFAULT_EMBED_MODEL = "openai/text-embedding-3-small"
+
+
+def resolve_embed_model(
+    base_url: str | None,
+    explicit_model: str | None = None,
+    *,
+    provider: str | None = None,
+) -> str:
+    """Return the embedding model to use for the given base URL / provider.
+
+    An explicitly configured model always wins. Otherwise the model is inferred
+    from the provider or base URL: NVIDIA endpoints get an NVIDIA embedding
+    model, OpenRouter gets the OpenRouter default, everything else falls back
+    to the OpenAI default.
+    """
+    if explicit_model and explicit_model.strip():
+        return explicit_model.strip()
+    provider_id = str(provider or "").strip().lower()
+    if provider_id == "nvidia" or (base_url and "nvidia" in base_url.lower()):
+        return NVIDIA_DEFAULT_EMBED_MODEL
+    if provider_id == "openrouter" or (base_url and "openrouter" in base_url.lower()):
+        return OPENROUTER_DEFAULT_EMBED_MODEL
+    return OPENAI_DEFAULT_EMBED_MODEL
+
+
 class Settings(BaseSettings):
     mana_configured_providers: list[str] = Field(default_factory=list, alias="MANA_CONFIGURED_PROVIDERS")
     mana_model_capability_overrides: list[dict[str, Any]] = Field(default_factory=list, alias="MANA_MODEL_CAPABILITY_OVERRIDES")
@@ -47,7 +79,10 @@ class Settings(BaseSettings):
     mana_config_schema_version: int = Field(default=3, alias="MANA_CONFIG_SCHEMA_VERSION")
     mana_ai_provider: str = Field(default="openai", alias="MANA_AI_PROVIDER")
     mana_primary_model: str = Field(
-        default="", alias="MANA_PRIMARY_MODEL"
+        default="openai/gpt-4.1-mini", alias="MANA_PRIMARY_MODEL"
+    )
+    mana_embedding_model: str = Field(
+        default="openai/text-embedding-3-small", alias="MANA_EMBEDDING_MODEL"
     )
     spirit: dict[str, Any] | str = Field(default_factory=dict, alias="spirit")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
@@ -75,15 +110,16 @@ class Settings(BaseSettings):
     xai_api_key: str = Field(default="", alias="XAI_API_KEY")
     xai_base_url: str = Field(default="https://api.x.ai/v1", alias="XAI_BASE_URL")
     anthropic_chat_model: str = Field(
-        default="", alias="ANTHROPIC_CHAT_MODEL"
+        default="claude-sonnet-5-5", alias="ANTHROPIC_CHAT_MODEL"
     )
-    openai_chat_model: str = Field(default="", alias="OPENAI_CHAT_MODEL")
+    openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_tool_worker_model: str | None = Field(
-        default="", alias="OPENAI_TOOL_WORKER_MODEL"
+        default="gpt-6-luna", alias="OPENAI_TOOL_WORKER_MODEL"
     )
     openai_coding_planner_model: str | None = Field(
-        default="", alias="OPENAI_CODING_PLANNER_MODEL"
+        default="gpt-6-luna", alias="OPENAI_CODING_PLANNER_MODEL"
     )
+    openai_embed_model: str | None = Field(default=None, alias="OPENAI_EMBED_MODEL")
     openai_batch_enabled: bool = Field(default=True, alias="OPENAI_BATCH_ENABLED")
     openai_batch_mode: str = Field(default="auto", alias="OPENAI_BATCH_MODE")
     openai_batch_endpoint: str = Field(default="/v1/responses", alias="OPENAI_BATCH_ENDPOINT")
@@ -102,7 +138,7 @@ class Settings(BaseSettings):
         default=True, alias="MANA_DECISIONS_ENABLED"
     )
     mana_decisions_model: str = Field(
-        default="", alias="MANA_DECISIONS_MODEL"
+        default="gpt-6-luna", alias="MANA_DECISIONS_MODEL"
     )
     mana_decisions_base_url: str | None = Field(
         default=None, alias="MANA_DECISIONS_BASE_URL"

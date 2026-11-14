@@ -42,6 +42,11 @@ class MockLLM:
     def __init__(self, responses: dict[str, Any] | None = None) -> None:
         self.responses = responses or {}
         self.calls: list[Any] = []
+        self._tool_calls: list[dict[str, Any]] = []
+
+    def with_tools(self, tools: Any, **kwargs: Any) -> Any:
+        self._tool_calls = [{"name": "create_issue", "args": {"title": "Bug", "body": "Broken"}}]
+        return self
 
     def generate_sync(self, messages: list[Any], **kwargs: Any) -> Any:
         self.calls.append(messages)
@@ -56,11 +61,11 @@ class MockLLM:
             if self.responses:
                 text_resp = next(iter(self.responses.values()))
             else:
-                text_resp = json.dumps({"result": True, "choice": "billing", "score": 1.0, "level": "Good", "name": "mock"})
+                text_resp = json.dumps({"result": True, "choice": "billing", "score": 1.0, "level": "Good", "name": "mock", "key": "extracted_val"})
         if isinstance(text_resp, dict):
             text_resp = json.dumps(text_resp)
         from types import SimpleNamespace
-        return SimpleNamespace(content=str(text_resp))
+        return SimpleNamespace(content=str(text_resp), tool_calls=list(self._tool_calls))
 
     def decide_sync(self, messages, schema, **kwargs):
         raw = self.generate_sync(messages, **kwargs)

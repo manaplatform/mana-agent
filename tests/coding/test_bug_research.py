@@ -267,12 +267,7 @@ def test_empty_structured_model_decision_never_calls_an_unstructured_fallback():
     from mana_agent.execution.continuation_decision import ContinuationDecisionError
     class EmptyModel:
         def decide_sync(self, messages, schema, **kwargs):
-            raw = self.generate_sync(messages, **kwargs)
-            if isinstance(raw, schema):
-                return raw
-            if isinstance(raw, dict):
-                return schema.model_validate(raw)
-            return schema.model_validate_json(getattr(raw, "content", raw))
+            return None
         def generate_sync(self, *_, **_native_options):
             pytest.fail("Empty structured output must not trigger another model call")
     with pytest.raises(ContinuationDecisionError):

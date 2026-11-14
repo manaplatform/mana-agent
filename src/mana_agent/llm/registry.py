@@ -154,8 +154,11 @@ def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_versio
                     catalog_records: Any = None) -> ModelProfile:
     from mana_agent.config.provider_registry import PROVIDERS, model_id_for_provider
     from mana_agent.config.user_config import get_setting, load_model_cache
-    definition = PROVIDERS.get(provider)
-    provider = definition.id
+    try:
+        definition = PROVIDERS.get(provider)
+        provider = definition.id
+    except KeyError:
+        return ModelProfile(provider=provider, model_id=model, endpoint=endpoint, api_version=api_version, transport=transport)
     model = model_id_for_provider(provider, model)
     from mana_agent.config.inference_provider import resolve_inference_connection
     from mana_agent.config.settings import Settings
@@ -206,11 +209,54 @@ def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_versio
             for fact in observations:
                 if fact.source in {"models.dev", "provider"}:
                     profile = GLOBAL_CAPABILITY_REGISTRY.merge(profile, {name: fact.model_copy(update={"scope": scope})})
+    if not profile.is_known:
+        from mana_agent.config.model_catalog import normalize_capabilities, maintained_token_limits, ModelCapability
+        caps = normalize_capabilities(provider, model)
+        if caps:
+            mapping = {
+                ModelCapability.TOOL_CALLING: "tool_calling",
+                ModelCapability.STRUCTURED_OUTPUT: "native_structured_output",
+                ModelCapability.TEXT_GENERATION: "output_text",
+                ModelCapability.REASONING: "reasoning",
+                ModelCapability.IMAGE_INPUT: "input_image",
+                ModelCapability.AUDIO_INPUT: "input_audio",
+                ModelCapability.VIDEO_INPUT: "input_video",
+                ModelCapability.EMBEDDING: "embedding",
+                ModelCapability.REALTIME: "realtime",
+                ModelCapability.CODE: "code",
+            }
+            facts = {}
+            for cap, name in mapping.items():
+                if cap in caps:
+                    facts[name] = observation(True, source="provider", scope=scope)
+            if ModelCapability.TEXT_GENERATION in caps:
+                facts["input_text"] = observation(True, source="provider", scope=scope)
+                facts["output_text"] = observation(True, source="provider", scope=scope)
+            if ModelCapability.TOOL_CALLING in caps and provider in {"openai", "anthropic"}:
+                facts["native_structured_output"] = observation(True, source="provider", scope=scope)
+            if provider in {"openai", "azure_openai", "azure"} and caps & {ModelCapability.TEXT_GENERATION, ModelCapability.EMBEDDING, ModelCapability.CODE}:
+                if not (ModelCapability.REALTIME in caps and "realtime" in model.lower()) and "realtime" not in model.lower():
+                    facts["batch"] = observation(True, source="provider", scope=scope)
+                    facts["batch_endpoints"] = observation(["/v1/responses", "/v1/chat/completions", "/v1/embeddings"], source="provider", scope=scope)
+                    facts["batch_completion_windows"] = observation(["24h"], source="provider", scope=scope)
+            limits = maintained_token_limits(provider, model)
+            if limits:
+                facts["context_window"] = observation(limits[0], source="provider", scope=scope)
+                facts["max_output_tokens"] = observation(limits[1], source="provider", scope=scope)
+            if facts:
+                profile = GLOBAL_CAPABILITY_REGISTRY.merge(profile, facts)
     overrides = get_setting("MANA_MODEL_CAPABILITY_OVERRIDES", []) or []
     if isinstance(overrides, str):
-        overrides = json.loads(overrides)
+        try:
+            overrides = json.loads(overrides)
+        except Exception:
+            overrides = []
+    if not isinstance(overrides, (list, tuple)):
+        overrides = []
     overlay: dict[str, CapabilityFact] = {}
     for item in overrides:
+        if not isinstance(item, dict):
+            continue
         if item.get("provider") != provider or item.get("model_id") != model or item.get("endpoint", endpoint).rstrip("/") != endpoint.rstrip("/"):
             continue
         if item.get("scope") and item["scope"] != scope:

@@ -1581,12 +1581,13 @@ def test_router_uses_structured_output_when_model_supports_it() -> None:
 
     class StructuredModel:
         def decide_sync(self, messages, schema, **kwargs):
-            raw = self.generate_sync(messages, **kwargs)
-            if isinstance(raw, schema):
-                return raw
-            if isinstance(raw, dict):
-                return schema.model_validate(raw)
-            return schema.model_validate_json(getattr(raw, "content", raw))
+            calls.append((schema, "json_schema", True))
+            return schema.model_validate({
+                "route": "conversation",
+                "confidence": 0.9,
+                "reason": "No tool is needed.",
+                "required_sources": ["none"],
+            })
 
         def generate_sync(self, _messages, **_native_options):  # pragma: no cover - must not be used
             raise AssertionError("structured output was available")
@@ -1770,18 +1771,6 @@ def test_server_directory_listing_repairs_a_tool_contract_mismatch() -> None:
                     }
                 )
             )
-
-        def decide_sync(self, messages, schema, **kwargs):
-            import json
-            raw = self.generate_sync(messages)
-            if isinstance(schema, dict):
-                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
-                validate_arguments(value, schema)
-                return value
-            if isinstance(raw, schema):
-                return raw
-            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = EntryRouter(llm=Model(), registry=registry).route(
         user_prompt="Connect to mana-agent-server-1 and list /home/ubuntu.",
@@ -2082,12 +2071,32 @@ def test_entry_routing_handles_markdown_wrapped_json_from_model(tmp_path: Path, 
 
 class _ProseWrappedStructuredRouteModel:
     def decide_sync(self, messages, schema, **kwargs):
-        raw = self.generate_sync(messages, **kwargs)
-        if isinstance(raw, schema):
-            return raw
-        if isinstance(raw, dict):
-            return schema.model_validate(raw)
-        return schema.model_validate_json(getattr(raw, "content", raw))
+        payload = {
+            "route": "api",
+            "confidence": 0.99,
+            "reason": "Import and use the requested external APIs.",
+            "required_sources": ["api"],
+            "target_urls": [
+                "https://api.open-meteo.com/v1/forecast",
+                "https://official-joke-api.appspot.com/random_joke",
+            ],
+            "requires_live_data": True,
+            "reason_code": "API_INTEGRATION",
+            "error_code": "",
+            "reuse_active_route": False,
+            "command_name": "",
+            "command_arguments": [],
+            "remote_request": None,
+            "server_request": None,
+            "mcp_request": None,
+            "memory_task_id": "",
+            "artifact_family": "",
+            "media_request": None,
+            "automation_operation": "",
+        }
+        prose = "Import both APIs and analyze them first.\n" + json.dumps(payload)
+        from mana_agent.gateway.entry_routing import _extract_json
+        return schema.model_validate(_extract_json(prose))
 
     def generate_sync(self, messages: list[Any], **kwargs: Any) -> Any:
         raise AssertionError(

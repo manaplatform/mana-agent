@@ -22,7 +22,7 @@ class ToolBinding:
     input_model: type[BaseModel] | dict[str, Any]
     async_handler: Callable[..., Any] | None = field(default=None, repr=False)
     output_model: type[BaseModel] | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] | None = None
     contract: ToolContract | None = None
     return_direct: bool = False
 
@@ -44,22 +44,36 @@ class ToolBinding:
             signature = inspect.signature(function)
             hints = get_type_hints(function)
             fields = {}
+            has_var_keyword = False
             for key, parameter in signature.parameters.items():
-                if parameter.kind in {parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD}:
+                if parameter.kind == parameter.VAR_POSITIONAL:
                     raise ValueError(f"{tool_name}: variadic tools require an explicit input schema")
+                if parameter.kind == parameter.VAR_KEYWORD:
+                    has_var_keyword = True
+                    continue
                 fields[key] = (hints.get(key, Any), ... if parameter.default is parameter.empty else parameter.default)
-            input_model = create_model(f"{tool_name}Input", __config__=ConfigDict(extra="forbid"), **fields)
+            extra_policy = "allow" if has_var_keyword else "forbid"
+            input_model = create_model(f"{tool_name}Input", __config__=ConfigDict(extra=extra_policy, strict=True), **fields)
+        meta = dict(metadata) if metadata is not None else None
         return cls(tool_name, description or inspect.getdoc(function) or tool_name, func, input_model,
-                   coroutine, output_model, dict(metadata or {}), contract, return_direct)
+                   coroutine, output_model, meta, contract, return_direct)
 
     def specification(self) -> dict[str, Any]:
         return {"name": self.name, "description": self.description, "parameters": self.input_schema}
 
-    def _arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _arguments(self, arguments: Any) -> dict[str, Any]:
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                arguments = {"input": arguments}
+        elif not isinstance(arguments, dict):
+            arguments = {"input": arguments}
+        if isinstance(self.input_model, type) and issubclass(self.input_model, BaseModel):
+            validated = self.input_model.model_validate(arguments)
+            return {k: getattr(validated, k) for k in type(validated).model_fields}
         validate_arguments(arguments, self.input_schema)
-        if isinstance(self.input_model, dict):
-            return dict(arguments)
-        return self.input_model.model_validate_json(json.dumps(arguments), strict=True).model_dump()
+        return dict(arguments)
 
     def _output(self, value: Any) -> Any:
         if self.output_model is not None:
@@ -69,7 +83,7 @@ class ToolBinding:
             validate_arguments(rendered, self.contract.output_schema, "result")
         return value
 
-    def call(self, arguments: dict[str, Any], *, config: dict[str, Any] | None = None) -> Any:
+    def call(self, arguments: Any, *, config: dict[str, Any] | None = None) -> Any:
         values = self._arguments(arguments)
         run_id = str((config or {}).get("tool_call_id") or uuid.uuid4().hex)
         observers = list((config or {}).get("callbacks") or [])
@@ -77,8 +91,21 @@ class ToolBinding:
             observer.tool_started({"name": self.name}, json.dumps(values, ensure_ascii=False), run_id=run_id)
         try:
             if self.handler is None:
-                raise RuntimeError(f"{self.name} is async-only; use its async call entry point")
-            result = self._output(self.handler(**values))
+                if self.async_handler is not None:
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+                    if loop and loop.is_running():
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as pool:
+                            result = self._output(pool.submit(asyncio.run, self.async_handler(**values)).result())
+                    else:
+                        result = self._output(asyncio.run(self.async_handler(**values)))
+                else:
+                    raise RuntimeError(f"{self.name} is async-only; use its async call entry point")
+            else:
+                result = self._output(self.handler(**values))
         except BaseException as exc:
             for observer in observers:
                 observer.tool_failed(exc, run_id=run_id)
@@ -87,7 +114,7 @@ class ToolBinding:
             observer.tool_finished(result, run_id=run_id)
         return result
 
-    async def call_async(self, arguments: dict[str, Any], *, config: dict[str, Any] | None = None) -> Any:
+    async def call_async(self, arguments: Any, *, config: dict[str, Any] | None = None) -> Any:
         if self.async_handler is None:
             return await asyncio.to_thread(self.call, arguments, config=config)
         values = self._arguments(arguments)
@@ -104,6 +131,12 @@ class ToolBinding:
         for observer in observers:
             observer.tool_finished(result, run_id=run_id)
         return result
+
+    def invoke(self, input: Any, config: dict[str, Any] | None = None) -> Any:
+        return self.call(input, config=config)
+
+    async def ainvoke(self, input: Any, config: dict[str, Any] | None = None) -> Any:
+        return await self.call_async(input, config=config)
 
 
 def tool_specification(tool: Any) -> dict[str, Any]:

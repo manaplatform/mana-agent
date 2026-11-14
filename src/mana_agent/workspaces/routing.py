@@ -31,9 +31,9 @@ Schema:
 class RepositoryScopeOutput(BaseModel):
     repository_ids: list[str]
     access_by_repository: dict[str, Literal["read", "write", "git", "verify"]]
-    relationship_depth: int = Field(ge=0)
+    relationship_depth: int = Field(default=0, ge=0)
     requires_multi_repo: bool
-    requires_verification: bool
+    requires_verification: bool = False
     safe_to_continue: bool
     reason: str
 

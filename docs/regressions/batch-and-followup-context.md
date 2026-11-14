@@ -132,6 +132,27 @@ render their internal protocol data as an assistant conversation message.
 Do not replace saved task limits on restart, reuse command receipts for distinct
 deferred call IDs, or send only part of a tool-call wave's required outputs.
 
+## 2026-11-14 — Conversation history test hang
+
+After the native inference migration, running `tests/test_conversation_followup_context.py`
+could stall at `test_qna_chain_chat_includes_recent_history`. The test still
+configured `invoke` after `QnAChain.chat` switched to `generate_sync`. The
+unconfigured call returned a mock that synthesized further mocks for each
+`.content` lookup during text extraction.
+
+The test now mocks the native engine interface, returns a concrete `ModelResponse`,
+and checks that the single generation call receives the prior user and assistant
+messages in order before the current question.
+
+**Do not reintroduce** an unspecced inference mock or a synthetic mock response in
+this test. Stub the native method and return its concrete response type.
+
+Targeted verification is user-owned. The agent did not rerun the test.
+
+```bash
+python -m pytest -v tests/test_conversation_followup_context.py
+```
+
 ## User-owned verification
 
 ```bash

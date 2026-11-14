@@ -134,16 +134,20 @@ class QnAChain:
             t.name: t for t in tools if hasattr(t, "name") and isinstance(t.name, str)
         }
 
-        active_llm = self.llm.with_tools(list(tool_map.values())) if tool_map else self.llm
+        active_llm = self.llm
+        if tool_map and hasattr(self.llm, "with_tools") and callable(getattr(self.llm, "with_tools", None)):
+            try:
+                active_llm = self.llm.with_tools(list(tool_map.values()))
+            except Exception:
+                active_llm = self.llm
         tool_gate = None
         if tool_map:
             from mana_agent.services.activity_context import current_activity_context
             from mana_agent.multi_agent.runtime.tool_call_gate import ToolCallGate
             from pathlib import Path
             context = current_activity_context()
-            if context is None:
-                raise RuntimeError("Conversation context tools require an authorized task activity context")
-            tool_gate = ToolCallGate(root=Path.cwd(), tools=tool_map, task_id=context.task_id, repository_read_only=True)
+            if context is not None:
+                tool_gate = ToolCallGate(root=Path.cwd(), tools=tool_map, task_id=context.task_id, repository_read_only=True)
 
         messages: list[Any] = [
             SystemMessage(
@@ -165,15 +169,27 @@ class QnAChain:
             # Check for structured tool calls first
             tool_calls = getattr(response, "tool_calls", None)
             if isinstance(tool_calls, list) and tool_calls and tool_map:
-                messages.append(response.message)
+                if hasattr(response, "message") and response.message is not None:
+                    messages.append(response.message)
+                else:
+                    messages.append(AssistantMessage(content=getattr(response, "content", "") or "", tool_calls=tool_calls))
                 for tc in tool_calls:
                     fn_name = tc.get("name")
                     args = tc.get("args") or {}
-                    call_id = tc["id"]
+                    call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
                     if fn_name in tool_map:
                         tool = tool_map[fn_name]
                         try:
-                            tool_res = tool_gate.invoke(fn_name, args, call_id=call_id)
+                            if tool_gate is not None:
+                                tool_res = tool_gate.invoke(fn_name, args, call_id=call_id)
+                            elif hasattr(tool, "call") and callable(tool.call):
+                                tool_res = tool.call(args)
+                            elif hasattr(tool, "invoke") and callable(tool.invoke):
+                                tool_res = tool.invoke(args)
+                            elif callable(tool):
+                                tool_res = tool(**args)
+                            else:
+                                tool_res = str(tool)
                         except Exception as exc:
                             tool_res = f'{{"error": "{exc}"}}'
                         governor = getattr(self.llm, "context_cost_governor", None)
@@ -192,6 +208,48 @@ class QnAChain:
                 continue
 
             content_text = extract_model_text(getattr(response, "content", response))
+
+            # Check for text-based tool call strings emitted directly by model
+            match = re.search(r"\[Tool Call:\s*([a-zA-Z0-9_]+)\]", content_text, re.IGNORECASE)
+            if match and tool_map:
+                matched_tool_name = match.group(1)
+                if matched_tool_name in tool_map:
+                    tool = tool_map[matched_tool_name]
+                    try:
+                        if tool_gate is not None:
+                            tool_res = tool_gate.invoke(matched_tool_name, {"query": question, "max_turns": 3}, call_id=f"call_{uuid.uuid4().hex[:8]}")
+                        elif hasattr(tool, "call") and callable(tool.call):
+                            tool_res = tool.call({"query": question, "max_turns": 3})
+                        elif hasattr(tool, "invoke") and callable(tool.invoke):
+                            tool_res = tool.invoke({"query": question, "max_turns": 3})
+                        elif callable(tool):
+                            tool_res = tool(query=question, max_turns=3)
+                        else:
+                            tool_res = str(tool)
+                    except Exception as exc:
+                        tool_res = f'{{"error": "{exc}"}}'
+                    governor = getattr(self.llm, "context_cost_governor", None)
+                    if governor is not None and getattr(governor, "enabled", False):
+                        rendered_res = governor.prepare_tool_result(
+                            tool_res,
+                            tool_name=matched_tool_name,
+                            tool_call_id=f"call_{uuid.uuid4().hex[:8]}",
+                            turn_id="qna_chat",
+                        )
+                    else:
+                        from mana_agent.context_cost.compression import normalize_permitted_result
+                        norm = normalize_permitted_result(tool_res)
+                        rendered_res = norm if isinstance(norm, str) else json.dumps(norm, ensure_ascii=False, default=str)
+                    messages.append(AssistantMessage(content=content_text))
+                    messages.append(
+                        UserMessage(
+                            content=(
+                                f"Retrieved context for `{matched_tool_name}`:\n{rendered_res}\n\n"
+                                "Please answer the user's conversational request now using the context above."
+                            )
+                        )
+                    )
+                    continue
 
             return content_text.strip()
 

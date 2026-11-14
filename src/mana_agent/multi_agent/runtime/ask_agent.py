@@ -14,7 +14,7 @@ from time import perf_counter
 from typing import Any, Literal, Sequence
 from collections import defaultdict
 
-from mana_agent.llm.messages import UserMessage, SystemMessage, ToolResultMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage, ToolResultMessage, AssistantMessage
 from mana_agent.llm.tools import ToolBinding
 from mana_agent.llm.engine import create_model
 from pydantic import BaseModel, Field
@@ -1882,10 +1882,45 @@ class AskAgent:
             dirs = StructureService._list_directories(self.project_root)
             return json.dumps({"directories": dirs})
 
-        def repo_search(query: str, glob: str = "**/*", regex: bool = False, limit: int = 100) -> str:
-            return dumps_tool_result(
-                repo_text_search(self.project_root, query=query, glob=glob, regex=regex, limit=limit)
-            )
+        def repo_search(query: str, glob: str = "**/*", regex: bool = False, limit: int = 100, k: int | None = None) -> str:
+            started = perf_counter()
+            status = "ok"
+            output_preview = ""
+            effective_limit = k or limit
+            args_summary = f"query={query!r} glob={glob!r} limit={effective_limit}"
+            try:
+                hits_found: list[SearchHit] = []
+                if getattr(self, "search_service", None) is not None and hasattr(self.search_service, "search"):
+                    for index_dir in resolved_indexes:
+                        try:
+                            hits = self.search_service.search(index_dir=index_dir, query=query, k=effective_limit)
+                            hits_found.extend(hits)
+                        except Exception:
+                            pass
+                    if hits_found:
+                        sources.extend(hits_found)
+                        encoded = json.dumps([item.to_dict() for item in hits_found])
+                        output_preview = encoded
+                        return encoded
+                result = dumps_tool_result(
+                    repo_text_search(self.project_root, query=query, glob=glob, regex=regex, limit=effective_limit)
+                )
+                output_preview = str(result)[:400]
+                return result
+            except Exception as exc:
+                status = "error"
+                output_preview = str(exc)
+                return json.dumps({"error": str(exc)})
+            finally:
+                traces.append(
+                    ToolInvocationTrace(
+                        tool_name="repo_search",
+                        args_summary=args_summary,
+                        duration_ms=(perf_counter() - started) * 1000,
+                        status=status,
+                        output_preview=output_preview,
+                    )
+                )
 
         def repo_batch_read(files: list[str]) -> str:
             return dumps_tool_result(repo_batch_read_files(self.project_root, files=files))
@@ -2868,7 +2903,12 @@ class AskAgent:
                 invoke_kwargs: dict[str, Any] = {"config": cfg}
                 if model_max_tokens is not None:
                     invoke_kwargs["max_tokens"] = model_max_tokens
-                ai_msg = use_bound.generate_sync(messages, continuation=native_continuation, **invoke_kwargs)
+                if native_continuation is not None:
+                    invoke_kwargs["continuation"] = native_continuation
+                if hasattr(use_bound, "generate_sync"):
+                    ai_msg = use_bound.generate_sync(messages, **invoke_kwargs)
+                else:
+                    ai_msg = use_bound.invoke(messages, **invoke_kwargs)
                 native_continuation = getattr(ai_msg, "continuation", None)
             except BaseException as exc:
                 if governor.enabled and model_call_id:
@@ -2889,7 +2929,16 @@ class AskAgent:
                     turn_id=str(run_id or flow_id or ""),
                     step_id=str(step_idx),
                 )
-            messages.append(ai_msg.message)
+            if hasattr(ai_msg, "message"):
+                msg_obj = ai_msg.message
+            elif isinstance(ai_msg, AssistantMessage):
+                msg_obj = ai_msg
+            else:
+                msg_obj = AssistantMessage(
+                    content=getattr(ai_msg, "content", ""),
+                    tool_calls=getattr(ai_msg, "tool_calls", None) or [],
+                )
+            messages.append(msg_obj)
 
             tool_calls = getattr(ai_msg, "tool_calls", None) or []
             if not tool_calls:
@@ -3600,11 +3649,14 @@ class AskAgent:
         self.search_config = config
         if disabled or not config.enable_ask_agent:
             return None
-        guardrail = SearchDecisionEngine(llm=None, config=config).decide(
-            user_query=question,
-            repo_context=system_prompt or "",
-            memory_context=f"run_id={run_id or ''}",
-        )
+        try:
+            guardrail = SearchDecisionEngine(llm=None, config=config).decide(
+                user_query=question,
+                repo_context=system_prompt or "",
+                memory_context=f"run_id={run_id or ''}",
+            )
+        except Exception:
+            return None
         if not guardrail.needs_search:
             return None
         try:

@@ -36,6 +36,7 @@ class RouteExecutor:
         self,
         *,
         router: EntryRouter,
+        store: Any = None,
         qna_chain: Any,
         ask_agent: Any | None = None,
         search_service: SearchService | None = None,
@@ -43,6 +44,7 @@ class RouteExecutor:
         project_root: str | Path | None = None,
     ) -> None:
         self.router = router
+        self.store = store
         self.qna_chain = qna_chain
         self.ask_agent = ask_agent
         self.search_service = search_service

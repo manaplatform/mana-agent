@@ -303,6 +303,8 @@ def test_model_scope_selects_multiple_repositories_and_validates_membership(tmp_
 
 
 def test_tool_worker_rejects_repository_scope_mismatch(tmp_path: Path, isolated_home: Path) -> None:
+    from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient, ToolWorkerProcessError
+
     client = ToolWorkerClient(
         api_key="test",
         model="test",
