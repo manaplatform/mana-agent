@@ -430,30 +430,47 @@ def test_14_autonomous_loop_supervisor_taskboard_compatibility(tmp_path: Path):
 
 # 15. AskAgent records tool mistakes and injects learned prevention rules
 def test_15_ask_agent_records_tool_mistake_and_injects_prevention_rule(tmp_path: Path):
-    from langchain_core.messages import SystemMessage
+    from mana_agent.llm.messages import SystemMessage
     from mana_agent.context_cost import ContextCostGovernor
     from mana_agent.multi_agent.runtime.ask_agent import AskAgent
     from mana_agent.search.config import SearchConfig
 
     gm = GlobalMemory(store=LearningMemoryStore(db_path=tmp_path / "ask_learning.sqlite3"), default_project_id=str(tmp_path))
 
-    class FakeAIMessage:
+    class FakeAssistantMessage:
         def __init__(self, content: str, tool_calls: list | None = None) -> None:
             self.content = content
             self.tool_calls = tool_calls or []
 
+        @property
+        def message(self):
+            from mana_agent.llm.messages import AssistantMessage
+            return AssistantMessage(content=self.content, tool_calls=getattr(self, "tool_calls", []))
+
     captured_messages: list[list[Any]] = []
 
     class FakeLLM:
-        def __init__(self, responses: list[FakeAIMessage]) -> None:
+        def __init__(self, responses: list[FakeAssistantMessage]) -> None:
             self._responses = list(responses)
 
-        def bind_tools(self, tools: list[Any], tool_choice: str | None = None) -> "FakeLLM":
+        def with_tools(self, tools: list[Any], tool_choice: str | None = None, **_native_options) -> "FakeLLM":
             return self
 
-        def invoke(self, messages: list[Any], config: Any = None, **kwargs: Any) -> FakeAIMessage:
+        def generate_sync(self, messages: list[Any], config: Any = None, **kwargs: Any) -> FakeAssistantMessage:
             captured_messages.append(list(messages))
             return self._responses.pop(0)
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     governor = ContextCostGovernor(
         session_id="test-ask-agent-learning",
@@ -480,11 +497,11 @@ def test_15_ask_agent_records_tool_mistake_and_injects_prevention_rule(tmp_path:
     # Turn 1: model calls a tool with an error
     agent.llm = FakeLLM(
         [
-            FakeAIMessage(
+            FakeAssistantMessage(
                 "",
                 tool_calls=[{"id": "c1", "name": "unknown_tool", "args": {"foo": "bar"}}],
             ),
-            FakeAIMessage(
+            FakeAssistantMessage(
                 "I see unknown_tool failed. Let me answer with what I have.",
                 tool_calls=[],
             ),
@@ -513,7 +530,7 @@ def test_15_ask_agent_records_tool_mistake_and_injects_prevention_rule(tmp_path:
     captured_messages.clear()
     agent.llm = FakeLLM(
         [
-            FakeAIMessage("Answer using injected rule.", tool_calls=[]),
+            FakeAssistantMessage("Answer using injected rule.", tool_calls=[]),
         ]
     )
 

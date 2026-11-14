@@ -508,31 +508,31 @@ class BatchLifecycleManager:
 
                 from mana_agent.config.inference_provider import resolve_inference_connection
                 from mana_agent.config.settings import Settings
-                from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+                from mana_agent.llm.engine import create_model
 
                 conn = resolve_inference_connection(Settings(), provider=provider, require_api_key=False)
                 if not conn.api_key:
                     raise ValueError("No model API key configured for live inference.")
 
-                llm = create_chat_model(
+                llm = create_model(
                     api_key=conn.api_key,
                     model=item_model,
                     base_url=conn.base_url,
                     provider=conn.provider,
                 )
 
-                from langchain_core.messages import convert_to_messages
+                from mana_agent.llm.messages import messages_from_records
                 raw_messages = body.get("messages")
                 if raw_messages is None:
                     raw_input = body.get("input", body.get("prompt"))
                     raw_messages = raw_input if isinstance(raw_input, list) else [{"role": "user", "content": raw_input}]
                 if not raw_messages or any(not isinstance(message, dict) or message.get("content") is None for message in raw_messages):
                     raise ValueError("Internal batch requires valid conversation messages or text input")
-                response = llm.invoke(convert_to_messages(raw_messages))
+                response = llm.generate_sync(messages_from_records(raw_messages))
                 content = getattr(response, "content", "") or ""
                 if not content:
                     raise ValueError("Internal batch model returned no output")
-                usage = getattr(response, "usage_metadata", None) or {}
+                usage = (response.usage.model_dump() if hasattr(response, "usage") else None) or {}
                 return BatchItemResult(custom_id=item.custom_id, status_code=200, response_body={
                     "id": f"resp_{item.custom_id}", "model": item_model, "usage": usage,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],

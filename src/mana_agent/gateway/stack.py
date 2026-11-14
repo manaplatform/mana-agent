@@ -25,7 +25,7 @@ from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
 from mana_agent.integrations.codex.config import CodexSettings
 from mana_agent.coding.selection import resolve_coding_backend
 from mana_agent.multi_agent.core.types import AgentRole
-from mana_agent.multi_agent.runtime.model_levels import pin_model_for_role, resolve_model_for_role
+from mana_agent.multi_agent.runtime.model_levels import ResolvedModelAssignment, pin_model_for_role, resolve_model_for_role
 from mana_agent.model_routing.repository import RepositoryMetadataInspector
 from mana_agent.gateway.routing import GatewayRoutingAuthority
 from mana_agent.multi_agent.runtime.tool_worker_process import ToolWorkerClient
@@ -160,6 +160,7 @@ class ChatStack:
     execution_manager: ExecutionManager | None = None
     routing_authority: GatewayRoutingAuthority | None = None
     prepared_repository: PreparedRepository | None = None
+    tool_worker_model_assignment: ResolvedModelAssignment | None = None
 
 
 def build_chat_stack(
@@ -276,8 +277,6 @@ def build_chat_stack(
         pinned_profiles = profiles_for_pinned_models(
             pinned_models,
             default_provider=str(getattr(settings, "mana_ai_provider", "openai") or "openai"),
-            context_window=int(getattr(settings, "mana_context_unknown_model_context_window", 16_384)),
-            max_output_tokens=int(getattr(settings, "mana_context_unknown_model_max_output_tokens", 4_096)),
         )
     routing_authority = GatewayRoutingAuthority(
         root,
@@ -373,12 +372,13 @@ def build_chat_stack(
             str(cfg.model or pinned_main).strip(),
         )
     else:
-        effective_model = resolve_model_for_role(
+        main_assignment = resolve_model_for_role(
             AgentRole.MAIN,
             global_model=cfg.model or settings.openai_chat_model,
             repository=routing_repository,
             **route_context,
-        ).resolved_model
+        )
+        effective_model = main_assignment.resolved_model
         router_model_assignment = resolve_model_for_role(
             AgentRole.HEAD_DECISION,
             global_model=effective_model,
@@ -423,7 +423,8 @@ def build_chat_stack(
     effective_tool_worker_model = tool_worker_model_assignment.resolved_model
     # Stack construction is deliberately credential-free for diagnostics and
     # injected test services. The actual model construction validates keys.
-    inference_connection = resolve_inference_connection(settings, require_api_key=False)
+    main_decision = main_assignment.routing_decision
+    inference_connection = resolve_inference_connection(settings, provider=main_decision.provider if main_decision else None, require_api_key=False)
     effective_base_url = inference_connection.base_url
 
     coding_agent_instance = cfg.coding_agent_instance
@@ -455,11 +456,16 @@ def build_chat_stack(
 
     if tool_worker_client is None and cfg.tool_worker_process and coding_agent_is_custom:
         tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
+        tool_decision = tool_worker_model_assignment.routing_decision
+        tool_connection = resolve_inference_connection(settings, provider=tool_decision.provider if tool_decision else None, require_api_key=False)
         tool_worker_client = tool_worker_client_cls(
-            api_key=inference_connection.api_key,
+            api_key=tool_connection.api_key,
             model=effective_tool_worker_model,
             session_id=session_id,
-            base_url=effective_base_url,
+            base_url=tool_connection.base_url,
+            provider=tool_connection.provider,
+            default_headers=tool_connection.headers,
+            model_configuration=tool_decision.model_configuration if tool_decision else None,
             repo_root=root,
             project_root=root,
             allowed_prefixes=None,
@@ -491,11 +497,14 @@ def build_chat_stack(
             )
             default_mode = "internal" if (coding_selection and coding_selection.backend == "internal") else "external"
             facade_cls = UnifiedCodingAgentFacade if coding_agent_cls is CodexCodingAgentShim else coding_agent_cls
+            coding_decision = coding_model_assignment.routing_decision
+            coding_connection = resolve_inference_connection(settings, provider=codex_settings.provider, require_api_key=False)
             internal_engine = InternalCodingEngine(
                 model=coding_model_assignment.resolved_model,
-                provider=codex_settings.provider or "openai",
-                api_key=inference_connection.api_key,
-                base_url=effective_base_url,
+                provider=coding_connection.provider,
+                api_key=coding_connection.api_key,
+                base_url=coding_connection.base_url,
+                model_configuration=coding_decision.model_configuration if coding_decision else None,
             )
             internal_engine.enabled = bool(getattr(settings, "mana_internal_coding_enabled", True))
             coding_agent_instance = facade_cls(
@@ -676,6 +685,7 @@ def build_chat_stack(
         context_cost_governor=context_cost_governor,
         coding_agent_is_custom=coding_agent_is_custom,
         effective_model=effective_model,
+        tool_worker_model_assignment=tool_worker_model_assignment,
         chat_agent_max_steps=chat_agent_max_steps,
         coding_agent_max_steps=coding_agent_max_steps,
         resolved_k=resolved_k,

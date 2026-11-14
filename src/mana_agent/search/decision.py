@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from pydantic import BaseModel, Field
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.models import SearchDecision, SearchMode, SearchQuery, SearchTarget
@@ -24,6 +25,7 @@ LOCAL_ONLY_HINTS = re.compile(
     r"\b(rewrite|branch name|git command|local repo|this repo|update|edit|fix|add tests?|run tests?|explain this file)\b",
     re.I,
 )
+SEARCH_INTERNET_HINT = re.compile(r"\b(search\s+internet|internet\s+search)\b", re.I)
 PRIVATE_SNIPPET_HINTS = re.compile(
     r"(```|BEGIN (RSA|OPENSSH|PRIVATE)|api[_-]?key|token\s*=|password\s*=|/Users/|\.env|customer|private url)",
     re.I,
@@ -33,6 +35,15 @@ ORG_RE = re.compile(r"\borg:([A-Za-z0-9_.-]+)\b")
 USER_RE = re.compile(r"\buser:([A-Za-z0-9_.-]+)\b")
 LANG_RE = re.compile(r"\b(?:language|lang):([A-Za-z0-9_+#.-]+)\b", re.I)
 PATH_RE = re.compile(r"\bpath:([^\s]+)\b", re.I)
+
+
+class SearchDecisionOutput(BaseModel):
+    mode: SearchMode
+    reason: str
+    confidence: float = Field(ge=0, le=1)
+    queries: list[SearchQuery]
+    reuse_memory_first: bool = True
+    max_results: int = Field(default=8, ge=1, le=25)
 
 
 class SearchDecisionEngine:
@@ -57,7 +68,12 @@ class SearchDecisionEngine:
             memory_context=memory_context,
             max_results=max_results,
         )
-        decision = model_decision or self._guardrail_decision(text, max_results=max_results)
+        if model_decision is None:
+            if SEARCH_INTERNET_HINT.search(text):
+                raise RuntimeError("Search model decision is unavailable or invalid; no search target was selected")
+            decision = self._guardrail_decision(text, max_results=max_results)
+        else:
+            decision = model_decision
         if not self.config.enable_web:
             decision.targets = [target for target in decision.targets if target != "web"]
             decision.queries = [query for query in decision.queries if query.target != "web"]
@@ -67,37 +83,6 @@ class SearchDecisionEngine:
         decision.needs_search = bool(decision.targets) and decision.mode != "none"
         decision.mode = self._mode_from_targets(decision.targets) if decision.needs_search else "none"
         return decision
-
-    def _model_decision(
-        self,
-        user_query: str,
-        *,
-        repo_context: str,
-        memory_context: str,
-        max_results: int | None,
-    ) -> SearchDecision | None:
-        if self.llm is None:
-            return None
-        payload = {
-            "user_query": user_query,
-            "repo_context": repo_context,
-            "memory_context": memory_context,
-            "max_results": max_results or self.config.max_results,
-        }
-        try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=SEARCH_ROUTER_PROMPT),
-                    HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
-                ]
-            )
-            from mana_agent.utils.text import extract_model_text
-
-            content = extract_model_text(getattr(response, "content", response))
-            data = _extract_json(content)
-            return self._decision_from_payload(data, fallback_query=user_query)
-        except Exception:
-            return None
 
     def _guardrail_decision(self, text: str, *, max_results: int | None) -> SearchDecision:
         wants_web = bool(WEB_HINTS.search(text))
@@ -125,63 +110,6 @@ class SearchDecisionEngine:
             mode=self._mode_from_targets(targets),
         )
 
-    def _merge_decisions(
-        self,
-        model_decision: SearchDecision | None,
-        guardrail: SearchDecision,
-        text: str,
-    ) -> SearchDecision:
-        if model_decision is None:
-            return guardrail
-        if model_decision.mode == "memory_only":
-            return model_decision
-        if not model_decision.needs_search and guardrail.needs_search and guardrail.confidence >= 0.7:
-            return guardrail
-        if model_decision.needs_search and not guardrail.needs_search and model_decision.confidence < 0.7 and LOCAL_ONLY_HINTS.search(text):
-            return self._none("Model confidence was low and the task appears local-only.")
-        if model_decision.needs_search and not model_decision.queries:
-            model_decision.queries = [self._query_for_target(text, target) for target in model_decision.targets]
-        return model_decision
-
-    def _decision_from_payload(self, data: dict[str, Any], *, fallback_query: str) -> SearchDecision:
-        mode = str(data.get("mode") or "none").strip().lower()
-        if mode not in {"none", "web", "github", "both", "memory_only"}:
-            mode = "none"
-        targets = self._targets_from_mode(mode)  # type: ignore[arg-type]
-        queries: list[SearchQuery] = []
-        for item in list(data.get("queries") or []):
-            if not isinstance(item, dict):
-                continue
-            target = str(item.get("target") or "").strip().lower()
-            if target not in {"web", "github"}:
-                continue
-            queries.append(
-                SearchQuery(
-                    query=str(item.get("query") or fallback_query).strip(),
-                    target=target,  # type: ignore[arg-type]
-                    github_kind=str(item.get("github_kind") or "code") if target == "github" else "code",  # type: ignore[arg-type]
-                    repo=_optional_str(item.get("repo")),
-                    org=_optional_str(item.get("org")),
-                    user=_optional_str(item.get("user")),
-                    language=_optional_str(item.get("language")),
-                    path=_optional_str(item.get("path")),
-                    exact_phrases=[str(x) for x in item.get("exact_phrases") or [] if str(x).strip()],
-                    exclude_paths=[str(x) for x in item.get("exclude_paths") or [] if str(x).strip()],
-                )
-            )
-        if targets and not queries:
-            queries = [self._query_for_target(fallback_query, target) for target in targets]
-        return SearchDecision(
-            needs_search=bool(targets),
-            targets=targets,
-            reason=str(data.get("reason") or "Model-routed search decision.")[:500],
-            confidence=max(0.0, min(1.0, float(data.get("confidence", 0.5) or 0.5))),
-            queries=queries,
-            reuse_memory_first=bool(data.get("reuse_memory_first", True)),
-            max_results=max(1, min(25, int(data.get("max_results", self.config.max_results) or self.config.max_results))),
-            mode=mode,  # type: ignore[arg-type]
-        )
-
     def _query_for_target(self, text: str, target: SearchTarget) -> SearchQuery:
         repo = _first_match(REPO_REF_RE, text)
         org = _first_match(ORG_RE, text)
@@ -201,6 +129,84 @@ class SearchDecisionEngine:
                 path=path,
             )
         return SearchQuery(query=cleaned, target="web")
+        if not self.config.enable_web:
+            decision.targets = [target for target in decision.targets if target != "web"]
+            decision.queries = [query for query in decision.queries if query.target != "web"]
+        if not self.config.enable_github:
+            decision.targets = [target for target in decision.targets if target != "github"]
+            decision.queries = [query for query in decision.queries if query.target != "github"]
+        decision.needs_search = bool(decision.targets) and decision.mode != "none"
+        decision.mode = self._mode_from_targets(decision.targets) if decision.needs_search else "none"
+        return decision
+
+    def _model_decision(
+        self,
+        user_query: str,
+        *,
+        repo_context: str,
+        memory_context: str,
+        max_results: int | None,
+    ) -> SearchDecision | None:
+        if self.llm is None:
+            return None
+        payload = {
+            "user_query": user_query,
+            "repo_context": repo_context,
+            "memory_context": memory_context,
+            "max_results": max_results or self.config.max_results,
+        }
+        try:
+            data = self.llm.decide_sync([
+                SystemMessage(content=SEARCH_ROUTER_PROMPT),
+                UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+            ], SearchDecisionOutput).model_dump(mode="json")
+            return self._decision_from_payload(data)
+        except Exception:
+            return None
+
+
+
+    def _decision_from_payload(self, data: dict[str, Any]) -> SearchDecision:
+        mode = str(data.get("mode") or "none").strip().lower()
+        if mode not in {"none", "web", "github", "both", "memory_only"}:
+            raise ValueError("Invalid search decision mode")
+        targets = self._targets_from_mode(mode)  # type: ignore[arg-type]
+        queries: list[SearchQuery] = []
+        for item in list(data.get("queries") or []):
+            if not isinstance(item, dict):
+                raise ValueError("Invalid search query record")
+            target = str(item.get("target") or "").strip().lower()
+            if target not in {"web", "github"}:
+                raise ValueError("Invalid search query target")
+            queries.append(
+                SearchQuery(
+                    query=str(item.get("query") or "").strip(),
+                    target=target,  # type: ignore[arg-type]
+                    github_kind=str(item.get("github_kind") or "code") if target == "github" else "code",  # type: ignore[arg-type]
+                    repo=_optional_str(item.get("repo")),
+                    org=_optional_str(item.get("org")),
+                    user=_optional_str(item.get("user")),
+                    language=_optional_str(item.get("language")),
+                    path=_optional_str(item.get("path")),
+                    exact_phrases=[str(x) for x in item.get("exact_phrases") or [] if str(x).strip()],
+                    exclude_paths=[str(x) for x in item.get("exclude_paths") or [] if str(x).strip()],
+                )
+            )
+        if {query.target for query in queries} != set(targets):
+            raise ValueError("Search queries must match exactly the selected search targets")
+        if any(not query.query for query in queries):
+            raise ValueError("Search decisions require nonempty explicit queries")
+        return SearchDecision(
+            needs_search=bool(targets),
+            targets=targets,
+            reason=str(data.get("reason") or "Model-routed search decision.")[:500],
+            confidence=max(0.0, min(1.0, float(data.get("confidence", 0.5) or 0.5))),
+            queries=queries,
+            reuse_memory_first=bool(data.get("reuse_memory_first", True)),
+            max_results=max(1, min(25, int(data.get("max_results", self.config.max_results) or self.config.max_results))),
+            mode=mode,  # type: ignore[arg-type]
+        )
+
 
     @staticmethod
     def _targets_from_mode(mode: SearchMode) -> list[SearchTarget]:

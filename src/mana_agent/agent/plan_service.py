@@ -70,15 +70,10 @@ def _is_noise_path(path_str: str, allow_docs_or_ci: bool = False) -> bool:
 
 
 def _invoke_llm(llm: Any, prompt_or_messages: Any) -> str:
-    try:
-        if hasattr(llm, "invoke"):
-            res = llm.invoke(prompt_or_messages)
-        else:
-            res = llm(prompt_or_messages)
-        return str(getattr(res, "content", res) or "")
-    except Exception as exc:
-        logger.debug("PlanService LLM invocation failed: %s", exc)
-        return ""
+    if llm is None or not callable(getattr(llm, "generate_sync", None)):
+        raise RuntimeError("Plan model is unavailable; no replacement action was selected")
+    response = llm.generate_sync(prompt_or_messages)
+    return str(response.content)
 
 
 def _extract_json_payload(text: str) -> dict[str, Any] | None:
@@ -164,8 +159,8 @@ class PlanService:
         )
         user_prompt = f"Task: {task}"
         try:
-            from langchain_core.messages import HumanMessage, SystemMessage
-            messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+            from mana_agent.llm.messages import UserMessage, SystemMessage
+            messages = [SystemMessage(content=system_prompt), UserMessage(content=user_prompt)]
         except Exception:
             messages = f"{system_prompt}\n\n{user_prompt}"
 
@@ -477,8 +472,8 @@ class PlanService:
             f"Inspected Repository Context:\n{context_block}\n"
         )
         try:
-            from langchain_core.messages import HumanMessage, SystemMessage
-            messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+            from mana_agent.llm.messages import UserMessage, SystemMessage
+            messages = [SystemMessage(content=system_prompt), UserMessage(content=user_prompt)]
         except Exception:
             messages = f"{system_prompt}\n\n{user_prompt}"
 

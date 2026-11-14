@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, Field
 
 from mana_agent.integrations.computer_control.context import current_computer_client
@@ -196,7 +196,7 @@ def _action(operation: str, payload: _Decision, *, capability: str, target: Comp
     return ComputerAction.model_validate(values)
 
 
-def build_computer_langchain_tools(service: ComputerControlService | None = None) -> list[Any]:
+def build_computer_tools(service: ComputerControlService | None = None) -> list[Any]:
     """Build tools without touching the desktop until a selected tool executes."""
     control = service or default_computer_control_service()
 
@@ -534,7 +534,7 @@ def build_computer_langchain_tools(service: ComputerControlService | None = None
         return _response(lambda: execute(_action(operation, payload, capability="system", arguments=args)))
 
     def tool(func, name: str, description: str, schema=None):
-        return StructuredTool.from_function(func=func, name=name, description=description, args_schema=schema)
+        return ToolBinding.from_callable(func=func, name=name, description=description, input_model=schema)
 
     decision = "Requires a validated model decision ID. "
     tools = [

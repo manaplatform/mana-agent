@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mana_agent.canvas.models import RendererAction
-from mana_agent.canvas.runtime_tools import build_canvas_langchain_tools
+from mana_agent.canvas.runtime_tools import build_canvas_tools
 from mana_agent.canvas.service import canvas_service_for_root
 from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
@@ -44,7 +44,7 @@ def test_canvas_route_creates_complete_surface_atomically(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
-    tools = {item.name: item for item in build_canvas_langchain_tools(tmp_path)}
+    tools = {item.name: item for item in build_canvas_tools(tmp_path)}
 
     class Executor:
         calls = 0
@@ -185,7 +185,7 @@ def test_canvas_renderer_action_resumes_owning_model_and_updates_surface(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
-    tools = {item.name: item for item in build_canvas_langchain_tools(tmp_path)}
+    tools = {item.name: item for item in build_canvas_tools(tmp_path)}
 
     class Executor:
         calls = 0

@@ -232,9 +232,9 @@ def test_worker_single_operation_has_no_model_calls_and_deduplicates(tmp_path, m
     calls = []
     class RegisteredTool:
         name = "selected"
-        args_schema = None
+        input_model = None
         metadata = {"execution_capability": "repository_read", "execution_effect": "read_only", "repository_operation": True}
-        def invoke(self, arguments, **kwargs):
+        def call(self, arguments, **kwargs):
             calls.append(arguments)
             return {"ok": True, "content": "observed"}
     server = worker._ToolWorkerServer()

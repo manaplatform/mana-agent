@@ -75,7 +75,7 @@ def test_runtime_compatibility_settings_ignore_environment(
     isolated_user_config: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+    from mana_agent.llm.engine import create_model
 
     user_config.save_effective_user_config(
         {
@@ -89,11 +89,11 @@ def test_runtime_compatibility_settings_ignore_environment(
     monkeypatch.setenv("MANA_LLM_REASONING_EFFORT", "high")
     monkeypatch.setenv("MANA_LLM_SUPPORTS_RESPONSES_API", "true")
 
-    llm = create_chat_model(api_key="saved-key", model="saved-model", base_url="https://gateway.example/v1")
+    llm = create_model(api_key="saved-key", model="saved-model", base_url="https://gateway.example/v1")
 
-    assert llm.compatibility_api_mode == "chat_completions"
-    assert llm.reasoning_effort == "low"
-    assert llm.compatibility_capabilities.supports_responses_api is False
+    assert llm.endpoint == "chat_completions"
+    assert llm.parameters["reasoning_effort"] == "low"
+    assert llm.provider == "openai"
 
 
 def test_tool_worker_connection_settings_ignore_environment(

@@ -316,3 +316,20 @@ This is a **policy and contract guide**, not proof that all behavior has been im
 - `src/mana_agent/execution/continuation_decision.py` — typed autonomous continuation decisions.
 - `src/mana_agent/coding/` and `src/mana_agent/integrations/codex/` — coding engines and live events.
 - `CHANGELOG.md` — user-visible change history and regression notes.
+
+## Native inference migration contract — 2026-11-14
+
+Use `mana_agent.llm` contracts and registered native tool bindings. Do not import
+LangChain, LangGraph, LangSmith, their message/tool/callback adapters, or FAISS.
+Model capability evidence lives in the canonical native registry. Omission and
+expired evidence remain UNKNOWN; never restore model-name tables or permissive
+capability defaults. Only explicitly user-initiated settings probes may spend
+inference requests to test features. The engine cannot execute tools or own
+TaskBoard/Supervisor/Autonomous Loop responsibilities. External Codex keeps its
+inner loop. Repository retrieval uses text/symbol tools; index commands retain
+analysis metadata only. Never load old vector-index pickles.
+
+Follow [native engine recovery and regression notes](docs/native-llm-engine.md)
+and the [migration inventory](docs/native-llm-engine-migration.md). Verification
+remains user-owned under Rule 40; adding tests or CI entries does not establish
+compatibility or authorize paid requests.

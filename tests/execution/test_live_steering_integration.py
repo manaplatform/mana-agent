@@ -539,7 +539,7 @@ class FakeLLM:
         self.responses = list(responses)
         self.invocations: list[Any] = []
 
-    def invoke(self, messages: Any, **kwargs: Any) -> Any:
+    def generate_sync(self, messages: Any, **kwargs: Any) -> Any:
         self.invocations.append(messages)
         if not self.responses:
             raise RuntimeError("No more responses in FakeLLM")
@@ -547,6 +547,18 @@ class FakeLLM:
         if isinstance(resp, Exception):
             raise resp
         return resp
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def test_resume_from_waiting_rebinds_lease_without_stale_token_error(
@@ -737,7 +749,7 @@ def test_submit_steering_during_routing_queues_and_injects() -> None:
         )
     )
     mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content=json.dumps({
+    mock_llm.generate_sync.return_value = MagicMock(content=json.dumps({
         "route": "coding",
         "confidence": 0.95,
         "required_sources": ["repository"],

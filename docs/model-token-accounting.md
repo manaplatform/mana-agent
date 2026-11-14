@@ -28,22 +28,15 @@ and transactional safety context are protected.
 
 ## Model metadata and unknown models
 
-Provider catalog metadata is preferred, followed by maintained OpenAI-family
-token limits for common `gpt-4.1*`, `gpt-4o*`, `gpt-5*`, and `o3`/`o4` models
-when the catalog omits windows, then configured model profiles and explicit
-custom-deployment metadata. A model profile includes provider, model ID,
-context window, maximum output, tokenizer, usage-reporting support, and
-Decimal input/cached-input/output/reasoning prices.
+The native capability registry supplies context and output limits for the
+exact provider, model and endpoint. Explicit user overrides take precedence,
+followed by current conclusive probe results, provider metadata and exact
+models.dev matches. Unknown or expired token-limit evidence blocks inference.
+The registry does not infer limits from model names.
 
-Explicit `MANA_MODEL_PROFILES` entries must provide both `context_window` and
-`max_output_tokens`. Custom providers should publish the same fields through
-their model catalog or profile, plus `tokenizer` and pricing when known.
-
-`MANA_CONTEXT_UNKNOWN_MODEL_POLICY=require_metadata` rejects a selected model
-whose capability metadata is absent. `conservative` permits the explicitly
-configured unknown-model context and output limits, labels the profile and
-token estimate low-confidence, and leaves monetary cost unknown when pricing is
-absent. Unknown cost is never treated as free.
+A token profile projects that evidence into the accounting service. Explicit
+profiles and custom deployments can supply context limits, tokenizer and
+pricing metadata. Unknown pricing cannot grant a cost-constrained operation.
 
 Eval suite runs pin variant models via `ChatGatewayConfig.pin_models` so
 operator `MODEL_LEVEL_*` / `MANA_MODEL_*` preferences cannot rewrite the
@@ -179,12 +172,8 @@ are not required for correctness.
 MANA_CONTEXT_ESTIMATION_SAFETY_MARGIN_RATIO=0.05
 MANA_CONTEXT_DEFAULT_OUTPUT_RATIO=0.20
 MANA_CONTEXT_HISTORICAL_PREDICTION_ENABLED=true
-MANA_CONTEXT_UNKNOWN_MODEL_POLICY=conservative
-MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW=16384
-MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS=4096
 ```
 
-The two unknown-model limits are an explicit compatibility policy, not claimed
-capabilities for known models. Existing routing token budgets remain spending
-limits. Lane `token_budget` and `cost_budget` fields are optional policy caps;
-omitting them does not impose a synthetic model context window.
+Routing budgets are spending limits. Lane `token_budget` and `cost_budget`
+fields are optional policy caps. Model context and output limits come from
+current capability evidence.

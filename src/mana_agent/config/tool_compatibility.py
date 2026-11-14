@@ -8,7 +8,7 @@ from typing import Any, Sequence
 
 from mana_agent.config.model_discovery import (
     GLOBAL_CAPABILITY_REGISTRY,
-    ModelCapabilityProfile,
+    ModelProfile,
     ModelCapabilityRegistry,
 )
 
@@ -43,7 +43,7 @@ class ValidationResult:
     mode: str = "auto"
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    resolved_profile: ModelCapabilityProfile | None = None
+    resolved_profile: ModelProfile | None = None
 
     @property
     def ok(self) -> bool:
@@ -64,7 +64,8 @@ class ToolCompatibilityResolver:
         provider: str = "openai",
         execution_mode: str = "realtime",
     ) -> ToolCompatibilityReport:
-        profile = self.registry.get(provider, model_id)
+        from mana_agent.llm.registry import resolve_profile
+        profile = resolve_profile(provider, model_id) if self.registry is GLOBAL_CAPABILITY_REGISTRY else self.registry.get(provider, model_id)
         if profile is None:
             from mana_agent.config.model_discovery import ModelMetadataResolver
 
@@ -181,7 +182,8 @@ class ModelConfigurationValidator:
                 errors=["Model ID cannot be empty."],
             )
 
-        profile = self.registry.get(clean_provider, clean_id)
+        from mana_agent.llm.registry import resolve_profile
+        profile = resolve_profile(clean_provider, clean_id) if self.registry is GLOBAL_CAPABILITY_REGISTRY else self.registry.get(clean_provider, clean_id)
         if profile is None:
             from mana_agent.config.model_discovery import ModelMetadataResolver
 
@@ -195,7 +197,7 @@ class ModelConfigurationValidator:
                     f"Model '{profile.model_id}' is explicitly unsupported for OpenAI Batch API."
                 )
             elif profile.supports_batch is None:
-                warnings.append(
+                errors.append(
                     f"Model '{profile.model_id}' has unknown Batch API compatibility status."
                 )
 
@@ -206,16 +208,18 @@ class ModelConfigurationValidator:
                 )
 
         # 2. Context window limits
-        if requested_tokens and profile.context_window:
-            if requested_tokens > profile.context_window:
+        if requested_tokens:
+            if not profile.context_window:
+                errors.append("Context window is UNKNOWN; refresh metadata or configure an override.")
+            elif requested_tokens > profile.context_window:
                 errors.append(
                     f"Requested tokens ({requested_tokens}) exceed model context window ({profile.context_window})."
                 )
 
         # 3. Reasoning effort
-        if reasoning_effort and profile.reasoning_effort_levels:
-            if reasoning_effort.lower() not in profile.reasoning_effort_levels:
-                warnings.append(
+        if reasoning_effort:
+            if not isinstance(profile.reasoning_effort_levels, list) or reasoning_effort.lower() not in profile.reasoning_effort_levels:
+                errors.append(
                     f"Reasoning effort '{reasoning_effort}' is not in known levels {profile.reasoning_effort_levels} for model '{clean_id}'."
                 )
 

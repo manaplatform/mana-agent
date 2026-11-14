@@ -44,7 +44,7 @@ from mana_agent.integrations.computer_control.providers.linux.provider import Li
 from mana_agent.integrations.computer_control.providers.macos.provider import MacOSProvider
 from mana_agent.integrations.computer_control.providers.windows.provider import WindowsProvider
 from mana_agent.integrations.computer_control.registry import ApplicationAdapterRegistry
-from mana_agent.integrations.computer_control.runtime_tools import build_computer_langchain_tools
+from mana_agent.integrations.computer_control.runtime_tools import build_computer_tools
 from mana_agent.integrations.computer_control.service import ComputerControlService
 from mana_agent.config.user_config import load_user_config, save_user_config
 from mana_agent.chat_commands.builtins import definitions as command_definitions
@@ -540,7 +540,7 @@ def test_audit_and_events_never_duplicate_sensitive_content(tmp_path: Path) -> N
 
 def test_runtime_tools_require_authenticated_gateway_context(tmp_path: Path) -> None:
     control = service(tmp_path)
-    tools = {tool.name: tool for tool in build_computer_langchain_tools(control)}
+    tools = {tool.name: tool for tool in build_computer_tools(control)}
     payload = {"source_decision_id": "decision-1"}
     denied = json.loads(tools["media_pause"].invoke(payload))
     assert denied["error_code"] == "remote_control_denied"
@@ -563,7 +563,7 @@ def test_permission_status_ask_says_no_prompt_exists_until_exact_action(tmp_path
         permissions={spec.permission_scope: "ask" for spec in ACTION_SPECS.values()},
     )
     control = service(tmp_path, config=config)
-    tools = {tool.name: tool for tool in build_computer_langchain_tools(control)}
+    tools = {tool.name: tool for tool in build_computer_tools(control)}
     with computer_client_scope("session", "tui"):
         response = json.loads(tools["computer_permission_status"].invoke({
             "scope": "computer.apps.control",
@@ -822,7 +822,7 @@ def test_entry_router_accepts_explicit_computer_model_decision() -> None:
     ))
 
     class Llm:
-        def invoke(self, _messages):
+        def generate_sync(self, _messages, **_native_options):
             return SimpleNamespace(content=json.dumps({
                 "route": "computer",
                 "confidence": 0.99,
@@ -831,6 +831,18 @@ def test_entry_router_accepts_explicit_computer_model_decision() -> None:
                 "target_urls": [],
                 "requires_live_data": True,
             }))
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = EntryRouter(llm=Llm(), registry=registry).route(
         user_prompt="Pause the active desktop media player.",

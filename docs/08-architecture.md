@@ -254,41 +254,25 @@ Mutation tool execution uses a typed command contract:
   It also writes patch history under the configured logs directory.
   See: `src/mana_agent/tools/apply_patch.py:1-447`.
 
-### Analysis / ask service (indexed Q&A)
+### Native inference and repository retrieval
 
-- **`src/mana_agent/services/ask_service.py`** is the central orchestration layer for
-  answering questions over indexed code context.
-  It supports:
-  - “classic ask” using FAISS semantic search when the semantic index exists
-  - a fallback to direct project search when the FAISS index is missing/empty
-  - an agent/tool path (`ask_with_tools` / `ask_with_tools_dir_mode`)
-  See: `src/mana_agent/services/ask_service.py:1-448`.
+`mana_agent.llm` owns typed messages, requests, responses, usage, streaming events,
+provider encoding, and explicit continuation receipts. OpenAI uses Responses;
+OpenRouter, NVIDIA, xAI and custom endpoints use Chat Completions; Anthropic uses
+Messages. Protocol selection and provider request settings are explicit configuration.
+The engine never executes tools, chooses agents, updates TaskBoard, or finalizes goals.
 
-Important behaviors:
+One evidence registry supplies capabilities to routing, configuration and accounting.
+The configured Main model selects among eligible execution candidates. Deterministic
+code validates the selection, execution mode, budgets, isolation and verifier authority.
+Missing capability evidence blocks the operation with a settings action.
 
-- Semantic index missing triggers a direct project search fallback with explicit
-  warnings. See: `src/mana_agent/services/ask_service.py:1-448` (constants and fallback paths).
+`SearchService` uses existing repository text search and reads. It needs no index,
+embedding model, or API credential. Index commands perform local chunk/symbol
+analysis only. The retired workspace semantic mode returns an actionable error.
+Independent memory-provider search remains available through its own contracts.
 
-### Indexing and embeddings (FAISS vector store)
-
-- **`src/mana_agent/vector_store/embeddings.py`** constructs an embeddings client
-  compatible with the configured `base_url` / provider.
-  In particular, it supports NVIDIA Build / NIM endpoints by:
-  - resolving `NVIDIA_API_KEY` + `NVIDIA_BASE_URL` through
-    `resolve_inference_connection` (never via `OPENAI_API_KEY`)
-  - disabling client-side tokenization (`check_embedding_ctx_length=False`)
-  - setting `extra_body["input_type"]` to `"query"` vs `"passage"`
-  See: `src/mana_agent/vector_store/embeddings.py` and
-  `src/mana_agent/config/inference_provider.py`.
-
-- **Inference providers** are registered in
-  `src/mana_agent/config/provider_registry.py` (`openai`, `openrouter`,
-  `nvidia`, `custom`). Runtime transport is OpenAI-compatible Chat Completions
-  for all of them; credentials and base URLs stay provider-isolated.
-
-- The ask service uses the FAISS store (`FaissStore`) and falls back when the on-disk
-  index under `.mana/` or the requested `index_dir` is missing.
-  See: `src/mana_agent/services/ask_service.py:1-448`.
+See [native engine configuration, recovery and acceptance](native-llm-engine.md).
 
 ### Skills and progressive skill loading
 
@@ -425,7 +409,7 @@ The disconnected tool cards and disparate progress streams are replaced with a s
 
 ### B. Ask (indexed Q&A)
 1. `AskService.ask()` chooses semantic index search when present.
-2. If FAISS semantic index is missing, it falls back to direct `project_search()`.
+2. Repository retrieval calls existing text/symbol search tools directly, independent of analysis indexes.
 3. `QnAChain` produces the final answer from retrieved snippets.
 See: `src/mana_agent/services/ask_service.py:1-448`.
 
@@ -465,7 +449,7 @@ src/mana_agent/
   tools/                # repository access + safe mutation tools
   ui/                   # console UI helpers
   utils/                # guards, IO, discovery, helper glue
-  vector_store/         # FAISS store and embedding construction
+  llm/                  # Native inference, providers, capability evidence and probes
 ```
 
 ## Related Docs

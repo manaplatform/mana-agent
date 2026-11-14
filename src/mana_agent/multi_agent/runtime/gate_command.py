@@ -95,7 +95,7 @@ GATE_POLICIES: dict[str, GatePolicy] = {
     "locate_candidates": GatePolicy(
         gate="locate_candidates",
         phase="DISCOVERY",
-        allowed_tools=frozenset({"repo_search", "repo_batch_search", "semantic_search", "list_files", "run_command", "run_script_once"}),
+        allowed_tools=frozenset({"repo_search", "repo_batch_search", "list_files", "run_command", "run_script_once"}),
         forbidden_tools=frozenset(),
         required_tool_set=frozenset(),
         progress_keys=("files_found", "files_discovered", "candidate_files", "no_candidates"),

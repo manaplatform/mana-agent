@@ -23,11 +23,23 @@ jobs:
             timeout: 90
 
           - os: ubuntu-latest
+            python: "3.11"
+            timeout: 90
+
+          - os: ubuntu-latest
             python: "3.12"
             timeout: 90
 
           - os: ubuntu-latest
+            python: "3.13"
+            timeout: 90
+
+          - os: ubuntu-latest
             python: "3.14"
+            timeout: 90
+
+          - os: ubuntu-latest
+            python: "3.15"
             timeout: 90
 
           - os: windows-latest
@@ -40,6 +52,7 @@ jobs:
 
     env:
       PYTHONPATH: src
+      PYTHONUTF8: "1"
       NO_COLOR: "1"
       CLICOLOR: "0"
       TERM: dumb
@@ -53,8 +66,13 @@ jobs:
 
       - name: Install
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]" build twine
+          python -m pip install --upgrade pip packaging
+          python -m pip install ".[dev]" build twine
+
+      - name: Native dependency audit
+        run: |
+          python -m pip check
+          python scripts/audit_native_dependencies.py --extras dev
 
       - name: Test
         run: python -m pytest -q

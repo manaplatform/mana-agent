@@ -59,7 +59,7 @@ def _external_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs)
 def test_memory_capabilities_contract_defaults() -> None:
     caps = MemoryCapabilities()
     assert caps.evidence is True
-    assert caps.supports("semantic_search") is False
+    assert caps.supports("repo_search") is False
     assert caps.as_dict()["task_state"] is True
 
 

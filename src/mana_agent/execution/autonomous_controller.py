@@ -69,7 +69,7 @@ def normalize_strategy(strategy: str | None) -> str:
         return ExecutionStrategy.CODING.value
     if s in {
         "repo_search",
-        "semantic_qa",
+        "repository_qa",
         "research",
         "web_search",
         "github_search",

@@ -44,6 +44,13 @@ def level_value(value: Complexity | RiskLevel) -> float:
 
 _SECRET_KEY_MARKERS = ("key", "token", "secret", "password", "credential", "authorization", "cookie")
 _SECRET_VALUE_RE = re.compile(r"(?i)(bearer\s+\S+|\b(?:sk|ghp|github_pat)_[A-Za-z0-9_-]{8,})")
+_PUBLIC_TOKEN_FIELDS = frozenset({"max_tokens", "max_output_tokens", "max_completion_tokens", "max_input_tokens",
+    "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
+    "cached_input_tokens", "token_budget", "token_usage", "token_profile_confidence", "tokenizer"})
+
+
+def _secret_configuration_key(key: str) -> bool:
+    return key.lower() not in _PUBLIC_TOKEN_FIELDS and any(marker in key.lower() for marker in _SECRET_KEY_MARKERS)
 
 # Routing/profile bookkeeping stored on ModelProfile.configuration. These must
 # never be forwarded as Chat Completions / Responses body fields — providers
@@ -56,6 +63,7 @@ INTERNAL_MODEL_CONFIGURATION_KEYS = frozenset(
         "capability_confidence",
         "capability_descriptor",
         "token_profile_confidence",
+        "pricing_known",
     }
 )
 
@@ -81,7 +89,6 @@ CATALOG_MODEL_OBJECT_KEYS = frozenset(
         "top_provider",
         "context_length",
         "context_window",
-        "max_output_tokens",
         "tokenizer",
         "input_price_per_million",
         "output_price_per_million",
@@ -95,7 +102,7 @@ CATALOG_MODEL_OBJECT_KEYS = frozenset(
 # Client/SDK-only keys that are not OpenAI-compatible HTTP body parameters.
 NON_HTTP_MODEL_CONFIGURATION_KEYS = frozenset(
     {
-        "model_kwargs",  # LangChain ChatOpenAI init, not chat/completions JSON
+        "model_kwargs",  # Retired inference-construction setting; never sent to a provider
     }
 )
 
@@ -105,7 +112,7 @@ def sanitize_configuration(value: Any) -> Any:
         return {
             str(key): sanitize_configuration(item)
             for key, item in value.items()
-            if not any(marker in str(key).lower() for marker in _SECRET_KEY_MARKERS)
+            if not _secret_configuration_key(str(key))
         }
     if isinstance(value, (list, tuple)):
         return [sanitize_configuration(item) for item in value]
@@ -141,7 +148,7 @@ def provider_request_overrides_from_configuration(
         name = str(key)
         if name in blocked:
             continue
-        if any(marker in name.lower() for marker in _SECRET_KEY_MARKERS):
+        if _secret_configuration_key(name):
             continue
         # Nested extra_body must not reintroduce catalog/routing keys when
         # later flattened into a raw HTTP chat/completions body.
@@ -221,9 +228,9 @@ class ModelProfile:
     def __post_init__(self) -> None:
         if not self.provider.strip() or not self.model_id.strip() or not self.supported_roles:
             raise ValueError("model profile requires provider, model_id, and supported_roles")
-        if self.context_window <= 0 or self.max_output_tokens <= 0:
-            raise ValueError("context_window and max_output_tokens must be positive")
-        if self.max_output_tokens > self.context_window:
+        if self.context_window < 0 or self.max_output_tokens < 0:
+            raise ValueError("context_window and max_output_tokens cannot be negative")
+        if self.context_window > 0 and self.max_output_tokens > self.context_window:
             raise ValueError("max_output_tokens cannot exceed context_window")
         if min(self.input_cost_per_million, self.output_cost_per_million, self.logical_cost_per_1k_tokens) < 0:
             raise ValueError("model costs cannot be negative")
@@ -300,6 +307,7 @@ class RoutingRequest:
     maximum_concurrency: int = 1
     task_tree_depth: int = 0
     provider_health: tuple[tuple[str, str], ...] = ()
+    assignment_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.role.strip() or not self.task_description.strip() or not self.task_type.strip():

@@ -70,9 +70,13 @@ def resolve_embed_model(
 
 
 class Settings(BaseSettings):
+    mana_configured_providers: list[str] = Field(default_factory=list, alias="MANA_CONFIGURED_PROVIDERS")
+    mana_model_capability_overrides: list[dict[str, Any]] = Field(default_factory=list, alias="MANA_MODEL_CAPABILITY_OVERRIDES")
+    mana_capability_probe_permissions: dict[str, str] = Field(default_factory=dict, alias="MANA_CAPABILITY_PROBE_PERMISSIONS")
+
     mana_execution_trace_max_bytes: int = Field(default=104_857_600, ge=1024, alias="MANA_EXECUTION_TRACE_MAX_BYTES")
     mana_activity_visibility: Literal["minimal", "normal", "verbose"] = Field(default="normal", alias="MANA_ACTIVITY_VISIBILITY")
-    mana_config_schema_version: int = Field(default=2, alias="MANA_CONFIG_SCHEMA_VERSION")
+    mana_config_schema_version: int = Field(default=3, alias="MANA_CONFIG_SCHEMA_VERSION")
     mana_ai_provider: str = Field(default="openai", alias="MANA_AI_PROVIDER")
     mana_primary_model: str = Field(
         default="openai/gpt-4.1-mini", alias="MANA_PRIMARY_MODEL"
@@ -115,8 +119,6 @@ class Settings(BaseSettings):
     openai_coding_planner_model: str | None = Field(
         default="gpt-6-luna", alias="OPENAI_CODING_PLANNER_MODEL"
     )
-    # Left unset by default so the embedding model can be auto-selected from the
-    # active base URL (see ``resolve_embed_model``). An explicit value always wins.
     openai_embed_model: str | None = Field(default=None, alias="OPENAI_EMBED_MODEL")
     openai_batch_enabled: bool = Field(default=True, alias="OPENAI_BATCH_ENABLED")
     openai_batch_mode: str = Field(default="auto", alias="OPENAI_BATCH_MODE")
@@ -235,7 +237,7 @@ class Settings(BaseSettings):
         default=True, alias="MANA_CONTEXT_HISTORICAL_PREDICTION_ENABLED"
     )
     mana_context_unknown_model_policy: Literal["require_metadata", "conservative"] = Field(
-        default="conservative", alias="MANA_CONTEXT_UNKNOWN_MODEL_POLICY"
+        default="require_metadata", alias="MANA_CONTEXT_UNKNOWN_MODEL_POLICY"
     )
     mana_context_unknown_model_context_window: int = Field(
         default=16_384, ge=1, alias="MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW"

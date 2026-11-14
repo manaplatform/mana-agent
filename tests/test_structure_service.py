@@ -19,7 +19,7 @@ def _write_sample_project(root: Path) -> None:
 [project]
 name = "sample"
 version = "0.1.0"
-dependencies = ["typer>=0.12", "langchain>=0.3", "faiss-cpu>=1.8.0"]
+dependencies = ["typer>=0.12", "httpx>=0.27", "numpy>=1.24"]
 [project.optional-dependencies]
 dev = ["pytest>=8.3"]
 [project.scripts]

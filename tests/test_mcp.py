@@ -13,7 +13,7 @@ from mana_agent.mcp.display import (
     format_mcp_result_preview,
     is_documentation_mcp_operation,
 )
-from mana_agent.mcp.tools import discovered_mcp_langchain_tools, mcp_model_tool_name
+from mana_agent.mcp.tools import discovered_mcp_tools, mcp_model_tool_name
 from mana_agent.mcp.config import McpConfigError, McpServerConfig, load_mcp_servers, load_mcp_token, parse_mcp_server_json, save_mcp_server, save_mcp_token
 from mana_agent.mcp.server import protected_http_app
 from mana_agent.transactional_actions.adapters import McpActionAdapter
@@ -206,12 +206,12 @@ def test_approved_mcp_action_rehydrates_only_its_exact_provider_tool(monkeypatch
             "mcp_tool_name": "authorize",
         }
 
-        def invoke(self, arguments):
+        def call(self, arguments):
             calls.append(arguments)
             return {"ok": True, "tool_name": "authorize"}
 
     monkeypatch.setattr(
-        "mana_agent.mcp.tools.discovered_mcp_langchain_tools",
+        "mana_agent.mcp.tools.discovered_mcp_tools",
         lambda *, server_ids: ([_RegisteredTool()], []),
     )
 
@@ -239,7 +239,7 @@ def test_explicit_mcp_discovery_uses_only_the_requested_configured_provider(monk
             return {"tools": []}
 
     monkeypatch.setattr("mana_agent.mcp.tools.McpClient", FakeClient)
-    tools, warnings = discovered_mcp_langchain_tools(server_ids=["context7"])
+    tools, warnings = discovered_mcp_tools(server_ids=["context7"])
 
     assert tools == []
     assert warnings == []

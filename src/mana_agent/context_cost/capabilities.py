@@ -180,7 +180,7 @@ def build_core_tools(
     artifact_reader: Callable[..., Any],
 ) -> list[Any]:
     """Create four lightweight controls without binding optional capabilities."""
-    from langchain_core.tools import StructuredTool
+    from mana_agent.llm.tools import ToolBinding
     read_only_metadata = {"read_only": True, "side_effecting": False}
 
     def capability_search(query: str, limit: int = 20) -> str:
@@ -213,10 +213,10 @@ def build_core_tools(
         return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
     return [
-        StructuredTool.from_function(capability_search, name="capability_search", description="Search the authorized lightweight capability manifest. Does not load a tool.", metadata=read_only_metadata),
-        StructuredTool.from_function(capability_load, name="capability_load", description="Load named authorized capabilities for the next model step. Never widens permissions.", metadata=read_only_metadata),
-        StructuredTool.from_function(capability_unload, name="capability_unload", description="Unload named non-core capabilities to reclaim context.", metadata=read_only_metadata),
-        StructuredTool.from_function(context_read_artifact, name="context_read_artifact", description="Read an exact scoped tool-result artifact by offset, line range, JSON path, section, records, or bounded search.", metadata=read_only_metadata),
+        ToolBinding.from_callable(capability_search, name="capability_search", description="Search the authorized lightweight capability manifest. Does not load a tool.", metadata=read_only_metadata),
+        ToolBinding.from_callable(capability_load, name="capability_load", description="Load named authorized capabilities for the next model step. Never widens permissions.", metadata=read_only_metadata),
+        ToolBinding.from_callable(capability_unload, name="capability_unload", description="Unload named non-core capabilities to reclaim context.", metadata=read_only_metadata),
+        ToolBinding.from_callable(context_read_artifact, name="context_read_artifact", description="Read an exact scoped tool-result artifact by offset, line range, JSON path, section, records, or bounded search.", metadata=read_only_metadata),
     ]
 
 

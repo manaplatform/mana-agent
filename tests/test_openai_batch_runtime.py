@@ -275,8 +275,7 @@ def test_missing_action_and_mismatched_task_cannot_finalize():
     with pytest.raises(ValueError):
         _coerce_continuation_decision('{"reason":"done"}', task_id="task")
     model = MagicMock()
-    model.with_structured_output.return_value = model
-    model.invoke.return_value = {"task_id": "another", "action": "FINALIZE", "goal_satisfied": True,
+    model.decide_sync.return_value = {"task_id": "another", "action": "FINALIZE", "goal_satisfied": True,
         "progress_detected": True, "evidence_summary": "done", "safe_to_continue": True, "reason": "done"}
     with pytest.raises(Exception, match="different task"):
         ContinuationEvaluator(model).evaluate(task_id="task", user_goal="task", step_output={}, completed_steps=[], metrics={})

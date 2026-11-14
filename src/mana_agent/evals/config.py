@@ -277,7 +277,8 @@ def validate_suite_runtime(suite: EvalSuite) -> None:
             variant.reviewer_model,
             variant.verifier_model,
         }:
-            provider, model_id = (model.split("/", 1) if "/" in model and not model.startswith("gpt-") else ("openai", model))
+            from mana_agent.config.provider_registry import split_qualified_model_id
+            provider, model_id = split_qualified_model_id(model, default_provider="openai")
             if ModelCapability.TEXT_GENERATION not in normalize_capabilities(provider, model_id):
                 raise EvalConfigurationError(
                     f"unknown or non-text model in variant {variant.variant_id}: {model}"

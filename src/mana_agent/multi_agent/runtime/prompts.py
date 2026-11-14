@@ -140,7 +140,7 @@ Tool orientation:
 - Tools are already provided. Do NOT call `list_tools` to rediscover them.
 - Call `ls()` at most once for orientation, and skip it when layout is already known.
 - Use `repo_search` for exact text.
-- Use `semantic_search` for conceptual retrieval.
+- Use `repo_search`, `repo_batch_search`, symbols and file reads for repository discovery.
 - Use `read_file` for concrete source evidence.
 - Use `find_symbols` / `call_graph` for AST and call-site questions.
 - Use `verify_project` / `run_command` only when behavior or checks must be confirmed.
@@ -163,7 +163,7 @@ Evidence policy:
 
 Search discipline:
 - Stop after the answer is supported.
-- Do not run broad semantic searches after the exact file/symbol is known.
+- Prefer targeted reads after the exact file or symbol is known.
 - Do not inspect cache, build, vendor, lock, or generated output unless directly relevant.
 
 Presentation:
@@ -234,7 +234,7 @@ Goal:
 
 You MUST:
 - Gather repository evidence before conclusions.
-- Choose deliberately among `repo_search`, `semantic_search`, `read_file`,
+- Choose deliberately among `repo_search`, `read_file`,
   `find_symbols`, `call_graph`, `run_command`, and verification tools.
 - Open source files only when needed for evidence.
 - Treat run-memory reads as already-opened evidence.
@@ -567,8 +567,7 @@ Schema:
       "requires_tools": [
         "repo_search",
         "repo_batch_search",
-        "semantic_search",
-        "read_file",
+                "read_file",
         "repo_batch_read",
         "find_symbols",
         "call_graph",
@@ -672,7 +671,7 @@ Anti-loop rules:
 
 Tool choice rules:
 - Use `repo_search` for exact strings.
-- Use `semantic_search` for conceptual discovery, but never depend on it alone.
+- Use model-selected repository search, symbols and file reads for discovery.
 - Use `read_file` for source evidence.
 - Use `find_symbols` / `call_graph` for AST/call-site questions.
 - Use mutation tools for edit steps.
@@ -703,8 +702,7 @@ Schema:
         "search_budget": 0,
         "read_budget": 0,
         "require_read_files": 0,
-        "search_repeat_limit": 1,
-        "max_semantic_k": 50
+        "search_repeat_limit": 1
       },
       "timeout_seconds": 30
     }
@@ -729,7 +727,7 @@ Request quality rules:
 - Make each request specific enough for the worker to execute without guessing.
 - Include exact file paths, symbols, commands, or search strings when known.
 - Use `tool_policy_override` only when it meaningfully constrains the worker.
-- Do not use broad semantic search when exact targets are known.
+- Use targeted reads when exact targets are known.
 - Do not ask workers to produce conversational final answers for edit-intent passes
   until changed-files evidence exists.
 

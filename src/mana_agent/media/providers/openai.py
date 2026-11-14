@@ -169,28 +169,22 @@ class OpenAIMediaProvider:
             metadata=metadata,
         )
 
-    @staticmethod
-    def _is_gpt_image_model(model: str) -> bool:
-        normalized = str(model or "").strip().lower()
-        return normalized.startswith("gpt-image-") or normalized == "chatgpt-image-latest"
+    @classmethod
+    def _image_profile(cls, model: str):
+        from mana_agent.llm.registry import resolve_profile
+        return resolve_profile(cls.provider_id, model)
 
-    @staticmethod
-    def _is_gpt_image_25_model(model: str) -> bool:
-        return str(model or "").strip().lower().startswith("gpt-image-2.5-")
+    @classmethod
+    def _is_gpt_image_model(cls, model: str) -> bool:
+        return cls._image_profile(model).value("image_request_format") == "images"
 
-    @staticmethod
-    def _is_gpt_image_2_model(model: str) -> bool:
-        normalized = str(model or "").strip().lower()
-        return normalized == "gpt-image-2" or normalized.startswith("gpt-image-2-202")
-
-    @staticmethod
-    def _is_dalle2_model(model: str) -> bool:
-        return str(model or "").strip().lower() == "dall-e-2"
+    @classmethod
+    def _is_dalle2_model(cls, model: str) -> bool:
+        return cls._image_profile(model).value("image_request_format") == "legacy_square"
 
     @classmethod
     def _is_dalle3_model(cls, model: str) -> bool:
-        normalized = str(model or "").strip().lower()
-        return normalized.startswith("dall-e") and not cls._is_dalle2_model(normalized)
+        return cls._image_profile(model).value("image_request_format") == "legacy_single"
 
     @staticmethod
     def _resolve_orientation(aspect_ratio: str, size: str) -> str:
@@ -272,7 +266,7 @@ class OpenAIMediaProvider:
             return "1024x1024"
 
         # GPT Image 2/2.5 accept valid custom dimensions too.
-        if cls._is_gpt_image_25_model(model) or cls._is_gpt_image_2_model(model):
+        if cls._image_profile(model).supports("image_flexible_dimensions"):
             if cls._valid_flexible_gpt_image_size(size):
                 return size
         elif size in {"1024x1024", "1024x1536", "1536x1024"}:
@@ -298,12 +292,10 @@ class OpenAIMediaProvider:
         }
         value = aliases.get(value, value)
 
-        if cls._is_gpt_image_25_model(model):
-            allowed = {"low", "medium", "high", "xhigh", "max"}
-        else:
-            allowed = {"low", "medium", "high"}
-
-        return value if value in allowed else None
+        allowed = cls._image_profile(model).value("image_quality_levels", [])
+        if not isinstance(allowed, list) or value not in allowed:
+            raise MediaProviderError("media_capability_unknown", "Requested image quality lacks current evidence. Configure image_quality_levels in model settings.")
+        return value
 
     @staticmethod
     def _normalize_background(background: str) -> str:
@@ -333,6 +325,9 @@ class OpenAIMediaProvider:
         for_edit: bool = False,
     ) -> dict[str, Any]:
         model = str(request.model or "").strip()
+        profile = cls._image_profile(model)
+        if profile.value("image_request_format") not in {"images", "legacy_square", "legacy_single"}:
+            raise MediaProviderError("media_capability_unknown", "Configure image_request_format in model settings; no image protocol was guessed from the model name.")
         orientation = cls._resolve_orientation(request.aspect_ratio, request.size)
 
         if cls._is_dalle2_model(model):
@@ -422,8 +417,7 @@ class OpenAIMediaProvider:
         if (
             for_edit
             and input_fidelity in {"low", "high"}
-            and not cls._is_gpt_image_2_model(model)
-            and not cls._is_gpt_image_25_model(model)
+            and cls._image_profile(model).supports("image_input_fidelity")
         ):
             payload["input_fidelity"] = input_fidelity
 

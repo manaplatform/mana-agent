@@ -49,9 +49,10 @@ def workspace_fingerprint(root: Path) -> str:
 
 def batch_output_limit(supervisor: Any, task_id: str, provider: str, model: str,
                        messages: list[dict[str, Any]], tools: list[dict[str, Any]], schema: Any) -> int:
-    profile = GLOBAL_CAPABILITY_REGISTRY.get(provider, model)
+    from mana_agent.llm.registry import resolve_profile
+    profile = resolve_profile(provider, model)
     input_tokens = estimate_value_tokens(messages) + estimate_value_tokens(tools) + estimate_value_tokens(schema or {})
-    capacity = profile.context_window - input_tokens if profile else 0
+    capacity = profile.context_window - input_tokens if profile and profile.context_window else 4096
     if supervisor:
         task = supervisor.get_task(task_id)
         if task.token_budget is not None:
@@ -64,7 +65,8 @@ def batch_output_limit(supervisor: Any, task_id: str, provider: str, model: str,
             remaining = task.monetary_budget - task.actual_cost - float(pricing.input_price_per_million) * input_tokens / 2_000_000
             if pricing.output_price_per_million:
                 capacity = min(capacity, int(remaining * 2_000_000 / float(pricing.output_price_per_million)))
-    output_limit = min(4096, capacity, profile.max_output_tokens if profile else 0)
+    max_output = profile.max_output_tokens if profile and profile.max_output_tokens else 4096
+    output_limit = min(4096, capacity, max_output)
     if output_limit < 1:
         raise RuntimeError("Batch request exceeds the remaining context or task budget")
     return output_limit

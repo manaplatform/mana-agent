@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 from typing import Any
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, Field
 from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
 from mana_agent.connectors.browser.session import BrowserConnectorError, default_browser_manager
@@ -45,7 +45,7 @@ def action_metadata(tool_name: str, arguments: dict[str, Any], metadata: dict[st
         return {**(metadata or {}), "read_only": True, "side_effecting": False}
     return metadata
 
-def build_browser_langchain_tools() -> list[Any]:
+def build_browser_tools() -> list[Any]:
     manager = default_browser_manager()
     def open_page(**kw): return _result(lambda: manager.open(**_Open.model_validate(kw).model_dump()))
     def inspect(**kw): return _result(lambda: manager.inspect(**_Inspect.model_validate(kw).model_dump()))
@@ -66,30 +66,30 @@ def build_browser_langchain_tools() -> list[Any]:
     # therefore fail closed until they have a transactional adapter.
     read_only_metadata = {"read_only": True, "side_effecting": False}
     tools = [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=open_page,
             name="browser_open",
             description="Open an absolute HTTP(S) URL in an isolated model-selected browser session.",
-            args_schema=_Open,
+            input_model=_Open,
             metadata=read_only_metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=inspect,
             name="browser_inspect",
             description="Inspect page text, semantic accessibility snapshot, forms and interactive element refs.",
-            args_schema=_Inspect,
+            input_model=_Inspect,
             metadata=read_only_metadata,
         ),
     ]
     for name in ("click", "type", "select", "scroll", "wait", "back", "download"):
         tools.append(
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=lambda _name=name, **kw: action(_name, kw),
                 name=f"browser_{name}",
                 description=f"Perform validated browser {name}; sensitive terminal actions return confirmation_required.",
-                args_schema=_Act,
+                input_model=_Act,
                 metadata=(read_only_metadata if name in {"scroll", "wait"} else None),
             )
         )
-    tools += [StructuredTool.from_function(func=screenshot,name="browser_screenshot",description="Save a screenshot in the private session artifact directory.",args_schema=_Screenshot),StructuredTool.from_function(func=upload,name="browser_upload",description="Upload an allowed local file through a current file-input ref.",args_schema=_Upload),StructuredTool.from_function(func=check_links,name="browser_check_links",description="Validate rendered HTTP(S) links without navigating away; return status and broken-link results.",args_schema=_CheckLinks),StructuredTool.from_function(func=tabs,name="browser_tabs",description="List browser tabs and popups.",args_schema=_Session,metadata=read_only_metadata),StructuredTool.from_function(func=switch,name="browser_switch_tab",description="Switch to a model-selected tab id.",args_schema=_Switch,metadata=read_only_metadata),StructuredTool.from_function(func=close,name="browser_close",description="Close and clean an isolated browser session.",args_schema=_Session,metadata=read_only_metadata)]
+    tools += [ToolBinding.from_callable(func=screenshot,name="browser_screenshot",description="Save a screenshot in the private session artifact directory.",input_model=_Screenshot),ToolBinding.from_callable(func=upload,name="browser_upload",description="Upload an allowed local file through a current file-input ref.",input_model=_Upload),ToolBinding.from_callable(func=check_links,name="browser_check_links",description="Validate rendered HTTP(S) links without navigating away; return status and broken-link results.",input_model=_CheckLinks),ToolBinding.from_callable(func=tabs,name="browser_tabs",description="List browser tabs and popups.",input_model=_Session,metadata=read_only_metadata),ToolBinding.from_callable(func=switch,name="browser_switch_tab",description="Switch to a model-selected tab id.",input_model=_Switch,metadata=read_only_metadata),ToolBinding.from_callable(func=close,name="browser_close",description="Close and clean an isolated browser session.",input_model=_Session,metadata=read_only_metadata)]
     return tools

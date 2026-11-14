@@ -197,11 +197,7 @@ def search_command(
     limit: int = typer.Option(20, "--limit"),
 ) -> None:
     if mode == "semantic":
-        from mana_agent.commands.cli_internal import Settings, build_search_service
-
-        semantic = build_search_service(Settings())
-    else:
-        semantic = None
+        raise typer.BadParameter("Semantic repository search was removed; use --mode text, file, or symbol")
     request = WorkspaceSearchRequest(
         workspace_id=workspace_id,
         query=query,
@@ -209,7 +205,7 @@ def search_command(
         repository_ids=repository,
         limit=limit,
     )
-    _emit(WorkspaceSearchService(semantic=semantic).search(request))
+    _emit(WorkspaceSearchService().search(request))
 
 
 def impact_command(

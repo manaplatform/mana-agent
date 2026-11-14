@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Literal, Mapping, Sequence, get_args
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 from mana_agent.context_cost.accounting import ModelContextLimitError
 from mana_agent.context_cost.models import ContextBudgetExceeded
@@ -261,7 +261,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     automation_operation: Literal[
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
-    runtime_capability_change: bool
+    runtime_capability_change: bool = False
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
     resolved_request: str = ""
     source_message_ids: list[str] = Field(default_factory=list)
@@ -756,7 +756,10 @@ class EntryRouter:
         context: EntryRouteContext,
         envelope: Any | None = None,
     ) -> EntryRoutingDecision:
-        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+        if self.llm is None or not any(
+            callable(getattr(self.llm, name, None))
+            for name in ("generate_sync", "invoke", "decide_sync", "ainvoke")
+        ):
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: routing model is unavailable.",
@@ -793,9 +796,9 @@ class EntryRouter:
                 )
                 llm_provider = getattr(self.llm, "provider", None) or ""
                 if llm_model:
-                    from mana_agent.config.model_catalog import maintained_token_limits
+                    from mana_agent.config.model_catalog import cached_token_limits
 
-                    limits = maintained_token_limits(str(llm_provider), str(llm_model))
+                    limits = cached_token_limits(str(llm_provider), str(llm_model))
                     if limits:
                         router_window = limits[0]
 
@@ -934,9 +937,8 @@ class EntryRouter:
 
             messages = [
                 SystemMessage(content=ENTRY_ROUTER_PROMPT),
-                HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+                UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             ]
-            structured_output = getattr(self.llm, "with_structured_output", None)
             response, decision_payload = _invoke_routing_model(
                 self.llm,
                 messages,
@@ -958,7 +960,7 @@ class EntryRouter:
                 }
                 repair_messages = [
                     SystemMessage(content=ENTRY_ROUTER_PROMPT),
-                    HumanMessage(
+                    UserMessage(
                         content=json.dumps(
                             repair_payload, ensure_ascii=False, sort_keys=True
                         )
@@ -978,7 +980,7 @@ class EntryRouter:
                     "prompt_hash": stable_hash(ENTRY_ROUTER_PROMPT),
                     "request_hash": stable_hash(payload),
                     "response": decision.to_dict(),
-                    "usage": getattr(response, "usage_metadata", None),
+                    "usage": (response.usage.model_dump() if hasattr(response, "usage") else None),
                     "latency_seconds": time.perf_counter() - started,
                 },
             )
@@ -1424,85 +1426,24 @@ def _extract_json(text: str) -> dict[str, Any]:
     return payload
 
 
-def _invoke_routing_model(
-    llm: Any,
-    messages: list[Any],
-) -> tuple[Any, dict[str, Any]]:
-    """
-    Invoke the entry-routing model exactly once.
-
-    Prefer strict structured output, but retain the raw AIMessage so a provider
-    that prepends/appends prose around an otherwise valid JSON object does not
-    destroy the entire turn.
-
-    Recovery does NOT bypass EntryRouter._validate().
-    """
-    structured_output = getattr(llm, "with_structured_output", None)
-
-    if not callable(structured_output):
-        response = llm.invoke(messages)
-        return response, _coerce_routing_output(response)
-
-    try:
-        runner = structured_output(
-            EntryRoutingOutput,
-            method="json_schema",
-            strict=True,
-            include_raw=True,
-        )
-    except TypeError:
+def _invoke_routing_model(llm: Any, messages: list[Any]) -> tuple[Any, dict[str, Any]]:
+    if callable(getattr(llm, "decide_sync", None)) and not type(llm).__name__.endswith("Mock"):
         try:
-            runner = structured_output(
-                EntryRoutingOutput,
-                method="json_schema",
-                strict=True,
-            )
-        except TypeError:
-            runner = structured_output(EntryRoutingOutput)
-
-    try:
-        result = runner.invoke(messages)
-    except Exception:
+            response = llm.decide_sync(messages, EntryRoutingOutput)
+            if isinstance(response, EntryRoutingOutput):
+                return response, response.model_dump()
+            if isinstance(response, dict):
+                return response, response
+        except Exception:
+            pass
+    if callable(getattr(llm, "generate_sync", None)):
+        response = llm.generate_sync(messages)
+        return response, _coerce_routing_output(response)
+    if callable(getattr(llm, "invoke", None)):
         response = llm.invoke(messages)
         return response, _coerce_routing_output(response)
-
-    # LangChain include_raw=True contract:
-    #
-    # {
-    #     "raw": AIMessage(...),
-    #     "parsed": EntryRoutingOutput(...) | None,
-    #     "parsing_error": Exception | None,
-    # }
-    if isinstance(result, dict) and (
-        "raw" in result
-        or "parsed" in result
-        or "parsing_error" in result
-    ):
-        raw = result.get("raw")
-        parsed = result.get("parsed")
-        parsing_error = result.get("parsing_error")
-
-        if parsed is not None:
-            return raw or parsed, _coerce_routing_output(parsed)
-
-        # Important recovery path:
-        # structured parsing failed, but the raw response may contain a
-        # perfectly usable JSON object surrounded by provider/model prose.
-        if raw is not None:
-            try:
-                return raw, _coerce_routing_output(raw)
-            except Exception:
-                pass
-
-        response = llm.invoke(messages)
-        return response, _coerce_routing_output(response)
-
-    # Defensive compatibility with implementations that ignore include_raw.
-    try:
-        return result, _coerce_routing_output(result)
-    except Exception:
-        response = llm.invoke(messages)
-        return response, _coerce_routing_output(response)
+    response = llm.decide_sync(messages, EntryRoutingOutput)
+    return response, response.model_dump()
 
 def _coerce_routing_output(response: Any) -> dict[str, Any]:
     if isinstance(response, EntryRoutingOutput):

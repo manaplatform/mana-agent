@@ -155,7 +155,7 @@ GENERIC_FOLDER_ROLES: dict[str, str] = {
     "hooks": "Hooks / extensions.",
     "store": "State / store management.",
     "stores": "State / store management.",
-    "vector_store": "Vector store / embeddings storage.",
+    "llm": "Native inference adapters and capability evidence.",
     "llm": "LLM client and model orchestration.",
     "ai": "AI / model orchestration.",
     "agents": "Agent orchestration.",
@@ -507,7 +507,7 @@ class ProjectAnalyzeService:
         all_deps = runtime | dev
         frameworks = sorted({label for key, label in FRAMEWORK_SIGNALS.items() if _dependency_name(key) in all_deps})
         testing = sorted(dep for dep in all_deps if dep in {"pytest", "unittest", "jest", "vitest", "mocha", "playwright"})
-        llm = sorted(dep for dep in all_deps if dep in {"openai", "langchain", "langchain-openai", "langchain-community", "anthropic", "faiss-cpu"})
+        llm = sorted(dep for dep in all_deps if dep in {"openai", "anthropic", "httpx"})
         inventory["detected_frameworks"] = frameworks
         inventory["package_managers"] = sorted(managers)
         return {

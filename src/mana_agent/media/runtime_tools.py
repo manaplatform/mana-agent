@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, ConfigDict, Field
 
 from mana_agent.media.errors import MediaError
@@ -89,7 +89,7 @@ def _json(operation: Any) -> str:
         )
 
 
-def build_media_langchain_tools(
+def build_media_tools(
     root: str | Path, *, service: MediaService | None = None
 ) -> list[Any]:
     workspace_root = Path(root).resolve()
@@ -99,10 +99,10 @@ def build_media_langchain_tools(
         "Returns compact metadata and managed artifact references, never binary data."
     )
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="generate_image",
             description=f"Generate an image with the configured image model. {common}",
-            args_schema=_Image,
+            input_model=_Image,
             func=lambda source_decision_id, session_id, **kwargs: _json(
                 lambda: media.generate_image(
                     ImageGenerationRequest(**kwargs),
@@ -111,10 +111,10 @@ def build_media_langchain_tools(
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="generate_voice",
             description=f"Generate speech audio with the configured voice model. {common}",
-            args_schema=_Voice,
+            input_model=_Voice,
             func=lambda source_decision_id, session_id, **kwargs: _json(
                 lambda: media.generate_speech(
                     VoiceGenerationRequest(**kwargs),
@@ -123,10 +123,10 @@ def build_media_langchain_tools(
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="generate_video",
             description=f"Create or queue video generation with the configured video model. {common}",
-            args_schema=_Video,
+            input_model=_Video,
             func=lambda source_decision_id, session_id, **kwargs: _json(
                 lambda: media.generate_video(
                     VideoGenerationRequest(**kwargs),
@@ -135,10 +135,10 @@ def build_media_langchain_tools(
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="get_media_generation_status",
             description="Get durable status and artifact metadata for one media generation.",
-            args_schema=_Generation,
+            input_model=_Generation,
             func=lambda source_decision_id, session_id, generation_id: _json(
                 lambda: media.get_generation_status(
                     generation_id,
@@ -147,10 +147,10 @@ def build_media_langchain_tools(
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="cancel_media_generation",
             description="Cancel the exact pending media generation when its provider supports cancellation.",
-            args_schema=_Generation,
+            input_model=_Generation,
             func=lambda source_decision_id, session_id, generation_id: _json(
                 lambda: media.cancel_generation(
                     generation_id,

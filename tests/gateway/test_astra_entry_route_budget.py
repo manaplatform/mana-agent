@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from mana_agent.config.model_catalog import maintained_token_limits
+from mana_agent.config.model_catalog import cached_token_limits
 from mana_agent.config.settings import Settings
 from mana_agent.context_cost.models import AccountingSnapshot
 from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver
@@ -45,10 +45,15 @@ class _MockAstraRoutingModel:
         self.provider = "openai"
         self.invoked_messages: list[list[Any]] = []
 
-    def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True):
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, messages: list[Any], **_kwargs: Any) -> Any:
+    def generate_sync(self, messages: list[Any], **_kwargs: Any) -> Any:
         self.invoked_messages.append(messages)
         sources = ["repository"] if self.route in {"coding", "repository"} else ["none"]
         return SimpleNamespace(
@@ -76,31 +81,12 @@ def _build_test_registry() -> EntryRouteRegistry:
     return reg
 
 
-def test_astra_model_limits_and_profiles_resolution() -> None:
-    """Verify Astra (GPT-6 Astra) context limit (1,050,000) and max output tokens (128,000) resolution."""
-    # Maintained token limits catalog
-    limits_astra = maintained_token_limits("openai", "gpt-6-astra")
-    assert limits_astra == (1_050_000, 128_000)
-
-    limits_gpt6 = maintained_token_limits("openai", "gpt-6")
-    assert limits_gpt6 == (1_050_000, 128_000)
-
-    limits_short = maintained_token_limits("openai", "astra")
-    assert limits_short == (1_050_000, 128_000)
-
-    # ModelTokenProfileResolver resolution
-    resolver = ModelTokenProfileResolver()
-    profile = resolver.resolve(ModelIdentity("openai", "gpt-6-astra"))
-    assert profile.context_window == 1_050_000
-    assert profile.max_output_tokens == 128_000
-    assert profile.confidence == "high"
-
-    # Configured profiles resolution
-    profiles = configured_profiles([{"model_id": "gpt-6-astra", "provider": "openai", "supported_roles": ["coding"]}])
-    assert len(profiles) == 1
-    assert profiles[0].context_window == 1_050_000
-    assert profiles[0].max_output_tokens == 128_000
-
+def test_model_names_never_grant_token_limits(monkeypatch) -> None:
+    from mana_agent.llm.capabilities import ModelProfile
+    from mana_agent.context_cost.profiles import UnknownModelProfileError
+    monkeypatch.setattr("mana_agent.llm.registry.resolve_profile", lambda provider, model: ModelProfile(provider=provider, model_id=model))
+    with pytest.raises(UnknownModelProfileError):
+        ModelTokenProfileResolver().resolve(ModelIdentity("openai", "gpt-6-astra"))
 
 
 

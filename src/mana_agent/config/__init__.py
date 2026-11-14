@@ -1,6 +1,6 @@
 from .model_discovery import (
     GLOBAL_CAPABILITY_REGISTRY,
-    ModelCapabilityProfile,
+    ModelProfile,
     ModelCapabilityRegistry,
     ModelDiscoveryService,
     ModelMetadataResolver,
@@ -16,7 +16,7 @@ from .tool_compatibility import (
 __all__ = [
     "AdaptiveSkillsConfig",
     "GLOBAL_CAPABILITY_REGISTRY",
-    "ModelCapabilityProfile",
+    "ModelProfile",
     "ModelCapabilityRegistry",
     "ModelConfigurationValidator",
     "ModelDiscoveryService",

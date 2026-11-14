@@ -371,7 +371,7 @@ TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
     "get_media_generation_status": frozenset({"media.status.read"}),
     "cancel_media_generation": frozenset({"media.generation.cancel"}),
     "list_files": frozenset({"repository_read"}), "find_symbols": frozenset({"repository_read"}),
-    "semantic_search": frozenset({"repository_read"}), "call_graph": frozenset({"repository_read"}),
+    "repo_search": frozenset({"repository_read"}), "call_graph": frozenset({"repository_read"}),
     "read_skill": frozenset({"repository_read"}),
     "edit_file": frozenset({"repository_write"}), "multi_edit_file": frozenset({"repository_write"}),
     "apply_patch": frozenset({"repository_write"}), "apply_patch_batch": frozenset({"repository_write"}),

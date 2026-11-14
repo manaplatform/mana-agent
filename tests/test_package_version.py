@@ -38,26 +38,49 @@ def test_fastapi_app_version_matches_package() -> None:
     assert app.version == __version__
 
 
-def test_langchain_constraints_are_resolvable_and_consistent() -> None:
-    expected = {
-        "langchain>=1.3.9,<2.0.0",
-        "langchain-community>=0.3.27,<0.4.0",
-        "langchain-openai>=1.1.14,<2.0.0",
-    }
-    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    package_constraints = {
-        item
-        for item in pyproject["project"]["dependencies"]
-        if item.startswith(("langchain>", "langchain-community>", "langchain-openai>"))
-    }
-    requirements_constraints = {
-        line.strip()
-        for line in (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
-        if line.startswith(("langchain>", "langchain-community>", "langchain-openai>"))
-    }
+def test_native_dependencies_are_direct_and_forbidden_families_absent() -> None:
+    from packaging.requirements import Requirement
+    project = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    requirements = [line.strip() for line in (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.startswith("#")]
+    names = {Requirement(item).name.lower().replace("_", "-") for item in project["dependencies"]}
+    for group in [project["dependencies"], *project["optional-dependencies"].values(), requirements]:
+        for item in group:
+            name = Requirement(item).name.lower().replace("_", "-")
+            assert not name.startswith(("langchain", "langgraph", "langsmith", "faiss"))
+    assert {"openai", "anthropic", "httpx"} <= names
+    assert {str(Requirement(item)) for item in requirements} == {str(Requirement(item)) for item in project["dependencies"]}
 
-    assert package_constraints == expected
-    assert requirements_constraints == expected
+
+def test_audit_sources_handles_utf8_source_files_with_multibyte_characters(tmp_path: Path) -> None:
+    import importlib.util
+
+    script_path = _REPO_ROOT / "scripts" / "audit_native_dependencies.py"
+    spec = importlib.util.spec_from_file_location("audit_native_dependencies", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Multi-byte UTF-8 sequences containing byte 0x9d (e.g. right double quote \u201d -> \xe2\x80\x9d)
+    source_file = tmp_path / "sample_unicode.py"
+    source_file.write_bytes(
+        '"""Docstring with curly quotes “test” and symbols — ┝."""\n'
+        'MSG = "Hello from Windows UTF-8 test"\n'.encode("utf-8")
+    )
+    assert b"\x9d" in source_file.read_bytes()
+
+    failures = module.audit_sources(tmp_path)
+    assert failures == []
+
+    # Verify forbidden import detection continues to work in UTF-8 source files
+    bad_file = tmp_path / "forbidden.py"
+    forbidden_import = "import " + "lang" + "chain\n"
+    bad_file.write_bytes(
+        '"""Docstring with ”."""\n'.encode("utf-8")
+        + forbidden_import.encode("utf-8")
+    )
+    forbidden_failures = module.audit_sources(tmp_path)
+    assert any("forbidden import lang" in failure for failure in forbidden_failures)
 
 
 def test_full_extra_does_not_build_linux_desktop_input_dependencies() -> None:

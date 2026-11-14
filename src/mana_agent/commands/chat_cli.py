@@ -196,7 +196,7 @@ def _generate_planning_question_llm(
 ) -> str:
     qna_chain = getattr(ask_service, "qna_chain", None)
     llm = getattr(qna_chain, "llm", None)
-    if llm is None or not hasattr(llm, "invoke"):
+    if llm is None or not hasattr(llm, "generate_sync"):
         raise RuntimeError("planning question LLM is unavailable")
     prompt = (
         "Generate exactly one concise clarification question for a coding plan.\n"
@@ -207,7 +207,7 @@ def _generate_planning_question_llm(
     for idx, (prior_q, prior_a) in enumerate(zip(prior_questions, prior_answers), start=1):
         prompt += f"Q{idx}: {prior_q}\nA{idx}: {prior_a}\n"
     prompt += "Ask only for information that materially changes the implementation plan."
-    response = llm.invoke(prompt)
+    response = llm.generate_sync(prompt)
     content = str(getattr(response, "content", response) or "").strip()
     if not content:
         raise RuntimeError("planning question LLM returned an empty question")
@@ -242,9 +242,9 @@ def _decide_chat_route(
 def _model_selected_skill_ids(*, ask_service: Any, question: str, compact_index: str) -> list[str]:
     """Get a semantic skill selection from the model without keyword fallback."""
     llm = _agent_decision_llm(ask_service)
-    if llm is None or not hasattr(llm, "invoke"):
+    if llm is None or not hasattr(llm, "generate_sync"):
         raise RuntimeError("skill selection model is unavailable")
-    response = llm.invoke(
+    response = llm.generate_sync(
         "Select the smallest sufficient set of adaptive skill IDs for this task. "
         "Return strict JSON only: {\"selected_skill_ids\":[...]}. Do not select a skill "
         "unless its procedure is materially useful.\n\n"
@@ -478,7 +478,7 @@ def chat(
     dir_mode: bool = typer.Option(
         False,
         "--dir-mode",
-        help="Enable directory-aware chat mode (uses subproject indexes).",
+        help="Search discovered subprojects directly in directory-aware chat.",
     ),
     root_dir: str | None = typer.Option(
         None,
@@ -499,7 +499,7 @@ def chat(
     max_indexes: int = typer.Option(
         0,
         "--max-indexes",
-        help="Maximum discovered indexes to use in dir-mode (0 means unlimited).",
+        help="Maximum repository scopes in dir-mode (0 means unlimited).",
     ),
     auto_index_missing: bool = typer.Option(
         True,
@@ -570,7 +570,7 @@ def chat(
     coding_search_budget: int = typer.Option(
         4,
         "--coding-search-budget",
-        help="Max semantic_search calls per coding turn.",
+        help="Max repository searches per coding turn.",
     ),
     coding_read_budget: int = typer.Option(
         6,
@@ -943,16 +943,10 @@ def chat(
         inference_connection = resolve_inference_connection(settings, require_api_key=False)
         effective_base_url = inference_connection.base_url
         effective_api_key = inference_connection.api_key
-        tool_worker_model_assignment = resolve_model_for_role(
-            AgentRole.TOOL_WORKER,
-            global_model=settings.openai_tool_worker_model or effective_model,
-            routing_authority=stack.routing_authority,
-            session_id=stack.session_id,
-            workspace_id=str(stack.workspace_id or ""),
-            repository_id=str(stack.repository_id or ""),
-        )
-        effective_tool_worker_model = tool_worker_model_assignment.resolved_model
-    except (ValueError, RoutingFailure) as exc:
+    except RoutingFailure as exc:
+        console.print(f"Chat startup failed. {exc}", markup=False)
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     chat_log_path = stack.log_path or (
         default_logs_dir(root) / f"mana_agent_{datetime.now().strftime('%Y%m%d')}.log"
@@ -1014,7 +1008,6 @@ def chat(
         )
 
     tmp_root: tempfile.TemporaryDirectory | None = None
-    tmp_base: Path | None = None
     dir_mode_index_dirs: list[Path] = []
     background_index_state: dict[str, Any] = {"status": "idle", "announced": False, "error": ""}
     try:
@@ -1038,116 +1031,19 @@ def chat(
         resolved_index_dir: Path | None = None
 
         if dir_mode:
-            discovered_subprojects = _public_symbol("discover_subprojects", discover_subprojects)(root)
-            discovered_indexes = _public_symbol("discover_index_dirs", discover_index_dirs)(root)
-            discovered_index_set = {item.resolve() for item in discovered_indexes}
+            discovered = _public_symbol("discover_subprojects", discover_subprojects)(root)
+            dir_mode_index_dirs = sorted({project.root_path.resolve() for project in discovered}) or [root]
+            if max_indexes > 0:
+                dir_mode_index_dirs = dir_mode_index_dirs[:max_indexes]
+            chat_service.set_index_dirs(dir_mode_index_dirs)
+            chat_ui_state.index_path = f"{len(dir_mode_index_dirs)} repository scope(s)"
 
             if ephemeral_index and not index_dir:
-                tmp_root, tmp_base = _make_ephemeral_index_dir(prefix="mana_chat_indexes_")
-
-            index_service = _public_symbol("build_index_service", build_index_service)(settings)
-            auto_indexed_count = 0
-            skipped_missing_count = 0
-            warnings: list[str] = []
-            selected_indexes: list[Path] = []
-
-            def _auto_index(target_path: Path, idx_dir: Path) -> bool:
-                logger.info("Chat auto-index attempt", extra={"target_path": str(target_path), "idx_dir": str(idx_dir)})
-                try:
-                    _index_service_index_compat(
-                        index_service,
-                        target_path=target_path,
-                        index_dir=idx_dir,
-                        rebuild=False,
-                        vectors=True,
-                    )
-                    logger.info("Chat auto-index vectors success", extra={"idx_dir": str(idx_dir)})
-                    return True
-                except Exception as exc:
-                    warning = f"Vector index failed for {target_path} (fallback to chunks-only): {exc}"
-                    logger.warning(warning)
-                    warnings.append(warning)
-                    try:
-                        _index_service_index_compat(
-                            index_service,
-                            target_path=target_path,
-                            index_dir=idx_dir,
-                            rebuild=False,
-                            vectors=False,
-                        )
-                        logger.info("Chat auto-index chunks-only success", extra={"idx_dir": str(idx_dir)})
-                        return True
-                    except Exception as exc2:
-                        warning2 = f"Chunks-only index failed for {target_path}: {exc2}"
-                        logger.warning(warning2)
-                        warnings.append(warning2)
-                        return False
-
-            if discovered_subprojects:
-                for subproject in discovered_subprojects:
-                    if tmp_base is not None:
-                        expected_index = (tmp_base / _stable_subdir_name(subproject.root_path)).resolve()
-                        has_index_dir = expected_index.exists()
-                    else:
-                        expected_index = default_index_dir(subproject.root_path).resolve()
-                        has_index_dir = expected_index in discovered_index_set
-
-                    has_search_data = has_index_dir and _index_has_search_data(expected_index)
-
-                    if has_search_data:
-                        selected_indexes.append(expected_index)
-                        continue
-
-                    if auto_index_missing:
-                        ok = _auto_index(subproject.root_path, expected_index)
-                        if ok:
-                            auto_indexed_count += 1
-                            selected_indexes.append(expected_index)
-                        else:
-                            if _index_has_chunks(expected_index):
-                                selected_indexes.append(expected_index)
-                    else:
-                        skipped_missing_count += 1
-                        warning = f"Skipped missing or empty index for subproject {subproject.root_path}"
-                        logger.warning(warning)
-                        warnings.append(warning)
-
-            else:
-                if tmp_base is not None:
-                    root_index = (tmp_base / _stable_subdir_name(root)).resolve()
-                else:
-                    root_index = default_index_dir(root).resolve()
-
-                if root_index.exists() and _index_has_search_data(root_index):
-                    selected_indexes = [root_index]
-                elif auto_index_missing:
-                    ok = _auto_index(root, root_index)
-                    if ok:
-                        auto_indexed_count = 1
-                        selected_indexes = [root_index]
-                    else:
-                        if _index_has_chunks(root_index):
-                            selected_indexes = [root_index]
-
-            selected_indexes = sorted({item.resolve() for item in selected_indexes}, key=lambda p: str(p))
-            if max_indexes > 0:
-                selected_indexes = selected_indexes[:max_indexes]
-
-            if not selected_indexes:
-                msg = (
-                    f"No usable indexes found under {root}. "
-                    f"Try running: mana-agent index {root} "
-                    f"or re-run chat with --auto-index-missing."
-                )
-                _emit_text(msg, output_file=output_file)
-                logger.error("Chat aborted: no usable indexes", extra={"root": str(root)})
-                raise typer.Exit(code=2)
-
-            chat_service.set_index_dirs(selected_indexes)
-            dir_mode_index_dirs = selected_indexes
-            chat_ui_state.index_path = f"{len(selected_indexes)} dir-mode index(es)"
-            if warnings:
-                _emit_text("Warnings:\n" + "\n".join(f"- {w}" for w in warnings), output_file=output_file)
+                tmp_root, analysis_base = _make_ephemeral_index_dir(prefix="mana_chat_indexes_")
+                index_service = _public_symbol("build_index_service", build_index_service)(settings)
+                for repository in dir_mode_index_dirs:
+                    _index_service_index_compat(index_service, target_path=repository,
+                        index_dir=analysis_base / _stable_subdir_name(repository), rebuild=False)
 
         else:
             if ephemeral_index and not index_dir:
@@ -1158,15 +1054,11 @@ def chat(
                     target_path=root,
                     index_dir=resolved_index_dir,
                     rebuild=False,
-                    vectors=True,
                 )
             else:
                 resolved_index_dir = Path(index_dir).resolve() if index_dir else default_index_dir(root)
 
-            # Build the semantic index in the BACKGROUND when it is missing so chat
-            # is usable immediately (direct project-search fallback) and semantic
-            # search activates automatically once the index is ready. Indexing is
-            # never blocking and never prompts.
+            # Optional analysis metadata builds in the background. Repository search is live.
             if (
                 auto_index_missing
                 and not ephemeral_index
@@ -1181,11 +1073,11 @@ def chat(
                 )
 
             if background_index_state["status"] == "building":
-                index_state = "building in background; using direct project search until ready"
+                index_state = "analysis metadata building"
             elif _index_has_search_data(resolved_index_dir):
                 index_state = "ready"
             else:
-                index_state = "missing (run `mana-agent index`; using direct project search fallback)"
+                index_state = "optional analysis metadata missing"
             chat_ui_state.index_path = f"{resolved_index_dir} ({index_state})"
 
         # Keep gateway indexes in sync with CLI-resolved paths (shared by TUI/send).
@@ -1390,7 +1282,7 @@ def chat(
                 )
             policy = {
                 "allowed_tools": [
-                    "semantic_search",
+                    "repo_search",
                     "read_file",
                     "run_command",
                     "apply_patch",
@@ -1402,7 +1294,6 @@ def chat(
                 "read_line_window": 400,
                 "require_read_files": max(1, int(coding_require_read_files or settings.coding_require_read_files)),
                 "search_repeat_limit": 1,
-                "max_semantic_k": 50,
             }
             if auto_chat_mode is not None:
                 policy = apply_auto_chat_tool_policy(policy, auto_chat_mode)
@@ -1417,17 +1308,26 @@ def chat(
             if tools_manager_orchestrator is not None:
                 return tools_manager_orchestrator
             if tool_worker_client is None:
+                worker_assignment = stack.tool_worker_model_assignment
+                if worker_assignment is None:
+                    raise RoutingFailure("The gateway did not assign a tool worker model")
+                decision = worker_assignment.routing_decision
+                worker_connection = resolve_inference_connection(settings,
+                    provider=decision.provider if decision else None, require_api_key=False)
                 tool_worker_client_cls = _public_symbol("ToolWorkerClient", ToolWorkerClient)
                 tool_worker_client = tool_worker_client_cls(
-                    api_key=effective_api_key,
-                    model=effective_tool_worker_model,
+                    api_key=worker_connection.api_key,
+                    model=worker_assignment.resolved_model,
                     session_id=chat_ui_state.session_id,
-                    base_url=effective_base_url,
+                    base_url=worker_connection.base_url,
+                    provider=worker_connection.provider,
+                    default_headers=worker_connection.headers,
+                    model_configuration=decision.model_configuration if decision else None,
                     repo_root=root,
                     project_root=root,
                     allowed_prefixes=None,
                     tools_only_strict=tool_worker_strict,
-                    model_level=tool_worker_model_assignment.model_level,
+                    model_level=worker_assignment.model_level,
                     workspace_id=chat_ui_state.workspace_id,
                     repository_id=chat_ui_state.repository_id,
                 )
@@ -1517,26 +1417,6 @@ def chat(
                     "prechecklist_warning": "",
                 }, ""
             if dir_mode:
-                if not dir_mode_index_dirs:
-                    return {
-                        "answer": "Auto-execute unavailable: no dir-mode indexes resolved.",
-                        "warnings": [
-                            "auto_execute_missing_index_dirs",
-                            *[str(item).strip() for item in tools_execution_boot_warnings if str(item).strip()],
-                        ],
-                        "trace": [],
-                        "sources": [],
-                        "changed_files": [],
-                        "plan": None,
-                        "passes": 0,
-                        "terminal_reason": "missing_indexes",
-                        "toolsmanager_requests_count": 0,
-                        "pass_logs": [],
-                        "planner_decisions": [],
-                        "prechecklist": None,
-                        "prechecklist_source": "",
-                        "prechecklist_warning": "",
-                    }, ""
                 target_index_dir: Path | None = None
                 target_index_dirs: list[Path] | None = list(dir_mode_index_dirs)
             else:
@@ -1934,8 +1814,8 @@ def chat(
                     "next_step": payload.get("terminal_reason", ""),
                     "flow_id": active_flow_id,
                     "duplicate_request_skips": int(payload.get("duplicate_request_skips", 0) or 0),
-                    "duplicate_semantic_search_skips": int(
-                        payload.get("duplicate_semantic_search_skips", 0) or 0
+                    "duplicate_repository_search_skips": int(
+                        payload.get("duplicate_repository_search_skips", 0) or 0
                     ),
                     "request_retry_attempts": int(payload.get("request_retry_attempts", 0) or 0),
                     "request_retry_exhausted": int(payload.get("request_retry_exhausted", 0) or 0),
@@ -2126,16 +2006,15 @@ def chat(
                 gateway.request_shutdown(source="ctrl_c", session_id=chat_ui_state.session_id)
                 break
 
-            # Announce background-index completion once, so the user knows when
-            # semantic search becomes active.
+            # Announce completion of the optional local analysis pass once.
             if not background_index_state.get("announced", False):
                 bg_status = background_index_state.get("status")
                 if bg_status == "ready":
-                    console.print("[green]Semantic index ready — semantic search is now active.[/green]")
+                    console.print("[green]Local analysis metadata is ready.[/green]")
                     background_index_state["announced"] = True
                 elif bg_status == "failed":
                     console.print(
-                        "[yellow]Background indexing failed; continuing with direct project search.[/yellow]"
+                        "[yellow]Background analysis failed. Repository search is available.[/yellow]"
                     )
                     background_index_state["announced"] = True
 
@@ -2559,13 +2438,13 @@ def chat(
                 continue
 
             # -----------------------------
-            # Direct command fast-path (no FAISS / RAG / CodingAgent).
+            # Direct command fast path.
             # -----------------------------
             direct_command = _classify_direct_command(question)
             if direct_command is not None:
                 if dir_mode:
                     index_available = any(
-                        _index_has_search_data(item) for item in dir_mode_index_dirs
+                        _index_has_search_data(default_index_dir(item)) for item in dir_mode_index_dirs
                     )
                 else:
                     index_available = bool(
@@ -3023,8 +2902,6 @@ def chat(
                 stop()
         if tmp_root is not None:
             tmp_root.cleanup()
-        if tmp_base is not None:
-            tmp_base.cleanup()
 
     if single_shot_noninteractive and single_shot_exit_code:
         raise typer.Exit(code=int(single_shot_exit_code))

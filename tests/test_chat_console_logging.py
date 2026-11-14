@@ -16,7 +16,7 @@ def test_quiet_filter_drops_normal_logs_keeps_warnings(monkeypatch) -> None:
     assert f.filter(_rec("mana_agent.parsers.python_parser", logging.DEBUG)) is False
     assert f.filter(_rec("mana_agent.analysis.chunker", logging.INFO)) is False
     assert f.filter(_rec("mana_agent.services.index_service", logging.DEBUG)) is False
-    assert f.filter(_rec("mana_agent.vector_store.faiss_store", logging.INFO)) is False
+    assert f.filter(_rec("mana_agent.llm.engine", logging.INFO)) is False
     assert f.filter(_rec("mana_agent.commands.cli_internal", logging.INFO)) is False
     assert f.filter(_rec("mana_agent.multi_agent.runtime.tool_worker_process", logging.INFO)) is False
 

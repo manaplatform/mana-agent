@@ -52,6 +52,9 @@ class ProgrammaticExecutionState:
     total_tokens: dict[str, int] = field(default_factory=dict)
     verification_results: list[dict[str, Any]] = field(default_factory=list)
     executed_operations: list[dict[str, Any]] = field(default_factory=list)
+    native_continuation: dict[str, Any] | None = None
+    native_messages: list[dict[str, Any]] = field(default_factory=list)
+    native_pending_calls: list[str] = field(default_factory=list)
     active: bool = True
 
 
@@ -572,7 +575,7 @@ class ToolExecutionDispatcher:
             try:
                 tools = {t.name: t for t in build_email_tools()}
                 if name in tools:
-                    res = tools[name].invoke(args)
+                    res = tools[name].call(args)
                     return json.loads(res) if isinstance(res, str) else {"ok": True, "result": res}
                 return {"ok": False, "error": f"Email tool not found: {name}", "error_code": "UNKNOWN_TOOL"}
             except Exception as exc:
@@ -638,15 +641,6 @@ class ToolExecutionDispatcher:
                     "results": [item.model_dump() if hasattr(item, "model_dump") else item for item in search_res.web_results],
                     "summary": search_res.context_block(),
                 }
-            except Exception as exc:
-                return {"ok": False, "error": str(exc), "error_code": "SEARCH_FAILED"}
-
-        elif name == "semantic_search":
-            query = str(args.get("query") or "")
-            k = int(args.get("k") or 6)
-            try:
-                res = repo_search(self.repo_root, query=query, limit=k)
-                return json.loads(res) if isinstance(res, str) else res
             except Exception as exc:
                 return {"ok": False, "error": str(exc), "error_code": "SEARCH_FAILED"}
 
@@ -819,11 +813,11 @@ class ProgrammaticExecutionSession:
             task_id=self.task_id,
             backend=self.backend_name,
             sequence=self._next_sequence(),
-            title="Generated JavaScript Program Execution",
-            summary=f"Executing {len(code.splitlines())} lines of generated tool orchestration code",
+            title="Hosted JavaScript program selected",
+            summary=f"Observed hosted program with {len(code.splitlines())} lines; client tools remain guarded",
             visibility="progress",
             semantic_kind="program_execution",
-            payload={"call_id": program_id, "code_preview": code[:2000]},
+            payload={"call_id": program_id, "line_count": len(code.splitlines())},
         ))
 
     def handle_function_call(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -831,16 +825,12 @@ class ProgrammaticExecutionSession:
         call_id = str(item.get("call_id") or "")
         tool_name = str(item.get("name") or "")
         raw_args = item.get("arguments", {})
-        if isinstance(raw_args, str):
-            try:
-                arguments = json.loads(raw_args)
-            except Exception:
-                arguments = {"raw": raw_args}
-        else:
-            arguments = dict(raw_args)
+        arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        if not call_id or not tool_name or not isinstance(arguments, dict):
+            raise ValueError("Programmatic calls require an original call ID, registered name and complete JSON arguments")
 
         caller = item.get("caller")
-        caller_prog_id = str(caller.get("call_id") or "") if isinstance(caller, dict) else None
+        caller_prog_id = str(caller.get("caller_id") or caller.get("call_id") or "") if isinstance(caller, dict) else None
 
         if self.state.tool_calls_executed >= self.state.max_tool_calls:
             err_msg = f"Maximum tool calls budget ({self.state.max_tool_calls}) exceeded for program"

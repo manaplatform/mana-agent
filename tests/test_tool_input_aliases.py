@@ -27,7 +27,7 @@ def test_apply_patch_tool_accepts_patch_alias(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr("mana_agent.tools.apply_patch.safe_apply_patch", _fake_safe_apply_patch)
 
     tool = build_apply_patch_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"patch": "*** Begin Patch\n*** End Patch", "check_only": True})
+    result = tool.call({"patch": "*** Begin Patch\n*** End Patch", "check_only": True})
 
     assert result["ok"] is True
     assert captured["patch"] == "*** Begin Patch\n*** End Patch"
@@ -52,7 +52,7 @@ def test_apply_patch_tool_accepts_nested_patch_payload(monkeypatch, tmp_path: Pa
     monkeypatch.setattr("mana_agent.tools.apply_patch.safe_apply_patch", _fake_safe_apply_patch)
 
     tool = build_apply_patch_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"patch": {"patch": patch_text}})
+    result = tool.call({"patch": {"patch": patch_text}})
 
     assert result["ok"] is True
     assert captured["patch"] == patch_text
@@ -60,7 +60,7 @@ def test_apply_patch_tool_accepts_nested_patch_payload(monkeypatch, tmp_path: Pa
 
 def test_apply_patch_tool_rejects_structured_patch_list(tmp_path: Path) -> None:
     tool = build_apply_patch_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"patch": [{"path": "sample.py", "hunks": []}]})
+    result = tool.call({"patch": [{"path": "sample.py", "hunks": []}]})
 
     assert result["ok"] is False
     assert result["error_code"] == "invalid_patch_format"
@@ -84,7 +84,7 @@ def test_apply_patch_tool_accepts_input_alias(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr("mana_agent.tools.apply_patch.safe_apply_patch", _fake_safe_apply_patch)
 
     tool = build_apply_patch_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"input": patch_text})
+    result = tool.call({"input": patch_text})
 
     assert result["ok"] is True
     assert captured["patch"] == patch_text
@@ -112,7 +112,7 @@ def test_write_file_tool_accepts_text_alias(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr("mana_agent.tools.write_file.safe_write_file", _fake_safe_write_file)
 
     tool = build_write_file_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"path": "src/new_file.py", "text": "print('ok')\n"})
+    result = tool.call({"path": "src/new_file.py", "text": "print('ok')\n"})
 
     assert result["ok"] is True
     assert captured["path"] == "src/new_file.py"
@@ -138,7 +138,7 @@ def test_create_file_tool_accepts_text_alias(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr("mana_agent.tools.write_file.safe_create_file", _fake_safe_create_file)
 
     tool = build_create_file_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"path": "src/new_file.py", "text": "print('ok')\n"})
+    result = tool.call({"path": "src/new_file.py", "text": "print('ok')\n"})
 
     assert result["ok"] is True
     assert captured["path"] == "src/new_file.py"
@@ -197,7 +197,7 @@ def test_delete_file_tool_calls_safe_delete_file(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr("mana_agent.tools.write_file.safe_delete_file", _fake_safe_delete_file)
 
     tool = build_delete_file_tool(repo_root=tmp_path, allowed_prefixes=None)
-    result = tool.invoke({"path": "src/old.py"})
+    result = tool.call({"path": "src/old.py"})
 
     assert result["ok"] is True
     assert captured["path"] == "src/old.py"

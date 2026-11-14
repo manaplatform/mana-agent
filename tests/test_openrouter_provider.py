@@ -40,14 +40,14 @@ def test_openrouter_catalog_preserves_ids_and_capabilities() -> None:
         "id": "anthropic/claude-3.7-sonnet:free",
         "name": "Claude",
         "context_length": 200000,
-        "supported_parameters": ["tools", "response_format", "reasoning"],
+        "supported_parameters": ["tools", "structured_outputs", "reasoning"],
         "architecture": {"input_modalities": ["text", "image"]},
     }, {
-        "id": "openai/dall-e-3",
+        "id": "openai/dall-e-3", "image_generation": True,
     }, {
-        "id": "openai/text-embedding-3-small",
+        "id": "openai/text-embedding-3-small", "capabilities": ["embedding"],
     }, {
-        "id": "haiper/haiper-video-2",
+        "id": "haiper/haiper-video-2", "output_modalities": ["video"],
     }]})
     models = ModelCatalogService(fetcher=lambda **_kwargs: records).refresh(
         provider="openrouter", base_url="https://openrouter.ai/api/v1", api_key="secret"
@@ -74,7 +74,7 @@ def test_openrouter_configuration_persists_provider_model_pair(isolated_openrout
     draft = ConfigurationDraft.load()
     draft.set_secret("OPENROUTER_API_KEY", "secret")
     draft.values["OPENROUTER_BASE_URL"] = "https://openrouter.ai/api/v1"
-    draft.set_models(provider="openrouter", high="openai/gpt-4.1-mini", coding="openai/gpt-4.1-mini", fast="openai/gpt-4.1-mini", embedding="openai/text-embedding-3-small")
+    draft.set_models(provider="openrouter", high="openai/gpt-4.1-mini", coding="openai/gpt-4.1-mini", fast="openai/gpt-4.1-mini")
     draft.save()
     values = user_config.load_effective_settings(include_env=False)
     assert values["MANA_AI_PROVIDER"] == "openrouter"

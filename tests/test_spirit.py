@@ -220,9 +220,21 @@ def test_conversation_executor_binds_routed_spirit_after_model_selection() -> No
     captured: list[object] = []
 
     class _LLM:
-        def invoke(self, messages):
+        def generate_sync(self, messages, **_native_options):
             captured.extend(messages)
             return SimpleNamespace(content="ok")
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     chain = QnAChain.__new__(QnAChain)
     chain.llm = _LLM()
@@ -415,14 +427,14 @@ def test_conversation_executor_executes_context_tool_call() -> None:
     class _Tool:
         name = "conversation_context_read"
 
-        def invoke(self, args):
+        def call(self, args):
             return json.dumps({"turns": [{"role": "user", "content": "previous turn"}]})
 
     class _BoundLLM:
         def __init__(self):
             self.calls = 0
 
-        def invoke(self, messages):
+        def generate_sync(self, messages, **_native_options):
             self.calls += 1
             if self.calls == 1:
                 return SimpleNamespace(
@@ -431,8 +443,20 @@ def test_conversation_executor_executes_context_tool_call() -> None:
                 )
             return SimpleNamespace(content="Based on our previous turn, here is the answer.")
 
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
+
     class _LLM:
-        def bind_tools(self, tools):
+        def with_tools(self, tools, **_native_options):
             return _BoundLLM()
 
     chain = QnAChain.__new__(QnAChain)
@@ -449,14 +473,14 @@ def test_conversation_executor_recovers_from_text_tool_call() -> None:
     class _Tool:
         name = "conversation_context_read"
 
-        def invoke(self, args):
+        def call(self, args):
             return json.dumps({"turns": [{"role": "user", "content": "previous message"}]})
 
     class _LLM:
         def __init__(self):
             self.calls = 0
 
-        def invoke(self, messages):
+        def generate_sync(self, messages, **_native_options):
             self.calls += 1
             if self.calls == 1:
                 return SimpleNamespace(
@@ -464,6 +488,18 @@ def test_conversation_executor_recovers_from_text_tool_call() -> None:
                     tool_calls=[],
                 )
             return SimpleNamespace(content="I checked our conversation: you said previous message.")
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     chain = QnAChain.__new__(QnAChain)
     chain.llm = _LLM()

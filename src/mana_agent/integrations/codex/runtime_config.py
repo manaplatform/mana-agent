@@ -328,14 +328,14 @@ def _mana_model_capability_bridge(
         from mana_agent.config.model_capabilities import resolve_model_capability
         from mana_agent.config.model_catalog import (
             ModelCapability,
-            maintained_token_limits,
+            cached_token_limits,
             normalize_capabilities,
         )
     except Exception:
         return None, None, None
 
     desc = resolve_model_capability(provider_val, model_val, transport=transport_val)
-    limits = maintained_token_limits(provider_val, model_val)
+    limits = cached_token_limits(provider_val, model_val)
     context_window: int | None = None
     auto_compact: int | None = None
     if limits is not None:

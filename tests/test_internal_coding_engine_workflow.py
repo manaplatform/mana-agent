@@ -22,7 +22,7 @@ class _FakeMultiToolLLM:
         self.final_response = final_response
         self.turn = 0
 
-    def bind_tools(self, tools: list[dict[str, Any]]) -> "_FakeMultiToolLLM":
+    def with_tools(self, tools: list[dict[str, Any]], **_native_options) -> "_FakeMultiToolLLM":
         return self
 
     async def ainvoke(self, messages: list[Any]) -> Any:

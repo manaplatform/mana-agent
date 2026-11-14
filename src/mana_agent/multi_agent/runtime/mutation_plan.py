@@ -50,7 +50,7 @@ ARCHITECTURE_SOURCE_DIRS = (
     "src/mana_agent/config/",
     "src/mana_agent/prompting/",
     "src/mana_agent/skills/",
-    "src/mana_agent/vector_store/",
+    "src/mana_agent/llm/",
     "src/mana_agent/ui/",
     "src/mana_agent/renderers/",
 )
@@ -92,7 +92,7 @@ ARCHITECTURE_INTENDED_CHANGES = (
     "Tool manager and mutation tools",
     "Repository search/read/write tools",
     "Analyze service and generated artifacts",
-    "Indexing and FAISS vector store",
+    "Repository analysis and search",
     "Skills / progressive skill loading",
     "UI/rendering layer",
     "Verification and safety gates",

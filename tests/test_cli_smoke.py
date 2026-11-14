@@ -655,15 +655,14 @@ def test_chat_root_dir_applies_to_worker_and_coding_agent_in_classic_mode(monkey
     assert _FakeCodingAgent.init_kwargs.get("repo_root") == tmp_path.resolve()
 
 
-def test_chat_ping_returns_pong_without_faiss_index(monkeypatch, tmp_path: Path) -> None:
-    # ping is a direct command: it must answer without any FAISS index, RAG,
-    # or coding-agent search, even when the project has never been indexed.
+@pytest.mark.parametrize("mode", [[], ["--dir-mode", "--no-auto-index-missing"]])
+def test_chat_ping_returns_pong_without_analysis_metadata(monkeypatch, tmp_path: Path, mode: list[str]) -> None:
     class _AskService(FakeAskService):
         def __init__(self) -> None:
             self.ask_agent = SimpleNamespace()
 
         def ask_with_tools(self, *_a: object, **_k: object):
-            raise AssertionError("ping must not trigger semantic search")
+            raise AssertionError("ping must not trigger repository search")
 
     class _FakeWorkerClient:
         def __init__(self, **_kwargs: object) -> None:
@@ -693,10 +692,9 @@ def test_chat_ping_returns_pong_without_faiss_index(monkeypatch, tmp_path: Path)
     monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", _FakeWorkerClient)
     monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", _FakeCodingAgent)
 
-    # No .mana/index directory exists under tmp_path -> no FAISS index.
     result = runner.invoke(
         app,
-        ["chat", "--root-dir", str(tmp_path)],
+        ["chat", "--root-dir", str(tmp_path), *mode],
         input="ping\nquit\n",
     )
     assert result.exit_code == 0
@@ -787,7 +785,7 @@ def test_chat_agent_tools_mode_renders_answer_without_diagnostic_panels(monkeypa
                 mode="agent-tools",
                 trace=[
                     {
-                        "tool_name": "semantic_search",
+                        "tool_name": "repo_search",
                         "status": "ok",
                         "duration_ms": 3.5,
                         "args_summary": "query='planner'",
@@ -1325,9 +1323,21 @@ def test_chat_planning_mode_auto_executes_after_clarifications(monkeypatch, tmp_
         def __init__(self) -> None:
             self.calls = 0
 
-        def invoke(self, _messages):
+        def generate_sync(self, _messages, **_native_options):
             self.calls += 1
             return type("_Msg", (), {"content": f"Clarification question {self.calls}?"})()
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     class _AskService(FakeAskService):
         def __init__(self) -> None:
@@ -1423,9 +1433,21 @@ def test_chat_planning_mode_no_auto_execute_keeps_plan_only_behavior(monkeypatch
         def __init__(self) -> None:
             self.calls = 0
 
-        def invoke(self, _messages):
+        def generate_sync(self, _messages, **_native_options):
             self.calls += 1
             return type("_Msg", (), {"content": f"Clarification question {self.calls}?"})()
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     class _AskService(FakeAskService):
         def __init__(self) -> None:

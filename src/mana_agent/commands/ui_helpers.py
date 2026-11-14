@@ -22,7 +22,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from langchain_core.callbacks.base import BaseCallbackHandler
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
@@ -92,7 +91,7 @@ def _sanitize_full_auto_answer_text(
     return raw
 
 
-class RichToolCallbackHandler(BaseCallbackHandler):
+class RichToolActivityObserver:
     """Correlate concurrent callbacks by their registered run ID."""
 
     def __init__(self, *, show_inputs: bool = True) -> None:
@@ -104,7 +103,7 @@ class RichToolCallbackHandler(BaseCallbackHandler):
     def _run_key(kwargs: dict[str, Any]) -> str:
         return str(kwargs.get("run_id") or f"thread-{threading.get_ident()}")
 
-    def on_tool_start(self, serialized, input_str: str, **kwargs) -> None:
+    def tool_started(self, serialized, input_str: str, **kwargs) -> None:
         from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
         if current_operation() is not None:
             return
@@ -122,7 +121,7 @@ class RichToolCallbackHandler(BaseCallbackHandler):
             tool, started, event_id = self._runs.pop(self._run_key(kwargs), ("tool", time.monotonic(), None))
         return tool, max(0.0, time.monotonic() - started), event_id
 
-    def on_tool_end(self, output: str, **kwargs) -> None:
+    def tool_finished(self, output: str, **kwargs) -> None:
         from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
         if current_operation() is not None:
             return
@@ -132,7 +131,7 @@ class RichToolCallbackHandler(BaseCallbackHandler):
         else:
             emit_tool_event("end", tool, duration=duration, event_id=event_id)
 
-    def on_tool_error(self, error: BaseException, **kwargs) -> None:
+    def tool_failed(self, error: BaseException, **kwargs) -> None:
         from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
         if current_operation() is not None:
             return
@@ -972,7 +971,7 @@ def _looks_like_edit_request(question: str) -> bool:
     )
 
 
-# Simple health/chat commands answered directly, without FAISS / RAG / CodingAgent.
+# Direct health and chat commands.
 _DIRECT_COMMANDS: frozenset[str] = frozenset(
     {
         "ping",
@@ -1228,23 +1227,19 @@ def _render_direct_command(
             "- /clear — clear visible history\n"
             "- /exit / /quit — leave chat\n"
             "\n"
-            "Otherwise just ask: I search the project (semantic index when available,\n"
-            "ripgrep/static search otherwise), read files, and can edit/fix code."
+            "Otherwise just ask. I search repository text, inspect files and symbols, and can edit code."
         )
     elif normalized == "status":
         if ui_state is not None:
             full = str(raw_question or "").strip().lower() in {"/status full", "status full"}
             _print(render_status(ui_state, full=full))
             return "Displayed full status." if full else "Displayed status."
-        index_line = (
-            "available (semantic search enabled)"
-            if index_available
-            else "missing (using direct project search fallback; run `mana-agent index` to enable)"
-        )
+        index_line = "available" if index_available else "unavailable"
         answer = (
             "mana-agent chat status\n"
             f"- project root: {str(project_root).replace(chr(92), '/')}\n"
-            f"- semantic index: {index_line}\n"
+            f"- repository search: live\n"
+            f"- optional analysis metadata: {index_line}\n"
             f"- coding agent: {'active' if coding_agent_active else 'inactive'}\n"
             f"- tool worker: {'active' if tool_worker_active else 'inactive'}"
         )
@@ -1363,7 +1358,7 @@ def _run_with_live_buffer(
     *,
     spinner_text: str,
     fn,  # callable
-    callbacks: list[BaseCallbackHandler] | None = None,
+    callbacks: list[Any] | None = None,
     show_all_logs: bool = False,
     activity: LiveToolActivity | None = None,
     manage_live: bool = True,

@@ -1,7 +1,7 @@
 """Unit tests for model text extraction and reasoning filter."""
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage
+from mana_agent.llm.messages import AssistantMessage, UserMessage
 
 from mana_agent.utils.text import extract_model_text
 
@@ -53,7 +53,7 @@ def test_extract_model_text_handles_multiple_text_blocks() -> None:
 
 
 def test_extract_model_text_from_ai_message() -> None:
-    message = AIMessage(
+    message = AssistantMessage(
         content=[
             {"type": "reasoning", "encrypted_content": "xyz123"},
             {"type": "text", "text": "The answer is 42."},

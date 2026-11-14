@@ -84,3 +84,20 @@ def test_apply_patch_batch_validates_and_applies_multiple_patches(tmp_path: Path
     assert result["changed_files"] == ["a.txt", "b.txt"]
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "new a\n"
     assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "new b\n"
+
+
+def test_repository_search_ignores_external_symlinks_and_local_credential_files(tmp_path):
+    from mana_agent.tools.repository import repo_search
+    root = tmp_path / "repo"
+    root.mkdir()
+    external = tmp_path / "protected.txt"
+    external.write_text("fixture marker\n")
+    (root / ".env").write_text("fixture marker\n")
+    (root / "visible.txt").write_text("fixture marker\n")
+    import pytest
+    try:
+        (root / "outside.txt").symlink_to(external)
+    except OSError:
+        pytest.skip("creating symlinks requires local OS support")
+    result = repo_search(root, query="fixture marker")
+    assert [item["file"] for item in result["matches"]] == ["visible.txt"]

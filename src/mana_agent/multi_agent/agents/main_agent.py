@@ -68,8 +68,6 @@ class _MainAgentSkillDraftGenerator:
 
     def __init__(self, llm: Any) -> None:
         self.llm = llm
-        structured = getattr(llm, "with_structured_output", None)
-        self.model = structured(SkillDraft) if callable(structured) else None
 
     def generate(self, experience: ExperienceRecord, decision) -> SkillDraft:  # noqa: ANN001
         prompt = (
@@ -79,20 +77,7 @@ class _MainAgentSkillDraftGenerator:
             f"Eligibility:\n{decision.model_dump_json(indent=2)}\n\n"
             f"Recorded evidence:\n{experience.model_dump_json(indent=2)}"
         )
-        if self.model is not None:
-            try:
-                value = self.model.invoke(prompt)
-                return value if isinstance(value, SkillDraft) else SkillDraft.model_validate(value)
-            except Exception:
-                pass
-        raw = self.llm.invoke(prompt)
-        text = extract_model_text(getattr(raw, "content", raw))
-        if text.startswith("```"):
-            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        return SkillDraft.model_validate_json(text)
+        return self.llm.decide_sync(prompt, SkillDraft)
 
 
 class MainAgent:

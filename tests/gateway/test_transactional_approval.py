@@ -78,10 +78,10 @@ def test_transactional_action_approval_command_mcp_action_executes(tmp_path: Pat
 
     mock_tool = MagicMock()
     mock_tool.metadata = {"mcp_provider_id": "test_server", "mcp_tool_name": "scan_port"}
-    mock_tool.invoke = MagicMock(side_effect=fake_mcp_call)
+    mock_tool.call = MagicMock(side_effect=fake_mcp_call)
 
     import mana_agent.mcp.tools as mcp_tools_mod
-    monkeypatch.setattr(mcp_tools_mod, "discovered_mcp_langchain_tools", lambda server_ids: ([mock_tool], []))
+    monkeypatch.setattr(mcp_tools_mod, "discovered_mcp_tools", lambda server_ids: ([mock_tool], []))
 
     adapter = McpActionAdapter(
         provider_id="test_server",

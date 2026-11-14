@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, Field
 
 from .models import TeachError
@@ -60,21 +60,21 @@ def _response(operation) -> str:
         )
 
 
-def build_teach_langchain_tools() -> list[Any]:
+def build_teach_tools() -> list[Any]:
     """Build lazy local tools; no recorder starts until the model selects start."""
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="teach_start",
             description="Start an explicit visible local Teach Mode recording for a user-named task.",
-            args_schema=_Start,
+            input_model=_Start,
             func=lambda task_name, permissions, desktop, source_decision_id: _response(
                 lambda: TeachService().start(task_name, permissions=permissions, desktop=desktop)
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="teach_stop",
             description="Stop an active Teach recording and compile a draft flow requiring review.",
-            args_schema=_Session,
+            input_model=_Session,
             func=lambda source_decision_id, session_id=None: _response(
                 lambda: {
                     "session": (result := TeachService().stop(session_id))[0].model_dump(mode="json"),
@@ -82,35 +82,35 @@ def build_teach_langchain_tools() -> list[Any]:
                 }
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="teach_explain",
             description="Attach a typed parameterization hint to the active recording.",
-            args_schema=_Explain,
+            input_model=_Explain,
             func=lambda explanation, source_decision_id, session_id=None: _response(
                 lambda: TeachService().explain(explanation, session_id)
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="teach_list_flows",
             description="List local learned Mana Flows and activation status.",
-            args_schema=_Decision,
+            input_model=_Decision,
             func=lambda source_decision_id: _response(lambda: TeachService().storage.list_flows()),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="teach_replay",
             description="Dry-run, guide, or normally replay an explicitly selected learned flow; verification determines success.",
-            args_schema=_Replay,
+            input_model=_Replay,
             func=lambda flow_id, mode, inputs, source_decision_id: _response(
                 lambda: TeachService().replay(flow_id, mode=mode, inputs=inputs)
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="teach_automation_handoff",
             description=(
                 "Return secret-free structured metadata for an exact reviewed and verified "
                 "Teach flow version before creating an automation."
             ),
-            args_schema=_Handoff,
+            input_model=_Handoff,
             func=lambda flow_id, source_decision_id, version=None: _response(
                 lambda: TeachService().automation_handoff(flow_id, version=version)
             ),

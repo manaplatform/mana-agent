@@ -1551,10 +1551,7 @@ def build_apply_patch_tool(
     repo_root: Path,
     allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES,
 ):
-    try:
-        from langchain_core.tools import StructuredTool  # type: ignore[import-untyped]
-    except Exception:  # pragma: no cover
-        from langchain.tools import StructuredTool  # type: ignore[import-untyped]
+    from mana_agent.llm.tools import ToolBinding
 
     def _tool(
         patch: Any | None = None,
@@ -1575,7 +1572,7 @@ def build_apply_patch_tool(
             action_approval_id=action_approval_id,
         )
 
-    return StructuredTool.from_function(
+    return ToolBinding.from_callable(
         func=_tool,
         name="apply_patch",
         description=(

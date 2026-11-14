@@ -278,7 +278,7 @@ class FakeTool:
     def __init__(self, name: str, description: str = "tool") -> None:
         self.name = name
         self.description = description
-        self.args_schema = None
+        self.input_model = None
 
 
 def test_capability_manifest_load_never_widens_authorization_and_saves_schemas() -> None:

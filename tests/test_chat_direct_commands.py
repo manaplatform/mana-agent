@@ -39,7 +39,7 @@ def test_render_ping_returns_pong_without_index() -> None:
     assert answer == "pong"
 
 
-def test_render_status_reports_index_and_agent_state() -> None:
+def test_render_status_reports_live_search_and_optional_analysis() -> None:
     console = Console(record=True, force_terminal=False)
     answer = _render_direct_command(
         console,
@@ -50,7 +50,8 @@ def test_render_status_reports_index_and_agent_state() -> None:
         tool_worker_active=True,
     )
     assert "/tmp/proj" in answer
-    assert "missing" in answer  # semantic index missing -> fallback messaging
+    assert "repository search: live" in answer
+    assert "optional analysis metadata: unavailable" in answer
     assert "coding agent: active" in answer
     assert "tool worker: active" in answer
 

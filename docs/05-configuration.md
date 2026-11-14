@@ -198,7 +198,7 @@ When no saved user config exists, the CLI prints the Mana banner first, then sta
 - Configure first-class providers: **OpenAI**, **OpenRouter**, **NVIDIA** (Build / NIM), **Anthropic**, **xAI (Grok)**, or a custom OpenAI-compatible endpoint.
 - Enter the selected provider's API key without echoing it back (NVIDIA uses `NVIDIA_API_KEY`, never `OPENAI_API_KEY`).
 - Fetch models dynamically from the selected provider's model catalog endpoint. Anthropic uses `GET /v1/models`; its base URL may be the API host root or include `/v1`.
-- Select chat, tool-worker, coding-planner, and embedding models.
+- Select the Main, tool-worker and coding models. No repository embedding model is required.
 - Assign model levels for Mana roles such as main, planner, coding, verifier, reviewer, tool, and summarizer.
 - Configure web and GitHub search providers.
 - Save a masked config summary for review.
@@ -257,14 +257,12 @@ Chat Completions-only hosts). Codex receives a temporary local token and never
 sees `NVIDIA_API_KEY`. Mana still attributes context/cost accounting to
 `provider=nvidia` with transport `codex_responses_bridge`.
 
-**DeepSeek V4 on NVIDIA:** models such as `deepseek-ai/deepseek-v4-flash` and
-`deepseek-ai/deepseek-v4-pro` require NIM `chat_template_kwargs` (`thinking` +
-`reasoning_effort` in `none`/`high`/`max`). Mana injects these automatically for
-both direct chat and the Codex bridge. Direct LangChain/OpenAI-SDK calls nest
-them under `extra_body` (required by `Completions.create`); the Codex Responses
-bridge sends them as top-level Chat Completions JSON fields. Without them,
-NVIDIA may hang, return 4xx/410, or disconnect the Codex stream as a generic
-`systemError`.
+Provider-specific parameters belong in explicit model configuration. For example,
+a provider's documented `chat_template_kwargs` can be supplied in `extra_body`.
+Mana passes these settings through without model-name guesses, forced reasoning
+changes, or feature downgrades. The Codex bridge flattens configured `extra_body`
+for its raw HTTP request. Capability overrides and evidence are managed in the
+Capabilities settings panel; see [the native engine guide](native-llm-engine.md).
 
 Saved files:
 
@@ -412,7 +410,6 @@ OPENAI_CHAT_MODEL="gpt-4.1"
 LLM_MODEL="gpt-4.1"
 OPENAI_TOOL_WORKER_MODEL="gpt-4.1"
 OPENAI_CODING_PLANNER_MODEL="gpt-4.1"
-OPENAI_EMBED_MODEL="text-embedding-3-small"
 MODEL_LEVEL_3_HIGH_REASONING="gpt-4.1"
 MODEL_LEVEL_2_CODING="gpt-4.1"
 MODEL_LEVEL_1_FAST_TOOL="gpt-4.1-mini"
@@ -420,11 +417,6 @@ DEFAULT_TOP_K=8
 MANA_LLM_LOG_FILE=
 MANA_LLM_API_MODE=auto
 MANA_LLM_REASONING_EFFORT=
-MANA_LLM_SUPPORTS_RESPONSES_API=
-MANA_LLM_SUPPORTS_CHAT_COMPLETIONS=
-MANA_LLM_SUPPORTS_TOOLS=
-MANA_LLM_SUPPORTS_REASONING=
-MANA_LLM_SUPPORTS_TOOLS_WITH_CHAT_REASONING=
 MANA_MANAGED_WORKTREES_ENABLED=true
 MANA_CODEX_ENABLED=true
 MANA_CODEX_BIN=codex
@@ -506,29 +498,22 @@ reasoning options, and provider capability flags are resolved from
 through their validated initialization payload and remove conflicting LLM
 configuration variables from the inherited process environment.
 
-## OpenAI-Compatible LLM Capabilities
+## Inference protocols and capability evidence
 
-Mana-Agent automatically uses the Responses API for tool calls when the active
-endpoint is OpenAI. This also supports reasoning models that enable reasoning
-by default and reject function tools through Chat Completions. Custom
-`OPENAI_BASE_URL` gateways are treated as Chat Completions-only by default, so
-tool calls stay enabled and incompatible reasoning is sent as `none`.
+The selected provider determines the default protocol. OpenAI uses Responses,
+Anthropic uses Messages, and compatible gateways use Chat Completions. Set
+`MANA_LLM_API_MODE` to `responses` or `chat_completions` for a gateway that
+explicitly supports that protocol. Reasoning settings are sent only when the
+selected model has current evidence for their exact values.
 
-For a verified nonstandard gateway, configure these optional values in
-`~/.mana/config.toml`:
-
-```bash
-MANA_LLM_API_MODE=auto # auto, responses, or chat_completions
-MANA_LLM_REASONING_EFFORT=high
-MANA_LLM_SUPPORTS_RESPONSES_API=true
-MANA_LLM_SUPPORTS_TOOLS_WITH_CHAT_REASONING=false
-```
-
-Only enable Responses API support when that gateway implements `/v1/responses`.
+Use the Capabilities panel in `mana-agent configure` to inspect evidence,
+refresh metadata, or supply an override for an exact provider and model.
+See [the native engine guide](native-llm-engine.md) for the override format and
+settings-only capability probes.
 
 ## Adaptive model routing
 
-Adaptive routing is enabled by default. Explicit profiles can be supplied as a JSON/TOML list in `MANA_MODEL_PROFILES`; see [Evidence-based model routing](model-routing.md) for its schema, scoring, history, budget, verifier, and competition behavior.
+Adaptive routing is enabled by default. Explicit profiles can be supplied as a JSON/TOML list in `MANA_MODEL_PROFILES`; see [Evidence-based model routing](model-routing.md) for candidate eligibility, the Main model decision, budgets, and verification.
 
 ```bash
 MANA_ADAPTIVE_ROUTING_ENABLED=true
@@ -554,9 +539,6 @@ MANA_ROUTING_PROVIDER_FAILURE_PENALTY_WEIGHT=0.04
 MANA_CONTEXT_ESTIMATION_SAFETY_MARGIN_RATIO=0.05
 MANA_CONTEXT_DEFAULT_OUTPUT_RATIO=0.20
 MANA_CONTEXT_HISTORICAL_PREDICTION_ENABLED=true
-MANA_CONTEXT_UNKNOWN_MODEL_POLICY=conservative
-MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW=16384
-MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS=4096
 ```
 
 Invalid profile, capability, latency, or budget configuration stops selection. Disabling adaptive routing also stops model execution; it does not restore static routing.

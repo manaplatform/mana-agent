@@ -6,7 +6,7 @@ from mana_agent.connectors.email.auth.oauth import GMAIL_SCOPES, gmail_scopes_fo
 from mana_agent.connectors.email.providers.gmail import GMAIL_CAPABILITIES, gmail_list_arguments, gmail_query
 from mana_agent.connectors.email.sanitizer import safe_attachment_filename, sanitize_html, untrusted_email_context
 from mana_agent.connectors.email.tools import email_tool_contracts
-from mana_agent.connectors.email.runtime_tools import build_email_langchain_tools
+from mana_agent.connectors.email.runtime_tools import build_email_tools
 from mana_agent.connectors.email.providers.gmail import GmailProvider
 from mana_agent.connectors.email.models import EmailAccount, EmailAddress
 def test_gmail_query_is_structured():
@@ -30,7 +30,7 @@ def test_explicit_email_tools_expose_permissions():
     tools = {x.name: x for x in email_tool_contracts()}; assert "email_search" in tools and "email_send" in tools and "approval_id" in tools["email_send"].input_schema["required"]
 
 def test_email_runtime_tools_are_available_without_connecting_to_gmail():
-    assert {tool.name for tool in build_email_langchain_tools()} >= {"email_accounts_list", "email_search", "email_read", "email_thread_read"}
+    assert {tool.name for tool in build_email_tools()} >= {"email_accounts_list", "email_search", "email_read", "email_thread_read"}
 
 def test_gmail_search_reads_metadata_not_full_mime():
     calls = []
@@ -141,7 +141,7 @@ def test_runtime_search_reference_is_accepted_by_read_and_keeps_account(monkeypa
         async def get_message(self, message_id): self.read_ids.append(message_id); return message
     provider = Provider()
     monkeypatch.setattr(runtime_tools, "_provider", lambda account_id: provider)
-    tools = {tool.name: tool for tool in runtime_tools.build_email_langchain_tools()}
+    tools = {tool.name: tool for tool in runtime_tools.build_email_tools()}
     searched = json.loads(tools["email_search"].invoke({"account_id": account.id, "limit": 1}).split("\n", 1)[1])
     reference = searched["messages"][0]["message_ref"]
     read = json.loads(tools["email_read"].invoke({"message_ref": reference}).split("\n", 1)[1])
@@ -181,11 +181,11 @@ def test_runtime_search_executes_inside_active_event_loop(monkeypatch):
             return runtime_tools.EmailSearchResult(messages=[message])
 
     monkeypatch.setattr(runtime_tools, "_provider", lambda account_id: Provider())
-    tool = {item.name: item for item in runtime_tools.build_email_langchain_tools()}["email_search"]
+    tool = {item.name: item for item in runtime_tools.build_email_tools()}["email_search"]
     event_loop_thread_id = threading.get_ident()
 
     async def invoke_from_dashboard_loop():
-        return tool.invoke({"account_id": account.id, "limit": 1})
+        return tool.call({"account_id": account.id, "limit": 1})
 
     payload = json.loads(asyncio.run(invoke_from_dashboard_loop()).split("\n", 1)[1])
 
@@ -211,7 +211,7 @@ def test_runtime_stale_reference_refreshes_once_but_authentication_does_not_retr
             return fresh
     provider = Provider()
     monkeypatch.setattr(runtime_tools, "_provider", lambda account_id: provider)
-    tools = {tool.name: tool for tool in runtime_tools.build_email_langchain_tools()}
+    tools = {tool.name: tool for tool in runtime_tools.build_email_tools()}
     searched = json.loads(tools["email_search"].invoke({"account_id": account.id, "limit": 1}).split("\n", 1)[1])
     runtime_tools_result = tools["email_read"].invoke({"message_ref": searched["messages"][0]["message_ref"]})
     assert '"ok": true' in runtime_tools_result
@@ -235,7 +235,7 @@ def test_email_accounts_list_returns_json_safe_granted_permissions(monkeypatch):
         granted_permissions={runtime_tools.EmailPermission.READ, runtime_tools.EmailPermission.METADATA},
     )
     monkeypatch.setattr(runtime_tools, "load_accounts", lambda: [account])
-    tools = {tool.name: tool for tool in runtime_tools.build_email_langchain_tools()}
+    tools = {tool.name: tool for tool in runtime_tools.build_email_tools()}
     result = tools["email_accounts_list"].invoke({})
     assert isinstance(result, dict)
     assert isinstance(result["accounts"][0]["granted_permissions"], list)
@@ -282,7 +282,7 @@ def test_gmail_search_and_read_with_sets_in_labels_metadata_and_payload(monkeypa
             return message
 
     monkeypatch.setattr(runtime_tools, "_provider", lambda account_id: Provider())
-    tools = {tool.name: tool for tool in runtime_tools.build_email_langchain_tools()}
+    tools = {tool.name: tool for tool in runtime_tools.build_email_tools()}
 
     search_output = tools["email_search"].invoke({"account_id": account.id, "limit": 1})
     assert search_output.startswith("UNTRUSTED")

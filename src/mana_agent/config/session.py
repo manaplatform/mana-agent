@@ -47,7 +47,7 @@ class ConfigurationDraft:
         self.values[name] = ""
         self.removed_secrets.add(name)
 
-    def set_models(self, *, provider: str, high: str, coding: str, fast: str, embedding: str) -> None:
+    def set_models(self, *, provider: str, high: str, coding: str, fast: str) -> None:
         configured = self.values.get("MANA_CONFIGURED_PROVIDERS", [])
         if not isinstance(configured, list):
             configured = [str(configured)] if str(configured).strip() else []
@@ -61,17 +61,10 @@ class ConfigurationDraft:
         high_clean = str(high or "").strip()
         coding_clean = str(coding or "").strip() or high_clean
         fast_clean = str(fast or "").strip() or high_clean
-        embedding_clean = str(embedding or "").strip()
-
-        prov_norm = str(provider or "").strip().lower()
-        if prov_norm in {"x-ai", "grok"}:
-            prov_norm = "xai"
-        embedding_required = prov_norm not in {"xai", "anthropic"}
 
         has_valid_high = bool(high_clean and high_clean != "<Select.BLANK>")
-        has_valid_embedding = bool(embedding_clean and embedding_clean != "<Select.BLANK>")
 
-        if has_valid_high and (has_valid_embedding or not embedding_required):
+        if has_valid_high:
             updates.update(
                 {
                     "MANA_PRIMARY_MODEL": qualify_model_id(provider, high_clean),
@@ -84,13 +77,6 @@ class ConfigurationDraft:
                     "MODEL_LEVEL_1_FAST_TOOL": fast_clean,
                 }
             )
-            if has_valid_embedding:
-                updates.update(
-                    {
-                        "MANA_EMBEDDING_MODEL": qualify_model_id(provider, embedding_clean),
-                        "OPENAI_EMBED_MODEL": embedding_clean,
-                    }
-                )
         self.values.update(updates)
 
     def save(self) -> None:
@@ -145,8 +131,12 @@ class ConfigurationDraft:
             )
         if str(values.get("MANA_MEMORY_MODE") or "internal") == "internal":
             values["MANA_MEMORY_PROVIDER"] = "mana"
+        values.pop("MANA_EMBEDDING_MODEL", None)
+        values.pop("OPENAI_EMBED_MODEL", None)
         cleaned = validate_config_values(values)
         save_effective_user_config(cleaned, merge=False)
+        from mana_agent.config.model_capabilities import clear_capability_cache
+        clear_capability_cache()
         new_identity = provider_identity(cleaned)
         if new_identity != old_identity:
             invalidate_model_cache()

@@ -20,7 +20,7 @@ from mana_agent.engine_selection.models import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DECISIONS_MODEL = "gpt-6-luna"
+DEFAULT_DECISIONS_MODEL = ""
 DEFAULT_DECISIONS_TIMEOUT_SECONDS = 30.0
 
 
@@ -78,6 +78,8 @@ class DecisionsClient:
         self.model = str(
             model or get_setting("MANA_DECISIONS_MODEL", DEFAULT_DECISIONS_MODEL) or DEFAULT_DECISIONS_MODEL
         ).strip()
+        if not self.model:
+            raise DecisionsError("Configure MANA_DECISIONS_MODEL explicitly; no default model is selected")
         self.timeout = timeout
         self._external_client = http_client
 

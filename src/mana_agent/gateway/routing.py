@@ -62,10 +62,13 @@ class GatewayRoutingAuthority:
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.settings = settings or Settings()
+        self._uses_configured_profiles = profiles is None
         if not bool(getattr(self.settings, "mana_gateway_routing_enforced", True)):
             raise GatewayRoutingError(
                 "Gateway-wide model routing enforcement is disabled. No model action was executed."
             )
+        if profiles is None:
+            self._refresh_configured_metadata()
         candidates = tuple(profiles) if profiles is not None else self._configured_profiles()
         if not candidates:
             raise GatewayRoutingError(
@@ -109,6 +112,18 @@ class GatewayRoutingAuthority:
     ) -> RoutingDecision:
         """Route and persist one model-backed invocation with explicit retry lineage."""
 
+        router = self.router
+        if self._uses_configured_profiles:
+            # Resolve a fresh evidence snapshot so settings updates and expiry
+            # affect this turn without mutating an in-flight decision.
+            candidates = self._configured_profiles()
+            router = ModelRouter(candidates, history=self.history, policy=self.policy,
+                resource_availability=router.resource_availability, resource_scoring=router.resource_scoring,
+                decision_model=router.decision_model)
+            self.router = router
+            if self.context_cost_governor is not None:
+                self.context_cost_governor.register_model_profiles(candidates)
+        router.context_cost_governor = self.context_cost_governor
         invocation_id = request.request_id or f"route_req_{uuid.uuid4().hex}"
         budgets = (
             self.context_cost_governor.remaining_routing_budgets(request.budgets)
@@ -138,7 +153,7 @@ class GatewayRoutingAuthority:
             **spirit_diag,
         )
         try:
-            decision = self.router.route(
+            decision = router.route(
                 enriched,
                 fallback_of_decision_id=fallback_of_decision_id,
                 fallback_reason=fallback_reason,
@@ -268,6 +283,7 @@ class GatewayRoutingAuthority:
         return {
             "enforced": bool(getattr(self.settings, "mana_gateway_routing_enforced", True)),
             "profiles": [profile.key for profile in self.router.profiles],
+            "metadata_errors": list(getattr(self, "_metadata_errors", [])),
             "evidence_store_healthy": self.history.healthy(),
             "decision_store_healthy": self.decision_path.parent.is_dir() or not self.decision_path.exists(),
             "simple_default": self.policy.simple_routing_default,
@@ -308,98 +324,41 @@ class GatewayRoutingAuthority:
                 f"Routing decision could not be persisted: {exc}. No model action was executed."
             ) from exc
 
+    def _refresh_configured_metadata(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from mana_agent.llm.discovery import ModelDiscoveryService
+        from mana_agent.config.user_config import load_model_cache
+        from datetime import datetime, timedelta, timezone
+        ai_provider = getattr(self.settings, "mana_ai_provider", "openai") or "openai"
+        configured_providers = getattr(self.settings, "mana_configured_providers", ["openai"]) or ["openai"]
+        providers = list(dict.fromkeys([ai_provider, *configured_providers]))
+        connections = [resolve_inference_connection(self.settings, provider=provider, require_api_key=False) for provider in providers]
+        def refresh(connection):
+            if not connection.api_key:
+                return
+            cached = load_model_cache(connection.provider, connection.base_url)
+            if cached:
+                try:
+                    created = datetime.fromisoformat(cached.created_at)
+                    if created.tzinfo and created + timedelta(hours=24) > datetime.now(timezone.utc):
+                        return
+                except ValueError:
+                    pass
+            ModelDiscoveryService().discover_models(provider=connection.provider, base_url=connection.base_url, api_key=connection.api_key)
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(refresh, connection) for connection in connections]
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as exc:
+                    self._metadata_errors = [*getattr(self, "_metadata_errors", []), type(exc).__name__]
+
     def _configured_profiles(self) -> tuple[ModelProfile, ...]:
         explicit = configured_profiles(getattr(self.settings, "mana_model_profiles", []))
         if explicit:
             return explicit
-        legacy = profiles_from_legacy_configuration(
-            global_model=str(getattr(self.settings, "openai_chat_model", "gpt-4.1-mini") or "gpt-4.1-mini"),
-            default_provider=str(getattr(self.settings, "mana_ai_provider", "openai") or "openai"),
-            context_window=int(getattr(self.settings, "mana_context_unknown_model_context_window", 16_384)),
-            max_output_tokens=int(getattr(self.settings, "mana_context_unknown_model_max_output_tokens", 4_096)),
-        )
-        try:
-            connection = resolve_inference_connection(self.settings, require_api_key=False)
-            descriptors = {
-                item.id: item
-                for item in ModelCatalogService().cached(provider=connection.provider, base_url=connection.base_url)
-            }
-        except (KeyError, ValueError):
-            descriptors = {}
-        resolved: list[ModelProfile] = []
-        for profile in legacy:
-            descriptor = descriptors.get(profile.model_id)
-            if descriptor is None:
-                cap_desc = resolve_model_capability(profile.provider, profile.model_id)
-                resolved.append(replace(
-                    profile,
-                    can_patch=cap_desc.supports_repository_write if cap_desc.is_known else False,
-                    can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else True,
-                    can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else True,
-                    can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else True,
-                    supported_tools=(
-                        frozenset({"*"}) if not cap_desc.is_known or (cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
-                        else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
-                        if cap_desc.supports_tool_calls
-                        else frozenset()
-                    ),
-                    capability_descriptor=cap_desc,
-                    configuration={
-                        **profile.configuration,
-                        "capability_confidence": cap_desc.capability_confidence,
-                        "capability_source": cap_desc.capability_source,
-                        "capability_descriptor": cap_desc.to_dict(),
-                    },
-                ))
-                continue
-            metadata = dict(descriptor.metadata)
-            context_window = descriptor.context_window or profile.context_window
-            max_output_tokens = min(
-                context_window,
-                descriptor.max_output_tokens or profile.max_output_tokens,
-            )
-            complete_capabilities = (
-                descriptor.context_window is not None
-                and descriptor.max_output_tokens is not None
-            )
-            cap_desc = resolve_model_capability(
-                profile.provider,
-                profile.model_id,
-                catalog_records=[metadata] if metadata else None,
-            )
-            resolved.append(replace(
-                profile,
-                context_window=context_window,
-                max_output_tokens=max_output_tokens,
-                tokenizer=descriptor.tokenizer,
-                input_cost_per_million=float(metadata.get("input_price_per_million") or 0),
-                output_cost_per_million=float(metadata.get("output_price_per_million") or 0),
-                cached_input_cost_per_million=(float(metadata["cached_input_price_per_million"]) if metadata.get("cached_input_price_per_million") is not None else None),
-                can_patch=cap_desc.supports_repository_write if cap_desc.is_known else False,
-                can_structured_output=cap_desc.supports_structured_output if cap_desc.is_known else True,
-                can_tool_call=cap_desc.supports_tool_calls if cap_desc.is_known else True,
-                can_verify=(cap_desc.supports_tool_calls or cap_desc.supports_structured_output) if cap_desc.is_known else True,
-                supported_tools=(
-                    frozenset({"*"}) if not cap_desc.is_known or (cap_desc.supports_tool_calls and cap_desc.supports_repository_write)
-                    else frozenset({"repository_read", "test_execution", "shell"} if (cap_desc.supports_tool_calls and cap_desc.supports_repository_read) else set())
-                    if cap_desc.supports_tool_calls
-                    else frozenset()
-                ),
-                capability_descriptor=cap_desc,
-                source_level=("provider-catalog" if complete_capabilities else "provider-catalog-with-configured-unknown-limit"),
-                configuration={
-                    **profile.configuration,
-                    "token_profile_confidence": "high" if complete_capabilities else "low",
-                    "capability_source": (
-                        cap_desc.capability_source
-                        if cap_desc.is_known
-                        else ("provider-catalog" if complete_capabilities else "provider-catalog-with-configured-unknown-limit")
-                    ),
-                    "capability_confidence": cap_desc.capability_confidence,
-                    "capability_descriptor": cap_desc.to_dict(),
-                },
-            ))
-        return tuple(resolved)
+        return profiles_from_legacy_configuration(global_model=str(getattr(self.settings, "mana_primary_model", None) or getattr(self.settings, "openai_chat_model", "") or ""),
+            default_provider=getattr(self.settings, "mana_ai_provider", "openai") or "openai")
 
     def _policy(self) -> RoutingPolicy:
         weights = getattr(self.settings, "mana_routing_benchmark_weights", {})

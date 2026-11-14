@@ -33,12 +33,12 @@ from mana_agent.batch.tools import (
     batch_list_jobs,
     batch_retrieve_results,
     batch_submit_requests,
-    build_batch_langchain_tools,
+    build_batch_tools,
 )
 from mana_agent.coding.programmatic import ToolExecutionDispatcher
 from mana_agent.config.model_discovery import (
     GLOBAL_CAPABILITY_REGISTRY,
-    ModelCapabilityProfile,
+    ModelProfile,
     ModelCapabilityRegistry,
     ModelDiscoveryService,
     ModelMetadataResolver,
@@ -53,110 +53,26 @@ from mana_agent.tools.contracts import coding_tool_contracts
 # --- 1. Model Discovery & Capability Registry ---
 
 
-def test_capability_registry_luna_and_flagship_models() -> None:
-    registry = ModelCapabilityRegistry()
-
-    # Luna flagship models
-    luna_prof = registry.get("openai", "gpt-6-luna")
-    assert luna_prof is not None
-    assert luna_prof.model_id == "gpt-6-luna"
-    assert luna_prof.context_window == 1_050_000
-    assert luna_prof.supports_batch is True
-    assert luna_prof.supports_batch_display == "yes"
-    assert "low" in luna_prof.reasoning_effort_levels
-    assert luna_prof.function_calling is True
-    assert luna_prof.verification_source == "maintained_registry"
-    assert luna_prof.verified_at != ""
-
-    # Bare luna alias
-    bare_luna = registry.get("openai", "luna")
-    assert bare_luna is not None
-    assert bare_luna.supports_batch is True
-
-    # GPT-5.6 Luna
-    gpt56_luna = registry.get("openai", "gpt-5.6-luna")
-    assert gpt56_luna is not None
-    assert gpt56_luna.context_window == 400_000
-    assert gpt56_luna.supports_batch is True
-
-    # Unsupported batch model
-    realtime_prof = registry.get("openai", "gpt-4o-realtime-preview")
-    assert realtime_prof is not None
-    assert realtime_prof.supports_batch is False
-    assert realtime_prof.supports_batch_display == "no"
-    assert len(realtime_prof.batch_restrictions) > 0
+def test_missing_model_capabilities_stay_unknown(tmp_path) -> None:
+    registry = ModelCapabilityRegistry(tmp_path / "profiles.json")
+    profile = ModelMetadataResolver(registry).resolve("unobserved", "openai")
+    assert profile.supports_batch is None
+    assert not profile.function_calling
+    assert profile.context_window is None
 
 
-def test_metadata_resolver_dynamic_and_offline() -> None:
-    resolver = ModelMetadataResolver()
-
-    # Known model resolution
-    profile = resolver.resolve("gpt-6-luna", provider="openai")
-    assert profile.supports_batch is True
-    assert profile.confidence == "high"
-
-    # API record augmentation
-    api_record = {
-        "id": "gpt-6-luna",
-        "created": 1700000000,
-        "owned_by": "openai",
-        "context_window": 1_050_000,
-    }
-    augmented = resolver.resolve("gpt-6-luna", provider="openai", raw_metadata=api_record)
-    assert augmented.verification_source == "openai_api"
-    assert augmented.raw_metadata.get("owned_by") == "openai"
-
-
-def test_model_discovery_service_offline_fallback() -> None:
-    discovery = ModelDiscoveryService()
-    # When api_key is empty or offline, returns maintained registry profiles
-    profiles = discovery.discover_models(provider="openai", api_key="")
-    assert len(profiles) > 0
-    ids = {p.model_id for p in profiles}
-    assert "gpt-6-luna" in ids
-    assert "gpt-4o" in ids
-    assert "o3" in ids
-
-
-# --- 2. Tool Compatibility & Configuration Validator ---
-
-
-def test_tool_compatibility_resolver() -> None:
-    resolver = ToolCompatibilityResolver()
-
-    # Compatible tools for standard text model
-    tools = ["read_file", "write_file", "batch_create_job", "shell"]
-    report = resolver.resolve("gpt-6-luna", tools, execution_mode="realtime")
-    assert report.all_compatible
-    assert report.requires_batch is True
-    assert len(report.incompatible_tools) == 0
-
-    # Deferred function calls execute locally after the provider returns.
-    report_batch = resolver.resolve("gpt-6-luna", ["shell", "read_file"], execution_mode="batch")
-    assert report_batch.all_compatible
-    assert not report_batch.batch_restricted_tools
-    native = resolver.resolve("gpt-6-luna", ["batch_read_files", "batch_write_files"])
-    assert native.all_compatible
-    assert not native.requires_batch
-
-
-def test_model_configuration_validator() -> None:
-    validator = ModelConfigurationValidator()
-
-    # Valid config
-    res_ok = validator.validate("gpt-6-luna", mode="batch", requested_tokens=100_000)
-    assert res_ok.ok
-    assert res_ok.valid
-
-    # Unsupported batch model in batch mode
-    res_bad = validator.validate("gpt-4o-realtime-preview", mode="batch")
-    assert not res_bad.ok
-    assert any("unsupported" in err.lower() for err in res_bad.errors)
-
-    # Token overflow
-    res_overflow = validator.validate("gpt-5.6-luna", requested_tokens=900_000)
-    assert not res_overflow.ok
-    assert any("exceed" in err.lower() for err in res_overflow.errors)
+def test_tool_and_batch_configuration_require_explicit_evidence(tmp_path) -> None:
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    registry = ModelCapabilityRegistry(tmp_path / "profiles.json")
+    profile = ModelProfile(provider="openai", model_id="fixture")
+    registry.merge(profile, {key: observation(value, source="provider") for key, value in {
+        "tool_calling": True, "batch": True, "batch_endpoints": ["/v1/responses"], "context_window": 1000,
+    }.items()})
+    assert ToolCompatibilityResolver(registry).resolve("fixture", ["read_file", "write_file"]).all_compatible
+    validator = ModelConfigurationValidator(registry)
+    assert validator.validate("fixture", mode="batch", requested_tokens=500).ok
+    assert not validator.validate("fixture", requested_tokens=2000).ok
+    assert not validator.validate("unknown", mode="batch").ok
 
 
 # --- 3. Batch Request Builder ---
@@ -397,8 +313,8 @@ def test_tool_dispatcher_executes_batch_tools() -> None:
         assert res_ret["ok"]
 
 
-def test_build_batch_langchain_tools() -> None:
-    tools = build_batch_langchain_tools()
+def test_build_batch_tools() -> None:
+    tools = build_batch_tools()
     assert len(tools) == 8
     names = {t.name for t in tools}
     assert "batch_create_job" in names

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, Field
 
 from .service import (
@@ -76,10 +76,10 @@ def _result(operation) -> str:
         })
 
 
-def build_automation_langchain_tools(root: str | Path) -> list[Any]:
+def build_automation_tools(root: str | Path) -> list[Any]:
     service = AutomationService(root)
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_create",
             description=(
                 "Create and deploy a durable automation from a complete typed semantic trigger and job. "
@@ -88,7 +88,7 @@ def build_automation_langchain_tools(root: str | Path) -> list[Any]:
                 "Use interval/every_seconds for exact elapsed intervals, cron only for calendar schedules, "
                 "and once/run_at for one-time jobs. Returns the persisted record and truthful deployment."
             ),
-            args_schema=_Create,
+            input_model=_Create,
             func=lambda name, description, trigger, job, timezone, target_runtime,
             permission_references, retry_policy, misfire_policy, idempotency_key,
             source_decision_id: _result(lambda: service.create(
@@ -100,57 +100,57 @@ def build_automation_langchain_tools(root: str | Path) -> list[Any]:
                 idempotency_key=idempotency_key,
             )),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_get", description="Get one canonical persisted automation definition.",
-            args_schema=_Id,
+            input_model=_Id,
             func=lambda automation_id, source_decision_id: _result(lambda: service.get(automation_id)),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_list",
             description=(
                 "List canonical persisted automations only when the validated operation is list. "
                 "Never use this as discovery or a prerequisite for automation creation."
             ),
-            args_schema=_Decision,
+            input_model=_Decision,
             func=lambda source_decision_id: _result(
                 lambda: [item.to_dict() for item in service.list()]
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_status", description="Inspect deployment health and recent persisted runs.",
-            args_schema=_Id,
+            input_model=_Id,
             func=lambda automation_id, source_decision_id: _result(lambda: service.status(automation_id)),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_update",
             description="Explicitly update a canonical automation and reconcile its persistent deployment.",
-            args_schema=_Update,
+            input_model=_Update,
             func=lambda automation_id, changes, source_decision_id: _result(
                 lambda: service.update(automation_id, changes)
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_delete", description="Delete an automation and every managed scheduler artifact.",
-            args_schema=_Id,
+            input_model=_Id,
             func=lambda automation_id, source_decision_id: _result(lambda: service.delete(automation_id)),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_enable", description="Enable and redeploy a persisted automation.",
-            args_schema=_Id,
+            input_model=_Id,
             func=lambda automation_id, source_decision_id: _result(
                 lambda: service.update(automation_id, {"enabled": True})
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_disable", description="Disable a persisted automation and remove its active wakeup.",
-            args_schema=_Id,
+            input_model=_Id,
             func=lambda automation_id, source_decision_id: _result(
                 lambda: service.update(automation_id, {"enabled": False})
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="automation_run_now", description="Claim and execute one persisted automation immediately.",
-            args_schema=_Id,
+            input_model=_Id,
             func=lambda automation_id, source_decision_id: _result(
                 lambda: service.execute(automation_id, force=True)
             ),

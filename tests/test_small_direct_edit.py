@@ -41,7 +41,7 @@ def test_direct_readme_version_update_uses_single_patch(monkeypatch, tmp_path: P
     ]
     assert [row["tool_name"] for row in result.trace] == ["read_file", "apply_patch", "read_file"]
     assert result.trace[0]["path"] == "README.md"
-    assert all(row["tool_name"] not in {"repo_search", "list_files", "semantic_search", "verify_project", "tool_worker"} for row in result.trace)
+    assert all(row["tool_name"] not in {"repo_search", "list_files", "repo_search", "verify_project", "tool_worker"} for row in result.trace)
     assert readme.read_text(encoding="utf-8").splitlines()[2] == "Current documented version: **v0.0.8**."
     assert "Verification skipped: docs-only one-line edit" in result.answer
 

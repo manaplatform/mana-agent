@@ -116,6 +116,22 @@ def service_for(values: dict, tmp_path: Path) -> MediaService:
     )
 
 
+@pytest.fixture(autouse=True)
+def explicit_image_protocol_fixtures(monkeypatch):
+    """Test fixtures are explicit evidence, never production model-name rules."""
+    from mana_agent.media.providers.openai import OpenAIMediaProvider
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    fixtures = {
+        "gpt-image-1": {"image_request_format": "images", "image_quality_levels": ["low", "medium", "high"]},
+        "gpt-image-2.5-flare": {"image_request_format": "images", "image_flexible_dimensions": True, "image_quality_levels": ["low", "medium", "high", "xhigh", "max"]},
+        "dall-e-2": {"image_request_format": "legacy_square"},
+        "dall-e-3": {"image_request_format": "legacy_single"},
+    }
+    def profile(cls, model):
+        return ModelProfile(provider="openai", model_id=model, facts={name: observation(value, source="override") for name, value in fixtures.get(model, {}).items()})
+    monkeypatch.setattr(OpenAIMediaProvider, "_image_profile", classmethod(profile))
+
+
 def test_workspace_root_places_only_images_in_launch_directory(
     media_values: dict, tmp_path: Path
 ) -> None:
@@ -211,22 +227,13 @@ def test_media_configuration_repairs_legacy_string_none_duration() -> None:
 
 
 def test_capability_filtering_and_search_are_conservative() -> None:
-    models = descriptors_from_catalog(
-        "openai",
-        [
-            "gpt-4.1-mini",
-            "gpt-image-1",
-            "gpt-4o-mini-tts",
-            "sora-2",
-            "text-embedding-3-small",
-            "unknown-model",
-        ],
-    )
-    assert [item.id for item in filter_models(models, ModelPurpose.IMAGE)] == ["gpt-image-1"]
-    assert [item.id for item in filter_models(models, ModelPurpose.VOICE)] == ["gpt-4o-mini-tts"]
-    assert [item.id for item in filter_models(models, ModelPurpose.VIDEO)] == ["sora-2"]
-    assert [item.id for item in search_models(models, purpose=ModelPurpose.IMAGE, query="image")] == ["gpt-image-1"]
+    models = descriptors_from_catalog("openai", [{"id": "image-model", "output_modalities": ["image"]},
+        {"id": "voice-model", "text_to_speech": True}, {"id": "video-model", "output_modalities": ["video"]}, "unknown-model"])
+    assert [item.id for item in filter_models(models, ModelPurpose.IMAGE)] == ["image-model"]
+    assert [item.id for item in filter_models(models, ModelPurpose.VOICE)] == ["voice-model"]
+    assert [item.id for item in filter_models(models, ModelPurpose.VIDEO)] == ["video-model"]
     assert next(item for item in models if item.id == "unknown-model").capabilities == frozenset()
+
 
 
 def test_typed_media_requests_reject_invalid_parameters() -> None:

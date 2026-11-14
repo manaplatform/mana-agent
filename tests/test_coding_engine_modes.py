@@ -304,7 +304,7 @@ def test_registry_supports_internal_and_external() -> None:
 
 def test_internal_engine_model_tool_calling_loop_and_events(tmp_path: Path) -> None:
     """Internal coding engine executes model tool calls, sets system instruction, and emits events."""
-    from langchain_core.messages import AIMessage
+    from mana_agent.llm.messages import AssistantMessage
     from mana_agent.coding.live_events import coding_event_scope
     from mana_agent.coding.prompts import INTERNAL_CODING_SYSTEM_INSTRUCTION
 
@@ -315,14 +315,14 @@ def test_internal_engine_model_tool_calling_loop_and_events(tmp_path: Path) -> N
             self.turn = 0
             self.received_messages: list[Any] = []
 
-        def bind_tools(self, tools: list[dict[str, Any]]) -> _MockChatModel:
+        def with_tools(self, tools: list[dict[str, Any]], **_native_options) -> _MockChatModel:
             return self
 
-        def invoke(self, messages: list[Any]) -> AIMessage:
+        def generate_sync(self, messages: list[Any], **_native_options) -> AssistantMessage:
             self.received_messages = list(messages)
             self.turn += 1
             if self.turn == 1:
-                return AIMessage(
+                return AssistantMessage(
                     content="",
                     tool_calls=[{
                         "name": "write_file",
@@ -330,9 +330,21 @@ def test_internal_engine_model_tool_calling_loop_and_events(tmp_path: Path) -> N
                         "id": "call_write_1",
                     }],
                 )
-            return AIMessage(
+            return AssistantMessage(
                 content="### Result\nSuccessfully created output.py\n\n### Changes\noutput.py\n\n### Verification\nNone\n\n### Notes\nDone."
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     mock_llm = _MockChatModel()
     engine = InternalCodingEngine(

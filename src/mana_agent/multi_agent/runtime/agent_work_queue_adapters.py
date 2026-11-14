@@ -214,7 +214,7 @@ def classify_result(item: WorkItem, response: ToolRunResponse, *, repo_root: Pat
             trace=list(response.trace),
         )
 
-    if tool in {"repo_search", "repo_batch_search", "semantic_search", "list_files"}:
+    if tool in {"repo_search", "repo_batch_search", "list_files"}:
         ok = not error and (bool(paths) or has_content)
         return WorkResult(
             ok=ok,

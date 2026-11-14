@@ -9,7 +9,7 @@ import mana_agent.connectors.browser.runtime_tools as browser_runtime_tools
 from mana_agent.connectors.browser.approval import BrowserApprovalBinding, issue_approval
 from mana_agent.connectors.browser.contracts import browser_tool_contracts
 from mana_agent.connectors.browser.models import BrowserActionDecision, BrowserRisk
-from mana_agent.connectors.browser.runtime_tools import action_metadata, build_browser_langchain_tools
+from mana_agent.connectors.browser.runtime_tools import action_metadata, build_browser_tools
 from mana_agent.connectors.browser.session import BrowserConnectorError, BrowserSession, BrowserSessionManager
 from mana_agent.transactional_actions.enforcement import (
     TransactionalGatewayRequired,
@@ -60,7 +60,7 @@ def test_contracts_are_strict_and_complete() -> None:
 
 
 def test_documentation_browser_tools_are_explicitly_read_only() -> None:
-    tools = {item.name: item for item in build_browser_langchain_tools()}
+    tools = {item.name: item for item in build_browser_tools()}
 
     for name in (
         "browser_open",
@@ -113,10 +113,10 @@ def test_browser_action_reason_is_not_forwarded_to_the_session_manager(monkeypat
     monkeypatch.setattr(browser_runtime_tools, "default_browser_manager", lambda: _Manager())
     tool = {
         item.name: item
-        for item in browser_runtime_tools.build_browser_langchain_tools()
+        for item in browser_runtime_tools.build_browser_tools()
     }["browser_click"]
 
-    result = tool.invoke(
+    result = tool.call(
         {
             "session_id": "docs-session",
             "target": "e2-25",

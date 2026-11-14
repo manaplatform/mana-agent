@@ -60,6 +60,7 @@ class ModelConfig:
     base_url: str | None = None
     max_retries: int = 3
     request_timeout: float | None = None
+    provider: str | None = None
 
 
 @dataclass(slots=True)
@@ -338,8 +339,8 @@ class LLMAnalyzer:
     """Thin wrapper around a chat model that turns evidence into analysis JSON."""
 
     def __init__(self, model_config: ModelConfig) -> None:
-        from langchain_core.prompts import ChatPromptTemplate
-        from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+        from mana_agent.llm.prompts import MessageTemplate
+        from mana_agent.llm.engine import create_model
 
         from mana_agent.multi_agent.runtime.prompts import (
             PROJECT_ANALYZE_HUMAN_TEMPLATE,
@@ -347,7 +348,7 @@ class LLMAnalyzer:
         )
 
         self.config = model_config
-        self.prompt = ChatPromptTemplate.from_messages(
+        self.prompt = MessageTemplate.from_messages(
             [
                 ("system", PROJECT_ANALYZE_SYSTEM_PROMPT),
                 ("human", PROJECT_ANALYZE_HUMAN_TEMPLATE),
@@ -356,15 +357,16 @@ class LLMAnalyzer:
         kwargs: dict[str, Any] = {}
         if model_config.request_timeout:
             kwargs["timeout"] = model_config.request_timeout
-        self.llm = create_chat_model(
+        self.llm = create_model(
             api_key=model_config.api_key,
             model=model_config.model,
             base_url=model_config.base_url,
+            provider=model_config.provider,
             **kwargs,
         )
 
     def run(self, evidence: AnalyzeEvidence) -> LLMAnalyzeResult:
-        chain = self.prompt | self.llm
+        rendered_prompt = self.prompt
         evidence_json = json.dumps(evidence.to_dict(), ensure_ascii=False, indent=2)
         inputs = {
             "project_name": evidence.project_name,
@@ -372,20 +374,9 @@ class LLMAnalyzer:
             "language": evidence.language,
             "evidence_json": evidence_json,
         }
-        attempts = max(1, int(self.config.max_retries))
-        last_error: Exception | None = None
-        for attempt in range(attempts):
-            try:
-                response = chain.invoke(inputs)
-                return _parse_result(str(response.content), self.config.model)
-            except Exception as exc:  # noqa: BLE001 - bounded retry, never crash analyze
-                last_error = exc
-                logger.warning(
-                    "LLM project analysis attempt %d/%d failed: %s", attempt + 1, attempts, exc
-                )
-                if attempt < attempts - 1:
-                    sleep(min(2.0 * (attempt + 1), 8.0))
-        raise last_error if last_error else RuntimeError("LLM project analysis failed")
+        response = self.llm.generate_sync(rendered_prompt.render(inputs))
+        return _parse_result(str(response.content), self.config.model)
+
 
 
 def generate_llm_analysis(

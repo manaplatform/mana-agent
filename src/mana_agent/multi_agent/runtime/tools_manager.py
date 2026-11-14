@@ -102,7 +102,7 @@ class AutoExecuteResult(BaseModel):
     execution_requests_ok: int = 0
     execution_requests_failed: int = 0
     duplicate_request_skips: int = 0
-    duplicate_semantic_search_skips: int = 0
+    duplicate_repository_search_skips: int = 0
     duplicate_tool_execution_blocks: int = 0
     request_retry_attempts: int = 0
     request_retry_exhausted: int = 0
@@ -359,7 +359,6 @@ class RunStateStore:
             normalized_question = cls._normalize_action_text(question)
             for known in (
                 "repo_search",
-                "semantic_search",
                 "read_file",
                 "run_command",
                 "find_symbols",
@@ -377,15 +376,15 @@ class RunStateStore:
                 match = re.search(r"\bread(?:_file)?\s+([^\s`'\";]+)", str(question or ""), flags=re.IGNORECASE)
                 path = cls._normalize_action_text(match.group(1)) if match else ""
             return f"read_file:{path}" if path else "read_file"
-        if tool in {"repo_search", "repo_batch_search", "semantic_search"}:
+        if tool in {"repo_search", "repo_batch_search"}:
             query = cls._extract_arg_text(payload, ("query", "q", "pattern"), question)
             glob = cls._extract_arg_text(payload, ("glob", "path_glob", "include"), question)
             if not query:
                 text = cls._normalize_action_text(question)
-                text = re.sub(r"\b(repo_search|repo_batch_search|semantic_search|search|find|locate|grep)\b", " ", text)
+                text = re.sub(r"\b(repo_search|repo_batch_search|search|find|locate|grep)\b", " ", text)
                 text = re.sub(r"\b(k|max_steps|timeout_seconds)\s*[:=]\s*\d+\b", " ", text)
                 query = re.sub(r"\s+", " ", text).strip()
-            prefix = "repo_search" if tool in {"repo_search", "repo_batch_search"} else "semantic_search"
+            prefix = "repo_search"
             return f"{prefix}:{query}:{glob}"
         if tool == "run_command":
             command = cls._extract_arg_text(payload, ("cmd", "command", "shell_command"), question)
@@ -1233,7 +1232,7 @@ class RunStateStore:
         completed_searches = [
             row
             for row in self.read_jsonl("tool_calls.jsonl")
-            if row.get("status") == "ok" and str(row.get("tool_name", "")).strip().lower() in {"repo_search", "repo_batch_search", "semantic_search", "list_files"}
+            if row.get("status") == "ok" and str(row.get("tool_name", "")).strip().lower() in {"repo_search", "repo_batch_search", "list_files"}
         ]
         todo = self.read_json("todo.json", {})
         state = self.read_json("state.json", self._default_state(goal="", flow_id=""))
@@ -1330,7 +1329,7 @@ class RunStateStore:
                     "id": "discover_models_sources",
                     "title": "Discover model source files",
                     "kind": "discover",
-                    "allowed_tools": ["repo_batch_search", "repo_search", "semantic_search", "list_files", "run_script_once", "run_command"],
+                    "allowed_tools": ["repo_batch_search", "repo_search", "list_files", "run_script_once", "run_command"],
                     "done_condition": "candidate model source files are located or no candidates remain",
                 },
                 "read_candidates": {
@@ -1391,7 +1390,7 @@ class RunStateStore:
         generic_mapping: dict[str, dict[str, Any]] = {
             "locate_candidates": {
                 "kind": "discover",
-                "allowed_tools": ["repo_batch_search", "repo_search", "semantic_search", "list_files", "run_script_once", "run_command"],
+                "allowed_tools": ["repo_batch_search", "repo_search", "list_files", "run_script_once", "run_command"],
                 "done_condition": "candidate files are located",
             },
             "read_candidates": {
@@ -1673,7 +1672,7 @@ class RunStateStore:
         searched_queries = [
             row.get("normalized_args", {})
             for row in tool_history
-            if str(row.get("tool_name", "")).strip().lower() in {"repo_batch_search", "repo_search", "semantic_search", "list_files", "run_script_once", "run_command"}
+            if str(row.get("tool_name", "")).strip().lower() in {"repo_batch_search", "repo_search", "list_files", "run_script_once", "run_command"}
         ]
         verification_commands = [
             row.get("normalized_args", {})
@@ -1798,8 +1797,7 @@ _MUTATION_FALLBACK_BLOCKED_TOOLS = frozenset(
     {
         "repo_search",
         "repo_batch_search",
-        "semantic_search",
-        "read_file",
+                "read_file",
         "repo_batch_read",
         "list_files",
         "ls",
@@ -2175,7 +2173,7 @@ def _mutation_tool_stats(trace: Sequence[dict[str, Any]]) -> dict[str, Any]:
         tool = _trace_tool_name(row)
         if tool in {"read_file", "repo_batch_read", "chunk_file"}:
             read_tools.append(tool)
-        if tool in {"repo_search", "repo_batch_search", "semantic_search", "list_files", "ls", "find_symbols", "call_graph"}:
+        if tool in {"repo_search", "repo_batch_search", "list_files", "ls", "find_symbols", "call_graph"}:
             search_tools.append(tool)
         if tool not in _MUTATION_TOOLS:
             continue

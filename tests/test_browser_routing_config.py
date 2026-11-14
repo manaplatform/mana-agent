@@ -20,7 +20,7 @@ def isolated_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 class _BrowserDecisionModel:
-    def invoke(self, messages):  # noqa: ANN001
+    def generate_sync(self, messages, **_native_options):  # noqa: ANN001
         payload = json.loads(messages[-1].content)
         tools = payload.get("tools") or payload.get("available_tools") or []
         assert any(tool["name"] == "browser_open" for tool in tools)
@@ -46,12 +46,24 @@ class _BrowserDecisionModel:
             },
         )()
 
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
+
 
 class _CorrectingBrowserDecisionModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    def invoke(self, messages):  # noqa: ANN001
+    def generate_sync(self, messages, **_native_options):  # noqa: ANN001
         self.calls += 1
         decision = (
             {
@@ -72,6 +84,18 @@ class _CorrectingBrowserDecisionModel:
             }
         )
         return type("Message", (), {"content": json.dumps(decision)})()
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def test_browser_tools_are_exposed_to_model_router() -> None:

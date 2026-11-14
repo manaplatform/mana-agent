@@ -21,7 +21,7 @@ class _Model:
         self.tool_rounds = tool_rounds
         self.calls = 0
 
-    def bind_tools(self, _tools):
+    def with_tools(self, _tools, **_native_options):
         return self
 
     async def ainvoke(self, _messages):

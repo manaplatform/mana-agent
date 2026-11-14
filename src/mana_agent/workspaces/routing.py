@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
+from pydantic import BaseModel, Field
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 
 from mana_agent.workspaces.context import WorkspaceContext
 from mana_agent.workspaces.models import RepositoryPermission, RepositoryScopeDecision
@@ -27,6 +28,16 @@ Schema:
 """
 
 
+class RepositoryScopeOutput(BaseModel):
+    repository_ids: list[str]
+    access_by_repository: dict[str, Literal["read", "write", "git", "verify"]]
+    relationship_depth: int = Field(default=0, ge=0)
+    requires_multi_repo: bool
+    requires_verification: bool = False
+    safe_to_continue: bool
+    reason: str
+
+
 class ScopeDecisionError(RuntimeError):
     pass
 
@@ -44,7 +55,7 @@ class RepositoryScopeDecisionEngine:
     ) -> RepositoryScopeDecision:
         # The cwd-to-primary binding is mechanical, not a routing fallback. An
         # unavailable model therefore remains restricted to one repository.
-        if len(context.session.attached_repository_ids) == 1 or self.llm is None or not hasattr(self.llm, "invoke"):
+        if len(context.session.attached_repository_ids) == 1 or self.llm is None or not hasattr(self.llm, "generate_sync"):
             return context.validate_scope(
                 RepositoryScopeDecision(
                     workspace_id=context.workspace.workspace_id,
@@ -76,13 +87,10 @@ class RepositoryScopeDecisionEngine:
             ],
         }
         try:
-            response = self.llm.invoke(
-                [SystemMessage(content=SCOPE_DECISION_PROMPT), HumanMessage(content=json.dumps(payload, sort_keys=True))]
-            )
-            raw = getattr(response, "content", response)
-            text = " ".join(str(item.get("text", item)) if isinstance(item, dict) else str(item) for item in raw) if isinstance(raw, list) else str(raw)
-            start, end = text.find("{"), text.rfind("}")
-            data = json.loads(text[start : end + 1])
+            data = self.llm.decide_sync(
+                [SystemMessage(content=SCOPE_DECISION_PROMPT), UserMessage(content=json.dumps(payload, sort_keys=True))],
+                RepositoryScopeOutput,
+            ).model_dump(mode="json")
         except Exception as exc:
             raise ScopeDecisionError(f"Model repository-scope decision failed. No cross-repository action executed. Reason: {exc}") from exc
         ids = [str(item) for item in data.get("repository_ids", [])]
@@ -93,7 +101,7 @@ class RepositoryScopeDecisionEngine:
             primary_repository_id=context.session.primary_repository_id,
             repository_ids=ids,
             permissions=[
-                RepositoryPermission(repository_id=repository_id, access=str(access.get(repository_id) or "read"))
+                RepositoryPermission(repository_id=repository_id, access=str(access.get(repository_id) or ""))
                 for repository_id in ids
             ],
             relationship_depth=int(data.get("relationship_depth", 0) or 0),

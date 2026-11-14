@@ -483,15 +483,15 @@ class CodingResearchRuntime:
             if self.inspector is not None:
                 result = self.inspector(url)
             else:
-                from mana_agent.connectors.browser.runtime_tools import build_browser_langchain_tools
-                tools = {tool.name: tool for tool in build_browser_langchain_tools()}
+                from mana_agent.connectors.browser.runtime_tools import build_browser_tools
+                tools = {tool.name: tool for tool in build_browser_tools()}
                 session_id = f"coding-research-{_hash(self.task_id)}"
-                opened = json.loads(tools["browser_open"].invoke({"session_id": session_id, "url": url}))
+                opened = json.loads(tools["browser_open"].call({"session_id": session_id, "url": url}))
                 if not opened.get("ok"):
                     raise CodingResearchError("Source could not be opened")
                 self._authority()
                 self._save("coding_research_before_inspect", tool_call=True)
-                result = json.loads(tools["browser_inspect"].invoke({"session_id": session_id, "tab_id": opened["tab_id"]}))
+                result = json.loads(tools["browser_inspect"].call({"session_id": session_id, "tab_id": opened["tab_id"]}))
             self._authority()
             if not result.get("ok", True):
                 raise CodingResearchError("Source could not be inspected")

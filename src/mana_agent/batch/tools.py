@@ -1,4 +1,4 @@
-"""Model-callable tools and LangChain tool wrappers for OpenAI Batch API operations."""
+"""Model-callable tools and native tool wrappers for OpenAI Batch API operations."""
 
 from __future__ import annotations
 
@@ -7,10 +7,7 @@ from typing import Any, Sequence
 
 from pydantic import BaseModel, Field
 
-try:
-    from langchain_core.tools import StructuredTool
-except ImportError:
-    from langchain.tools import StructuredTool  # type: ignore[no-redef]
+from mana_agent.llm.tools import ToolBinding
 
 from mana_agent.batch.manager import BatchLifecycleManager
 from mana_agent.batch.models import BatchItemRequest
@@ -324,8 +321,8 @@ batch_check_status = batch_get_status
 batch_retrieve_results = batch_download_results
 
 
-def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) -> list[StructuredTool]:
-    """Build LangChain StructuredTool instances for inclusion in agent tool surfaces."""
+def build_batch_tools(manager: BatchLifecycleManager | None = None) -> list[ToolBinding]:
+    """Build native callable bindings for inclusion in agent tool surfaces."""
     mgr = manager or get_batch_manager()
 
     def _create(
@@ -367,66 +364,66 @@ def build_batch_langchain_tools(manager: BatchLifecycleManager | None = None) ->
     metadata = {"category": "batch_operations", "provider": "openai"}
 
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_create,
             name="batch_create_job",
             description=(
                 "Submit a batch of independent model requests for asynchronous execution. "
                 "Supports OpenAI Batch API (50% cost discount) and internal batch engine."
             ),
-            args_schema=BatchCreateJobInput,
+            input_model=BatchCreateJobInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_status,
             name="batch_get_status",
             description="Check the execution status and request counters of a batch job.",
-            args_schema=BatchGetStatusInput,
+            input_model=BatchGetStatusInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_list,
             name="batch_list_jobs",
             description="List recent batch jobs and their current execution statuses.",
-            args_schema=BatchListJobsInput,
+            input_model=BatchListJobsInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_cancel,
             name="batch_cancel_job",
             description="Cancel an active or queued batch job.",
-            args_schema=BatchCancelJobInput,
+            input_model=BatchCancelJobInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_download,
             name="batch_download_results",
             description="Download and parse results (outputs and errors) for a completed batch job.",
-            args_schema=BatchDownloadResultsInput,
+            input_model=BatchDownloadResultsInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_create,
             name="batch_submit_requests",
             description=(
                 "Submit a batch of requests for asynchronous execution (alias for batch_create_job). "
                 "Supports OpenAI Batch API and internal batch execution."
             ),
-            args_schema=BatchCreateJobInput,
+            input_model=BatchCreateJobInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_status,
             name="batch_check_status",
             description="Check the execution status and request counters of a batch job (alias for batch_get_status).",
-            args_schema=BatchGetStatusInput,
+            input_model=BatchGetStatusInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_download,
             name="batch_retrieve_results",
             description="Retrieve and parse results for a completed batch job (alias for batch_download_results).",
-            args_schema=BatchDownloadResultsInput,
+            input_model=BatchDownloadResultsInput,
             metadata=metadata,
         ),
     ]
@@ -447,6 +444,6 @@ __all__ = [
     "batch_list_jobs",
     "batch_retrieve_results",
     "batch_submit_requests",
-    "build_batch_langchain_tools",
+    "build_batch_tools",
     "get_batch_manager",
 ]

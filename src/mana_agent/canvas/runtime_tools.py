@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, Field
 
 from mana_agent.canvas.models import CanvasSource, OwnerRef
@@ -136,21 +136,21 @@ def _create_surface_with_content(
     return service.get_surface(session_id, surface_id)
 
 
-def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
+def build_canvas_tools(root: str | Path) -> list[Any]:
     service = canvas_service_for_root(root)
     common = (
         "Use only after a structured model decision selects Canvas. All UI is validated against "
         "the allowlisted catalog; never include HTML, JavaScript, CSS, commands, prompts, or secrets."
     )
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="canvas_create_surface",
             description=(
                 "Create a complete durable A2UI surface. The same call must include a validated "
                 "component adjacency list containing id='root' and its initial data model. "
                 f"{common}"
             ),
-            args_schema=_Create,
+            input_model=_Create,
             metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id, owner, components, data_model=None, retain_on_complete=True: (
                 _json(
@@ -168,13 +168,13 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="canvas_update_components",
             description=(
                 "Add or replace validated components using the same supported A2UI wire shapes "
                 f"as canvas_create_surface. {common}"
             ),
-            args_schema=_Components,
+            input_model=_Components,
             metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id, components: (
                 _json(
@@ -188,10 +188,10 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="canvas_update_data",
             description=f"Update a validated surface data model. {common}",
-            args_schema=_Data,
+            input_model=_Data,
             metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id, value, path: (
                 _json(
@@ -206,10 +206,10 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="canvas_delete_surface",
             description="Delete a surface from its owning session.",
-            args_schema=_Surface,
+            input_model=_Surface,
             metadata={"transactional_adapter": "canvas"},
             func=lambda source_decision_id, session_id, conversation_id, surface_id: (
                 _json(
@@ -222,18 +222,18 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="canvas_get_surface",
             description="Load one durable Canvas snapshot.",
-            args_schema=_Surface,
+            input_model=_Surface,
             func=lambda source_decision_id, session_id, conversation_id, surface_id: (
                 _json(lambda: service.get_surface(session_id, surface_id))
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="canvas_list_surfaces",
             description="List surfaces owned by a session.",
-            args_schema=_List,
+            input_model=_List,
             func=lambda source_decision_id, session_id, conversation_id, include_deleted: (
                 _json(
                     lambda: [
@@ -245,10 +245,10 @@ def build_canvas_langchain_tools(root: str | Path) -> list[Any]:
                 )
             ),
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="canvas_wait_for_action",
             description="Pause the owning runtime until the exact declared renderer action arrives.",
-            args_schema=_Wait,
+            input_model=_Wait,
             func=lambda source_decision_id, session_id, conversation_id, surface_id, action_name, timeout_seconds: (
                 _json(
                     lambda: service.wait_for_action(

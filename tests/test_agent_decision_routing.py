@@ -29,13 +29,25 @@ class _DecisionModel:
     def __init__(self, payloads: dict[str, dict]) -> None:
         self.payloads = payloads
 
-    def invoke(self, messages):  # noqa: ANN001
+    def generate_sync(self, messages, **_native_options):  # noqa: ANN001
         body = json.loads(messages[-1].content)
         request = body["user_request"]
         payload = dict(self.payloads[request])
         payload.update({key: value for key, value in _semantic_contract(payload["intent"]).items() if key not in payload})
         payload.setdefault("required_subagents", [])
         return type("Msg", (), {"content": json.dumps(payload)})()
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def _engine() -> AgentDecisionEngine:
@@ -249,10 +261,22 @@ def test_agent_decision_repairs_write_route_missing_mutation_tool() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             self.calls += 1
             payload = invalid if self.calls < 3 else repaired
             return type("Msg", (), {"content": json.dumps(payload)})()
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     model = RepairingModel()
     decision = AgentDecisionEngine(llm=model).decide(user_request="fix the routing bug")
@@ -277,8 +301,20 @@ def test_agent_decision_repair_failure_stays_rejected() -> None:
     }
 
     class NonRepairingModel:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return type("Msg", (), {"content": json.dumps(invalid)})()
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = AgentDecisionEngine(llm=NonRepairingModel()).decide(user_request="fix the routing bug")
 
@@ -309,7 +345,7 @@ def test_router_keeps_entrypoint_metadata_out_of_semantic_user_text() -> None:
         def __init__(self) -> None:
             self.payloads: list[dict] = []
 
-        def invoke(self, messages):  # noqa: ANN001
+        def generate_sync(self, messages, **_native_options):  # noqa: ANN001
             payload = json.loads(messages[-1].content)
             self.payloads.append(payload)
             return type(
@@ -329,6 +365,18 @@ def test_router_keeps_entrypoint_metadata_out_of_semantic_user_text() -> None:
                     "reasoning_summary": "Plain conversation.",
                 })},
             )()
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     model = RecordingModel()
     router = Router(decision_engine=AgentDecisionEngine(llm=model))
@@ -351,7 +399,7 @@ def test_router_keeps_coding_request_semantic_text_when_entered_through_chat() -
         def __init__(self) -> None:
             self.decision_payload: dict | None = None
 
-        def invoke(self, messages):  # noqa: ANN001
+        def generate_sync(self, messages, **_native_options):  # noqa: ANN001
             payload = json.loads(messages[-1].content)
             if "tools" in payload:
                 self.decision_payload = payload
@@ -372,6 +420,18 @@ def test_router_keeps_coding_request_semantic_text_when_entered_through_chat() -
                     "reasoning_summary": "Repository routing code needs a mutation.",
                 })},
             )()
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     model = CodingModel()
     route = Router(decision_engine=AgentDecisionEngine(llm=model)).route(
@@ -412,7 +472,7 @@ def test_router_rejects_invalid_semantic_decision_instead_of_using_simple_route(
 
 def test_router_blocks_when_model_omits_required_semantic_contract() -> None:
     class IncompleteModel:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return type(
                 "Msg",
                 (),
@@ -428,6 +488,18 @@ def test_router_blocks_when_model_omits_required_semantic_contract() -> None:
                 })},
             )()
 
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
+
     with pytest.raises(RoutingDecisionError, match="routing model decision is unavailable"):
         Router(decision_engine=AgentDecisionEngine(llm=IncompleteModel())).route(
             task_id="task-incomplete",
@@ -438,7 +510,7 @@ def test_router_blocks_when_model_omits_required_semantic_contract() -> None:
 
 def test_chat_route_uses_direct_agent_decision_without_search_repair() -> None:
     class AnswerModel:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return type(
                 "Msg",
                 (),
@@ -460,6 +532,18 @@ def test_chat_route_uses_direct_agent_decision_without_search_repair() -> None:
                     )
                 },
             )()
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     ask_service = type("AskService", (), {"ask_agent": type("AskAgent", (), {"llm": AnswerModel()})()})()
     decision = _decide_chat_route(

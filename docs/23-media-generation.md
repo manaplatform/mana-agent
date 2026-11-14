@@ -59,7 +59,7 @@ resolution = "720x1280"
 Provider model metadata wins during capability normalization, followed by
 Mana's maintained registry, then conservative non-text name inference. Unknown
 models are not offered as supporting every modality. Selectors filter
-independently for text, embedding, image, voice, and video use.
+independently for text, image, voice, and video use.
 
 ## Chat and durable jobs
 

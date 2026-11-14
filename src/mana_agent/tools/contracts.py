@@ -399,19 +399,6 @@ def coding_tool_contracts() -> list[ToolContract]:
     contracts = [
         *email_contracts,
         ToolContract(
-            name="semantic_search",
-            description="Search indexed code chunks semantically using the local vector index when available.",
-            input_schema=_schema({"query": {"type": "string"}, "k": {"type": "integer"}}, ["query"]),
-            output_schema=_schema({"results": {"type": "array"}, "warnings": {"type": "array"}}),
-            error_format=common_error,
-            safety_rules=[
-                "Read matching files before editing them.",
-                "Do not repeat the same query indefinitely.",
-                "Use repo_search, read_file, find_symbols, call_graph, or verify_project when they fit better than semantic retrieval.",
-            ],
-            examples=[{"input": {"query": "safe_apply_patch path validation", "k": 8}}],
-        ),
-        ToolContract(
             name="repo_search",
             description="Search repository text with regex or literal matching.",
             input_schema=_schema(

@@ -3,235 +3,236 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 import subprocess
-
 import pytest
-
-from mana_agent.model_routing.competition import (
-    CandidateCompetition, CandidateEvidence, CandidateWorkspace, CompetitionJudgment,
-)
+from mana_agent.model_routing.competition import CandidateCompetition, CandidateEvidence, CandidateWorkspace, CompetitionJudgment
 from mana_agent.model_routing.history import InMemoryRoutingHistory, JsonlRoutingHistory
-from mana_agent.model_routing.models import (
-    Complexity, LatencyClass, ModelProfile, RepositoryMetadata, RiskLevel,
-    RoutingBudgets, RoutingFailure, RoutingOutcome, RoutingRequest,
-    RoutingResourceScore,
-    provider_request_overrides_from_configuration,
-)
+from mana_agent.model_routing.models import (Complexity, LatencyClass, ModelProfile, RepositoryMetadata,
+    RiskLevel, RoutingBudgets, RoutingFailure, RoutingOutcome, RoutingRequest, RoutingResourceScore,
+    provider_request_overrides_from_configuration)
 from mana_agent.model_routing.profiles import configured_profiles, profiles_from_legacy_configuration
 from mana_agent.model_routing.router import ModelRouter
 from mana_agent.model_routing.repository import RepositoryMetadataInspector
+from mana_agent.llm.capabilities import ModelProfile as NativeProfile, observation
 
 
-def profile(
-    model: str,
-    *,
-    reliability: float,
-    cost: float,
-    languages: frozenset[str] = frozenset(),
-    roles: frozenset[str] = frozenset({"coding", "tool", "verifier"}),
-    benchmarks: dict[str, float] | None = None,
-) -> ModelProfile:
-    return ModelProfile(
-        provider="fixture", model_id=model, supported_roles=roles,
-        context_window=1_000_000, max_output_tokens=500_000,
-        reasoning_settings=frozenset({"high"}) if reliability > 0.9 else frozenset({"none"}),
-        logical_cost_per_1k_tokens=cost, reliability_score=reliability,
-        supported_languages=languages, benchmark_scores=benchmarks or {},
-    )
+def profile(model: str, *, reliability: float = .9, cost: float = 1, **kwargs) -> ModelProfile:
+    evidence = NativeProfile(provider="fixture", model_id=model, facts={key: observation(value, source="provider") for key, value in {
+        "input_text": True, "output_text": True, "tool_calling": True, "native_structured_output": True,
+        "context_window": 1000000, "max_output_tokens": 500000}.items()})
+    return ModelProfile(provider="fixture", model_id=model, context_window=1000000, max_output_tokens=500000,
+        supported_roles=frozenset({"coding", "tool", "verifier"}), supported_tools=frozenset({"*"}),
+        can_tool_call=True, can_patch=True, can_structured_output=True, can_verify=True,
+        input_cost_per_million=cost, output_cost_per_million=cost, reliability_score=reliability,
+        configuration={"pricing_known": True}, capability_descriptor=evidence)
 
 
-CHEAP = profile("cheap", reliability=0.75, cost=0.2, benchmarks={"routine": 0.9, "coding": 0.45})
-STRONG = profile("strong", reliability=0.97, cost=10, benchmarks={"routine": 0.97, "coding": 0.99, "verification": 0.99})
+CHEAP, STRONG, VERIFIER = profile("cheap", cost=.2), profile("strong", cost=10), profile("verifier")
 
 
-def request(*, complexity: Complexity = Complexity.LOW, risk: RiskLevel = RiskLevel.LOW, task_type: str = "routine", **kwargs) -> RoutingRequest:
-    return RoutingRequest(
-        role="coding", task_description="fixture task", task_type=task_type,
-        complexity=complexity, risk=risk, latency_requirement=LatencyClass.STANDARD,
-        **kwargs,
-    )
+def request(**kwargs) -> RoutingRequest:
+    return RoutingRequest(role="coding", task_description="fixture task", task_type="coding",
+        complexity=Complexity.HIGH, risk=RiskLevel.LOW, latency_requirement=LatencyClass.STANDARD, **kwargs)
 
 
-def test_routine_task_chooses_cheaper_qualified_model_and_high_risk_chooses_stronger() -> None:
-    router = ModelRouter([CHEAP, STRONG])
-    assert router.route(request()).selected_model == "cheap"
-    assert router.route(request(complexity=Complexity.CRITICAL, risk=RiskLevel.CRITICAL, task_type="coding")).selected_model == "strong"
+class SelectionModel:
+    def __init__(self, candidate, **kwargs):
+        self.choice = {"candidate": candidate, "reason": "Explicit model selection", "confidence": .99, "mode": "single", **kwargs}
+        self.calls = []
+        self.schemas = []
+    def decide_sync(self, messages, schema):
+        self.calls.append(json.loads(messages[-1].content))
+        self.schemas.append(schema.model_json_schema())
+        return schema.model_validate(self.choice)
 
 
-def test_resource_score_is_consumed_once_and_persisted_on_decision() -> None:
-    calls: list[str] = []
-
-    def resources(model: ModelProfile, _request: RoutingRequest) -> RoutingResourceScore:
-        calls.append(model.model_id)
-        return RoutingResourceScore(
-            available=True,
-            provider_capacity=1.0 if model.model_id == "cheap" else 0.0,
-            quota_health=1.0,
-            resource_confidence=1.0,
-        )
-
-    policy = replace(ModelRouter([CHEAP, STRONG]).policy, weights={
-        "capability": 0.0, "quality": 0.0, "history": 0.0, "language": 0.0,
-        "cost": 0.0, "latency": 0.0, "provider_capacity": 1.0,
-        "quota_health": 0.0, "resource_confidence": 0.0,
-    })
-    decision = ModelRouter([CHEAP, STRONG], policy=policy, resource_scoring=resources).route(request())
-
-    assert decision.selected_model == "cheap"
-    assert decision.resource_score.provider_capacity == 1.0
-    assert calls == ["cheap", "strong"]
+def router(candidate="fixture/strong", **choice):
+    return ModelRouter([CHEAP, STRONG, VERIFIER], policy=replace(ModelRouter([]).policy, parallel_execution_enabled=True), decision_model=SelectionModel(candidate, **choice))
 
 
-def test_repository_language_changes_ranking() -> None:
-    python_model = replace(STRONG, model_id="python", supported_languages=frozenset({"python"}), reliability_score=0.9)
-    rust_model = replace(STRONG, model_id="rust", supported_languages=frozenset({"rust"}), reliability_score=0.9)
-    decision = ModelRouter([rust_model, python_model]).route(request(repository=RepositoryMetadata(languages=("python",))))
-    assert decision.selected_model == "python"
+def test_main_model_selects_even_when_candidate_is_more_expensive():
+    selected = router()
+    assert selected.route(request()).selected_model == "strong"
+    assert len(selected.decision_model.calls) == 1
+    assert {item["id"] for item in selected.decision_model.calls[0]["candidates"]} == {"fixture/cheap", "fixture/strong", "fixture/verifier"}
 
 
-def test_repository_metadata_is_cached_by_fingerprint_and_sensitive_changes_raise_demand(tmp_path: Path) -> None:
+def test_main_model_can_choose_a_verifier_with_no_execution_role():
+    verifier = replace(VERIFIER, supported_roles=frozenset({"verifier"}))
+    decision_model = SelectionModel("fixture/strong", mode="single_with_verification", verifier=verifier.key)
+    decision = ModelRouter([STRONG, verifier], decision_model=decision_model).route(request())
+    payload, = decision_model.calls
+    assert {item["id"] for item in payload["candidates"]} == {STRONG.key}
+    assert verifier.key in payload["verifier_candidates"]
+    assert decision.verifier_model == verifier.key
+
+
+def test_startup_role_assignment_omits_competition_candidates_from_wire_schema():
+    from mana_agent.llm.providers.openai import strict_schema
+
+    selected = router()
+    selected.decision_model.choice.pop("mode")
+    decision = selected.route(request(assignment_only=True))
+    payload, = selected.decision_model.calls
+    schema, = selected.decision_model.schemas
+    assert payload["permitted_modes"] == ["single"]
+    wire_schema = strict_schema(schema)
+    assert set(wire_schema["properties"]) == {"candidate", "reason", "confidence"}
+    assert set(wire_schema["required"]) == {"candidate", "reason", "confidence"}
+    assert wire_schema["additionalProperties"] is False
+    assert decision.selected_model == "strong"
+    assert decision.competition_candidates == ()
+    assert not decision.parallel_execution_permitted
+
+
+def test_startup_role_assignment_rejects_unoffered_competition_fields():
+    selected = router(competition_candidates=[CHEAP.key, STRONG.key])
+    selected.decision_model.choice.pop("mode")
+    with pytest.raises(RoutingFailure, match="Main model selection failed"):
+        selected.route(request(assignment_only=True))
+    assert len(selected.decision_model.calls) == 1
+
+
+def test_routing_rejects_unoffered_parallel_mode():
+    selected = router(mode="parallel_candidates")
+    with pytest.raises(RoutingFailure, match="outside the admitted authority"):
+        selected.route(request())
+    assert len(selected.decision_model.calls) == 1
+
+
+def test_role_resolver_requests_assignment_only():
+    from mana_agent.multi_agent.core.types import AgentRole
+    from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
+
+    selected = router()
+    selected.decision_model.choice.pop("mode")
+
+    class Authority:
+        def route(self, routing_request):
+            assert routing_request.assignment_only
+            return selected.route(routing_request)
+
+        def binding_for(self, decision_id):
+            return None
+
+    result = resolve_model_for_role(AgentRole.CODING, global_model=CHEAP.model_id, routing_authority=Authority())
+    assert result.resolved_model == STRONG.model_id
+    assert result.routing_decision.routing_mode.value == "single"
+
+
+def test_routing_reports_known_schema_fields_without_response_values():
+    selected = router(confidence="fixture-sensitive-output")
+    selected.decision_model.choice.pop("mode")
+    with pytest.raises(RoutingFailure, match=r"role coding.*selection schema \(confidence\)") as error:
+        selected.route(request(assignment_only=True))
+    assert "fixture-sensitive-output" not in str(error.value)
+    assert len(selected.decision_model.calls) == 1
+
+
+def test_routing_reports_safe_structured_output_failure():
+    from mana_agent.llm.errors import StructuredOutputError
+
+    class Broken:
+        def decide_sync(self, *_args):
+            raise StructuredOutputError("The provider returned JSON that did not match the requested structured-output schema.")
+
+    selected = ModelRouter([STRONG], decision_model=Broken())
+    with pytest.raises(RoutingFailure, match="role coding.*did not match the requested structured-output schema"):
+        selected.route(request(assignment_only=True))
+
+
+def test_routing_rejects_competition_candidates_when_main_chooses_single_mode():
+    selected = router(competition_candidates=[CHEAP.key, STRONG.key])
+    with pytest.raises(RoutingFailure, match="Competition candidates were supplied for a non-competition mode"):
+        selected.route(request(multi_candidate_permitted=True, parallel_execution_allowed=True,
+            main_model_requested_parallel=True, independent_verifier_available=True, maximum_concurrency=2, isolation_available=True))
+    assert "parallel_candidates" in selected.decision_model.calls[0]["permitted_modes"]
+    assert len(selected.decision_model.calls) == 1
+
+
+@pytest.mark.parametrize("choice", [
+    {"candidate": "unoffered"}, {"candidate": "fixture/strong", "confidence": .01},
+    {"candidate": "fixture/strong", "verifier": "fixture/strong"},
+    {"candidate": "fixture/strong", "mode": "single_with_verification"},
+    {"candidate": "fixture/strong", "mode": "multi_agent"},
+    {"candidate": "fixture/strong", "mode": "parallel_candidates", "competition_candidates": ["fixture/cheap", "fixture/strong"]},
+])
+def test_invalid_or_unauthorized_model_choice_never_falls_back(choice):
+    model = SelectionModel("fixture/strong")
+    model.choice.update(choice)
+    with pytest.raises(RoutingFailure):
+        ModelRouter([CHEAP, STRONG], decision_model=model).route(request())
+    assert len(model.calls) == 1
+
+
+def test_unknown_limits_are_rejected_before_main_call():
+    model = SelectionModel("fixture/cheap")
+    with pytest.raises(RoutingFailure, match="No configured model"):
+        ModelRouter([replace(CHEAP, context_window=0)], decision_model=model).route(request())
+    assert model.calls == []
+
+
+def test_resource_capacity_is_gathered_once_and_unavailable_candidates_are_not_offered():
+    calls = []
+    def resource(profile, request):
+        calls.append(profile.key)
+        return RoutingResourceScore(profile.model_id != "cheap", .8, 1, 1)
+    model = SelectionModel("fixture/strong")
+    decision = ModelRouter([CHEAP, STRONG], decision_model=model, resource_scoring=resource).route(request())
+    assert calls == ["fixture/cheap", "fixture/strong"]
+    assert len(model.calls[0]["candidates"]) == 1
+    assert decision.resource_score.provider_capacity == .8
+
+
+def test_cost_and_verification_reserve_are_enforced_before_selection():
+    model = SelectionModel("fixture/strong")
+    with pytest.raises(RoutingFailure):
+        ModelRouter([STRONG], decision_model=model).route(request(expected_prompt_tokens=450000,
+            expected_response_tokens=450000, budgets=RoutingBudgets(task_cost_limit=1, verification_reserve_ratio=.15)))
+    assert model.calls == []
+
+
+def test_repository_metadata_cache_refreshes_when_files_change(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    (tmp_path / "app.py").write_text("print('ok')\n")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "app.py"], check=True)
+    (tmp_path / "app.py").write_text("print('ok')")
     inspector = RepositoryMetadataInspector()
     first = inspector.inspect(tmp_path)
-    assert first.languages == ("python",)
     assert inspector.inspect(tmp_path) is first
-    auth = tmp_path / "auth"
-    auth.mkdir()
-    (auth / "security.py").write_text("TOKEN = None\n")
+    (tmp_path / "security.py").write_text("TOKEN = None")
     second = inspector.inspect(tmp_path)
     assert second is not first
-    assert "auth" in second.sensitive_areas or "security" in second.sensitive_areas
-    decision = ModelRouter([CHEAP, STRONG]).route(request(repository=second, multi_candidate_permitted=True))
-    assert decision.candidate_competition is True
+    assert first.fingerprint != second.fingerprint
 
 
-def test_repository_metadata_inspector_nonexistent_or_non_directory_root(tmp_path: Path) -> None:
-    inspector = RepositoryMetadataInspector()
-    nonexistent = tmp_path / "does_not_exist_xyz"
-    metadata = inspector.inspect(nonexistent)
-    assert metadata.file_count == 0
-    assert metadata.languages == ()
-    assert metadata.changed_files == ()
-    assert len(metadata.fingerprint) == 20
-
-    file_path = tmp_path / "regular_file.txt"
-    file_path.write_text("not a dir")
-    metadata_file = inspector.inspect(file_path)
-    assert metadata_file.file_count == 0
-    assert metadata_file.languages == ()
+def test_missing_repository_metadata_is_empty(tmp_path):
+    metadata = RepositoryMetadataInspector().inspect(tmp_path / "absent")
+    assert not metadata.languages and metadata.file_count == 0
 
 
-def test_budget_rejects_expensive_candidate_and_reserves_verification() -> None:
-    priced = replace(STRONG, input_cost_per_million=1.0, output_cost_per_million=1.0, context_window=1_000_000)
-    req = request(
-        expected_prompt_tokens=450_000, expected_response_tokens=450_000,
-        budgets=RoutingBudgets(task_token_limit=1_000_000, task_cost_limit=1.0, verification_reserve_ratio=0.15),
-    )
-    with pytest.raises(RoutingFailure) as caught:
-        ModelRouter([priced]).route(req)
-    assert "verification reserve" in caught.value.rejected[0].reasons[0]
-    cheaper = replace(priced, model_id="within-budget", input_cost_per_million=0.8, output_cost_per_million=0.8)
-    assert ModelRouter([cheaper]).route(req).selected_model == "within-budget"
+def test_unknown_names_do_not_get_maintained_capabilities(monkeypatch):
+    monkeypatch.setattr("mana_agent.model_routing.profiles.resolve_model_capability", lambda provider, model: NativeProfile(provider=provider, model_id=model))
+    candidate = configured_profiles([{"provider": "openai", "model_id": "gpt-6-luna"}])[0]
+    assert candidate.context_window == 0
+    assert not candidate.can_tool_call
 
 
-def outcome(model: str, *, accepted: bool = False, failure: str = "", age_seconds: int = 0) -> RoutingOutcome:
-    return RoutingOutcome(
-        provider="fixture", model_id=model, model_configuration={}, task_category="coding",
-        repository_languages=(), repository_frameworks=(), complexity="high", risk="high",
-        routing_score=0.8, selection_reason="fixture", accepted=accepted,
-        verification_passed=accepted, failure_kind=failure,
-        occurred_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
-    )
+def test_model_failure_stops_selection_without_second_choice():
+    class Broken:
+        calls = 0
+        def decide_sync(self, *args):
+            self.calls += 1
+            raise TimeoutError("controlled")
+    model = Broken()
+    with pytest.raises(RoutingFailure, match="no fallback"):
+        ModelRouter([CHEAP], decision_model=model).route(request())
+    assert model.calls == 1
 
 
-def test_history_affects_ranking_recent_failure_penalty_decays_and_circuit_breaker_excludes() -> None:
-    left = replace(STRONG, model_id="left", reliability_score=0.9)
-    right = replace(STRONG, model_id="right", reliability_score=0.9)
-    successful = InMemoryRoutingHistory(tuple(outcome("right", accepted=True) for _ in range(4)))
-    assert ModelRouter([left, right], history=successful).route(request(task_type="coding", complexity=Complexity.HIGH)).selected_model == "right"
-
-    recent = InMemoryRoutingHistory((outcome("left", failure="rate_limit"),))
-    assert ModelRouter([left, right], history=recent).route(request()).selected_model == "right"
-    recent_score = ModelRouter([left], history=recent).route(request()).routing_score
-    old = InMemoryRoutingHistory((outcome("left", failure="rate_limit", age_seconds=100_000),))
-    old_score = ModelRouter([left], history=old).route(request()).routing_score
-    assert old_score > recent_score
-
-    breaker = InMemoryRoutingHistory(tuple(outcome("left", failure="timeout") for _ in range(3)))
-    independent_provider = replace(right, provider="fixture-2")
-    decision = ModelRouter([left, independent_provider], history=breaker).route(request())
-    assert decision.selected_model == "right"
-    assert any(item.model == "fixture/left" and "circuit breaker" in item.reasons[0] for item in decision.rejected_candidates)
-
-
-def test_competition_policy_is_threshold_budget_and_latency_controlled() -> None:
-    base = request(multi_candidate_permitted=True)
-    assert ModelRouter([CHEAP, STRONG]).route(base).candidate_competition is False
-    difficult = replace(base, complexity=Complexity.HIGH, task_type="coding")
-    assert ModelRouter([CHEAP, STRONG]).route(difficult).candidate_competition is True
-    interactive = replace(difficult, latency_requirement=LatencyClass.INTERACTIVE)
-    assert ModelRouter([replace(CHEAP, latency_class=LatencyClass.INTERACTIVE), replace(STRONG, latency_class=LatencyClass.INTERACTIVE)]).route(interactive).candidate_competition is False
-    constrained = replace(difficult, budgets=RoutingBudgets(competition_cost_limit=0.01))
-    assert ModelRouter([CHEAP, STRONG]).route(constrained).candidate_competition is False
-
-
-def test_identical_inputs_and_evidence_produce_identical_decisions() -> None:
-    router = ModelRouter([STRONG, CHEAP])
-    assert router.route(request()) == router.route(request())
-
-
-def test_configured_and_legacy_profiles_migrate_without_role_lock(monkeypatch) -> None:
-    explicit = configured_profiles([{"provider": "custom", "model_id": "m", "supported_roles": ["coding"], "context_window": 4096, "max_output_tokens": 1024}])
-    assert explicit[0].key == "custom/m"
-    monkeypatch.setattr("mana_agent.model_routing.profiles.get_setting", lambda name, default="": {"MODEL_LEVEL_1_FAST_TOOL": "openai/fast"}.get(name, default))
-    migrated = profiles_from_legacy_configuration(
-        global_model="openai/current", context_window=16_384, max_output_tokens=4_096
-    )
-    assert {item.key for item in migrated} == {"openai/fast", "openai/current"}
-    assert "coding" in migrated[0].supported_roles
-
-
-def test_pinned_profiles_ignore_operator_model_levels(monkeypatch) -> None:
-    from mana_agent.model_routing.profiles import profiles_for_pinned_models
-
-    monkeypatch.setattr(
-        "mana_agent.model_routing.profiles.get_setting",
-        lambda name, default="": {"MODEL_LEVEL_3_HIGH_REASONING": "openai/gpt-5.6-luna"}.get(name, default),
-    )
-    pinned = profiles_for_pinned_models(["gpt-4.1-mini", "gpt-4.1-mini"])
-    assert len(pinned) == 1
-    assert pinned[0].model_id == "gpt-4.1-mini"
-    assert pinned[0].context_window >= 100_000
-    assert pinned[0].source_level == "pinned"
-    # Pinned models must satisfy interactive entry routing (head_decision).
-    assert pinned[0].latency_class is LatencyClass.INTERACTIVE
-    router = ModelRouter(pinned)
-    decision = router.route(
-        RoutingRequest(
-            role="head_decision",
-            task_description="Classify the gateway entry route for: fixture",
-            task_type="routing",
-            complexity=Complexity.MEDIUM,
-            risk=RiskLevel.MEDIUM,
-            required_capabilities=frozenset({"structured_output"}),
-            latency_requirement=LatencyClass.INTERACTIVE,
-        )
-    )
-    assert decision.selected_model == "gpt-4.1-mini"
-
-
-def test_legacy_profiles_apply_maintained_token_limits_for_known_models(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "mana_agent.model_routing.profiles.get_setting",
-        lambda name, default="": {"MODEL_LEVEL_3_HIGH_REASONING": "openai/gpt-5.6-luna"}.get(name, default),
-    )
-    migrated = profiles_from_legacy_configuration(context_window=16_384, max_output_tokens=4_096)
-    assert len(migrated) == 1
-    assert migrated[0].model_id == "gpt-5.6-luna"
-    assert migrated[0].context_window == 400_000
-    assert migrated[0].max_output_tokens == 128_000
+def outcome(model, **kwargs):
+    return RoutingOutcome(provider="fixture", model_id=model, model_configuration={}, task_category="coding",
+        repository_languages=(), repository_frameworks=(), complexity="high", risk="high", routing_score=.99,
+        selection_reason="controlled", occurred_at=datetime.now(timezone.utc), **kwargs)
 
 
 class FakeExecutor:
@@ -275,7 +276,11 @@ class FakeJudge:
 
 def test_candidates_are_isolated_judged_from_normalized_evidence_and_loser_cleaned(tmp_path: Path) -> None:
     executor, judge = FakeExecutor(tmp_path), FakeJudge()
-    decision = ModelRouter([CHEAP, STRONG]).route(request(complexity=Complexity.HIGH, task_type="coding", multi_candidate_permitted=True))
+    selected = router(CHEAP.key, mode="parallel_candidates", verifier=VERIFIER.key, competition_candidates=[CHEAP.key, STRONG.key])
+    decision = selected.route(request(multi_candidate_permitted=True, parallel_execution_allowed=True,
+        main_model_requested_parallel=True, independent_verifier_available=True, maximum_concurrency=2, isolation_available=True))
+    assert "parallel_candidates" in selected.decision_model.calls[0]["permitted_modes"]
+    assert "competition_candidates" in selected.decision_model.schemas[0]["properties"]
     result = CandidateCompetition(executor, judge).run(decision)
     assert result.winner.candidate_id == executor.promoted == "candidate-2"
     assert result.cleaned_candidates == ("candidate-1",)
@@ -297,7 +302,7 @@ def test_provider_request_overrides_drop_routing_metadata() -> None:
         for_http_body=True,
     )
     assert overrides == {"temperature": 0.1, "extra_body": {"foo": 1}}
-    # LangChain path may keep model_kwargs; HTTP body path must not.
+    # Retired client-only settings must not reach an HTTP body.
     client_side = provider_request_overrides_from_configuration(
         {"model_kwargs": {"bar": 2}, "source_levels": ("pinned",)},
         for_http_body=False,

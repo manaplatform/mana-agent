@@ -82,18 +82,6 @@ def main(
             "output_dir": str(OUTPUT_DIR) if OUTPUT_DIR else None,
         },
     )
-    if tuple(sys.version_info[:2]) >= (3, 14):
-        warning_msg = (
-            "Python 3.14+ may emit LangChain/Pydantic v1 compatibility warnings. "
-            "Recommended runtime: Python 3.12 or 3.13."
-        )
-        warnings.warn(warning_msg, UserWarning, stacklevel=2)
-        # Only emit the visual panel at the interactive root (no subcommand).
-        # Subcommands (e.g. `automation list`) must keep clean/JSON output.
-        # The warnings.warn still fires for all paths (used by tests and visible to users).
-        if ctx.invoked_subcommand is None:
-            sink = build_output_sink(command_name="main", json_mode=False, console=console)
-            sink.emit_warning(warning_msg)
     if ctx.invoked_subcommand is None:
         if configure_now:
             configure()

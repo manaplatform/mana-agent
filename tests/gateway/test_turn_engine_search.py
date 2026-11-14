@@ -72,7 +72,7 @@ def test_search_operation_uses_a_dedicated_query_decision(tmp_path) -> None:
         def __init__(self) -> None:
             self.payloads: list[dict[str, object]] = []
 
-        def invoke(self, messages):  # noqa: ANN001
+        def generate_sync(self, messages, **_native_options):  # noqa: ANN001
             payload = json.loads(messages[-1].content)
             self.payloads.append(payload)
             assert payload["required_tool"] == "web_search"
@@ -87,6 +87,18 @@ def test_search_operation_uses_a_dedicated_query_decision(tmp_path) -> None:
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     model = Model()
     decision = decide_search_operation(
@@ -108,7 +120,7 @@ def test_search_operation_uses_a_dedicated_query_decision(tmp_path) -> None:
 
 def test_search_operation_accepts_nested_tool_input_shape(tmp_path) -> None:
     class Model:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return SimpleNamespace(
                 content=json.dumps(
                     {
@@ -119,6 +131,18 @@ def test_search_operation_accepts_nested_tool_input_shape(tmp_path) -> None:
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = decide_search_operation(
         ask_service=SimpleNamespace(ask_agent=SimpleNamespace(llm=Model())),
@@ -133,10 +157,22 @@ def test_search_operation_accepts_nested_tool_input_shape(tmp_path) -> None:
 
 def test_search_operation_accepts_string_tool_payload(tmp_path) -> None:
     class Model:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return SimpleNamespace(
                 content=json.dumps({"web_search": "what is hermes agent"})
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = decide_search_operation(
         ask_service=SimpleNamespace(ask_agent=SimpleNamespace(llm=Model())),
@@ -150,7 +186,7 @@ def test_search_operation_accepts_string_tool_payload(tmp_path) -> None:
 
 def test_search_operation_fails_closed_when_query_missing(tmp_path) -> None:
     class Model:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return SimpleNamespace(
                 content=json.dumps(
                     {
@@ -159,6 +195,18 @@ def test_search_operation_fails_closed_when_query_missing(tmp_path) -> None:
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     with pytest.raises(SearchOperationDecisionError, match="did not include a query"):
         decide_search_operation(
@@ -181,8 +229,20 @@ def test_search_operation_fails_closed_when_model_unavailable(tmp_path) -> None:
 
 def test_search_operation_fails_closed_when_query_too_long(tmp_path) -> None:
     class Model:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return SimpleNamespace(content=json.dumps({"query": "x" * 401}))
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     with pytest.raises(SearchOperationDecisionError, match="400-character limit"):
         decide_search_operation(
@@ -195,7 +255,7 @@ def test_search_operation_fails_closed_when_query_too_long(tmp_path) -> None:
 
 def test_search_operation_github_includes_kind_and_repo(tmp_path) -> None:
     class Model:
-        def invoke(self, messages):  # noqa: ANN001
+        def generate_sync(self, messages, **_native_options):  # noqa: ANN001
             payload = json.loads(messages[-1].content)
             assert payload["required_tool"] == "github_search"
             return SimpleNamespace(
@@ -208,6 +268,18 @@ def test_search_operation_github_includes_kind_and_repo(tmp_path) -> None:
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = decide_search_operation(
         ask_service=SimpleNamespace(ask_agent=SimpleNamespace(llm=Model())),

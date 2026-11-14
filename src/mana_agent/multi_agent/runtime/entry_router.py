@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 
 from mana_agent.multi_agent.core.types import AgentRole
 from mana_agent.multi_agent.runtime.model_levels import resolve_model_for_role
@@ -16,7 +16,7 @@ RouteKind = Literal[
     "command",
     "tool_execution",
     "browser_task",
-    "semantic_qa",
+    "repository_qa",
     "repo_search",
     "web_search",
     "github_search",
@@ -32,7 +32,7 @@ ROUTE_KINDS: set[str] = {
     "command",
     "tool_execution",
     "browser_task",
-    "semantic_qa",
+    "repository_qa",
     "repo_search",
     "web_search",
     "github_search",
@@ -82,7 +82,7 @@ class RouteDecisionError(RuntimeError):
 ENTRY_ROUTER_PROMPT = """You are Mana-Agent's ask/chat entry router.
 Choose exactly one route for the user's request before any command, search, tool, or QnA chain runs.
 Do not use fallback behavior. Do not choose actions by keyword alone.
-Use runtime state to decide whether semantic indexes, repo context, external search, and commands are available.
+Use runtime state to decide whether repository search, repo context, external search, and commands are available.
 If validation_error is present, choose a new valid route or explain why execution must stop.
 If runtime_state.required_mcp_server is set, the user explicitly requires that
 MCP provider. Select tool_execution with a tool from mcp__<required_mcp_server>__*
@@ -92,7 +92,7 @@ Route kinds:
 - command: run a known Mana-Agent command only when command_name is in available_commands.
 - tool_execution: execute a named tool/action from available_tools, such as command_inventory or shell.
 - browser_task: run a multi-step interactive website session using only advertised browser_* tools.
-- semantic_qa: answer from the semantic index; requires_index must be true.
+- repository_qa: answer using repository search tools; no vector index is required.
 - repo_search: search/read local repository files directly.
 - web_search: use public web search when enabled.
 - github_search: use public GitHub search when enabled.
@@ -117,7 +117,7 @@ describes Mana-Agent's own CLI and must never be used to inspect a target URL.
 
 Return JSON only with this schema:
 {
-  "kind": "command|tool_execution|browser_task|semantic_qa|repo_search|web_search|github_search|gitops|coding_task|analysis_task|conversation|clarification|unsupported",
+  "kind": "command|tool_execution|browser_task|repository_qa|repo_search|web_search|github_search|gitops|coding_task|analysis_task|conversation|clarification|unsupported",
   "confidence": 0.0,
   "reason": "short reason",
   "command_name": null,
@@ -151,7 +151,7 @@ class EntryRouter:
         available_tools: list[str] | None = None,
         runtime_state: RouteRuntimeState | dict[str, Any] | None = None,
     ) -> RouteDecision:
-        if self.llm is None or not hasattr(self.llm, "invoke"):
+        if self.llm is None or not hasattr(self.llm, "generate_sync"):
             raise RouteDecisionError(
                 "Model decision failed: entry_route. No action executed. Reason: routing model is unavailable."
             )
@@ -165,21 +165,17 @@ class EntryRouter:
             "runtime_state": state,
         }
         try:
-            response = self.llm.invoke(
+            data = self.llm.decide_sync(
                 [
                     SystemMessage(content=ENTRY_ROUTER_PROMPT),
-                    HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
-                ]
+                    UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+                ], __import__("pydantic").TypeAdapter(RouteDecision).json_schema()
             )
         except Exception as exc:  # noqa: BLE001 - converted to explicit routing failure
             raise RouteDecisionError(
                 f"Model decision failed: entry_route. No action executed. Reason: {exc}"
             ) from exc
-        from mana_agent.utils.text import extract_model_text
-
-        content = extract_model_text(getattr(response, "content", response))
         try:
-            data = _extract_json(content)
             return validate_route_decision(data)
         except Exception as exc:  # noqa: BLE001 - validation failure blocks execution
             raise RouteDecisionError(

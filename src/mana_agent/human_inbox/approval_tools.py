@@ -11,10 +11,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
-try:
-    from langchain_core.tools import StructuredTool
-except ImportError:
-    from langchain.tools import StructuredTool  # type: ignore[no-redef]
+from mana_agent.llm.tools import ToolBinding
 
 from mana_agent.human_inbox.models import (
     InboxRequest,
@@ -872,8 +869,8 @@ def build_approval_tools(
     workspace_root: Any = None,
     task_id: str = "",
     agent_id: str = "",
-) -> list[StructuredTool]:
-    """Return LangChain StructuredTools for model-driven human approval requests and waiting."""
+) -> list[ToolBinding]:
+    """Return native tool bindings for model-driven human approval requests and waiting."""
     metadata = {"read_only": True, "inbox_only": True}
 
     def _approval_req_tool(
@@ -939,34 +936,34 @@ def build_approval_tools(
         return dict(result)
 
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_approval_req_tool,
             name="approval_request",
             description=(
                 "Request human approval and wait for user decision when a command or transactional action requires approval to run. "
                 "Displays the approval modal in the user's interface in real time and returns the approved approval_id grant."
             ),
-            args_schema=ApprovalRequestInput,
+            input_model=ApprovalRequestInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_req_tool,
             name="request_user_approval",
             description=(
                 "Create a pending human approval request in the durable inbox for a model-decided action. "
                 "Runs nothing and returns the inbox_item_id."
             ),
-            args_schema=RequestUserApprovalInput,
+            input_model=RequestUserApprovalInput,
             metadata=metadata,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=_wait_tool,
             name="wait_for_approval",
             description=(
                 "Wait for a human approval decision on a pending inbox item. "
                 "Returns verdict and may_continue (True only if approved)."
             ),
-            args_schema=WaitForApprovalInput,
+            input_model=WaitForApprovalInput,
             metadata=metadata,
         ),
     ]

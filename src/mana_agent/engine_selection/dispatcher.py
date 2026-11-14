@@ -34,7 +34,7 @@ class SmartDispatcher:
     - Never calls Decisions merely to check eligibility.
     - Deterministic execution bypasses AI completely.
     - Shares decisions across callers to avoid duplicate AI requests.
-    - Bounded fallback if a supported Decisions call fails.
+    - Failure stops the selected operation without changing its engine or format.
     """
 
     def __init__(
@@ -282,11 +282,10 @@ class SmartDispatcher:
 
         except DecisionsError as exc:
             logger.warning(
-                "decisions.execution_failed engine=%s error=%s. Triggering safe bounded fallback.",
+                "decisions.execution_failed engine=%s error=%s. Stopping selected operation.",
                 selected_engine,
                 exc,
             )
-            # Safe bounded fallback
             return self._execute_fallback_engine(
                 operation,
                 context,
@@ -295,7 +294,7 @@ class SmartDispatcher:
             )
         except Exception as exc:
             logger.warning(
-                "decisions.unexpected_error engine=%s error=%s. Triggering safe bounded fallback.",
+                "decisions.unexpected_error engine=%s error=%s. Stopping selected operation.",
                 selected_engine,
                 exc,
             )
@@ -316,22 +315,10 @@ class SmartDispatcher:
                 reasoning="No LLM provided for structured output extraction.",
             )
 
-        with_struct = getattr(llm, "with_structured_output", None)
-        if callable(with_struct) and schema is not None:
-            try:
-                runner = with_struct(schema)
-                res = runner.invoke(self._prompt_messages(operation))
-                return ExecutionResult(
-                    success=True,
-                    engine_used=EngineType.RESPONSES_STRUCTURED,
-                    result=res,
-                    confidence=1.0,
-                )
-            except Exception as exc:
-                logger.warning("structured_output.invoke_failed error=%s", exc)
-
-        # Fallback to standard invoke
-        return self._invoke_llm_json(operation, llm=llm, engine_used=EngineType.RESPONSES_STRUCTURED)
+        if schema is None:
+            raise ValueError("Structured execution requires an explicit output schema")
+        res = llm.decide_sync(self._prompt_messages(operation), schema)
+        return ExecutionResult(success=True, engine_used=EngineType.RESPONSES_STRUCTURED, result=res, confidence=1.0)
 
     def _execute_function_calling(self, operation: Operation, context: Any, *, llm: Any) -> ExecutionResult:
         if llm is None:
@@ -342,24 +329,12 @@ class SmartDispatcher:
                 reasoning="No LLM provided for function calling.",
             )
 
-        # Function calling via tools binding if supported
-        bind_tools = getattr(llm, "bind_tools", None)
-        if callable(bind_tools) and operation.tool_schema:
-            try:
-                tool_llm = bind_tools([operation.tool_schema])
-                msg = tool_llm.invoke(self._prompt_messages(operation))
-                tool_calls = getattr(msg, "tool_calls", None) or []
-                return ExecutionResult(
-                    success=True,
-                    engine_used=EngineType.FUNCTION_CALLING,
-                    result=tool_calls[0] if tool_calls else msg,
-                    confidence=1.0,
-                )
-            except Exception as exc:
-                logger.warning("function_calling.invoke_failed error=%s", exc)
-
-        # Fallback to standard invoke
-        return self._invoke_llm_json(operation, llm=llm, engine_used=EngineType.FUNCTION_CALLING)
+        if not operation.tool_schema:
+            raise ValueError("Function calling requires the selected registered tool schema")
+        msg = llm.with_tools([operation.tool_schema]).generate_sync(self._prompt_messages(operation))
+        if not msg.tool_calls:
+            raise ValueError("Selected function-calling operation returned no tool call")
+        return ExecutionResult(success=True, engine_used=EngineType.FUNCTION_CALLING, result=msg.tool_calls[0], confidence=1.0)
 
     def _execute_reasoning(self, operation: Operation, context: Any, *, llm: Any) -> ExecutionResult:
         return self._invoke_llm_text(operation, llm=llm, engine_used=EngineType.REASONING_ENGINE)
@@ -378,150 +353,16 @@ class SmartDispatcher:
         llm: Any,
         fallback_reason: str,
     ) -> ExecutionResult:
-        """Bounded fallback to existing compatible engine."""
-        logger.info(
-            "execute_auto.fallback operation=%s kind=%s reason=%s",
-            operation.name,
-            operation.kind,
-            fallback_reason,
-        )
-
-        if llm is None:
-            return ExecutionResult(
-                success=False,
-                engine_used=EngineType.COMPATIBLE_FALLBACK,
-                result=None,
-                fallback_occurred=True,
-                fallback_reason=fallback_reason,
-                reasoning="No compatible engine (LLM) available for fallback execution.",
-            )
-
-        # For predicate: prompt LLM for boolean evaluation
-        if operation.kind == OperationKind.PREDICATE:
-            prompt = (
-                f"Evaluate the following question ({operation.name}) based on the evidence.\n"
-                f"Question: {operation.instructions}\n"
-                f"Evidence: {operation.input}\n"
-                f"Answer with JSON only: {{\"result\": true|false, \"reason\": \"...\"}}"
-            )
-            try:
-                res = self._invoke_llm_json_raw(prompt, llm=llm)
-                bool_val = bool(res.get("result", False))
-                return ExecutionResult(
-                    success=True,
-                    engine_used=EngineType.COMPATIBLE_FALLBACK,
-                    result=bool_val,
-                    fallback_occurred=True,
-                    fallback_reason=fallback_reason,
-                    confidence=0.8,
-                    reasoning=str(res.get("reason", "")),
-                )
-            except Exception as exc:
-                return ExecutionResult(
-                    success=False,
-                    engine_used=EngineType.COMPATIBLE_FALLBACK,
-                    result=None,
-                    fallback_occurred=True,
-                    fallback_reason=f"{fallback_reason} -> LLM fallback failed: {exc}",
-                )
-
-        # For choice: prompt LLM for option classification
-        if operation.kind == OperationKind.CHOICE:
-            normalized_choices = self.selector._normalize_choices(operation.choices)
-            choice_values = [c.value for c in normalized_choices]
-            prompt = (
-                f"Choose the single best option ({operation.name}) for this input from the available choices.\n"
-                f"Instructions: {operation.instructions}\n"
-                f"Available Choices: {json.dumps(choice_values)}\n"
-                f"Input: {operation.input}\n"
-                f"Answer with JSON only: {{\"choice\": \"<selected_choice>\", \"reason\": \"...\"}}"
-            )
-            try:
-                res = self._invoke_llm_json_raw(prompt, llm=llm)
-                selected = str(res.get("choice") or "").strip()
-                if selected not in choice_values and choice_values:
-                    # Match nearest or first valid
-                    for cv in choice_values:
-                        if cv.lower() in selected.lower():
-                            selected = cv
-                            break
-                    if selected not in choice_values:
-                        selected = choice_values[0]
-                return ExecutionResult(
-                    success=True,
-                    engine_used=EngineType.COMPATIBLE_FALLBACK,
-                    result=selected,
-                    fallback_occurred=True,
-                    fallback_reason=fallback_reason,
-                    confidence=0.8,
-                    reasoning=str(res.get("reason", "")),
-                )
-            except Exception as exc:
-                return ExecutionResult(
-                    success=False,
-                    engine_used=EngineType.COMPATIBLE_FALLBACK,
-                    result=None,
-                    fallback_occurred=True,
-                    fallback_reason=f"{fallback_reason} -> LLM fallback failed: {exc}",
-                )
-
-        # For score: prompt LLM for rubric scoring
-        if operation.kind == OperationKind.SCORE:
-            levels = self.selector._normalize_levels(operation.levels)
-            labels = [l.label for l in levels]
-            prompt = (
-                f"Score the input ({operation.name}) against the following ordered levels.\n"
-                f"Instructions: {operation.instructions}\n"
-                f"Levels: {json.dumps([l.to_dict() for l in levels])}\n"
-                f"Input: {operation.input}\n"
-                f"Answer with JSON only: {{\"score\": <numeric_score_or_level_index>, \"level\": \"<label>\", \"reason\": \"...\"}}"
-            )
-            try:
-                res = self._invoke_llm_json_raw(prompt, llm=llm)
-                score_val = res.get("score")
-                if score_val is None and "level" in res:
-                    lvl_lbl = str(res["level"]).strip()
-                    if lvl_lbl in labels:
-                        score_val = float(labels.index(lvl_lbl))
-                return ExecutionResult(
-                    success=True,
-                    engine_used=EngineType.COMPATIBLE_FALLBACK,
-                    result=float(score_val if score_val is not None else 0.0),
-                    fallback_occurred=True,
-                    fallback_reason=fallback_reason,
-                    confidence=0.8,
-                    reasoning=str(res.get("reason", "")),
-                )
-            except Exception as exc:
-                return ExecutionResult(
-                    success=False,
-                    engine_used=EngineType.COMPATIBLE_FALLBACK,
-                    result=None,
-                    fallback_occurred=True,
-                    fallback_reason=f"{fallback_reason} -> LLM fallback failed: {exc}",
-                )
-
-        # General text/structured invoke
-        return self._invoke_llm_text(
-            operation,
-            llm=llm,
-            engine_used=EngineType.COMPATIBLE_FALLBACK,
-            fallback_occurred=True,
-            fallback_reason=fallback_reason,
-        )
-
-    # -------------------------------------------------------------------------
-    # Helper utilities
-    # -------------------------------------------------------------------------
+        raise RuntimeError(f"Selected inference engine failed: {fallback_reason}. No alternate engine was executed.")
 
     def _prompt_messages(self, operation: Operation) -> list[Any]:
-        from langchain_core.messages import HumanMessage, SystemMessage
+        from mana_agent.llm.messages import UserMessage, SystemMessage
 
         instructions = operation.instructions or "Execute the requested operation."
         evidence = json.dumps(operation.input, ensure_ascii=False) if not isinstance(operation.input, str) else operation.input
         return [
             SystemMessage(content=instructions),
-            HumanMessage(content=evidence),
+            UserMessage(content=evidence),
         ]
 
     def _invoke_llm_text(
@@ -543,7 +384,7 @@ class SmartDispatcher:
         try:
             from mana_agent.utils.text import extract_model_text
 
-            msg = llm.invoke(self._prompt_messages(operation))
+            msg = llm.generate_sync(self._prompt_messages(operation))
             text = extract_model_text(getattr(msg, "content", msg))
             return ExecutionResult(
                 success=True,
@@ -561,54 +402,6 @@ class SmartDispatcher:
                 fallback_reason=f"{fallback_reason} -> error: {exc}" if fallback_reason else str(exc),
                 reasoning=str(exc),
             )
-
-    def _invoke_llm_json(self, operation: Operation, *, llm: Any, engine_used: EngineType) -> ExecutionResult:
-        if llm is None:
-            return ExecutionResult(
-                success=False,
-                engine_used=engine_used,
-                result=None,
-                reasoning="No LLM provided.",
-            )
-        try:
-            from mana_agent.gateway.entry_routing import _extract_json
-            from mana_agent.utils.text import extract_model_text
-
-            msg = llm.invoke(self._prompt_messages(operation))
-            raw = extract_model_text(getattr(msg, "content", msg))
-            try:
-                data = _extract_json(raw)
-            except Exception:
-                data = {"raw": raw, "tool_name": operation.tool_name or operation.name}
-            return ExecutionResult(
-                success=True,
-                engine_used=engine_used,
-                result=data,
-            )
-        except Exception as exc:
-            return ExecutionResult(
-                success=False,
-                engine_used=engine_used,
-                result=None,
-                reasoning=str(exc),
-            )
-
-    def _invoke_llm_json_raw(self, prompt: str, *, llm: Any) -> dict[str, Any]:
-        from langchain_core.messages import HumanMessage
-        from mana_agent.gateway.entry_routing import _extract_json
-        from mana_agent.utils.text import extract_model_text
-
-        msg = llm.invoke([HumanMessage(content=prompt)])
-        raw = extract_model_text(getattr(msg, "content", msg))
-        try:
-            return _extract_json(raw)
-        except Exception:
-            raw_str = str(raw).strip()
-            if raw_str.lower() in ("true", "yes", "1"):
-                return {"result": True}
-            if raw_str.lower() in ("false", "no", "0"):
-                return {"result": False}
-            return {"result": raw_str, "choice": raw_str, "text": raw_str}
 
     def _cache_key(self, operation: Operation, context: Any) -> str:
         ctx_val = getattr(context, "session_id", None) or getattr(context, "turn_id", None) or context

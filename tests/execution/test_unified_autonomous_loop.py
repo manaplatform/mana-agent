@@ -49,7 +49,7 @@ class MockContinuationLLM:
         self.responses = list(responses)
         self.invocations: list[Any] = []
 
-    def invoke(self, messages: Any, **kwargs: Any) -> Any:
+    def generate_sync(self, messages: Any, **kwargs: Any) -> Any:
         self.invocations.append(messages)
         if not self.responses:
             # Default to finalize if responses run out
@@ -73,6 +73,18 @@ class MockContinuationLLM:
         if isinstance(resp, dict):
             return SimpleNamespace(content=json.dumps(resp))
         return SimpleNamespace(content=str(resp))
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def _make_supervisor(tmp_path: Path) -> ExecutionSupervisor:

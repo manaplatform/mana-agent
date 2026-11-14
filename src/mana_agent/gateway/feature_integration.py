@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, runtime_checkable
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 from pydantic import BaseModel, Field
 from mana_agent.multi_agent.core.types import (
     AgentRole,
@@ -146,7 +146,7 @@ class FeatureIntegrationDecisionProvider:
         taskboard: Any = None,
         **kwargs: Any,
     ) -> WiringDecision | None:
-        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+        if self.llm is None or not callable(getattr(self.llm, "generate_sync", None)):
             return None
 
         effective_request = request or user_request or kwargs.get("user_prompt", "")
@@ -189,43 +189,10 @@ class FeatureIntegrationDecisionProvider:
 
         messages = [
             SystemMessage(content=FEATURE_INTEGRATION_DECISION_PROMPT),
-            HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+            UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
         ]
 
-        from mana_agent.batch.decision_model import BatchDecisionModel
-        if isinstance(self.llm, BatchDecisionModel):
-            # A pending or invalid Batch decision cannot trigger another schema
-            # or a synchronous fallback request.
-            return self.llm.with_structured_output(WiringDecision).invoke(messages)
-
-        try:
-            structured = getattr(self.llm, "with_structured_output", None)
-            response = None
-            structured_error = None
-            if callable(structured):
-                try:
-                    response = structured(WiringDecision, method="json_schema", strict=True).invoke(messages)
-                except BatchPending:
-                    raise
-                except Exception as exc:
-                    structured_error = exc
-            if response is None:
-                response = self.llm.invoke(messages)
-            try:
-                decision = _coerce_wiring_decision(response)
-            except BatchPending:
-                raise
-            except Exception as coerce_exc:
-                if callable(structured) and structured_error is None:
-                    direct_response = self.llm.invoke(messages)
-                    decision = _coerce_wiring_decision(direct_response)
-                else:
-                    raise coerce_exc
-            return decision
-        except BatchPending:
-            raise
-        except Exception:
-            return None
+        return self.llm.decide_sync(messages, WiringDecision)
 
     def __call__(self, **kwargs: Any) -> WiringDecision | None:
         return self.decide(**kwargs)

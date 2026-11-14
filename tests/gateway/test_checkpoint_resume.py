@@ -21,23 +21,29 @@ class StructuredDecisionModel:
         self.payload = payload
         self.invocation_kwargs: list[dict[str, object]] = []
 
-    def with_structured_output(self, _schema, *, method: str, strict: bool):
-        assert method == "json_schema"
-        assert strict is True
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, _messages, **kwargs):
+    def generate_sync(self, _messages, **kwargs):
         self.invocation_kwargs.append(kwargs)
         return self.payload
 
 
 class ContextBlockedDecisionModel:
-    def with_structured_output(self, _schema, *, method: str, strict: bool):
-        assert method == "json_schema"
-        assert strict is True
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, _messages, **_kwargs):
+    def generate_sync(self, _messages, **_kwargs):
         snapshot = BudgetSnapshot(
             breakdown=ContextBreakdown(),
             budget=ContextBudget(context_window=1_000),
@@ -179,12 +185,15 @@ def test_context_budget_block_is_reported_as_a_typed_checkpoint_decision_error()
 
 
 class LengthLimitedDecisionModel:
-    def with_structured_output(self, _schema, *, method: str, strict: bool):
-        assert method == "json_schema"
-        assert strict is True
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, _messages, **_kwargs):
+    def generate_sync(self, _messages, **_kwargs):
         class LengthFinishReasonError(Exception):
             pass
 
@@ -700,104 +709,47 @@ def test_multi_task_live_data_route_starts_fresh_when_candidates_exist() -> None
     assert decision.checkpoint_id == ""
 
 
-def test_checkpoint_resume_recovers_when_structured_output_raises_parser_error() -> None:
-    """When with_structured_output raises an OutputParserException (e.g. parsed: None from reasoning models),
-    the decider falls back to direct model invocation and parses the model's text output safely."""
-    class _ReasoningModelStructuredFailure:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
-
-        def invoke(self, _messages, **kwargs):
-            # Simulates LangChain OpenAIStructuredOutputParser raising on empty parsed field from MiniMax/vLLM
-            raise Exception(
-                "Structured Output response does not have a 'parsed' field nor a 'refusal' field. "
-                "Received message: content='' additional_kwargs={'parsed': None, 'refusal': None}"
-            )
-
-    class _RecoveringDecisionModel:
-        def __init__(self) -> None:
-            self._structured = _ReasoningModelStructuredFailure()
-
-        def with_structured_output(self, schema, *, method: str, strict: bool):
-            return self._structured.with_structured_output(schema, method=method, strict=strict)
-
-        def invoke(self, _messages, **kwargs):
-            # Direct invocation receives JSON response from the model
-            return (
-                '{\n'
-                '  "action": "start_fresh",\n'
-                '  "task_id": "",\n'
-                '  "checkpoint_id": "",\n'
-                '  "same_work": false,\n'
-                '  "fresh_data_required": false,\n'
-                '  "checkpoint_still_valid": false,\n'
-                '  "side_effects_safe_to_repeat": false,\n'
-                '  "safe_to_continue": true,\n'
-                '  "reason": "independent fresh request"\n'
-                '}'
-            )
-
-    decider = CheckpointResumeDecider(_RecoveringDecisionModel())
-    decision = decider.decide(
-        current_request="start a brand new feature",
-        route="coding",
-        requires_live_data=False,
-        candidates=[candidate()],
-    )
-
-    assert decision.action == "start_fresh"
-    assert decision.safe_to_continue is True
-    assert decision.same_work is False
-    assert decision.reason == "independent fresh request"
+def test_checkpoint_resume_structured_request_failure_stops_without_plain_retry() -> None:
+    class Model:
+        calls = 0
+        def decide_sync(self, messages, schema, **kwargs):
+            self.calls += 1
+            raise RuntimeError("controlled structured request failure")
+        def generate_sync(self, *args, **kwargs):
+            pytest.fail("A plain-format retry is forbidden")
+    model = Model()
+    with pytest.raises(CheckpointResumeError):
+        CheckpointResumeDecider(model).decide(current_request="new request", route="coding", requires_live_data=False, candidates=[candidate()])
+    assert model.calls == 1
 
 
-def test_checkpoint_resume_handles_thinking_tags_and_reasoning_in_direct_invoke() -> None:
-    """When a reasoning model outputs <think> tags before the JSON block in direct invocation,
-    the text extraction strips thinking tags and parses the JSON schema cleanly."""
-    class _ThinkingTagModel:
-        def invoke(self, _messages, **kwargs):
-            return (
-                "<think>\n"
-                "The user is asking to start new work.\n"
-                "Candidate tasks are not applicable: {task_id: 'task_existing'}.\n"
-                "Therefore action should be start_fresh.\n"
-                "</think>\n"
-                "```json\n"
-                "{\n"
-                '  "action": "start_fresh",\n'
-                '  "task_id": "",\n'
-                '  "checkpoint_id": "",\n'
-                '  "same_work": false,\n'
-                '  "fresh_data_required": false,\n'
-                '  "checkpoint_still_valid": false,\n'
-                '  "side_effects_safe_to_repeat": false,\n'
-                '  "safe_to_continue": true,\n'
-                '  "reason": "thinking evaluated new task"\n'
-                "}\n"
-                "```"
-            )
-
-    decider = CheckpointResumeDecider(_ThinkingTagModel())
-    decision = decider.decide(
-        current_request="clean up documentation",
-        route="conversation",
-        requires_live_data=False,
-        candidates=[candidate()],
-    )
-
-    assert decision.action == "start_fresh"
-    assert decision.safe_to_continue is True
-    assert decision.reason == "thinking evaluated new task"
+def test_checkpoint_resume_malformed_structured_output_stops_without_plain_retry() -> None:
+    class Model:
+        calls = 0
+        def decide_sync(self, messages, schema, **kwargs):
+            self.calls += 1
+            return schema.model_validate_json("<think>private</think>")
+        def generate_sync(self, *args, **kwargs):
+            pytest.fail("A plain-format retry is forbidden")
+    model = Model()
+    with pytest.raises(CheckpointResumeError):
+        CheckpointResumeDecider(model).decide(current_request="new request", route="coding", requires_live_data=False, candidates=[candidate()])
+    assert model.calls == 1
 
 
 def test_checkpoint_resume_fails_safely_when_both_structured_and_direct_fail() -> None:
     """When structured output fails and direct invocation also fails or produces invalid output,
     CheckpointResumeError is raised without executing unvalidated fallback actions."""
     class _CompletelyBrokenModel:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages, **kwargs):
+        def generate_sync(self, _messages, **kwargs):
             raise RuntimeError("API connection severed")
 
     decider = CheckpointResumeDecider(_CompletelyBrokenModel())
@@ -814,10 +766,15 @@ def test_checkpoint_resume_handles_omitted_or_aliased_reason_field() -> None:
     """When the model outputs valid decision fields but omits 'reason' or provides 'rationale',
     CheckpointResumeOutput normalizes the payload safely instead of raising missing field validation errors."""
     class _OmittedReasonModel:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages, **kwargs):
+        def generate_sync(self, _messages, **kwargs):
             return {
                 "action": "start_fresh",
                 "task_id": "",
@@ -843,10 +800,15 @@ def test_checkpoint_resume_handles_omitted_or_aliased_reason_field() -> None:
     assert "start_fresh" in decision.reason
 
     class _AliasedReasonModel:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages, **kwargs):
+        def generate_sync(self, _messages, **kwargs):
             return {
                 "action": "start_fresh",
                 "task_id": "",
@@ -878,10 +840,15 @@ def test_checkpoint_resume_normalizes_task_id_and_checkpoint_for_start_fresh() -
     cand["task_id"] = "task_candidate_123"
 
     class _EchoingCandidateTaskModel:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages, **kwargs):
+        def generate_sync(self, _messages, **kwargs):
             return {
                 "action": "start_fresh",
                 "task_id": "task_candidate_123",

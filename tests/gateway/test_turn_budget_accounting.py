@@ -215,36 +215,53 @@ def test_case_d_genuine_hard_budget_exhaustion(coordinator: LaneCoordinator) -> 
 # --- Case E: Soft Budget Threshold Does Not Abort Required Steps ---
 def test_case_e_soft_budget_threshold_does_not_abort_required_steps(tmp_path: Path) -> None:
     """ask_agent must not abort with remaining_tool_budget_low on step max_steps-1 when budget exists."""
-    class _FakeAIMessage:
+    class _FakeAssistantMessage:
         def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
             self.content = content
             self.tool_calls = tool_calls or []
 
+        @property
+        def message(self):
+            from mana_agent.llm.messages import AssistantMessage
+            return AssistantMessage(content=self.content, tool_calls=getattr(self, "tool_calls", []))
+
     class _FakeBoundModel:
-        def __init__(self, responses: list[_FakeAIMessage]) -> None:
+        def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
             self._responses = responses
             self._idx = 0
 
-        def invoke(self, _messages: list[object], config: object | None = None) -> _FakeAIMessage:
+        def generate_sync(self, _messages: list[object], config: object | None = None, **_native_options) -> _FakeAssistantMessage:
             del config
             value = self._responses[self._idx]
             self._idx += 1
             return value
 
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
+
     class _FakeLLM:
-        def __init__(self, responses: list[_FakeAIMessage]) -> None:
+        def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
             self._responses = responses
 
-        def bind_tools(self, _tools: list[object]) -> _FakeBoundModel:
+        def with_tools(self, _tools: list[object], **_native_options) -> _FakeBoundModel:
             return _FakeBoundModel(self._responses)
 
     # 2-step sequence: Step 0 calls search, Step 1 calls get_message and produces final text
     llm = _FakeLLM([
-        _FakeAIMessage("", tool_calls=[{"id": "1", "name": "semantic_search", "args": {"query": "test", "k": 2}}]),
-        _FakeAIMessage("Final answer found in step 2.", tool_calls=[]),
+        _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "test", "k": 2}}]),
+        _FakeAssistantMessage("Final answer found in step 2.", tool_calls=[]),
     ])
 
-    from langchain_core.tools import StructuredTool
+    from mana_agent.llm.tools import ToolBinding
     from mana_agent.context_cost.governor import ContextCostGovernor
     from mana_agent.search.config import SearchConfig
 
@@ -252,9 +269,9 @@ def test_case_e_soft_budget_threshold_does_not_abort_required_steps(tmp_path: Pa
         def search(self, *args, **kwargs):
             return []
 
-    search_tool = StructuredTool.from_function(
+    search_tool = ToolBinding.from_callable(
         func=lambda query, k=2: json.dumps({"ok": True, "results": ["item 1"]}),
-        name="semantic_search",
+        name="repo_search",
         description="Search tool",
     )
 

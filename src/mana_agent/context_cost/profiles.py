@@ -93,23 +93,24 @@ class ModelTokenProfileResolver:
         ):
             return matches[0]
         try:
-            from mana_agent.config.model_catalog import maintained_token_limits
-
-            maintained = maintained_token_limits(identity.provider, identity.model)
-            if maintained is not None:
+            from mana_agent.llm.registry import resolve_profile
+            native = resolve_profile(identity.provider, identity.model)
+            if native.context_window and native.max_output_tokens:
                 return ModelTokenProfile(
                     identity=identity,
-                    context_window=int(maintained[0]),
-                    max_output_tokens=int(maintained[1]),
-                    source="maintained",
-                    confidence="high",
-                    metadata={"maintained": True},
+                    context_window=int(native.context_window),
+                    max_output_tokens=int(native.max_output_tokens),
+                    input_price_per_million=_decimal(native.catalog_pricing.get("input")),
+                    output_price_per_million=_decimal(native.catalog_pricing.get("output")),
+                    source="native-capability-evidence",
+                    confidence=native.capability_confidence,
+                    metadata={"native_registry": True},
                 )
         except Exception:
             pass
         if self.unknown_policy != "conservative" or not self.unknown_context_window or not self.unknown_max_output_tokens:
             raise UnknownModelProfileError(
-                f"Model token metadata is unavailable for {identity.key}. No arbitrary context or output limit was used."
+                f"Model token metadata is unavailable for {identity.key}. Configure exact model capability limits; no generic unknown-model limit is used."
             )
         return ModelTokenProfile(
             identity=identity,

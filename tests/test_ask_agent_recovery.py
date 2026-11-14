@@ -14,13 +14,25 @@ class _FakeBoundLLM:
     def __init__(self, scripted: list[SimpleNamespace]) -> None:
         self._scripted = list(scripted)
 
-    def bind_tools(self, _tools):
+    def with_tools(self, _tools, **_native_options):
         return self
 
-    def invoke(self, _messages, config=None):  # noqa: ARG002
+    def generate_sync(self, _messages, config=None, **_native_options):  # noqa: ARG002
         if self._scripted:
             return self._scripted.pop(0)
         return SimpleNamespace(content="done", tool_calls=[])
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 class _CapturingLogger:
@@ -61,7 +73,7 @@ def test_read_file_missing_returns_structured_error(tmp_path: Path) -> None:
     tools, _traces, _sources, _warnings = agent._build_tools(k_default=1, timeout_seconds=5)
     read_tool = {tool.name: tool for tool in tools}["read_file"]
 
-    raw = read_tool.invoke({"path": "agent.md", "mode": "full"})
+    raw = read_tool.call({"path": "agent.md", "mode": "full"})
     payload = json.loads(raw)
     assert payload["ok"] is False
     assert payload["error_code"] == "file_not_found"

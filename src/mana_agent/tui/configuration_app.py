@@ -189,10 +189,10 @@ class ManaConfigurationApp(App[bool]):
                 fast_opts = self._initial_model_options("OPENAI_TOOL_WORKER_MODEL")
                 fast_val = self._initial_model_value("OPENAI_TOOL_WORKER_MODEL", fast_opts)
                 yield Label("Recommended logical levels", classes="section-title")
-                yield Static("Agent roles use High reasoning, Coding, and Fast/tool. Only text-generation models appear here.", classes="hint")
-                yield Select(high_opts, value=high_val, id="high-model", allow_blank=False)
-                yield Select(coding_opts, value=coding_val, id="coding-model", allow_blank=False)
-                yield Select(fast_opts, value=fast_val, id="fast-model", allow_blank=False)
+                yield Static("Choose the Main, Coding and Tool models. Inspect missing capability evidence in Model capabilities.", classes="hint")
+                yield Select(high_opts, value=high_val, id="high-model", allow_blank=True)
+                yield Select(coding_opts, value=coding_val, id="coding-model", allow_blank=True)
+                yield Select(fast_opts, value=fast_val, id="fast-model", allow_blank=True)
                 yield Static(self._role_mapping_text(), id="role-mapping")
                 yield Label("Advanced role mappings", classes="section-title")
                 yield Static("Assign a logical level or a direct configured model to each role.", classes="hint")
@@ -204,12 +204,25 @@ class ManaConfigurationApp(App[bool]):
                 yield Select(self._role_options("MANA_MODEL_REVIEWER"), id="role-reviewer", allow_blank=False)
                 yield Select(self._role_options("MANA_MODEL_TOOL"), id="role-tool", allow_blank=False)
                 yield Select(self._role_options("MANA_MODEL_SUMMARIZER"), id="role-summarizer", allow_blank=False)
-            with TabPane("Embeddings", id="embeddings"):
-                embed_opts = self._initial_model_options("OPENAI_EMBED_MODEL", embedding=True)
-                embed_val = self._initial_model_value("OPENAI_EMBED_MODEL", embed_opts, embedding=True)
-                yield Label("Embedding model", classes="section-title")
-                yield Static("Only embedding-capable models are offered after catalog refresh.", classes="hint")
-                yield Select(embed_opts, value=embed_val, id="embedding-model", allow_blank=True)
+            with TabPane("Model capabilities", id="model-capabilities"):
+                yield Label("Capability evidence", classes="section-title")
+                yield Input(placeholder="Exact model ID (uses the selected provider)", id="capability-model")
+                yield Select([(name.replace("_", " "), name) for name in (
+                    "tool_calling", "tool_choice", "native_structured_output", "tool_call_streaming", "reasoning_effort")],
+                    value="tool_calling", id="capability-name", allow_blank=False)
+                yield Input(placeholder="Reasoning effort to test, if selected", id="capability-effort")
+                yield Select([(mode, mode) for mode in ("required", "function", "auto", "none")],
+                    value="required", id="capability-choice-mode", allow_blank=False)
+                yield Static("Tests make one paid request with at most 256 output tokens. They never execute tools or run during chat.", classes="hint")
+                yield Switch(False, id="capability-probe-consent")
+                yield Label("Allow this model's bounded capability tests")
+                yield Button("Inspect evidence", id="capability-inspect")
+                yield Button("Refresh metadata", id="capability-refresh")
+                yield Button("Test selected capability", id="capability-probe", variant="warning")
+                yield Button("Cancel test", id="capability-cancel")
+                yield Input(placeholder='Capability override JSON, e.g. {"tool_calling": true}', id="capability-overrides")
+                yield Button("Apply overrides to draft", id="capability-save")
+                yield Static("Select a model to inspect evidence", id="capability-status", classes="status")
             with TabPane("Image generation", id="media-image"):
                 yield Switch(value=bool(image_media.get("enabled", False)), id="media-image-enabled")
                 yield Label("Enable image generation", classes="hint")
@@ -433,54 +446,22 @@ class ManaConfigurationApp(App[bool]):
         s = str(val).strip()
         return "" if s == "<Select.BLANK>" else s
 
-    def _initial_model_options(self, key: str, *, embedding: bool = False) -> list[tuple[str, str]]:
-        provider = getattr(self, "_current_provider", "") or str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")
-        base_url = self._provider_base_url(self.draft.values, provider)
-        purpose = ModelPurpose.EMBEDDING if embedding else ModelPurpose.AGENT
-        descriptors = self.catalog_service.cached_or_maintained(provider=provider, base_url=base_url)
-        matching = filter_models(descriptors, purpose)
-
-        fallback = "text-embedding-3-small" if embedding else (
-            "gpt-6-luna" if key in {"OPENAI_TOOL_WORKER_MODEL", "OPENAI_CODING_PLANNER_MODEL"} else "gpt-4.1-mini"
-        )
+    def _initial_model_options(self, key: str) -> list[tuple[str, str]]:
+        provider = getattr(self, "_current_provider", "") or str(self.draft.values.get("MANA_AI_PROVIDER") or "")
+        descriptors = self.catalog_service.cached_profiles(provider=provider, base_url=self._provider_base_url(self.draft.values, provider))
         current = str(self.draft.values.get(key) or "").strip()
-        options: list[tuple[str, str]] = []
+        return self._inference_model_options(descriptors, current=current)
 
-        for item in matching:
-            options.append((self._model_label(item), item.id))
-
-        if current and current not in {val for _, val in options}:
-            options.insert(0, (f"{current} · current/manual", current))
-        elif not options:
-            if embedding:
-                options = [("(None / Provider has no embeddings)", "")]
-            else:
-                val = current or fallback
-                options = [(f"{val} · manual/current", val)]
-
+    def _inference_model_options(self, models: list[Any], *, current: str = "") -> list[tuple[str, str]]:
+        options = [("Select an inference model", "")]
+        options.extend((self._model_label(model), model.id) for model in models if model.available)
+        if current and current not in {value for _, value in options}:
+            options.append((f"{current} · configured", current))
         return options
 
-    def _initial_model_value(self, key: str, options: list[tuple[str, str]], *, embedding: bool = False) -> str:
+    def _initial_model_value(self, key: str, options: list[tuple[str, str]]) -> str:
         current = str(self.draft.values.get(key) or "").strip()
-        opt_values = {val for _, val in options}
-        if current and current in opt_values:
-            return current
-        provider = getattr(self, "_current_provider", "") or str(self.draft.values.get("MANA_AI_PROVIDER") or "openai")
-        if provider == "openai":
-            default_val = "text-embedding-3-small" if embedding else (
-                "gpt-6-luna" if key in {"OPENAI_TOOL_WORKER_MODEL", "OPENAI_CODING_PLANNER_MODEL"} else "gpt-4.1-mini"
-            )
-            if default_val in opt_values:
-                return default_val
-        elif provider in {"xai", "x-ai", "grok"}:
-            if embedding:
-                return ""
-            if "grok-4" in opt_values:
-                return "grok-4"
-        for _, val in options:
-            if val:
-                return val
-        return options[0][1] if options else ""
+        return current if current in {value for _, value in options} else ""
 
     def _role_options(self, key: str) -> list[tuple[str, str]]:
         current = str(self.draft.values.get(key) or "MODEL_LEVEL_3_HIGH_REASONING")
@@ -603,7 +584,6 @@ class ManaConfigurationApp(App[bool]):
         return (
             f"AI provider       {v.get('MANA_AI_PROVIDER', 'openai')} ({key_status})\n"
             f"Primary model     {v.get('MANA_PRIMARY_MODEL') or v.get('OPENAI_CHAT_MODEL', 'Not selected')}\n"
-            f"Embedding model   {v.get('MANA_EMBEDDING_MODEL') or v.get('OPENAI_EMBED_MODEL', 'Not selected')}\n"
             f"Web search        {search}\n"
             f"GitHub            {github}\n"
             f"Memory            {memory}"
@@ -796,11 +776,84 @@ class ManaConfigurationApp(App[bool]):
             high=self._select_value(self.query_one("#high-model", Select)),
             coding=self._select_value(self.query_one("#coding-model", Select)),
             fast=self._select_value(self.query_one("#fast-model", Select)),
-            embedding=self._select_value(self.query_one("#embedding-model", Select)),
         )
+
+    async def _capability_action(self, action: str) -> None:
+        import asyncio
+        import json
+        from mana_agent.llm.engine import create_model
+        from mana_agent.llm.capabilities import CapabilityFact
+        from mana_agent.llm.probes import run_capability_probe
+        from mana_agent.context_cost import ContextCostGovernor
+        from mana_agent.config.settings import Settings
+        from mana_agent.utils.redaction import redact_secrets
+        status = self.query_one("#capability-status", Static)
+        try:
+            self._collect()
+            provider = str(self.draft.values.get("MANA_AI_PROVIDER") or "")
+            model_id = self.query_one("#capability-model", Input).value.strip()
+            if not model_id:
+                raise ValueError("Enter the exact model ID for the selected provider")
+            engine = create_model(provider=provider, model=model_id,
+                api_key=self._provider_api_key(self.draft.values, provider),
+                base_url=self._provider_base_url(self.draft.values, provider))
+            engine.context_cost_governor = ContextCostGovernor(session_id="model-settings", mode="enforce", settings=Settings())
+            profile = engine.profile()
+            if action == "capability-save":
+                overrides = json.loads(self.query_one("#capability-overrides", Input).value)
+                if not isinstance(overrides, dict):
+                    raise ValueError("Overrides must be a JSON object of capability names and values")
+                allowed = {"tool_calling", "tool_choice", "reasoning", "reasoning_effort", "reasoning_policy", "thinking_control",
+                    "native_structured_output", "streaming", "tool_call_streaming", "parallel_tool_calls",
+                    "context_window", "max_output_tokens", "max_input_tokens", "input_text", "input_image",
+                    "input_audio", "input_video", "input_pdf", "output_text", "output_image", "output_audio",
+                    "output_video", "input_modalities", "output_modalities", "programmatic_tool_calling",
+                    "image_request_format", "image_flexible_dimensions", "image_quality_levels", "image_input_fidelity",
+                    "public_reasoning_summaries", "decisions_api", "batch", "batch_endpoints", "batch_completion_windows"}
+                if set(overrides) - allowed:
+                    raise ValueError("Unknown capability override name")
+                for value in overrides.values():
+                    if isinstance(value, dict):
+                        CapabilityFact.model_validate(value)
+                rows = list(self.draft.values.get("MANA_MODEL_CAPABILITY_OVERRIDES") or [])
+                rows = [row for row in rows if row.get("scope") != profile.configuration_fingerprint]
+                rows.append({"provider": provider, "model_id": engine.model, "endpoint": engine.base_url,
+                    "scope": profile.configuration_fingerprint, "capabilities": overrides})
+                self.draft.values["MANA_MODEL_CAPABILITY_OVERRIDES"] = rows
+                status.update("Overrides applied to draft. Save configuration to persist and activate them.")
+                return
+            if action == "capability-inspect":
+                status.update(json.dumps(redact_secrets(profile.model_dump(mode="json", exclude={"metadata"})), ensure_ascii=False, indent=2))
+                return
+            if action == "capability-refresh":
+                from mana_agent.llm.discovery import ModelDiscoveryService
+                await ModelDiscoveryService().discover(provider=engine.provider, base_url=engine.base_url, api_key=engine.api_key,
+                    default_headers=engine.headers, query_params=engine.query)
+                refreshed = engine.profile().model_dump(mode="json", exclude={"metadata"})
+                status.update(json.dumps(redact_secrets(refreshed), ensure_ascii=False, indent=2))
+                return
+            self._capability_cancel = asyncio.Event()
+            status.update("Running one bounded capability request; no tool implementation will execute")
+            result = await run_capability_probe(engine, str(self.query_one("#capability-name", Select).value),
+                user_initiated=True, consent=self.query_one("#capability-probe-consent", Switch).value,
+                effort=self.query_one("#capability-effort", Input).value.strip(),
+                tool_choice=str(self.query_one("#capability-choice-mode", Select).value), cancel=self._capability_cancel)
+            status.update(f"{result.capability}: {result.state.value} · {result.diagnostic}")
+        except asyncio.CancelledError:
+            status.update("Capability test cancelled. Its request will not be replayed.")
+            raise
+        except Exception as exc:
+            status.update(str(redact_secrets(f"Capability action failed: {exc}")))
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
+        if button_id == "capability-cancel":
+            if getattr(self, "_capability_cancel", None) is not None:
+                self._capability_cancel.set()
+            return
+        if button_id in {"capability-inspect", "capability-probe", "capability-save", "capability-refresh"}:
+            self.run_worker(self._capability_action(button_id), group="capabilities", exclusive=True)
+            return
         if button_id == "test-provider":
             self._collect()
             status = self.query_one("#provider-status", Static)
@@ -890,15 +943,6 @@ class ManaConfigurationApp(App[bool]):
                     options.append((f"{current} · manual", current))
                 widget.set_options(options)
                 widget.value = current if current in {value for _, value in options} else options[0][1]
-            embed = self.query_one("#embedding-model", Select)
-            current_embed = str(embed.value) if embed.value != Select.BLANK else ""
-            embed_options = [(self._model_label(item), item.id) for item in embedding_models]
-            if not embed_options:
-                embed_options = [("No compatible models discovered", "")]
-            elif current_embed and current_embed not in {value for _, value in embed_options}:
-                embed_options.append((f"{current_embed} · manual", current_embed))
-            embed.set_options(embed_options)
-            embed.value = current_embed if current_embed in {value for _, value in embed_options} else embed_options[0][1]
             for selector, compatible in media_models.items():
                 widget = self.query_one(selector, Select)
                 current = str(widget.value) if widget.value != Select.BLANK else ""
@@ -987,7 +1031,7 @@ class ManaConfigurationApp(App[bool]):
                 "overview",
                 "providers",
                 "models",
-                "embeddings",
+                "model-capabilities",
                 "media-image",
                 "media-voice",
                 "media-video",
@@ -1016,6 +1060,8 @@ class ManaConfigurationApp(App[bool]):
             api_key = self._provider_api_key(self.draft.values, provider)
             base_url = self._provider_base_url(self.draft.values, provider)
             chat_model = str(self.draft.values.get("OPENAI_CHAT_MODEL") or "").strip()
+            if not chat_model:
+                raise ValueError("Choose a Main model before saving inference settings.")
             if not self._provider_validated:
                 if api_key and base_url and chat_model:
                     self._provider_validated = True
@@ -1072,7 +1118,6 @@ class ManaConfigurationApp(App[bool]):
             empty_options = [("Test provider to discover models", "")]
             descriptors = self.catalog_service.cached_or_maintained(provider=provider, base_url=base_url)
             text_models = filter_models(descriptors, ModelPurpose.AGENT)
-            embed_models = filter_models(descriptors, ModelPurpose.EMBEDDING)
             text_options = empty_options + [(self._model_label(item), item.id) for item in text_models]
             for selector in (
                 "#high-model",
@@ -1085,14 +1130,6 @@ class ManaConfigurationApp(App[bool]):
                     w.value = ""
                 except Exception:
                     pass
-
-            embed_options = (empty_options + [(self._model_label(item), item.id) for item in embed_models]) if embed_models else [("(None / Provider has no embeddings)", "")]
-            try:
-                w = self.query_one("#embedding-model", Select)
-                w.set_options(embed_options)
-                w.value = ""
-            except Exception:
-                pass
 
             for selector in (
                 "#media-image-model",
@@ -1111,10 +1148,13 @@ class ManaConfigurationApp(App[bool]):
 
             for key in (
                 "OPENAI_CHAT_MODEL",
+                "OPENAI_CODING_PLANNER_MODEL",
+                "OPENAI_TOOL_WORKER_MODEL",
+                "MODEL_LEVEL_3_HIGH_REASONING",
+                "MODEL_LEVEL_2_CODING",
+                "MODEL_LEVEL_1_FAST_TOOL",
                 "LLM_MODEL",
                 "MANA_PRIMARY_MODEL",
-                "MANA_EMBEDDING_MODEL",
-                "OPENAI_EMBED_MODEL",
                 "MANA_MODEL_MAIN",
                 "MANA_MODEL_HEAD_DECISION",
                 "MANA_MODEL_PLANNER",

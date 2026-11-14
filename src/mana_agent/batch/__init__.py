@@ -42,7 +42,7 @@ from mana_agent.batch.tools import (
     batch_list_jobs,
     batch_retrieve_results,
     batch_submit_requests,
-    build_batch_langchain_tools,
+    build_batch_tools,
 )
 
 __all__ = [
@@ -73,7 +73,7 @@ __all__ = [
     "batch_list_jobs",
     "batch_retrieve_results",
     "batch_submit_requests",
-    "build_batch_langchain_tools",
+    "build_batch_tools",
     "is_model_supported_for_batch",
     "is_openai_batch_supported",
     "parse_batch_support_from_metadata",

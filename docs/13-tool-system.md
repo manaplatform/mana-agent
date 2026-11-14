@@ -68,7 +68,7 @@ pipeline) and surfaces repository analysis artifacts.
 
 ## Available Tool Categories
 
-- Search tools: semantic search, text search, and grouped text search.
+- Search tools: repository text search, grouped text search, and file and symbol search.
 - Inspection tools: file listing, file reads, batch file reads, chunked reads,
   symbol lookup, and call graph inspection.
 - Change tools: exact string edits, multi-edit batches, Codex-style patch

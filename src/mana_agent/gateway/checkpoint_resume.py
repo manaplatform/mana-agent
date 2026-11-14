@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mana_agent.context_cost.models import ContextBudgetExceeded
@@ -288,7 +288,7 @@ class CheckpointResumeDecider:
         requires_live_data: bool,
         candidates: list[dict[str, Any]],
     ) -> CheckpointResumeDecision:
-        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+        if self.llm is None or not callable(getattr(self.llm, "generate_sync", None)):
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "
                 "Reason: decision model is unavailable."
@@ -302,37 +302,12 @@ class CheckpointResumeDecider:
         }
         messages = [
             SystemMessage(content=CHECKPOINT_RESUME_PROMPT),
-            HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+            UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
         ]
         invoke_kwargs = {"max_tokens": CHECKPOINT_RESUME_MAX_OUTPUT_TOKENS}
         try:
-            structured = getattr(self.llm, "with_structured_output", None)
-            response = None
-            structured_error = None
-            if callable(structured):
-                try:
-                    response = structured(
-                        CheckpointResumeOutput, method="json_schema", strict=True
-                    ).invoke(messages, **invoke_kwargs)
-                except ContextBudgetExceeded:
-                    raise
-                except Exception as exc:
-                    structured_error = exc
-            if response is None:
-                try:
-                    response = self.llm.invoke(messages, **invoke_kwargs)
-                except Exception as exc:
-                    if structured_error is not None and "length" in str(structured_error).lower():
-                        raise structured_error from exc
-                    raise
-            try:
-                output = _coerce_checkpoint_output(response)
-            except Exception as coerce_exc:
-                if callable(structured) and structured_error is None:
-                    direct_response = self.llm.invoke(messages, **invoke_kwargs)
-                    output = _coerce_checkpoint_output(direct_response)
-                else:
-                    raise coerce_exc
+            response = self.llm.decide_sync(messages, CheckpointResumeOutput, **invoke_kwargs)
+            output = _coerce_checkpoint_output(response)
         except ContextBudgetExceeded as exc:
             raise CheckpointResumeError(
                 "Model decision failed: checkpoint_resume. No task was resumed or started. "

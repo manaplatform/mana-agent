@@ -20,6 +20,20 @@ from mana_agent.services.activity_context import ActivityContext, activity_scope
 from mana_agent.services.execution_event_hub import ExecutionEventHub, reset_execution_event_hub_for_tests
 
 
+def test_native_inference_activity_follows_coding_lane(monkeypatch):
+    from mana_agent.chat.execution_trace import classify_activity_category
+    from mana_agent.llm.engine import _emit_inference_activity
+
+    published = []
+    monkeypatch.setattr("mana_agent.services.activity_context.emit_activity", lambda kind, **fields: published.append((kind, fields)))
+    with activity_scope(ActivityContext(conversation_id="fixture", execution_id="fixture", execution_lane="coding")):
+        _emit_inference_activity("model.stream", title="Receiving model response")
+
+    kind, fields = published[0]
+    assert classify_activity_category(kind, metadata=fields) == "coding"
+    assert classify_activity_category(kind) == "main"
+
+
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
@@ -188,14 +202,14 @@ def test_failed_steering_acknowledgement_never_publishes_applied(tmp_path, isola
 
 
 def test_parallel_tool_callbacks_keep_original_operation_identity(monkeypatch):
-    from mana_agent.commands.ui_helpers import RichToolCallbackHandler
+    from mana_agent.commands.ui_helpers import RichToolActivityObserver
     received = []
     monkeypatch.setattr("mana_agent.commands.ui_helpers.emit_tool_event", lambda *args, **kwargs: received.append((args, kwargs)))
-    callback = RichToolCallbackHandler()
-    callback.on_tool_start({"name": "read_file"}, '{"path":"one.py"}', run_id="one")
-    callback.on_tool_start({"name": "read_file"}, '{"path":"two.py"}', run_id="two")
-    callback.on_tool_end("done", run_id="two")
-    callback.on_tool_end("done", run_id="one")
+    callback = RichToolActivityObserver()
+    callback.tool_started({"name": "read_file"}, '{"path":"one.py"}', run_id="one")
+    callback.tool_started({"name": "read_file"}, '{"path":"two.py"}', run_id="two")
+    callback.tool_finished("done", run_id="two")
+    callback.tool_finished("done", run_id="one")
     assert received[0][1]["event_id"] == received[3][1]["event_id"]
     assert received[1][1]["event_id"] == received[2][1]["event_id"]
     assert received[0][1]["event_id"] != received[1][1]["event_id"]

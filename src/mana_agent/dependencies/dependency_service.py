@@ -23,7 +23,6 @@ FRAMEWORK_SIGNALS = {
     "next": "Next.js",
     "vue": "Vue",
     "express": "Express",
-    "langchain": "LangChain",
     "flutter": "Flutter",
     "flutter_test": "Flutter",
     "@nestjs/common": "NestJS",

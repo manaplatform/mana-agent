@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import httpx
+
 from mana_agent.config.model_catalog import (
     ModelDescriptor,
     descriptors_from_catalog,
-    extract_capabilities_from_record,
     normalize_capabilities,
 )
 from mana_agent.config.user_config import load_model_cache, save_model_cache
@@ -58,17 +59,18 @@ class ModelCatalogService:
 
                 fetch = fetch_provider_models
             model_ids = fetch(provider=prov_norm, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
+            save_model_cache(prov_norm, base_url, model_ids)
+            try:
+                from mana_agent.llm.discovery import ModelMetadataResolver
+                resolver = ModelMetadataResolver()
+                for record in model_ids:
+                    resolver.resolve(record["id"] if isinstance(record, dict) else record, prov_norm, record if isinstance(record, dict) else None)
+            except Exception:
+                pass
         except ProviderValidationError:
             raise
         except Exception as exc:
             raise ProviderValidationError(str(exc)) from exc
-        save_model_cache(prov_norm, base_url, model_ids)
-        try:
-            from mana_agent.config.model_capabilities import clear_capability_cache
-
-            clear_capability_cache()
-        except Exception:
-            pass
         return descriptors_from_catalog(prov_norm, model_ids, source="discovered")
 
     def cached(self, *, provider: str, base_url: str) -> list[ModelDescriptor]:
@@ -97,6 +99,9 @@ class ModelCatalogService:
         from mana_agent.config.model_catalog import maintained_models_for_provider
 
         return maintained_models_for_provider(provider)
+
+    def cached_profiles(self, *, provider: str, base_url: str = "") -> list[ModelDescriptor]:
+        return self.cached_or_maintained(provider=provider, base_url=base_url)
 
     def get_descriptor(
         self,
@@ -142,37 +147,8 @@ class ModelCatalogService:
             if desc.id == target or desc.qualified_id == target:
                 if desc.capabilities:
                     return desc
-            if target.endswith(f"/{desc.id}") or desc.id.endswith(f"/{target}"):
-                if desc.capabilities:
-                    return desc
 
-        # 2. Try fetching single model detail directly from provider API endpoint
-        if allow_refresh and eff_api_key and eff_base_url:
-            try:
-                from mana_agent.tui.model_picker import fetch_provider_model_detail
-
-                detail = fetch_provider_model_detail(
-                    provider=p_lower,
-                    base_url=eff_base_url,
-                    api_key=eff_api_key,
-                    model_id=target,
-                    timeout_seconds=timeout_seconds,
-                )
-                if detail and isinstance(detail, dict):
-                    extracted = extract_capabilities_from_record(detail)
-                    caps = normalize_capabilities(p_lower, target, extracted)
-                    if caps:
-                        return ModelDescriptor(
-                            provider=p_lower,
-                            id=target,
-                            capabilities=caps,
-                            source="api_detail",
-                            metadata=detail,
-                        )
-            except Exception:
-                pass
-
-        # 3. If not found in cache and refresh is allowed, fetch from provider API catalog
+        # Discovery walks the catalog and uses supported model detail endpoints in one pass.
         if allow_refresh and eff_api_key and eff_base_url:
             try:
                 refreshed = self.refresh(
@@ -184,19 +160,17 @@ class ModelCatalogService:
                 for desc in refreshed:
                     if desc.id == target or desc.qualified_id == target:
                         return desc
-                    if target.endswith(f"/{desc.id}") or desc.id.endswith(f"/{target}"):
-                        return desc
             except Exception:
                 pass
 
-        # 3. Baseline descriptor via normalize_capabilities if known
+        # A configured model may have evidence without a provider catalog entry.
         caps = normalize_capabilities(p_lower, target)
         if caps:
             return ModelDescriptor(
                 provider=p_lower,
                 id=target,
                 capabilities=caps,
-                source="inferred",
+                source="registry",
             )
 
         return None
