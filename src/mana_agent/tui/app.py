@@ -2492,9 +2492,9 @@ class ManaChatApp(App):
 
                     tool_cb = None
                     try:
-                        from mana_agent.commands.ui_helpers import RichToolCallbackHandler
+                        from mana_agent.commands.ui_helpers import RichToolActivityObserver
 
-                        tool_cb = RichToolCallbackHandler(show_inputs=True)
+                        tool_cb = RichToolActivityObserver(show_inputs=True)
                     except Exception:
                         tool_cb = None
                     ask_callbacks = [tool_cb] if tool_cb is not None else []
@@ -2654,8 +2654,8 @@ class ManaChatApp(App):
                 self.update_status(f"Running {engine_name} coding turn (tools live in chat box)…")
 
                 try:
-                    from mana_agent.commands.ui_helpers import RichToolCallbackHandler
-                    cb = RichToolCallbackHandler(show_inputs=True)
+                    from mana_agent.commands.ui_helpers import RichToolActivityObserver
+                    cb = RichToolActivityObserver(show_inputs=True)
                 except Exception:
                     cb = None
                 callbacks = [cb] if cb is not None else None
@@ -3045,7 +3045,7 @@ class ManaChatApp(App):
         objects (future enhancement). Currently uses direct model + context for responses.
         """
         try:
-            from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+            from mana_agent.llm.engine import create_model
 
             model_name = self.model or "gpt-4o-mini"
             from mana_agent.config.settings import Settings
@@ -3068,7 +3068,7 @@ class ManaChatApp(App):
                     f"No {connection.display_name} API key is saved in ~/.mana/secrets.toml"
                 )
 
-            llm = create_chat_model(
+            llm = create_model(
                 api_key=api_key,
                 model=model_name,
                 base_url=base_url,
@@ -3091,7 +3091,7 @@ class ManaChatApp(App):
 
             # Run off the event loop (the model invoke may be sync)
             response = await asyncio.to_thread(
-                llm.invoke,
+                llm.generate_sync,
                 [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_content},

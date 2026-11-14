@@ -151,19 +151,25 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
     def _execute_internal(self, task_id: str, request: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         import copy
         engine = copy.copy(self._internal_engine)
+        engine.context_cost_governor = self.context_cost_governor
         engine.extra_tools = dict(self._internal_engine.extra_tools)
         runtime = {**(kwargs.get("execution_runtime") or {}), **(kwargs.get("batch_runtime") or {})}
         for name in ("execution_registry", "tool_authorize", "execution_supervisor", "taskboard", "batch_manager", "batch_authorize",
                      "batch_authority", "batch_autonomous_config", "model", "provider"):
             if name in runtime:
                 setattr(engine, name, runtime[name])
+        from mana_agent.llm.engine import NativeLLMEngine
+        if isinstance(engine.llm_client, NativeLLMEngine) and (engine.llm_client.provider, engine.llm_client.model) != (engine.provider, engine.model):
+            engine.llm_client = None
+            engine.api_key = None
+            engine.base_url = None
         for tool in runtime.get("context_tools", []):
             def invoke_context(_tool=tool, **arguments):
-                return _tool.invoke(arguments)
-            invoke_context.args_schema = tool.args_schema
+                return _tool.call(arguments)
+            invoke_context.input_model = tool.input_model
             from mana_agent.tools.contracts import ToolContract
             invoke_context.tool_contract = ToolContract(name=tool.name, description=tool.description,
-                input_schema=tool.args_schema.model_json_schema(), output_schema={}, error_format={},
+                input_schema=tool.input_model.model_json_schema(), output_schema={}, error_format={},
                 required_capability="context", effect="read_only", repository_operation=False)
             engine.extra_tools[tool.name] = invoke_context
         policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})

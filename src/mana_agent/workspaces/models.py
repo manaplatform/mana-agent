@@ -182,7 +182,7 @@ class ImpactReport(BaseModel):
 class WorkspaceSearchRequest(BaseModel):
     workspace_id: str
     query: str
-    mode: Literal["semantic", "text", "file", "symbol"] = "semantic"
+    mode: Literal["text", "file", "symbol"] = "text"
     repository_ids: list[str] = Field(default_factory=list)
     limit: int = Field(default=20, ge=1, le=500)
     metadata: dict[str, Any] = Field(default_factory=dict)

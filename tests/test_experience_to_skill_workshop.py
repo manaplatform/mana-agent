@@ -131,7 +131,7 @@ def test_secret_evidence_is_redacted_before_model_generation(storage: ProposalSt
     seen: list[ExperienceRecord] = []
 
     class CapturingGenerator:
-        def generate(self, recorded, decision):
+        def generate(self, recorded, decision, **_native_options):
             seen.append(recorded)
             return draft()
 
@@ -249,7 +249,7 @@ def test_invalid_generated_content_is_quarantined(storage: ProposalStorage) -> N
 
 def test_workshop_failure_does_not_change_original_task_success(storage: ProposalStorage) -> None:
     class BrokenGenerator:
-        def generate(self, experience, decision):
+        def generate(self, experience, decision, **_native_options):
             raise RuntimeError("model unavailable")
     hook = ExperienceWorkshopHook(SkillCreator(config=config(), storage=storage))
     result = hook.run(experience(), generator=BrokenGenerator(), original_task_succeeded=True)

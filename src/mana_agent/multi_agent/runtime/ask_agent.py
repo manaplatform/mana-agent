@@ -14,12 +14,11 @@ from time import perf_counter
 from typing import Any, Literal, Sequence
 from collections import defaultdict
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import StructuredTool, BaseTool
-from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+from mana_agent.llm.messages import UserMessage, SystemMessage, ToolResultMessage
+from mana_agent.llm.tools import ToolBinding
+from mana_agent.llm.engine import create_model
 from pydantic import BaseModel, Field
 
-from langchain_core.callbacks.base import BaseCallbackHandler
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
 from mana_agent.multi_agent.runtime.prompts import ASK_AGENT_SYSTEM_PROMPT
 from mana_agent.spirit.adapter import apply_spirit_instruction
@@ -53,7 +52,7 @@ from mana_agent.tools.repository import (
 )
 from mana_agent.skills.manager import SkillManager
 from mana_agent.multi_agent.tools import git_tools
-from mana_agent.mcp.tools import discovered_mcp_langchain_tools
+from mana_agent.mcp.tools import discovered_mcp_tools
 from mana_agent.execution.manager import ExecutionManager
 from mana_agent.execution.models import ExecutionRequest, RoutingRequest, SandboxSpec
 from mana_agent.execution.errors import ExecutionTimeoutError
@@ -275,11 +274,6 @@ class _ApiWorkflowLoopState:
                 self.terminal_blocker = err_code
 
 
-class _SemanticSearchInput(BaseModel):
-    query: str = Field(description="Query used for semantic code search")
-    k: int = Field(default=8, ge=1, le=50, description="Top results to return")
-
-
 class _ReadFileInput(BaseModel):
     path: str = Field(description="Absolute or project-relative file path")
     mode: Literal["line", "full"] = Field(default="line")
@@ -453,7 +447,7 @@ class AskAgent:
     # Tools whose calls are deduplicated semantically (similar queries collapse
     # to the same canonical intent, e.g. ``README`` / ``README.md`` / ``README*``).
     SEARCH_LIKE_TOOLS = frozenset(
-        {"semantic_search", "repo_search", "repo_batch_search", "find_symbols", "call_graph", "list_files"}
+        {"repo_search", "repo_batch_search", "find_symbols", "call_graph", "list_files"}
     )
 
     _BLOCKED_PATTERNS = [
@@ -486,13 +480,15 @@ class AskAgent:
         *,
         provider: str | None = None,
         default_headers: dict[str, str] | None = None,
+        model_configuration: dict[str, Any] | None = None,
     ) -> None:
-        self.llm = create_chat_model(
+        self.llm = create_model(
             api_key=api_key,
             model=model,
             base_url=base_url,
             provider=provider,
             default_headers=default_headers,
+            model_configuration=model_configuration,
         )
         self.provider = str(provider or getattr(self.llm, "selected_provider", "") or "unknown")
         self.model = model
@@ -521,7 +517,7 @@ class AskAgent:
         self.llm.context_cost_governor = context_cost_governor
 
         # ✅ NEW: allow external code to register extra tools (e.g. write_file/apply_patch)
-        self.tools: list[BaseTool] = []
+        self.tools: list[ToolBinding] = []
         self.mcp_server_overrides: list[str] = []
         self.continuation_evaluator: Any | None = None
 
@@ -530,7 +526,7 @@ class AskAgent:
         if not resolved or resolved == self.model:
             return
         governor = self.context_cost_governor
-        self.llm = create_chat_model(
+        self.llm = create_model(
             api_key=self.api_key,
             model=resolved,
             base_url=self.base_url,
@@ -539,7 +535,8 @@ class AskAgent:
         self.llm.context_cost_governor = governor
         self.model = resolved
 
-    def update_model_assignment(self, provider: str, model_name: str, *, settings: Any | None = None) -> None:
+    def update_model_assignment(self, provider: str, model_name: str, *, settings: Any | None = None,
+                                model_configuration: dict[str, Any] | None = None) -> None:
         from mana_agent.config.inference_provider import resolve_inference_connection
         from mana_agent.config.settings import Settings
 
@@ -550,12 +547,13 @@ class AskAgent:
         self.api_key = connection.api_key
         self.base_url = connection.base_url
         self.provider = connection.provider
-        self.llm = create_chat_model(
+        self.llm = create_model(
             api_key=connection.api_key,
             model=resolved,
             base_url=connection.base_url,
             provider=connection.provider,
             default_headers=connection.headers,
+            model_configuration=model_configuration,
         )
         self.llm.context_cost_governor = self.context_cost_governor
         self.model = resolved
@@ -822,7 +820,7 @@ class AskAgent:
         )
 
         llm = getattr(self, "llm", None)
-        invoke = getattr(llm, "invoke", None)
+        invoke = getattr(llm, "generate_sync", None)
         if invoke is None:
             return digest
 
@@ -838,7 +836,7 @@ class AskAgent:
                         "and what remains uncertain. Cite file paths/line ranges when given."
                     )
                 ),
-                HumanMessage(
+                UserMessage(
                     content=(
                         f"User question:\n{user_query.strip()}\n\n"
                         f"Reason the loop stopped: {reason}\n\n"
@@ -1337,7 +1335,7 @@ class AskAgent:
         required_mcp_server: str | None = None,
         enable_run_evidence: bool = True,
         skill_root: str | Path | None = None,
-    ) -> tuple[list[BaseTool], list[ToolInvocationTrace], list[SearchHit], list[str]]:
+    ) -> tuple[list[ToolBinding], list[ToolInvocationTrace], list[SearchHit], list[str]]:
         traces: list[ToolInvocationTrace] = []
         sources: list[SearchHit] = []
         warnings: list[str] = []
@@ -1354,43 +1352,6 @@ class AskAgent:
             fallback_index = Path(getattr(self, "_resolved_index", default_index_dir(self.project_root))).resolve()
             resolved_indexes = [fallback_index]
             self._resolved_indexes = resolved_indexes
-
-        def semantic_search(query: str, k: int = k_default) -> str:
-            started = perf_counter()
-            status = "ok"
-            output_preview = ""
-            args_summary = f"query={query!r} k={k}"
-            try:
-                payload: list[dict] = []
-                all_hits: list[SearchHit] = []
-                for index_dir in resolved_indexes:
-                    try:
-                        hits = self.search_service.search(index_dir=index_dir, query=query, k=k)
-                    except Exception as exc:
-                        warning = f"Skipped unusable index {index_dir}: {exc}"
-                        warnings.append(warning)
-                        payload.append({"index_dir": str(index_dir), "error": str(exc)})
-                        continue
-                    all_hits.extend(hits)
-                    payload.extend([{"index_dir": str(index_dir), **item.to_dict()} for item in hits])
-                sources.extend(all_hits)
-                encoded = json.dumps(payload)
-                output_preview = encoded
-                return encoded
-            except Exception as exc:
-                status = "error"
-                output_preview = str(exc)
-                return json.dumps({"error": str(exc)})
-            finally:
-                traces.append(
-                    ToolInvocationTrace(
-                        tool_name="semantic_search",
-                        args_summary=args_summary,
-                        duration_ms=(perf_counter() - started) * 1000,
-                        status=status,
-                        output_preview=output_preview,
-                    )
-                )
 
         def read_file(path: str, mode: str = "line", start_line: int = 1, end_line: int = 200) -> str:
             started = perf_counter()
@@ -2064,14 +2025,8 @@ class AskAgent:
         def document_delete(path: str, explicit: bool = False, backup: bool = True, action_approval_id: str = "") -> str:
             return dumps_tool_result(document_service.delete(path, explicit=explicit, backup=backup, action_approval_id=action_approval_id))
 
-        base_tools: list[BaseTool] = [
-            StructuredTool.from_function(
-                func=semantic_search,
-                name="semantic_search",
-                description="Search indexed code semantically and return JSON list of hits.",
-                args_schema=_SemanticSearchInput,
-            ),
-            StructuredTool.from_function(
+        base_tools: list[ToolBinding] = [
+            ToolBinding.from_callable(
                 func=read_file,
                 name="read_file",
                 description=(
@@ -2079,15 +2034,15 @@ class AskAgent:
                     "if full mode exceeds caps, call chunk_file(path). "
                     "Use mode='line' for targeted slices."
                 ),
-                args_schema=_ReadFileInput,
+                input_model=_ReadFileInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=run_command,
                 name="run_command",
                 description="Run a non-destructive shell command in project root and return JSON stdout/stderr.",
-                args_schema=_RunCommandInput,
+                input_model=_RunCommandInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=shell,
                 name="shell",
                 description=(
@@ -2095,208 +2050,208 @@ class AskAgent:
                     "Accepts an action with commands list, timeout_ms, and max_output_length. "
                     "Returns shell_call_output with items containing stdout, stderr, and outcome."
                 ),
-                args_schema=_ShellInput,
+                input_model=_ShellInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=chunk_file,
                 name="chunk_file",
                 description="Chunk a file into text parts when full-mode read is blocked.",
-                args_schema=_ChunkFileInput,
+                input_model=_ChunkFileInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=list_tools,
                 name="list_tools",
                 description="List available tool names.",
-                args_schema=_ListToolsInput,
+                input_model=_ListToolsInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=ls,
                 name="ls",
                 description="List project directories relative to the root.",
-                args_schema=_LsInput,
+                input_model=_LsInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=repo_search,
                 name="repo_search",
                 description="Search repository text with regex or literal matching. Read-only.",
-                args_schema=_RepoSearchInput,
+                input_model=_RepoSearchInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=repo_batch_read,
                 name="repo_batch_read",
                 description="Read multiple repository files in one call with per-file errors and truncation metadata.",
-                args_schema=_RepoBatchReadInput,
+                input_model=_RepoBatchReadInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=repo_batch_search,
                 name="repo_batch_search",
                 description="Run multiple repository text searches in one call and return grouped JSON results.",
-                args_schema=_RepoBatchSearchInput,
+                input_model=_RepoBatchSearchInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=run_script_once,
                 name="run_script_once",
                 description="Run one grouped, non-destructive shell script in the repository and return exit code/output/duration.",
-                args_schema=_RunScriptOnceInput,
+                input_model=_RunScriptOnceInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=apply_patch_batch,
                 name="apply_patch_batch",
                 description="Validate and apply multiple related Codex patch payloads in one call.",
-                args_schema=_ApplyPatchBatchInput,
+                input_model=_ApplyPatchBatchInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=read_skill,
                 name="read_skill",
                 description="Load one full skills/<skill_name>/SKILL.md body on demand after matching the compact skill index.",
-                args_schema=_ReadSkillInput,
+                input_model=_ReadSkillInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=list_files,
                 name="list_files",
                 description="List repository files relative to the project root. Read-only.",
-                args_schema=_ListFilesInput,
+                input_model=_ListFilesInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=find_symbols,
                 name="find_symbols",
                 description="Find Python classes/functions/methods using AST. Read-only.",
-                args_schema=_FindSymbolsInput,
+                input_model=_FindSymbolsInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=call_graph,
                 name="call_graph",
                 description="Inspect Python AST call edges by caller, callee, or file path. Read-only.",
-                args_schema=_CallGraphInput,
+                input_model=_CallGraphInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_status,
                 name="git_status",
                 description="Return git status --short. Read-only.",
-                args_schema=_LsInput,
+                input_model=_LsInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_diff,
                 name="git_diff",
                 description="Return git diff, optionally for one project-relative path. Read-only.",
-                args_schema=_GitDiffInput,
+                input_model=_GitDiffInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_help,
                 name="git_help",
                 description="Return Git help or dynamically discovered commands from git help -a. Use before git_generic for uncommon commands.",
-                args_schema=_GitHelpInput,
+                input_model=_GitHelpInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_generic,
                 name="git_generic",
                 description="Run a model-selected Git argv list through the shared safe executor. Omit the leading git executable.",
-                args_schema=_GitGenericInput,
+                input_model=_GitGenericInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_log,
                 name="git_log",
                 description="Inspect recent commit history. Read-only.",
-                args_schema=_GitLogInput,
+                input_model=_GitLogInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_branch,
                 name="git_branch",
                 description="List branches. Read-only.",
-                args_schema=_GitBranchInput,
+                input_model=_GitBranchInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_create_branch,
                 name="git_create_branch",
                 description="Create a safely named branch after the model has inspected repository state.",
-                args_schema=_GitCreateBranchInput,
+                input_model=_GitCreateBranchInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_switch,
                 name="git_switch",
                 description="Switch to an existing safely named branch.",
-                args_schema=_GitSwitchInput,
+                input_model=_GitSwitchInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_add,
                 name="git_add",
                 description="Stage specific relevant paths only. Do not use for blanket staging unless the model verified all changes are relevant.",
-                args_schema=_GitAddInput,
+                input_model=_GitAddInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_commit,
                 name="git_commit",
                 description="Create or amend a commit with a message generated from staged diff, request, files changed, and verification.",
-                args_schema=_GitCommitInput,
+                input_model=_GitCommitInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_push,
                 name="git_push",
                 description="Push after inspecting status, branch, remotes, and upstream. Force push is protected and blocked by default.",
-                args_schema=_GitPushInput,
+                input_model=_GitPushInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=git_remote,
                 name="git_remote",
                 description="Inspect configured remotes. Read-only.",
-                args_schema=_GitRemoteInput,
+                input_model=_GitRemoteInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=verify_project,
                 name="verify_project",
                 description="Run standard pytest/ruff/mypy/import/CLI smoke checks and report skipped tools.",
-                args_schema=_VerifyProjectInput,
+                input_model=_VerifyProjectInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=tool_contracts,
                 name="tool_contracts",
                 description="Return strict name/schema/output/error/safety/examples contracts for coding tools.",
-                args_schema=_ListToolsInput,
+                input_model=_ListToolsInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=document_detect,
                 name="document_detect",
                 description="Detect supported project document files by path, extension, and MIME when available.",
-                args_schema=_DocumentDetectInput,
+                input_model=_DocumentDetectInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=document_read,
                 name="document_read",
                 description="Read DOCX, PDF, XLSX/XLSM, or CSV files into normalized chunks with citation metadata.",
-                args_schema=_DocumentReadInput,
+                input_model=_DocumentReadInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=document_analyze,
                 name="document_analyze",
                 description="Analyze document structure, key points, tables, PDF OCR needs, and workbook schemas/formulas.",
-                args_schema=_DocumentAnalyzeInput,
+                input_model=_DocumentAnalyzeInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=document_query,
                 name="document_query",
                 description="Search parsed document chunks with optional file-type, path, sheet, page, or section filters.",
-                args_schema=_DocumentQueryInput,
+                input_model=_DocumentQueryInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=document_create,
                 name="document_create",
                 description=(
                     "Create DOCX, XLSX/XLSM, CSV, or styled PDF artifacts without overwriting by default. "
                     "PDF creation requires a successful read_skill('pdf-create') call first."
                 ),
-                args_schema=_DocumentCreateInput,
+                input_model=_DocumentCreateInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=document_update,
                 name="document_update",
                 description="Safely update supported document files with backups unless disabled.",
-                args_schema=_DocumentUpdateInput,
+                input_model=_DocumentUpdateInput,
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=document_delete,
                 name="document_delete",
                 description="Delete a supported document file only when explicit delete intent is validated.",
-                args_schema=_DocumentDeleteInput,
+                input_model=_DocumentDeleteInput,
             ),
         ]
 
@@ -2306,7 +2261,7 @@ class AskAgent:
         mcp_overrides = list(getattr(self, "mcp_server_overrides", []) or [])
         selected_mcp_servers = [str(required_mcp_server).strip()] if str(required_mcp_server or "").strip() else []
         mcp_tools, mcp_warnings = (
-            discovered_mcp_langchain_tools(
+            discovered_mcp_tools(
                 overrides=mcp_overrides,
                 server_ids=selected_mcp_servers,
             )
@@ -2315,18 +2270,18 @@ class AskAgent:
         )
         warnings.extend(mcp_warnings)
         # include externally-registered tools (write_file/apply_patch/etc)
-        from mana_agent.connectors.email.runtime_tools import build_email_langchain_tools
+        from mana_agent.connectors.email.runtime_tools import build_email_tools
 
         from mana_agent.config.user_config import get_setting
 
         browser_tools = []
         if bool(get_setting("MANA_BROWSER_ENABLED", True)):
             try:
-                from mana_agent.connectors.browser.runtime_tools import build_browser_langchain_tools
+                from mana_agent.connectors.browser.runtime_tools import build_browser_tools
             except ImportError:
                 pass
             else:
-                browser_tools = build_browser_langchain_tools()
+                browser_tools = build_browser_tools()
 
         computer_tools = []
         computer_settings = get_setting("computer_control", {})
@@ -2335,28 +2290,28 @@ class AskAgent:
             and bool(computer_settings.get("enabled", False))
         ) or bool(get_setting("MANA_COMPUTER_CONTROL_ENABLED", False))
         if computer_enabled:
-            from mana_agent.integrations.computer_control.runtime_tools import build_computer_langchain_tools
+            from mana_agent.integrations.computer_control.runtime_tools import build_computer_tools
 
-            computer_tools = build_computer_langchain_tools()
+            computer_tools = build_computer_tools()
 
         teach_tools = []
         teach_settings = get_setting("teach", {})
         if not isinstance(teach_settings, dict) or bool(teach_settings.get("enabled", True)):
-            from mana_agent.teach.runtime_tools import build_teach_langchain_tools
+            from mana_agent.teach.runtime_tools import build_teach_tools
 
-            teach_tools = build_teach_langchain_tools()
+            teach_tools = build_teach_tools()
 
-        from mana_agent.automations.runtime_tools import build_automation_langchain_tools
-        automation_tools = build_automation_langchain_tools(self.project_root)
+        from mana_agent.automations.runtime_tools import build_automation_tools
+        automation_tools = build_automation_tools(self.project_root)
         canvas_tools = []
         if bool(get_setting("MANA_CANVAS_ENABLED", True)):
-            from mana_agent.canvas.runtime_tools import build_canvas_langchain_tools
-            canvas_tools = build_canvas_langchain_tools(self.project_root)
-        from mana_agent.media.runtime_tools import build_media_langchain_tools
-        media_tools = build_media_langchain_tools(self.project_root)
+            from mana_agent.canvas.runtime_tools import build_canvas_tools
+            canvas_tools = build_canvas_tools(self.project_root)
+        from mana_agent.media.runtime_tools import build_media_tools
+        media_tools = build_media_tools(self.project_root)
         from mana_agent.api_manager.runtime_tools import (
             ApiToolExecutionContext,
-            build_api_manager_langchain_tools,
+            build_api_manager_tools,
         )
         api_context = ApiToolExecutionContext(
             session_id=str(flow_id or getattr(self, "session_id", "default-session") or "default-session"),
@@ -2365,7 +2320,7 @@ class AskAgent:
             execution_id=str(getattr(self, "current_turn_id", "") or (run_id or "")),
             source_decision_id=str(getattr(self, "current_turn_id", "") or (run_id or "")),
         )
-        api_manager_tools = build_api_manager_langchain_tools(self.project_root, context=api_context)
+        api_manager_tools = build_api_manager_tools(self.project_root, context=api_context)
 
         context_tools = []
         if hasattr(self, "_context_retrieval_tools") and self._context_retrieval_tools:
@@ -2395,13 +2350,13 @@ class AskAgent:
             task_id=str(run_id or ""), agent_id="ask_agent",
         )
 
-        from mana_agent.batch.tools import build_batch_langchain_tools
+        from mana_agent.batch.tools import build_batch_tools
 
-        batch_tools = build_batch_langchain_tools()
+        batch_tools = build_batch_tools()
 
         # Account metadata is local; Gmail is contacted only if the model calls
         # one of these explicitly selected tools.
-        email_tools = build_email_langchain_tools()
+        email_tools = build_email_tools()
         all_tools = [
             *base_tools,
             *context_tools,
@@ -2438,7 +2393,7 @@ class AskAgent:
                     "execution_effect": "external", "repository_operation": False}
         return all_tools, traces, sources, warnings
 
-    def set_context_retrieval_tools(self, tools: Sequence[BaseTool]) -> None:
+    def set_context_retrieval_tools(self, tools: Sequence[ToolBinding]) -> None:
         """Explicitly attach host-scoped context retrieval tools."""
         self._context_retrieval_tools = list(tools)
 
@@ -2452,7 +2407,7 @@ class AskAgent:
         max_steps: int = 9999999999999,
         timeout_seconds: int = 9999999999999,
         index_dirs: list[str | Path] | None = None,
-        callbacks: Sequence[BaseCallbackHandler] | None = None,
+        callbacks: Sequence[Any] | None = None,
         system_prompt: str | None = None,
         tool_policy: dict[str, Any] | None = None,
         tool_use: bool = True,
@@ -2482,7 +2437,7 @@ class AskAgent:
         max_steps: int = 6,
         timeout_seconds: int = 30,
         index_dirs: list[str | Path] | None = None,
-        callbacks: Sequence[BaseCallbackHandler] | None = None,
+        callbacks: Sequence[Any] | None = None,
         system_prompt: str | None = None,  # ✅ NEW
         tool_policy: dict[str, Any] | None = None,
         flow_id: str | None = None,
@@ -2538,7 +2493,6 @@ class AskAgent:
         require_read_files = int(policy.get("require_read_files", 0) or 0)
         search_repeat_limit = int(policy.get("search_repeat_limit", 1) or 1)
         search_seen: dict[str, int] = defaultdict(int)
-        max_semantic_k = int(policy.get("max_semantic_k", 50) or 50)
         read_telemetry: dict[str, int] = {
             "read_cache_hits": 0,
             "read_cache_misses": 0,
@@ -2643,10 +2597,10 @@ class AskAgent:
             governor.metrics["schema_tokens_avoided"] = int(governor.metrics["schema_tokens_avoided"]) + capability_registry.avoided_schema_tokens
         else:
             bound_tools = [tool for tool in tools if not allowed_tools or tool.name in allowed_tools]
-        bound = self.llm.bind_tools(bound_tools)
+        bound = self.llm.with_tools(bound_tools)
         bound_revision = capability_registry.active.revision if capability_registry is not None else 0
         bound_initial_required = (
-            self.llm.bind_tools(bound_tools, tool_choice="required")
+            self.llm.with_tools(bound_tools, tool_choice="required")
             if bool(policy.get("require_initial_tool_call"))
             else None
         )
@@ -2656,7 +2610,7 @@ class AskAgent:
         # budget is nearly spent without a successful mutation, the final step can
         # only call a write tool instead of synthesizing a prose answer that would
         # later trip the tools-only gate. tool_choice support varies by provider,
-        # so degrade gracefully (required -> any -> plain bind).
+        # so capability validation must reject unsupported required selection.
         mutation_required = bool(policy.get("mutation_required") or policy.get("mutation_strict"))
         mutation_tool_names = [
             name
@@ -2679,14 +2633,7 @@ class AskAgent:
         bound_mutation = None
         if mutation_required and mutation_tool_names:
             mutation_tools = [tool_map[name] for name in mutation_tool_names]
-            for choice in ("required", "any"):
-                try:
-                    bound_mutation = self.llm.bind_tools(mutation_tools, tool_choice=choice)
-                    break
-                except Exception:
-                    bound_mutation = None
-            if bound_mutation is None:
-                bound_mutation = self.llm.bind_tools(mutation_tools)
+            bound_mutation = self.llm.with_tools(mutation_tools, tool_choice="required")
         mutation_succeeded = False
         forced_write_done = False
 
@@ -2719,9 +2666,10 @@ class AskAgent:
 
         messages = [
             SystemMessage(content=system_content),
-            HumanMessage(content=question),
+            UserMessage(content=question),
         ]
 
+        native_continuation = None
         cfg: dict[str, Any] = {"callbacks": list(callbacks) if callbacks else []}
         seen_tool_args: dict[tuple[str, str], int] = defaultdict(int)
         tool_counts: dict[str, int] = defaultdict(int)
@@ -2788,7 +2736,7 @@ class AskAgent:
                     turn_id=str(run_id or flow_id or ""),
                     step_id=str(step),
                 )
-            messages.append(ToolMessage(content=visible, tool_call_id=tool_call_id))
+            messages.append(ToolResultMessage(content=visible, tool_call_id=tool_call_id))
 
         def safe_tool_args(tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
             sanitized = dict(tool_args)
@@ -2860,9 +2808,9 @@ class AskAgent:
                 if capability_registry.active.revision != bound_revision:
                     allowed_tools.update(capability_registry.active.loaded)
                     bound_tools = capability_registry.bound_tools()
-                    bound = self.llm.bind_tools(bound_tools)
+                    bound = self.llm.with_tools(bound_tools)
                     bound_initial_required = (
-                        self.llm.bind_tools(bound_tools, tool_choice="required")
+                        self.llm.with_tools(bound_tools, tool_choice="required")
                         if bool(policy.get("require_initial_tool_call")) and step_idx == 0
                         else None
                     )
@@ -2876,7 +2824,7 @@ class AskAgent:
             if remaining_steps <= 1 and step_idx > 0 and not final_answer:
                 if need_forced_write and not forced_write_done:
                     forced_write_done = True
-                    messages.append(HumanMessage(content=_FORCED_WRITE_INSTRUCTION))
+                    messages.append(UserMessage(content=_FORCED_WRITE_INSTRUCTION))
 
             # Once a forced write is in flight, restrict the model to mutation
             # tools so it can only act, never read again, until a write lands.
@@ -2895,7 +2843,7 @@ class AskAgent:
             if governor.enabled and getattr(self.llm, "context_cost_governor", None) is None:
                 model_segments = []
                 for index, message in enumerate(messages):
-                    kind = "system" if isinstance(message, SystemMessage) else "user" if isinstance(message, HumanMessage) and index == 1 else "tool_result" if isinstance(message, ToolMessage) else "history"
+                    kind = "system" if isinstance(message, SystemMessage) else "user" if isinstance(message, UserMessage) and index == 1 else "tool_result" if isinstance(message, ToolResultMessage) else "history"
                     model_segments.append(ContextSegment(
                         kind=kind,
                         content=getattr(message, "content", ""),
@@ -2920,7 +2868,8 @@ class AskAgent:
                 invoke_kwargs: dict[str, Any] = {"config": cfg}
                 if model_max_tokens is not None:
                     invoke_kwargs["max_tokens"] = model_max_tokens
-                ai_msg = use_bound.invoke(messages, **invoke_kwargs)
+                ai_msg = use_bound.generate_sync(messages, continuation=native_continuation, **invoke_kwargs)
+                native_continuation = getattr(ai_msg, "continuation", None)
             except BaseException as exc:
                 if governor.enabled and model_call_id:
                     governor.release_reservation(
@@ -2929,8 +2878,8 @@ class AskAgent:
                     )
                 raise
             if governor.enabled and model_call_id:
-                response_metadata = getattr(ai_msg, "response_metadata", {}) or {}
-                usage = getattr(ai_msg, "usage_metadata", None) or response_metadata.get("token_usage") or response_metadata.get("usage")
+                response_metadata = {}
+                usage = (ai_msg.usage.model_dump() if hasattr(ai_msg, "usage") else None) or response_metadata.get("token_usage") or response_metadata.get("usage")
                 governor.record_model_call(
                     model_call_id,
                     usage=usage,
@@ -2940,7 +2889,7 @@ class AskAgent:
                     turn_id=str(run_id or flow_id or ""),
                     step_id=str(step_idx),
                 )
-            messages.append(ai_msg)
+            messages.append(ai_msg.message)
 
             tool_calls = getattr(ai_msg, "tool_calls", None) or []
             if not tool_calls:
@@ -2949,7 +2898,7 @@ class AskAgent:
                 # accepting a prose answer that cannot satisfy the deliverable.
                 if need_forced_write and not forced_write_done:
                     forced_write_done = True
-                    messages.append(HumanMessage(content=_FORCED_WRITE_INSTRUCTION))
+                    messages.append(UserMessage(content=_FORCED_WRITE_INSTRUCTION))
                     continue
 
                 if api_state.should_continue():
@@ -2962,9 +2911,9 @@ class AskAgent:
                         if capability_registry.active.revision != bound_revision:
                             allowed_tools.update(capability_registry.active.loaded)
                             bound_tools = capability_registry.bound_tools()
-                            bound = self.llm.bind_tools(bound_tools)
+                            bound = self.llm.with_tools(bound_tools)
                             bound_revision = capability_registry.active.revision
-                    messages.append(HumanMessage(content=api_state.build_continuation_instruction()))
+                    messages.append(UserMessage(content=api_state.build_continuation_instruction()))
                     continue
 
                 continuation_evaluator = policy.get("continuation_evaluator") or getattr(self, "continuation_evaluator", None)
@@ -2983,7 +2932,7 @@ class AskAgent:
                             },
                         )
                         if eval_decision.action == ContinuationAction.CONTINUE:
-                            messages.append(HumanMessage(content=eval_decision.remaining_work or "Please continue executing the remaining required tasks."))
+                            messages.append(UserMessage(content=eval_decision.remaining_work or "Please continue executing the remaining required tasks."))
                             continue
                         elif eval_decision.action == ContinuationAction.WAIT_FOR_USER:
                             final_answer = eval_decision.user_message or self._extract_model_text(ai_msg.content)
@@ -3056,27 +3005,6 @@ class AskAgent:
                         seen_tool_calls.add(exact_signature)
                         if search_signature is not None:
                             seen_search_intents.add(search_signature)
-                    if name == "semantic_search":
-                        if search_budget > 0 and tool_counts["semantic_search"] >= search_budget:
-                            content = json.dumps({"error": "semantic_search budget exhausted"})
-                            persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
-                            continue
-                        k_val = int(args.get("k", 0) or 0)
-                        if k_val > max_semantic_k:
-                            content = json.dumps({"error": f"semantic_search k must be <= {max_semantic_k}"})
-                            persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
-                            continue
-                        normalized = self._normalize_search_key(args)
-                        search_seen[normalized] += 1
-                        if search_seen[normalized] > search_repeat_limit:
-                            content = json.dumps(
-                                {"error": "duplicate semantic_search intent blocked; move to read_file or edit phase"}
-                            )
-                            persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
-                            append_tool_message(name, content, str(call.get("id", "")), step_idx)
-                            continue
                     if name == "read_file":
                         read_args = args if isinstance(args, dict) else {}
                         failure_key = _read_failure_key(read_args)

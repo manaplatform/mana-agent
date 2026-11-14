@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from mana_agent.automations.runtime_tools import build_automation_langchain_tools
+from mana_agent.automations.runtime_tools import build_automation_tools
 from mana_agent.automations.service import AutomationService
 from mana_agent.gateway.chat_gateway import AgentChatGateway
 from mana_agent.gateway.entry_routing import EntryRouteContext, EntryRoutingDecision
@@ -19,7 +19,7 @@ from mana_agent.gateway.turn_engine import ChatTurnResult
 def test_automation_create_schema_reports_only_relevant_payload_errors(
     tmp_path: Path,
 ) -> None:
-    tool = {item.name: item for item in build_automation_langchain_tools(tmp_path)}[
+    tool = {item.name: item for item in build_automation_tools(tmp_path)}[
         "automation_create"
     ]
     payload = {
@@ -46,7 +46,7 @@ def test_automation_create_schema_reports_only_relevant_payload_errors(
     }
 
     with pytest.raises(ValidationError) as captured:
-        tool.invoke(payload)
+        tool.call(payload)
 
     errors = captured.value.errors(include_url=False)
     assert len(errors) == 3
@@ -55,7 +55,7 @@ def test_automation_create_schema_reports_only_relevant_payload_errors(
         ("retry_policy", "max_attempts"),
         ("misfire_policy", "type"),
     }
-    job_schema = tool.args_schema.model_json_schema()["properties"]["job"]
+    job_schema = tool.input_model.model_json_schema()["properties"]["job"]
     assert job_schema["discriminator"]["propertyName"] == "type"
 
 
@@ -68,7 +68,7 @@ def test_natural_language_automation_route_creates_persisted_exact_interval(
         "mana_agent.automations.service.reconcile_deployment",
         lambda root, automation_id: AutomationService(root).get(automation_id),
     )
-    tools = {item.name: item for item in build_automation_langchain_tools(tmp_path)}
+    tools = {item.name: item for item in build_automation_tools(tmp_path)}
 
     class ModelToolExecutor:
         def run(self, *, question: str, tool_policy: dict, **_kwargs):
@@ -143,7 +143,7 @@ def test_one_time_gmail_request_is_authored_without_recurrence_question(
         "mana_agent.automations.service.reconcile_deployment",
         lambda root, automation_id: AutomationService(root).get(automation_id),
     )
-    tools = {item.name: item for item in build_automation_langchain_tools(tmp_path)}
+    tools = {item.name: item for item in build_automation_tools(tmp_path)}
     run_at = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
         hour=1, minute=8, second=0, microsecond=0
     )

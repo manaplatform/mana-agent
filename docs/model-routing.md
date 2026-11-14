@@ -12,25 +12,27 @@ routing records store `spirit_id` and `spirit_version` only.
 
 A `RoutingRequest` carries task/parent/session/workspace/repository IDs, lane/role, task description and category, estimated complexity and risk, cached `RepositoryMetadata`, required tools/capabilities/context/output, latency, task-tree depth, health/evidence signals, budgets, and the coordinating model's explicit decomposition or competition request. Repository inspection uses a Git-index/config fingerprint and reuses its bounded inventory until relevant metadata changes. Languages, frameworks, build systems, repository/test size, changed-file scope, and sensitive changed areas contribute to routing demand.
 
-Each `ModelProfile` identifies the provider/model and records supported roles, tools, reasoning settings, context and output limits, tokenizer, monetary or logical cost, reliability, language preferences, category benchmarks, availability, and patch/structured-output/tool/verification capabilities. `MANA_MODEL_PROFILES` accepts explicit profiles. Existing `MODEL_LEVEL_*` values are migrated into profiles with cost, reliability, latency, and benchmark hints; their former role mapping is not a final selection rule. The final candidate is estimated through the shared [model-aware token accounting](model-token-accounting.md) service.
+Each `ModelProfile` identifies the provider/model and records supported roles, tools, reasoning settings, context and output limits, tokenizer, monetary or logical cost, reliability, language preferences, category benchmarks, availability, and patch/structured-output/tool/verification capabilities. `MANA_MODEL_PROFILES` accepts explicit profiles. Existing `MODEL_LEVEL_*` settings identify configured candidates. Capability and limit evidence comes from the native registry. The final candidate is estimated through the shared [model-aware token accounting](model-token-accounting.md) service.
 
-## Deterministic score
+## Main model selection
 
-Candidates are rejected before scoring when they cannot meet role, tool, capability, context, availability, circuit-breaker, latency, token, cost, or verification-reserve constraints. For remaining candidates, the score combines:
+Deterministic validation filters the configured candidates by role, tool and
+capability evidence, context, availability, circuit state, latency, and spend.
+The explicitly configured Main model receives this set with the task constraints
+and chooses a candidate, mode, and any verifier. The decision is schema validated
+and checked against the offered IDs, authorization, isolation, and total spend.
+A malformed result, an unavailable candidate, or expired evidence stops the
+operation. The router records the Main model's confidence and selection reason.
 
-```text
-capability fit
-+ demand-adjusted profile/benchmark quality
-+ demand-adjusted historical success, verification, tool, and structured-output reliability
-+ repository-language fit
-+ inverse estimated cost (weighted more heavily for low-demand work)
-+ latency fit
-- bounded, exponentially decaying recent-failure penalty
-```
-
-The configured weights are stable, candidates are sorted by score, then cost, then provider/model ID, so identical requests and evidence produce identical decisions. Token estimates combine the request estimate with historical usage for the same task category. Provider/model errors, authentication/rate-limit failures, bad tool calls, unsupported parameters, malformed output, verification failures, and timeouts lower the score. Repeated failures inside the configured window open a provider circuit breaker.
-
-The returned `RoutingDecision` includes request/decision/task identity, selected provider/model/configuration, model context/output capability, expected call count, routing mode, score, estimate confidence/components/assumptions, token/cost/latency estimates, verification level, reasons, rejected candidates, agent/candidate permissions, limits/deadline, verifier selection, and effective budgets. Modes are `single`, `single_with_verification`, `multi_agent`, `parallel_candidates`, and `multi_agent_with_parallel_candidates`. `single` is the default. `decision.concise()` is safe for normal diagnostics; credentials are excluded from persistence.
+Routing modes are `single`, `single_with_verification`, `multi_agent`,
+`parallel_candidates`, and `multi_agent_with_parallel_candidates`. The request
+lists the modes admitted by policy and available candidates. Role assignment at
+startup uses a schema with the selected model ID, reason, and confidence. When a parallel
+mode is available, the schema reserves that field for a parallel selection and
+requires an empty list for the other modes. A verifier must be independent of the
+selected implementation candidates. A provider circuit
+breaker still prevents repeated calls to an unhealthy provider. The selected
+configuration and budgets are recorded with its request, decision, and task IDs.
 
 ## Budgets
 
@@ -43,7 +45,7 @@ by replacing their configured routing budgets with cumulative remaining values.
 
 ## Candidate competition
 
-Competition is permitted only when the main coordinating model requests it and gateway policy confirms sufficient evidence, at least two compatible models, an independent verifier, isolated execution, no ownership conflict, concurrency, latency, and total candidate-plus-verification budget. Difficulty alone does not enable competition. The evidence score includes demand, initial-model uncertainty, similar failures, historical output variance and competition benefit, candidate diversity, and multiple plausible strategies. `CandidateCompetition` requires distinct isolated worktrees or patch roots and rejects the active checkout, duplicate roots, candidates without a diff and executed checks, and incomplete verifier judgments.
+Competition is permitted only when the main coordinating model requests it and gateway policy confirms at least two compatible models, an independent verifier, isolated execution, no ownership conflict, concurrency, latency, and total candidate-plus-verification budget. Difficulty alone does not enable competition. `CandidateCompetition` requires distinct isolated worktrees or patch roots and rejects the active checkout, duplicate roots, candidates without a diff and executed checks, and incomplete verifier judgments.
 
 The verifier receives normalized diffs, check outcomes, diagnostics, changed files, patch size, cost, and latency. It must score correctness, test results, regression risk, security, scope discipline, maintainability, repository conventions, patch size, verification completeness, and cost/latency. The same exact author configuration is avoided when a qualified independent verifier fits the context and verification budget. Only the winner is promoted; losing workspaces are cleaned. Any execution or judgment failure cleans every created candidate and promotes nothing.
 
@@ -61,4 +63,4 @@ CLI and TUI share the gateway commands `/route`, `/route explain`, `/tasks`, `/t
 
 ## Configuration
 
-Safe defaults enforce gateway routing and keep both multi-agent and parallel execution disabled. `MANA_ROUTING_MULTI_AGENT_ENABLED` and `MANA_ROUTING_PARALLEL_ENABLED` opt into those capabilities; they do not force their use. `MANA_ROUTING_MIN_PARALLEL_EVIDENCE`, `MANA_ROUTING_MAX_CANDIDATES`, `MANA_ROUTING_MAX_TASK_TREE_DEPTH`, `MANA_ROUTING_MAX_CONCURRENT_TASKS`, task/stall/cancellation timeouts, retention, and detail level bound orchestration. Existing installations therefore remain single-model unless explicitly configured and approved per task.
+Safe defaults enforce gateway routing and keep both multi-agent and parallel execution disabled. `MANA_ROUTING_MULTI_AGENT_ENABLED` and `MANA_ROUTING_PARALLEL_ENABLED` opt into those capabilities; they do not force their use. `MANA_ROUTING_MAX_CANDIDATES`, `MANA_ROUTING_MAX_TASK_TREE_DEPTH`, `MANA_ROUTING_MAX_CONCURRENT_TASKS`, task/stall/cancellation timeouts, retention, and detail level bound orchestration. Existing installations therefore remain single-model unless explicitly configured and approved per task.

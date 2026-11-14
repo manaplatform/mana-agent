@@ -6,7 +6,7 @@ import re
 import time
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 
 from mana_agent.tools.contracts import coding_tool_contracts
 from mana_agent.evals.ids import stable_hash
@@ -41,7 +41,7 @@ _TARGET_SURFACES = frozenset(
     {"conversation", "repository", "web", "browser", "local_system", "external_service"}
 )
 _REPOSITORY_READ_TOOLS = frozenset(
-    {"repo_search", "repo_batch_search", "read_file", "repo_batch_read", "semantic_search", "list_files"}
+    {"repo_search", "repo_batch_search", "read_file", "repo_batch_read", "list_files"}
 )
 _REPOSITORY_MUTATION_TOOLS = frozenset(
     {"apply_patch", "apply_patch_batch", "edit_file", "multi_edit_file", "write_file", "create_file", "delete_file"}
@@ -68,8 +68,7 @@ KNOWN_AGENT_TOOLS = frozenset(
         "git",
         "git_status",
         "git_diff",
-        "semantic_search",
-        "list_files",
+                "list_files",
         "ls",
         "find_symbols",
         "call_graph",
@@ -359,7 +358,7 @@ class AgentDecisionEngine:
         command_hint: str,
         operation_constraint: str,
     ) -> AgentDecision | None:
-        if self.llm is None or not hasattr(self.llm, "invoke"):
+        if self.llm is None or not hasattr(self.llm, "generate_sync"):
             return None
         payload = {
             "user_request": request,
@@ -372,104 +371,18 @@ class AgentDecisionEngine:
         }
         try:
             started = time.perf_counter()
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=AGENT_DECISION_PROMPT),
-                    HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
-                ]
-            )
-            from mana_agent.utils.text import extract_model_text
-
-            content = extract_model_text(getattr(response, "content", response))
-            data = _extract_json(content)
+            from pydantic import TypeAdapter
+            schema = TypeAdapter(AgentDecision).json_schema()
+            data = self.llm.decide_sync([
+                SystemMessage(content=AGENT_DECISION_PROMPT),
+                UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+            ], schema)
             proposed = self._decision_from_payload(data)
-            review_response = self.llm.invoke(
-                [
-                    SystemMessage(content=AGENT_DECISION_REVIEW_PROMPT),
-                    HumanMessage(
-                        content=json.dumps(
-                            {
-                                "user_request": request,
-                                "command_hint": command_hint,
-                                "proposed_decision": proposed.to_dict(),
-                                "repository_guidance": repository_guidance,
-                                "memory_context": memory_context,
-                                "operation_constraint": operation_constraint,
-                                "available_tools": self.tool_descriptions,
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        )
-                    ),
-                ]
-            )
-            review_content = extract_model_text(getattr(review_response, "content", review_response))
-            reviewed = self._decision_from_payload(_extract_json(review_content))
-            verification = verify_agent_decision(
-                reviewed,
-                user_request=request,
-                tool_descriptions=self.tool_descriptions,
-                require_flow_action=bool(memory_context.strip()),
-            )
-            if not verification.passed:
-                # A malformed coding route must not silently reach the caller
-                # as a no-op. Give the reviewer one bounded repair attempt with
-                # the concrete verifier failures, then let the normal verifier
-                # decide whether the repaired route is safe to execute.
-                try:
-                    repair_response = self.llm.invoke(
-                        [
-                            SystemMessage(
-                                content=(
-                                    AGENT_DECISION_REVIEW_PROMPT
-                                    + "\nThe previous reviewed decision failed validation. "
-                                    "Return a corrected, verifier-valid decision; do not omit "
-                                    "required capabilities for the requested effect."
-                                )
-                            ),
-                            HumanMessage(
-                                content=json.dumps(
-                                    {
-                                        "user_request": request,
-                                        "command_hint": command_hint,
-                                        "proposed_decision": reviewed.to_dict(),
-                                        "verification_errors": verification.warnings,
-                                        "repository_guidance": repository_guidance,
-                                        "memory_context": memory_context,
-                                        "operation_constraint": operation_constraint,
-                                        "available_tools": self.tool_descriptions,
-                                    },
-                                    ensure_ascii=False,
-                                    sort_keys=True,
-                                )
-                            ),
-                        ]
-                    )
-                    repair_content = extract_model_text(
-                        getattr(repair_response, "content", repair_response)
-                    )
-                    repaired = self._decision_from_payload(_extract_json(repair_content))
-                    repaired_verification = verify_agent_decision(
-                        repaired,
-                        user_request=request,
-                        tool_descriptions=self.tool_descriptions,
-                        require_flow_action=bool(memory_context.strip()),
-                    )
-                    if repaired_verification.passed:
-                        reviewed = repaired
-                except Exception as repair_exc:
-                    # Preserve the original rejected decision for the caller's
-                    # fail-closed handling rather than turning a repair failure
-                    # into an apparently successful conversational fallback.
-                    record_current(
-                        "model.decision.repair_failed",
-                        {
-                            "boundary": "agent_decision",
-                            "error_type": type(repair_exc).__name__,
-                            "error": str(repair_exc),
-                            "verification_errors": verification.warnings,
-                        },
-                    )
+            reviewed_data = self.llm.decide_sync([
+                SystemMessage(content=AGENT_DECISION_REVIEW_PROMPT),
+                UserMessage(content=json.dumps({**payload, "proposed_decision": proposed.to_dict()}, ensure_ascii=False, sort_keys=True)),
+            ], schema)
+            reviewed = self._decision_from_payload(reviewed_data)
             record_current(
                 "model.decision",
                 {
@@ -478,7 +391,7 @@ class AgentDecisionEngine:
                     "prompt_hash": stable_hash(AGENT_DECISION_PROMPT + AGENT_DECISION_REVIEW_PROMPT),
                     "request_hash": stable_hash(payload),
                     "response": reviewed.to_dict(),
-                    "usage": [getattr(response, "usage_metadata", None), getattr(review_response, "usage_metadata", None)],
+                    "usage_boundary": "native_inference",
                     "latency_seconds": time.perf_counter() - started,
                 },
             )

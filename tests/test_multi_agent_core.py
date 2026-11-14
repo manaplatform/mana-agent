@@ -95,7 +95,7 @@ class _RouteModel:
     def __init__(self, payloads: dict[str, dict]) -> None:
         self.payloads = payloads
 
-    def invoke(self, messages):  # noqa: ANN001
+    def generate_sync(self, messages, **_native_options):  # noqa: ANN001
         content = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
         all_text = str(messages)
         if "ContinuationDecision" in all_text or "step_output" in content or "taskboard_summary" in content:
@@ -115,6 +115,18 @@ class _RouteModel:
         request = body["user_request"]
         payload = self.payloads[request]
         return SimpleNamespace(content=json.dumps(payload))
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def _route_payload(
@@ -1207,11 +1219,23 @@ def test_main_agent_preserves_semantic_request_and_passes_entrypoint_as_metadata
         def __init__(self) -> None:
             self.routing_payload: dict | None = None
 
-        def invoke(self, messages):  # noqa: ANN001
+        def generate_sync(self, messages, **_native_options):  # noqa: ANN001
             payload = json.loads(messages[-1].content)
             if "tools" in payload:
                 self.routing_payload = payload
             return SimpleNamespace(content=json.dumps(_route_payload("answer")))
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     model = CapturingModel()
     main = MainAgent(tmp_path, routing_llm=model)
@@ -1228,7 +1252,7 @@ def test_main_agent_preserves_semantic_request_and_passes_entrypoint_as_metadata
 
 def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
     class ModelRouter:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return SimpleNamespace(
                 content=json.dumps(
                     {
@@ -1246,6 +1270,18 @@ def test_main_agent_uses_routing_llm_for_head_decision(tmp_path):
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     main = MainAgent(tmp_path, routing_llm=ModelRouter())
     result = main.run_user_request("search internet and give me description about openclaw", entrypoint="chat")

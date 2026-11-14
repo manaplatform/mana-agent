@@ -17,21 +17,38 @@ class _FakeResponse:
     def __init__(self, content: str) -> None:
         self.content = content
 
+    @property
+    def message(self):
+        from mana_agent.llm.messages import AssistantMessage
+        return AssistantMessage(content=self.content, tool_calls=getattr(self, "tool_calls", []))
+
 
 class _FakeInvoker:
     def __init__(self, content: str) -> None:
         self._content = content
 
-    def invoke(self, _payload: dict) -> _FakeResponse:
+    def generate_sync(self, _payload: dict, **_native_options) -> _FakeResponse:
         return _FakeResponse(content=self._content)
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 class _FakePrompt:
     def __init__(self, content: str) -> None:
         self._content = content
 
-    def __or__(self, _other: object) -> _FakeInvoker:
-        return _FakeInvoker(content=self._content)
+    def render(self, _values):
+        return []
 
 
 class _FakeSearchService:
@@ -42,31 +59,48 @@ class _FakeSearchService:
         return [SearchHit(0.9, "/tmp/a.py", 1, 2, "x", "def x(): pass")]
 
 
-class _FakeAIMessage:
+class _FakeAssistantMessage:
     def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
         self.content = content
         self.tool_calls = tool_calls or []
 
+    @property
+    def message(self):
+        from mana_agent.llm.messages import AssistantMessage
+        return AssistantMessage(content=self.content, tool_calls=getattr(self, "tool_calls", []))
+
 
 class _FakeBoundModel:
-    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+    def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
         self._responses = responses
         self._idx = 0
 
-    def invoke(
+    def generate_sync(
         self, _messages: list[object], config: object | None = None
-    ) -> _FakeAIMessage:
+    , **_native_options) -> _FakeAssistantMessage:
         del config
         value = self._responses[self._idx]
         self._idx += 1
         return value
 
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
+
 
 class _FakeLLM:
-    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+    def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
         self._responses = responses
 
-    def bind_tools(self, _tools: list[object]) -> _FakeBoundModel:
+    def with_tools(self, _tools: list[object], **_native_options) -> _FakeBoundModel:
         return _FakeBoundModel(self._responses)
 
 
@@ -110,7 +144,7 @@ def test_qna_chain_logs_each_run(tmp_path: Path) -> None:
     log_file = tmp_path / "llm.jsonl"
     chain = QnAChain.__new__(QnAChain)
     chain.prompt = _FakePrompt("answer")
-    chain.llm = object()
+    chain.llm = _FakeInvoker("answer")
     chain.model = "fake-qna"
     chain.run_logger = LlmRunLogger(log_file)
     result = chain.run("q?", "ctx")
@@ -138,7 +172,7 @@ def test_ask_agent_logs_each_run(tmp_path: Path) -> None:
     )
     agent._resolved_index = tmp_path / ".mana/index"
     agent.run_logger = LlmRunLogger(log_file)
-    agent.llm = _FakeLLM([_FakeAIMessage("done /tmp/a.py:1-2", tool_calls=[])])
+    agent.llm = _FakeLLM([_FakeAssistantMessage("done /tmp/a.py:1-2", tool_calls=[])])
 
     result = agent.run("where?", tmp_path / ".mana/index", 3, max_steps=2, timeout_seconds=2)
     assert "done" in result.answer

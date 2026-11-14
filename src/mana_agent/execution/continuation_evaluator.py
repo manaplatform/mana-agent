@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 
 from mana_agent.execution.continuation_decision import (
     ContinuationAction,
@@ -146,7 +146,7 @@ class ContinuationEvaluator:
         taskboard_progress: dict[str, Any] | None = None,
         coding_context: dict[str, Any] | None = None,
     ) -> ContinuationDecision:
-        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+        if self.llm is None or not callable(getattr(self.llm, "generate_sync", None)):
             raise ContinuationDecisionError(
                 "Model decision failed: continuation_decision. "
                 "Reason: decision model is unavailable."
@@ -199,39 +199,12 @@ class ContinuationEvaluator:
 
         messages = [
             SystemMessage(content=system_prompt),
-            HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
+            UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
         ]
 
         try:
-            structured = getattr(self.llm, "with_structured_output", None)
-            response = None
-            structured_error = None
-            if callable(structured):
-                try:
-                    response = structured(
-                        CodingContinuationDecision if coding_context is not None else ContinuationDecision,
-                        method="json_schema", strict=True
-                    ).invoke(messages)
-                except BatchPending:
-                    raise
-                except Exception as exc:
-                    if coding_context is not None:
-                        raise
-                    structured_error = exc
-
-            if response is None:
-                if coding_context is not None and callable(structured):
-                    raise ValueError("Main Model returned an empty structured coding decision")
-                response = self.llm.invoke(messages)
-
-            try:
-                decision = _coerce_continuation_decision(response, task_id=task_id, strict=coding_context is not None)
-            except Exception as coerce_exc:
-                if coding_context is None and callable(structured) and structured_error is None:
-                    direct_response = self.llm.invoke(messages)
-                    decision = _coerce_continuation_decision(direct_response, task_id=task_id)
-                else:
-                    raise coerce_exc
+            response = self.llm.decide_sync(messages, CodingContinuationDecision if coding_context is not None else ContinuationDecision)
+            decision = _coerce_continuation_decision(response, task_id=task_id, strict=coding_context is not None)
 
             if decision.task_id != task_id:
                 reconciled = False

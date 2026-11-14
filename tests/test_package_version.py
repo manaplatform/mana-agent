@@ -38,26 +38,18 @@ def test_fastapi_app_version_matches_package() -> None:
     assert app.version == __version__
 
 
-def test_langchain_constraints_are_resolvable_and_consistent() -> None:
-    expected = {
-        "langchain>=1.3.9,<2.0.0",
-        "langchain-community>=0.3.27,<0.4.0",
-        "langchain-openai>=1.1.14,<2.0.0",
-    }
-    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    package_constraints = {
-        item
-        for item in pyproject["project"]["dependencies"]
-        if item.startswith(("langchain>", "langchain-community>", "langchain-openai>"))
-    }
-    requirements_constraints = {
-        line.strip()
-        for line in (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
-        if line.startswith(("langchain>", "langchain-community>", "langchain-openai>"))
-    }
-
-    assert package_constraints == expected
-    assert requirements_constraints == expected
+def test_native_dependencies_are_direct_and_forbidden_families_absent() -> None:
+    from packaging.requirements import Requirement
+    project = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())["project"]
+    requirements = [line.strip() for line in (_REPO_ROOT / "requirements.txt").read_text().splitlines()
+                    if line.strip() and not line.startswith("#")]
+    names = {Requirement(item).name.lower().replace("_", "-") for item in project["dependencies"]}
+    for group in [project["dependencies"], *project["optional-dependencies"].values(), requirements]:
+        for item in group:
+            name = Requirement(item).name.lower().replace("_", "-")
+            assert not name.startswith(("langchain", "langgraph", "langsmith", "faiss"))
+    assert {"openai", "anthropic", "httpx"} <= names
+    assert {str(Requirement(item)) for item in requirements} == {str(Requirement(item)) for item in project["dependencies"]}
 
 
 def test_full_extra_does_not_build_linux_desktop_input_dependencies() -> None:

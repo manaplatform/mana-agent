@@ -164,15 +164,17 @@ def test_chat_planning_mode_asks_questions_and_resets(monkeypatch, tmp_path: Pat
     assert "plan billing module" in RecordingCodingAgent.calls[1]
 
 
-def test_main_warns_for_python_314(monkeypatch) -> None:
+def test_main_does_not_emit_retired_framework_warning_for_python_314(monkeypatch) -> None:
     monkeypatch.setattr("mana_agent.commands.cli.setup_logging", lambda **_: Path("/tmp/mana.log"))
     monkeypatch.setattr(cli.sys, "version_info", (3, 14, 0), raising=False)
 
     # main() is the Typer root callback; a subcommand is "invoked" so it does not
-    # dispatch to chat. Only the Python 3.14 compatibility warning should fire.
+    # dispatch to chat. The retired framework warning must be absent.
     ctx = types.SimpleNamespace(invoked_subcommand="chat")
-    with pytest.warns(UserWarning, match="Python 3.14"):
+    import warnings
+    with warnings.catch_warnings(record=True) as observed:
         cli.main(ctx, verbose=False, debug_llm=False, log_dir=None, output_dir=None)
+    assert not any("Python 3.14" in str(w.message) for w in observed)
 
 
 def test_chat_planning_mode_uses_llm_generated_questions(monkeypatch, tmp_path: Path) -> None:

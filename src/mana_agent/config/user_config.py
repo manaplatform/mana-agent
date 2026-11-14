@@ -60,13 +60,12 @@ MANAGED_SECRET_KEYS = frozenset(NON_PERSISTED_SECRET_KEYS)
 
 
 DEFAULT_USER_CONFIG: dict[str, Any] = {
-    "MANA_CONFIG_SCHEMA_VERSION": 2,
+    "MANA_CONFIG_SCHEMA_VERSION": 3,
     "MANA_EXECUTION_TRACE_MAX_BYTES": 104_857_600,
     "MANA_ACTIVITY_VISIBILITY": "normal",
     "MANA_USER_ID": "",
     "MANA_AI_PROVIDER": "openai",
-    "MANA_PRIMARY_MODEL": "openai/gpt-4.1-mini",
-    "MANA_EMBEDDING_MODEL": "openai/text-embedding-3-small",
+    "MANA_PRIMARY_MODEL": "",
     "MANA_CONFIGURED_PROVIDERS": ["openai"],
     "OPENAI_BASE_URL": "https://api.openai.com/v1",
     "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
@@ -76,11 +75,10 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
     "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
     "XAI_BASE_URL": "https://api.x.ai/v1",
-    "ANTHROPIC_CHAT_MODEL": "claude-sonnet-5-5",
-    "OPENAI_CHAT_MODEL": "gpt-4.1-mini",
-    "OPENAI_TOOL_WORKER_MODEL": "gpt-6-luna",
-    "OPENAI_CODING_PLANNER_MODEL": "gpt-6-luna",
-    "OPENAI_EMBED_MODEL": "",
+    "ANTHROPIC_CHAT_MODEL": "",
+    "OPENAI_CHAT_MODEL": "",
+    "OPENAI_TOOL_WORKER_MODEL": "",
+    "OPENAI_CODING_PLANNER_MODEL": "",
     "OPENAI_BATCH_ENABLED": True,
     "OPENAI_BATCH_MODE": "auto",
     "OPENAI_BATCH_ENDPOINT": "/v1/responses",
@@ -94,6 +92,8 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "OPENAI_BATCH_COST_OPTIMIZATION": True,
     "MANA_ADAPTIVE_ROUTING_ENABLED": True,
     "MANA_MODEL_PROFILES": [],
+    "MANA_MODEL_CAPABILITY_OVERRIDES": [],
+    "MANA_CAPABILITY_PROBE_PERMISSIONS": {},
     "MANA_ROUTING_COMPLEXITY_THRESHOLD": "high",
     "MANA_ROUTING_RISK_THRESHOLD": "high",
     "MANA_ROUTING_MAX_CANDIDATES": 2,
@@ -124,7 +124,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_CONTEXT_ESTIMATION_SAFETY_MARGIN_RATIO": 0.05,
     "MANA_CONTEXT_DEFAULT_OUTPUT_RATIO": 0.20,
     "MANA_CONTEXT_HISTORICAL_PREDICTION_ENABLED": True,
-    "MANA_CONTEXT_UNKNOWN_MODEL_POLICY": "conservative",
+    "MANA_CONTEXT_UNKNOWN_MODEL_POLICY": "require_metadata",
     "MANA_CONTEXT_UNKNOWN_MODEL_CONTEXT_WINDOW": 16384,
     "MANA_CONTEXT_UNKNOWN_MODEL_MAX_OUTPUT_TOKENS": 4096,
     "MANA_ROUTING_BENCHMARK_WEIGHTS": {},
@@ -147,7 +147,7 @@ DEFAULT_USER_CONFIG: dict[str, Any] = {
     "MANA_LLM_SUPPORTS_DECISIONS_API": "",
     "MANA_LLM_SUPPORTS_CHAT_COMPLETIONS": "",
     "MANA_DECISIONS_ENABLED": True,
-    "MANA_DECISIONS_MODEL": "gpt-6-luna",
+    "MANA_DECISIONS_MODEL": "",
     "MANA_DECISIONS_BASE_URL": "",
     "MANA_LLM_SUPPORTS_TOOLS": "",
     "MANA_LLM_SUPPORTS_REASONING": "",
@@ -457,8 +457,7 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "live": "live",
     "MANA_USER_ID": "mana_user_id",
     "MANA_AI_PROVIDER": "mana_ai_provider",
-    "MANA_PRIMARY_MODEL": "mana_primary_model",
-    "MANA_EMBEDDING_MODEL": "mana_embedding_model",
+    "MANA_PRIMARY_MODEL": "",
     "OPENAI_API_KEY": "openai_api_key",
     "OPENAI_BASE_URL": "openai_base_url",
     "OPENROUTER_API_KEY": "openrouter_api_key",
@@ -472,11 +471,10 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "ANTHROPIC_BASE_URL": "anthropic_base_url",
     "XAI_API_KEY": "xai_api_key",
     "XAI_BASE_URL": "xai_base_url",
-    "ANTHROPIC_CHAT_MODEL": "anthropic_chat_model",
-    "OPENAI_CHAT_MODEL": "openai_chat_model",
-    "OPENAI_TOOL_WORKER_MODEL": "openai_tool_worker_model",
-    "OPENAI_CODING_PLANNER_MODEL": "openai_coding_planner_model",
-    "OPENAI_EMBED_MODEL": "openai_embed_model",
+    "ANTHROPIC_CHAT_MODEL": "",
+    "OPENAI_CHAT_MODEL": "",
+    "OPENAI_TOOL_WORKER_MODEL": "",
+    "OPENAI_CODING_PLANNER_MODEL": "",
     "OPENAI_BATCH_ENABLED": "openai_batch_enabled",
     "OPENAI_BATCH_MODE": "openai_batch_mode",
     "OPENAI_BATCH_ENDPOINT": "openai_batch_endpoint",
@@ -490,6 +488,8 @@ FIELD_NAME_BY_ENV: dict[str, str] = {
     "OPENAI_BATCH_COST_OPTIMIZATION": "openai_batch_cost_optimization",
     "MANA_ADAPTIVE_ROUTING_ENABLED": "mana_adaptive_routing_enabled",
     "MANA_MODEL_PROFILES": "mana_model_profiles",
+    "MANA_MODEL_CAPABILITY_OVERRIDES": "mana_model_capability_overrides",
+    "MANA_CAPABILITY_PROBE_PERMISSIONS": "mana_capability_probe_permissions",
     "MANA_ROUTING_COMPLEXITY_THRESHOLD": "mana_routing_complexity_threshold",
     "MANA_ROUTING_RISK_THRESHOLD": "mana_routing_risk_threshold",
     "MANA_ROUTING_MAX_CANDIDATES": "mana_routing_max_candidates",
@@ -673,14 +673,12 @@ CONFIG_WRITE_ORDER = [
     "MANA_AI_PROVIDER",
     "MANA_PRIMARY_MODEL",
     "spirit",
-    "MANA_EMBEDDING_MODEL",
     "MANA_CONFIGURED_PROVIDERS",
     "OPENAI_BASE_URL",
     "OPENAI_CHAT_MODEL",
     "LLM_MODEL",
     "OPENAI_TOOL_WORKER_MODEL",
     "OPENAI_CODING_PLANNER_MODEL",
-    "OPENAI_EMBED_MODEL",
     "MODEL_LEVEL_3_HIGH_REASONING",
     "MODEL_LEVEL_2_CODING",
     "MODEL_LEVEL_1_FAST_TOOL",
@@ -874,8 +872,13 @@ def _toml_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        return str(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_scalar(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{_toml_key(str(key))} = {_toml_scalar(item)}"
+            for key, item in value.items() if item is not None) + " }"
     text = str(value)
     return json.dumps(text)
 
@@ -1667,11 +1670,10 @@ def migrate_legacy_config() -> list[str]:
     ).strip()
     if chat_model and not config.get("MANA_PRIMARY_MODEL"):
         config["MANA_PRIMARY_MODEL"] = qualify_model_id(provider, chat_model)
-    embed_model = str(config.get("OPENAI_EMBED_MODEL") or "").strip()
-    if embed_model and not config.get("MANA_EMBEDDING_MODEL"):
-        config["MANA_EMBEDDING_MODEL"] = qualify_model_id(provider, embed_model)
     config.setdefault("MANA_CONFIGURED_PROVIDERS", [provider])
-    config["MANA_CONFIG_SCHEMA_VERSION"] = 2
+    config.pop("MANA_EMBEDDING_MODEL", None)
+    config.pop("OPENAI_EMBED_MODEL", None)
+    config["MANA_CONFIG_SCHEMA_VERSION"] = 3
     if destructive:
         backup = current_config_file.with_suffix(".toml.bak")
         if not backup.exists():

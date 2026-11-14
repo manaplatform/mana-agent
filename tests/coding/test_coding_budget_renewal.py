@@ -23,7 +23,7 @@ class _ProgressiveModel:
         self.total_tool_calls = total_tool_calls
         self.call_count = 0
 
-    def bind_tools(self, _tools: object) -> "_ProgressiveModel":
+    def with_tools(self, _tools: object, **_native_options) -> "_ProgressiveModel":
         return self
 
     async def ainvoke(self, messages: list[object]) -> SimpleNamespace:
@@ -70,7 +70,7 @@ class _NoProgressModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    def bind_tools(self, _tools: object) -> "_NoProgressModel":
+    def with_tools(self, _tools: object, **_native_options) -> "_NoProgressModel":
         return self
 
     async def ainvoke(self, messages: list[object]) -> SimpleNamespace:
@@ -171,7 +171,7 @@ class _GitOperationalModel:
         self.total_tool_calls = total_tool_calls
         self.call_count = 0
 
-    def bind_tools(self, _tools: object) -> "_GitOperationalModel":
+    def with_tools(self, _tools: object, **_native_options) -> "_GitOperationalModel":
         return self
 
     async def ainvoke(self, messages: list[object]) -> SimpleNamespace:
@@ -256,7 +256,7 @@ def test_internal_engine_operational_task_completes_when_model_returns_empty_con
         def __init__(self) -> None:
             self.called = False
 
-        def bind_tools(self, _tools: object) -> "_EmptyContentModel":
+        def with_tools(self, _tools: object, **_native_options) -> "_EmptyContentModel":
             return self
 
         async def ainvoke(self, _messages: list[object]) -> SimpleNamespace:

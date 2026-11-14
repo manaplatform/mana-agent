@@ -86,38 +86,24 @@ class ModelTokenProfileResolver:
         direct = self._profiles.get(identity.key)
         if direct is not None:
             return direct
-        matches = [item for item in self._profiles.values() if item.identity.model == identity.model]
-        if len(matches) == 1 and (
-            matches[0].identity.provider.casefold() == identity.provider.casefold()
-            or identity.provider.casefold() in {"", "unknown"}
-        ):
-            return matches[0]
         try:
-            from mana_agent.config.model_catalog import maintained_token_limits
-
-            maintained = maintained_token_limits(identity.provider, identity.model)
-            if maintained is not None:
+            from mana_agent.llm.registry import resolve_profile
+            native = resolve_profile(identity.provider, identity.model)
+            if native.context_window and native.max_output_tokens:
                 return ModelTokenProfile(
                     identity=identity,
-                    context_window=int(maintained[0]),
-                    max_output_tokens=int(maintained[1]),
-                    source="maintained",
-                    confidence="high",
-                    metadata={"maintained": True},
+                    context_window=int(native.context_window),
+                    max_output_tokens=int(native.max_output_tokens),
+                    input_price_per_million=_decimal(native.catalog_pricing.get("input")),
+                    output_price_per_million=_decimal(native.catalog_pricing.get("output")),
+                    source="native-capability-evidence",
+                    confidence=native.capability_confidence,
+                    metadata={"native_registry": True},
                 )
         except Exception:
             pass
-        if self.unknown_policy != "conservative" or not self.unknown_context_window or not self.unknown_max_output_tokens:
-            raise UnknownModelProfileError(
-                f"Model token metadata is unavailable for {identity.key}. No arbitrary context or output limit was used."
-            )
-        return ModelTokenProfile(
-            identity=identity,
-            context_window=int(self.unknown_context_window),
-            max_output_tokens=int(self.unknown_max_output_tokens),
-            source="configured-unknown-model-policy",
-            confidence="low",
-            metadata={"unknown_model": True},
+        raise UnknownModelProfileError(
+            f"Model token metadata is unavailable for {identity.key}. Configure exact model capability limits; no generic unknown-model limit is used."
         )
 
     @staticmethod
@@ -145,7 +131,7 @@ class ModelTokenProfileResolver:
             cached_input_price_per_million=_decimal(getattr(source, "cached_input_cost_per_million", None) or combined.get("cached_input_price_per_million") or pricing.get("cached_input_per_million")),
             output_price_per_million=_decimal(getattr(source, "output_cost_per_million", None) or combined.get("output_price_per_million") or pricing.get("output_per_million")),
             reasoning_price_per_million=_decimal(getattr(source, "reasoning_cost_per_million", None) or combined.get("reasoning_price_per_million") or pricing.get("reasoning_per_million")),
-            supports_usage_reporting=bool(combined.get("supports_usage_reporting", True)),
+            supports_usage_reporting=bool(combined.get("supports_usage_reporting", False)),
             source=str(getattr(source, "source", "") or getattr(source, "source_level", "") or "configured"),
             confidence=str(combined.get("token_profile_confidence") or "high"),
             metadata=combined,

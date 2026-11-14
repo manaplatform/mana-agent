@@ -36,9 +36,9 @@ def test_safe_finalize_file_parts_requires_parts(tmp_path: Path) -> None:
 def test_write_file_tool_chunk_then_finalize(tmp_path: Path) -> None:
     tool = build_write_file_tool(repo_root=tmp_path, allowed_prefixes=None)
 
-    r1 = tool.invoke({"path": "docs/out.md", "content": "A", "part_index": 1})
-    r2 = tool.invoke({"path": "docs/out.md", "content": "B", "part_index": 2})
-    r3 = tool.invoke({"path": "docs/out.md", "finalize": True})
+    r1 = tool.call({"path": "docs/out.md", "content": "A", "part_index": 1})
+    r2 = tool.call({"path": "docs/out.md", "content": "B", "part_index": 2})
+    r3 = tool.call({"path": "docs/out.md", "finalize": True})
 
     assert r1["ok"] is True
     assert r2["ok"] is True
@@ -61,7 +61,7 @@ def test_safe_create_file_refuses_existing_target(tmp_path: Path) -> None:
 def test_create_file_tool_creates_missing_parent_dirs(tmp_path: Path) -> None:
     tool = build_create_file_tool(repo_root=tmp_path, allowed_prefixes=None)
 
-    result = tool.invoke({"path": "docs/new/note.md", "content": "# Note\n"})
+    result = tool.call({"path": "docs/new/note.md", "content": "# Note\n"})
 
     assert result["ok"] is True
     assert result["files_changed"] == ["docs/new/note.md"]

@@ -6,8 +6,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from langchain_core.prompts import ChatPromptTemplate
-from mana_agent.multi_agent.runtime.compatibility import CompatibleChatOpenAI, create_chat_model
+from mana_agent.llm.prompts import MessageTemplate
+from mana_agent.llm.engine import NativeLLMEngine, create_model
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -79,18 +79,18 @@ class RepositoryMultiChain:
         self.llm = self._create_llm(model)
         self.run_logger = LlmRunLogger()
 
-        self.file_summary_prompt = ChatPromptTemplate.from_messages(
+        self.file_summary_prompt = MessageTemplate.from_messages(
             [("system", FILE_SUMMARY_SYSTEM), ("human", FILE_SUMMARY_HUMAN)]
         )
-        self.arch_prompt = ChatPromptTemplate.from_messages(
+        self.arch_prompt = MessageTemplate.from_messages(
             [("system", ARCH_SYSTEM), ("human", ARCH_HUMAN)]
         )
-        self.tech_prompt = ChatPromptTemplate.from_messages(
+        self.tech_prompt = MessageTemplate.from_messages(
             [("system", TECH_SYSTEM), ("human", TECH_HUMAN)]
         )
 
-    def _create_llm(self, model_name: str) -> CompatibleChatOpenAI:
-        return create_chat_model(api_key=self.api_key, model=model_name, base_url=self.base_url)
+    def _create_llm(self, model_name: str) -> NativeLLMEngine:
+        return create_model(api_key=self.api_key, model=model_name, base_url=self.base_url)
 
     def update_model(self, new_model: str):
         if self.model != new_model:
@@ -157,26 +157,19 @@ class RepositoryMultiChain:
             })
         return compact
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        # only retry on exceptions that are NOT IsADirectoryError
-        retry=retry_if_exception(lambda exc: not isinstance(exc, IsADirectoryError)),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-    )
     def summarize_file(self, file_path: Path, language: str, source: str) -> tuple[str, list[str]]:
         # SKIP directories immediately
         if file_path.is_dir():
             logger.warning(f"Skipping directory in summarize_file: {file_path}")
             return "No summary generated.", []
 
-        chain = self.file_summary_prompt | self.llm
+        rendered_prompt = self.file_summary_prompt
         started = perf_counter()
-        response = chain.invoke({
+        response = self.llm.generate_sync(rendered_prompt.render({
             "file_path": str(file_path),
             "language": language,
             "source": source,
-        })
+        }))
         elapsed_ms = (perf_counter() - started) * 1000
 
         payload = self._safe_json(str(response.content))
@@ -193,12 +186,6 @@ class RepositoryMultiChain:
         })
         return summary, symbols
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception(lambda exc: not isinstance(exc, IsADirectoryError)),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-    )
     def synthesize_deep_flow_analysis(
         self,
         *,
@@ -210,7 +197,7 @@ class RepositoryMultiChain:
         line_target: int = 350,
         security_lens: str = "defensive-red-team",
     ) -> str:
-        prompt = ChatPromptTemplate.from_messages([
+        prompt = MessageTemplate.from_messages([
             (
                 "system",
                 apply_spirit_instruction(
@@ -247,8 +234,8 @@ class RepositoryMultiChain:
             }
         compact_files = self._compact_file_summaries(sampled_file_summaries)
 
-        chain = prompt | self.llm
-        response = chain.invoke({
+        rendered_prompt = prompt
+        response = self.llm.generate_sync(rendered_prompt.render({
             "security_lens": security_lens,
             "line_target": min(max(line_target, 200), 400),
             "dependency_report_json": json.dumps(dep, ensure_ascii=False),
@@ -256,15 +243,9 @@ class RepositoryMultiChain:
             "findings_summary_json": json.dumps(compact_findings, ensure_ascii=False),
             "security_summary_json": json.dumps(compact_security, ensure_ascii=False),
             "sampled_file_summaries_json": json.dumps(compact_files, ensure_ascii=False),
-        })
+        }))
         return str(response.content).strip()
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception(lambda exc: not isinstance(exc, IsADirectoryError)),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-    )
     def synthesize_architecture(
         self,
         dependency_report: dict[str, Any],
@@ -272,12 +253,12 @@ class RepositoryMultiChain:
     ) -> tuple[str, str]:
         dep = self._compact_dependency_report(dependency_report)
         files = self._compact_file_summaries(file_summaries)
-        chain = self.arch_prompt | self.llm
+        rendered_prompt = self.arch_prompt
         started = perf_counter()
-        response = chain.invoke({
+        response = self.llm.generate_sync(rendered_prompt.render({
             "dependency_report": json.dumps(dep, ensure_ascii=False),
             "file_summaries": json.dumps(files, ensure_ascii=False),
-        })
+        }))
         elapsed_ms = (perf_counter() - started) * 1000
 
         payload = self._safe_json(str(response.content))
@@ -293,18 +274,12 @@ class RepositoryMultiChain:
         })
         return architecture, tech
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception(lambda exc: not isinstance(exc, IsADirectoryError)),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-    )
     def detect_frameworks_from_samples(self, samples: list[dict[str, str]]) -> list[str]:
         if not samples:
             return []
-        chain = self.tech_prompt | self.llm
+        rendered_prompt = self.tech_prompt
         started = perf_counter()
-        response = chain.invoke({"samples": json.dumps(samples, ensure_ascii=False)})
+        response = self.llm.generate_sync(rendered_prompt.render({"samples": json.dumps(samples, ensure_ascii=False)}))
         elapsed_ms = (perf_counter() - started) * 1000
 
         payload = self._safe_json(str(response.content))

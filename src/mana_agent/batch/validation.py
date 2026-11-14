@@ -20,7 +20,8 @@ def validate_batch_selection(
         raise ValueError("This OpenAI Batch transport requires provider=openai")
     if not model:
         raise ValueError("OpenAI Batch requires an explicitly selected model")
-    profile = GLOBAL_CAPABILITY_REGISTRY.get(provider, model)
+    from mana_agent.llm.registry import resolve_profile
+    profile = resolve_profile(provider, model)
     if profile is None or profile.supports_batch is not True:
         raise ValueError(f"Batch capability for model '{model}' is unsupported or unknown")
     if endpoint not in profile.supported_batch_endpoints:

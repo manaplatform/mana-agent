@@ -5,6 +5,11 @@ Coding Activity exposes commands, working directories, live output, observed
 diffs, and retained operation details. External Codex keeps its own tool loop
 with explicit backend provenance. See the [execution and verification contract](docs/regressions/hierarchical-tool-execution.md).
 
+Inference uses Mana's native OpenAI Responses, Chat Completions and Anthropic
+Messages adapters. Model capabilities come from scoped evidence and explicit
+user overrides. Repository search needs no vector index or embedding credential.
+See [configuration and user-owned acceptance](docs/native-llm-engine.md).
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/manaplatform/mana-agent/refs/heads/main/logo.png" alt="Mana-Agent" width="100%" />
 </p>

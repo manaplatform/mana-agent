@@ -204,18 +204,10 @@ class CodingAgent(BaseAgent):
             arguments: dict
             reason: str
         llm = getattr(self, "routing_llm", None)
-        structured = getattr(llm, "with_structured_output", None) if llm else None
-        if callable(structured):
-            decision = structured(InspectionDecision).invoke(
-                "Select the first repository inspection for this delegated coding task. "
-                "Return only the registered tool, exact arguments, and a brief reason. Task: " + request)
-            decision = decision if isinstance(decision, InspectionDecision) else InspectionDecision.model_validate(decision)
-        else:
-            decision = InspectionDecision(
-                tool="repo_search",
-                arguments={"query": request},
-                reason="Initial repository search",
-            )
+        if llm is None:
+            raise RuntimeError("Coding inspection requires its selected decision model")
+        decision = llm.decide_sync("Select the first repository inspection for this delegated coding task. "
+            "Return only the registered tool, exact arguments, and a brief reason. Task: " + request, InspectionDecision)
         job_type = {"repo_search": QueueJobType.REPO_SEARCH, "repo_read": QueueJobType.REPO_READ,
                     "repo_batch_read": QueueJobType.REPO_BATCH_READ}[decision.tool]
         job = self.request_operation(task_id, job_type=job_type, payload=decision.arguments,
@@ -238,16 +230,5 @@ class CodingAgent(BaseAgent):
             f"Task: {child.user_request}\nFeature targets: {getattr(plan, 'implementation_targets', [])}\n"
             f"Repository references: {source_refs}\nRead evidence: {read_evidence}\n"
         )
-        structured = getattr(self.routing_llm, "with_structured_output", None)
-        if callable(structured):
-            result = structured(WiringDecision).invoke(prompt)
-            return result if isinstance(result, WiringDecision) else WiringDecision.model_validate(result)
-        raw = self.routing_llm.invoke(prompt)
-        text = extract_model_text(getattr(raw, "content", raw))
-        if text.startswith("```"):
-            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        return WiringDecision.model_validate_json(text)
+        return self.routing_llm.decide_sync(prompt, WiringDecision)
 

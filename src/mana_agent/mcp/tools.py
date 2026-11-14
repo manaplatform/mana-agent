@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import create_model
 
 from .client import McpClient
@@ -16,7 +16,7 @@ def mcp_model_tool_name(server_id: str, tool_name: str) -> str:
     return f"mcp__{server_id}__{tool_name}".replace(".", "_")
 
 
-def discovered_mcp_langchain_tools(
+def discovered_mcp_tools(
     *,
     overrides: list[str] | None = None,
     server_ids: list[str] | None = None,
@@ -51,17 +51,19 @@ def discovered_mcp_langchain_tools(
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         required = set(schema.get("required") or [])
         fields = {str(name): (Any, ... if str(name) in required else None) for name in properties}
-        args_schema = create_model("Mcp_" + model_name.replace("-", "_"), **fields)
+        input_model = schema
 
-        def call(_tool: str = qualified, **kwargs: Any) -> str:
-            return json.dumps(client.call_tool(_tool, {key: value for key, value in kwargs.items() if value is not None}), ensure_ascii=False, default=str)
+        def bind_call(registered_name: str):
+            def call(**kwargs: Any) -> str:
+                return json.dumps(client.call_tool(registered_name, {key: value for key, value in kwargs.items() if value is not None}), ensure_ascii=False, default=str)
+            return call
 
         tools.append(
-            StructuredTool.from_function(
-                func=call,
+            ToolBinding.from_callable(
+                func=bind_call(qualified),
                 name=model_name,
                 description=str(descriptor.get("description") or f"MCP tool {qualified}"),
-                args_schema=args_schema,
+                input_model=input_model,
                 metadata={
                     "transactional_adapter": "mcp",
                     "mcp_provider_id": str(descriptor["server_id"]),
@@ -73,5 +75,5 @@ def discovered_mcp_langchain_tools(
 
 
 def discovered_mcp_tool_names(*, server_ids: list[str] | None = None) -> list[str]:
-    tools, _warnings = discovered_mcp_langchain_tools(server_ids=server_ids)
+    tools, _warnings = discovered_mcp_tools(server_ids=server_ids)
     return sorted(str(tool.name) for tool in tools)

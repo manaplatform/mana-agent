@@ -7,9 +7,9 @@ import uuid
 from time import perf_counter
 from typing import Any, Sequence
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.prompts import ChatPromptTemplate
-from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+from mana_agent.llm.messages import AssistantMessage, UserMessage, SystemMessage, ToolResultMessage
+from mana_agent.llm.prompts import MessageTemplate
+from mana_agent.llm.engine import create_model
 
 from mana_agent.multi_agent.runtime.prompts import (
     CONVERSATION_SYSTEM_PROMPT,
@@ -33,22 +33,24 @@ class QnAChain:
         *,
         provider: str | None = None,
         default_headers: dict[str, str] | None = None,
+        model_configuration: dict[str, Any] | None = None,
     ) -> None:
         logger.debug("Initializing QnA chain with model=%s", model)
-        self.llm = create_chat_model(
+        self.llm = create_model(
             api_key=api_key,
             model=model,
             base_url=base_url,
             provider=provider,
             default_headers=default_headers,
+            model_configuration=model_configuration,
         )
         self.model = model
         self.provider = str(provider or getattr(self.llm, "selected_provider", "") or "unknown")
         self.prompt = self._build_prompt()
         self.run_logger = LlmRunLogger()
 
-    def _build_prompt(self) -> ChatPromptTemplate:
-        return ChatPromptTemplate.from_messages(
+    def _build_prompt(self) -> MessageTemplate:
+        return MessageTemplate.from_messages(
             [
                 (
                     "system",
@@ -66,18 +68,20 @@ class QnAChain:
             ]
         )
 
-    def update_model_assignment(self, provider: str, model: str, *, settings: Any | None = None) -> None:
+    def update_model_assignment(self, provider: str, model: str, *, settings: Any | None = None,
+                                model_configuration: dict[str, Any] | None = None) -> None:
         from mana_agent.config.inference_provider import resolve_inference_connection
         from mana_agent.config.settings import Settings
 
         governor = getattr(self.llm, "context_cost_governor", None)
         connection = resolve_inference_connection(settings or Settings(), provider=provider)
-        self.llm = create_chat_model(
+        self.llm = create_model(
             api_key=connection.api_key,
             model=model,
             base_url=connection.base_url,
             provider=connection.provider,
             default_headers=connection.headers,
+            model_configuration=model_configuration,
         )
         self.llm.context_cost_governor = governor
         self.model = model
@@ -87,9 +91,9 @@ class QnAChain:
     def run(self, question: str, context: str) -> str:
         logger.info("Invoking QnA chain")
         logger.debug("Prompt sizes: question_chars=%d context_chars=%d", len(question), len(context))
-        chain = self.prompt | self.llm
+        rendered_prompt = self.prompt
         started = perf_counter()
-        response = chain.invoke({"question": question, "context": context})
+        response = self.llm.generate_sync(rendered_prompt.render({"question": question, "context": context}))
         elapsed_ms = (perf_counter() - started) * 1000
         extracted_res = extract_model_text(getattr(response, "content", response))
         run_logger = getattr(self, "run_logger", None)
@@ -130,12 +134,16 @@ class QnAChain:
             t.name: t for t in tools if hasattr(t, "name") and isinstance(t.name, str)
         }
 
-        active_llm = self.llm
-        if tool_map and hasattr(self.llm, "bind_tools") and callable(getattr(self.llm, "bind_tools", None)):
-            try:
-                active_llm = self.llm.bind_tools(list(tool_map.values()))
-            except Exception:
-                active_llm = self.llm
+        active_llm = self.llm.with_tools(list(tool_map.values())) if tool_map else self.llm
+        tool_gate = None
+        if tool_map:
+            from mana_agent.services.activity_context import current_activity_context
+            from mana_agent.multi_agent.runtime.tool_call_gate import ToolCallGate
+            from pathlib import Path
+            context = current_activity_context()
+            if context is None:
+                raise RuntimeError("Conversation context tools require an authorized task activity context")
+            tool_gate = ToolCallGate(root=Path.cwd(), tools=tool_map, task_id=context.task_id, repository_read_only=True)
 
         messages: list[Any] = [
             SystemMessage(
@@ -143,42 +151,29 @@ class QnAChain:
             ),
         ]
         if recent_history:
-            for item in recent_history:
-                if isinstance(item, (HumanMessage, AIMessage, SystemMessage, ToolMessage)):
-                    messages.append(item)
-                elif isinstance(item, dict):
-                    role = str(item.get("role") or "").lower()
-                    content_str = extract_model_text(item.get("content", ""))
-                    if not content_str:
-                        continue
-                    if role == "user":
-                        messages.append(HumanMessage(content=content_str))
-                    elif role == "assistant":
-                        messages.append(AIMessage(content=content_str))
+            from mana_agent.llm.messages import messages_from_records
+            messages.extend(messages_from_records(recent_history))
         user_content = multimodal_content if multimodal_content is not None else question
-        messages.append(HumanMessage(content=user_content))
+        messages.append(UserMessage(content=user_content))
 
+        continuation = None
         max_retrieval_rounds = 2
         for _ in range(max_retrieval_rounds + 1):
-            response = active_llm.invoke(messages)
+            response = active_llm.generate_sync(messages, continuation=continuation)
+            continuation = getattr(response, "continuation", None)
 
             # Check for structured tool calls first
             tool_calls = getattr(response, "tool_calls", None)
             if isinstance(tool_calls, list) and tool_calls and tool_map:
-                messages.append(response)
+                messages.append(response.message)
                 for tc in tool_calls:
                     fn_name = tc.get("name")
                     args = tc.get("args") or {}
-                    call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                    call_id = tc["id"]
                     if fn_name in tool_map:
                         tool = tool_map[fn_name]
                         try:
-                            if hasattr(tool, "invoke") and callable(tool.invoke):
-                                tool_res = tool.invoke(args)
-                            elif callable(tool):
-                                tool_res = tool(**args)
-                            else:
-                                tool_res = str(tool)
+                            tool_res = tool_gate.invoke(fn_name, args, call_id=call_id)
                         except Exception as exc:
                             tool_res = f'{{"error": "{exc}"}}'
                         governor = getattr(self.llm, "context_cost_governor", None)
@@ -193,48 +188,10 @@ class QnAChain:
                             from mana_agent.context_cost.compression import normalize_permitted_result
                             norm = normalize_permitted_result(tool_res)
                             rendered_res = norm if isinstance(norm, str) else json.dumps(norm, ensure_ascii=False, default=str)
-                        messages.append(ToolMessage(content=rendered_res, tool_call_id=call_id))
+                        messages.append(ToolResultMessage(content=rendered_res, tool_call_id=call_id, caller=tc.get("caller")))
                 continue
 
             content_text = extract_model_text(getattr(response, "content", response))
-
-            # Check for text-based tool call strings emitted directly by model
-            match = re.search(r"\[Tool Call:\s*([a-zA-Z0-9_]+)\]", content_text, re.IGNORECASE)
-            if match and tool_map:
-                matched_tool_name = match.group(1)
-                if matched_tool_name in tool_map:
-                    tool = tool_map[matched_tool_name]
-                    try:
-                        if hasattr(tool, "invoke") and callable(tool.invoke):
-                            tool_res = tool.invoke({"query": question, "max_turns": 3})
-                        elif callable(tool):
-                            tool_res = tool(query=question, max_turns=3)
-                        else:
-                            tool_res = str(tool)
-                    except Exception as exc:
-                        tool_res = f'{{"error": "{exc}"}}'
-                    governor = getattr(self.llm, "context_cost_governor", None)
-                    if governor is not None and getattr(governor, "enabled", False):
-                        rendered_res = governor.prepare_tool_result(
-                            tool_res,
-                            tool_name=matched_tool_name,
-                            tool_call_id=f"call_{uuid.uuid4().hex[:8]}",
-                            turn_id="qna_chat",
-                        )
-                    else:
-                        from mana_agent.context_cost.compression import normalize_permitted_result
-                        norm = normalize_permitted_result(tool_res)
-                        rendered_res = norm if isinstance(norm, str) else json.dumps(norm, ensure_ascii=False, default=str)
-                    messages.append(AIMessage(content=content_text))
-                    messages.append(
-                        HumanMessage(
-                            content=(
-                                f"Retrieved context for `{matched_tool_name}`:\n{rendered_res}\n\n"
-                                "Please answer the user's conversational request now using the context above."
-                            )
-                        )
-                    )
-                    continue
 
             return content_text.strip()
 

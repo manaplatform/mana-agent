@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from mana_agent.llm.messages import AssistantMessage
 
 from mana_agent.batch.transport import BatchModelTransport
 from mana_agent.batch.policy import BatchPending
@@ -19,16 +19,17 @@ class BatchDecisionModel:
         self.supervisor, self.attempt_id, self.lease_token = supervisor, attempt_id, lease_token
         self.schema = schema
 
-    def with_structured_output(self, schema: Any, **kwargs: Any) -> "BatchDecisionModel":
-        return BatchDecisionModel(self.manager, task_id=self.task_id, model=self.model, provider=self.provider,
+    def decide_sync(self, messages: Any, schema: Any, **kwargs: Any) -> Any:
+        selected = BatchDecisionModel(self.manager, task_id=self.task_id, model=self.model, provider=self.provider,
             supervisor=self.supervisor, attempt_id=self.attempt_id, lease_token=self.lease_token, schema=schema)
+        return selected.generate_sync(messages)
 
-    def invoke(self, messages: Any) -> Any:
+    def generate_sync(self, messages: Any) -> Any:
         from mana_agent.execution.batch_loop import BatchTaskLoop, batch_output_limit
         transport = BatchModelTransport(self.manager)
-        serialized = [{"role": {"human": "user", "ai": "assistant"}.get(message.type, message.type),
+        serialized = [{"role": message.role,
                        "content": message.content} for message in messages]
-        schema = self.schema.model_json_schema() if self.schema else None
+        schema = self.schema if isinstance(self.schema, dict) else self.schema.model_json_schema() if self.schema else None
         digest = hashlib.sha256(json.dumps({"messages": serialized, "schema": schema}, sort_keys=True).encode()).hexdigest()[:20]
         phase = "integration-" + digest
         loop = BatchTaskLoop(self.manager, supervisor=self.supervisor,
@@ -43,7 +44,7 @@ class BatchDecisionModel:
         output_limit = batch_output_limit(self.supervisor, self.task_id, self.provider, self.model, serialized, [], schema)
         try:
             response = transport.invoke(task_id=self.task_id, phase=phase, step=0, model=self.model,
-                provider=self.provider, messages=serialized, schema=schema, strict_schema=False, max_output_tokens=output_limit)
+                provider=self.provider, messages=serialized, schema=schema, strict_schema=True, max_output_tokens=output_limit)
         except BatchPending:
             raise
         except Exception:
@@ -62,6 +63,11 @@ class BatchDecisionModel:
             if run.get("gateway_pending_operation", {}).get("operation_id") == operation_id:
                 run.pop("gateway_pending_operation", None)
             loop.store.save_run(self.task_id, run)
+        if isinstance(self.schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = json.loads(response["content"])
+            validate_arguments(value, self.schema)
+            return value
         if self.schema:
-            return self.schema.model_validate_json(response["content"])
-        return AIMessage(content=response["content"])
+            return self.schema.model_validate_json(response["content"], strict=True)
+        return AssistantMessage(content=response["content"])

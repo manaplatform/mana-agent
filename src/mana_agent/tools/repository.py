@@ -150,6 +150,10 @@ def repo_search(
         rel = path.relative_to(root).as_posix()
         if not _matches_file_glob(rel, glob):
             continue
+        if path.is_symlink() or not path.resolve().is_relative_to(root):
+            continue
+        if path.name == ".env" or path.name.startswith(".env.") or path.name in {"secrets.toml", "credentials.json"}:
+            continue
         if _is_binary(path):
             continue
         try:
@@ -159,7 +163,8 @@ def repo_search(
         for line_no, line in enumerate(lines, start=1):
             found = bool(pattern.search(line)) if pattern is not None else needle in line
             if found:
-                matches.append({"file": rel, "line": line_no, "text": line[:500]})
+                from mana_agent.utils.redaction import redact_secrets
+                matches.append({"file": rel, "line": line_no, "text": redact_secrets(line[:500])})
                 if len(matches) >= max_items:
                     return {"ok": True, "matches": matches, "limit": max_items, "truncated": True}
     return {"ok": True, "matches": matches, "limit": max_items, "truncated": False}

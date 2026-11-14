@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import typer
 import asyncio
 from asyncio.subprocess import PIPE
-from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+from mana_agent.llm.engine import create_model
 from mana_agent.config.settings import (
     Settings,
     default_diagrams_dir,  # noqa: F401 - consumed by chat_cli through wildcard command wiring
@@ -26,13 +26,11 @@ from mana_agent.config.settings import (
     mana_root_dir,
 )
 from mana_agent.config.user_config import load_effective_settings
-from mana_agent.vector_store.embeddings import build_embeddings
 from mana_agent.commands import ui_helpers as _ui_helpers
 from mana_agent.commands.ui_helpers import *  # noqa: F401,F403
 from mana_agent.commands.ui_helpers import _resolve_agent_max_steps  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.analysis.chunker import CodeChunker
 from mana_agent.parsers.multi_parser import MultiLanguageParser
-from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.services.ask_service import AskService
 from mana_agent.services.chat_service import ChatService  # noqa: F401 - consumed by chat_cli through wildcard command wiring
 from mana_agent.memory import CodingMemoryService
@@ -213,7 +211,7 @@ def _index_has_chunks(index_dir: str | Path) -> bool:
 
 def _index_has_search_data(index_dir: str | Path) -> bool:
     root = Path(index_dir)
-    return (root / "faiss").exists() or (root / "chunks.jsonl").exists()
+    return (root / "chunks.jsonl").exists()
 
 
 def _build_project_llm_analyzer():
@@ -238,8 +236,9 @@ def _build_project_llm_analyzer():
     return build_llm_analyzer(
         ModelConfig(
             api_key=api_key,
-            model=str(config.get("OPENAI_CHAT_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini"),
+            model=str(config.get("OPENAI_CHAT_MODEL", "") or ""),
             base_url=base_url or None,
+            provider=provider,
         )
     )
 
@@ -258,19 +257,21 @@ def _build_main_agent_routing_llm(routing_authority: Any | None = None) -> Any |
         connection = resolve_inference_connection(settings)
     except ProviderConfigurationError:
         return None
-    model = resolve_model_for_role(
+    assignment = resolve_model_for_role(
         AgentRole.HEAD_DECISION,
-        global_model=getattr(settings, "openai_chat_model", "gpt-4.1-mini"),
+        global_model=getattr(settings, "openai_chat_model", ""),
         routing_authority=routing_authority,
         task_description="Route a CLI request into the model-driven task lifecycle.",
-    ).resolved_model
-    return create_chat_model(
+    )
+    decision = assignment.routing_decision
+    connection = resolve_inference_connection(settings, provider=decision.provider if decision else connection.provider)
+    return create_model(
         api_key=connection.api_key,
-        model=model,
+        model=assignment.resolved_model,
         base_url=connection.base_url,
         provider=connection.provider,
         default_headers=connection.headers,
-        temperature=0,
+        model_configuration=decision.model_configuration if decision else None,
     )
 
 
@@ -288,21 +289,28 @@ def _build_planning_llm(*, model_override: str | None = None) -> Any | None:
         connection = resolve_inference_connection(settings)
     except ProviderConfigurationError:
         return None
-    model = (
-        model_override
-        or resolve_model_for_role(
+    if model_override:
+        from mana_agent.config.provider_registry import split_qualified_model_id
+        provider, model = split_qualified_model_id(model_override, default_provider=connection.provider)
+        connection = resolve_inference_connection(settings, provider=provider)
+        model_configuration = None
+    else:
+        assignment = resolve_model_for_role(
             AgentRole.HEAD_DECISION,
-            global_model=getattr(settings, "openai_chat_model", "gpt-4.1-mini"),
+            global_model=getattr(settings, "openai_chat_model", ""),
             task_description="Plan Mode codebase exploration and structured plan generation.",
-        ).resolved_model
-    )
-    return create_chat_model(
+        )
+        model = assignment.resolved_model
+        decision = assignment.routing_decision
+        connection = resolve_inference_connection(settings, provider=decision.provider if decision else connection.provider)
+        model_configuration = decision.model_configuration if decision else None
+    return create_model(
         api_key=connection.api_key,
         model=model,
         base_url=connection.base_url,
         provider=connection.provider,
         default_headers=connection.headers,
-        temperature=0.2,
+        model_configuration=model_configuration,
     )
 
 
@@ -1229,7 +1237,7 @@ class _ConfiguredSkillDraftGenerator:
             ) from exc
         from mana_agent.utils.text import extract_model_text
 
-        self.llm = create_chat_model(
+        self.llm = create_model(
             api_key=connection.api_key,
             model=settings.openai_chat_model,
             base_url=connection.base_url,
@@ -1237,8 +1245,6 @@ class _ConfiguredSkillDraftGenerator:
             default_headers=connection.headers,
             temperature=0,
         )
-        structured = getattr(self.llm, "with_structured_output", None)
-        self.model = structured(SkillDraft) if callable(structured) else None
 
     def generate(self, experience, decision):
         from mana_agent.utils.text import extract_model_text
@@ -1250,20 +1256,7 @@ class _ConfiguredSkillDraftGenerator:
             f"Eligibility decision:\n{decision.model_dump_json(indent=2)}\n\n"
             f"Recorded experience:\n{experience.model_dump_json(indent=2)}"
         )
-        if self.model is not None:
-            try:
-                result = self.model.invoke(prompt)
-                return result if isinstance(result, SkillDraft) else SkillDraft.model_validate(result)
-            except Exception:
-                pass
-        raw = self.llm.invoke(prompt)
-        text = extract_model_text(getattr(raw, "content", raw))
-        if text.startswith("```"):
-            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        return SkillDraft.model_validate_json(text)
+        return self.llm.decide_sync(prompt, SkillDraft)
 
 
 @skill_app.command("create-from-session")
@@ -1539,7 +1532,6 @@ _NOISY_CHAT_LOG_PREFIXES: tuple[str, ...] = (
     "mana_agent.services.index_service",
     "mana_agent.services.describe_service",
     "mana_agent.describe",
-    "mana_agent.vector_store",
 )
 
 
@@ -1581,11 +1573,9 @@ def _start_background_index(
     index_dir: str | Path,
     state: dict[str, Any],
 ) -> "threading.Thread":
-    """Build a semantic index in a daemon thread, updating ``state["status"]``.
+    """Build local analysis metadata in a daemon thread, updating ``state["status"]``.
 
-    Non-blocking: chat stays usable via the direct project-search fallback and
-    semantic search activates automatically once the index files exist. Tries a
-    full vector index first, then a chunks-only index, before giving up.
+    Repository search remains available while the analysis job runs.
     ``state["status"]`` transitions idle -> building -> ready|failed.
     """
     state["status"] = "building"
@@ -1593,23 +1583,7 @@ def _start_background_index(
     def _worker() -> None:
         try:
             index_service = _public_symbol("build_index_service", build_index_service)(settings)
-            try:
-                _index_service_index_compat(
-                    index_service,
-                    target_path=target_root,
-                    index_dir=index_dir,
-                    rebuild=False,
-                    vectors=True,
-                )
-            except Exception as exc:
-                logger.warning("Background vector index failed (%s); trying chunks-only", exc)
-                _index_service_index_compat(
-                    index_service,
-                    target_path=target_root,
-                    index_dir=index_dir,
-                    rebuild=False,
-                    vectors=False,
-                )
+            _index_service_index_compat(index_service, target_path=target_root, index_dir=index_dir, rebuild=False)
             state["status"] = "ready"
             logger.info("Background index ready", extra={"index_dir": str(index_dir)})
         except Exception as exc:
@@ -1622,41 +1596,9 @@ def _start_background_index(
     return thread
 
 
-def _index_service_index_compat(
-    index_service: Any,
-    *,
-    target_path: str | Path,
-    index_dir: str | Path,
-    rebuild: bool = False,
-    vectors: bool = True,
-) -> dict:
-    try:
-        return index_service.index(target_path=target_path, index_dir=index_dir, rebuild=rebuild, vectors=vectors)
-    except TypeError:
-        return index_service.index(target_path=target_path, index_dir=index_dir, rebuild=rebuild)
+def _index_service_index_compat(index_service, *, target_path, index_dir, rebuild=False):
+    return index_service.index(target_path=target_path, index_dir=index_dir, rebuild=rebuild)
 
-
-
-# ----------------------------------------------------------------------
-# subprocess helper
-# ----------------------------------------------------------------------
-
-async def _spawn_command(cmd: list[str]) -> tuple[int, str, str]:
-    """
-    Spawn a subprocess, capture stdout/stderr, return (returncode, stdout, stderr).
-    """
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=PIPE,
-        stderr=PIPE,
-    )
-    out_bytes, err_bytes = await proc.communicate()
-    stdout = out_bytes.decode("utf-8", errors="ignore")
-    stderr = err_bytes.decode("utf-8", errors="ignore")
-    return proc.returncode, stdout, stderr
-# ---------------------------------------------------------------------------
-# Helper utilities
-# ---------------------------------------------------------------------------
 
 def setup_logging(verbose: bool = False, log_dir: Path | str | None = None) -> Path | None:
     log_level = logging.DEBUG if verbose else logging.INFO
@@ -1797,32 +1739,18 @@ def _resolve_out_path(user_out: str | None, default: Path, suffix: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Vector store + search
+# Repository analysis and search
 # ---------------------------------------------------------------------------
-
-def build_store(settings: Settings) -> FaissStore:
-    store_cls = _public_symbol("FaissStore", FaissStore)
-    from mana_agent.config.inference_provider import resolve_inference_connection
-
-    connection = resolve_inference_connection(settings, require_api_key=False)
-    embeddings = build_embeddings(
-        api_key=connection.api_key or None,
-        base_url=connection.base_url or None,
-        model=settings.openai_embed_model,
-        provider=connection.provider,
-    )
-    return store_cls(embeddings=embeddings)
 
 def build_index_service(settings: Settings) -> IndexService:
     index_service_cls = _public_symbol("IndexService", IndexService)
     return index_service_cls(
         parser=_public_symbol("MultiLanguageParser", MultiLanguageParser)(),
         chunker=_public_symbol("CodeChunker", CodeChunker)(),
-        store=build_store(settings),
     )
 
 def build_search_service(settings: Settings) -> SearchService:
-    return _public_symbol("SearchService", SearchService)(store=build_store(settings))
+    return _public_symbol("SearchService", SearchService)(repository_root=Path.cwd())
 
 
 # ---------------------------------------------------------------------------
@@ -1847,54 +1775,62 @@ def build_ask_service(
         "workspace_id": "",
         "repository_id": "",
     }
-    model = resolve_model_for_role(
+    main_assignment = resolve_model_for_role(
         AgentRole.MAIN,
         global_model=model_override or settings.openai_chat_model,
         task_description="Initialize the main conversational model through the gateway.",
         **route_context,
-    ).resolved_model
+    )
+    model = main_assignment.resolved_model
+    main_decision = main_assignment.routing_decision
     qna_chain_cls = _public_symbol("QnAChain", QnAChain)
     ask_agent_cls = _public_symbol("AskAgent", AskAgent)
     ask_service_cls = _public_symbol("AskService", AskService)
     entry_router_cls = _public_symbol("EntryRouter", EntryRouter)
-    router_model = resolve_model_for_role(
+    route_assignment = resolve_model_for_role(
         AgentRole.HEAD_DECISION,
         global_model=model,
         task_description="Initialize the entry-routing model through the gateway.",
         **route_context,
-    ).resolved_model
+    )
+    router_model = route_assignment.resolved_model
+    route_decision = route_assignment.routing_decision
 
     from mana_agent.config.inference_provider import resolve_inference_connection
-    connection = resolve_inference_connection(settings)
+    connection = resolve_inference_connection(settings, provider=main_decision.provider if main_decision else None)
     qna_chain = qna_chain_cls(
         api_key=connection.api_key,
         model=model,
         base_url=connection.base_url,
         provider=connection.provider,
         default_headers=connection.headers,
+        model_configuration=main_decision.model_configuration if main_decision else None,
     )
     ask_agent = ask_agent_cls(
         api_key=connection.api_key,
         model=model,
-        search_service=build_search_service(settings),
+        search_service=SearchService(repository_root=root),
         base_url=connection.base_url,
         project_root=root,
         context_cost_governor=context_cost_governor,
         provider=connection.provider,
         default_headers=connection.headers,
+        model_configuration=main_decision.model_configuration if main_decision else None,
     )
     for model_client in (getattr(qna_chain, "llm", None), getattr(ask_agent, "llm", None)):
         if model_client is not None and hasattr(model_client, "context_cost_governor"):
             model_client.context_cost_governor = context_cost_governor
-    router_kwargs = {"api_key": connection.api_key, "model": router_model, "base_url": connection.base_url, "provider": connection.provider, "default_headers": connection.headers}
-    router_llm = create_chat_model(**router_kwargs)
+    router_connection = resolve_inference_connection(settings, provider=route_decision.provider if route_decision else None)
+    router_llm = create_model(api_key=router_connection.api_key, model=router_model,
+        base_url=router_connection.base_url, provider=router_connection.provider,
+        default_headers=router_connection.headers,
+        model_configuration=route_decision.model_configuration if route_decision else None)
     router_llm.context_cost_governor = context_cost_governor
 
     return ask_service_cls(
-        store=build_store(settings),
         qna_chain=qna_chain,
         ask_agent=ask_agent,
-        search_service=build_search_service(settings),
+        search_service=SearchService(repository_root=root),
         project_root=root,
         entry_router=entry_router_cls(llm=router_llm, router_model=router_model),
     )

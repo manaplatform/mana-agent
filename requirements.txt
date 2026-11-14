@@ -1,40 +1,29 @@
-# CLI / UX
+# Core requirements mirror pyproject.toml; optional integrations use package extras.
 typer>=0.6.0,<1.0.0
 rich>=12.0,<15.0
+textual>=0.80.0,<1.0.0
+prompt_toolkit>=3.0,<4.0
 fastapi>=0.110,<1.0
 uvicorn>=0.27,<1.0
 python-multipart>=0.0.9,<1.0
-
-# Config / validation
 pydantic>=2.0,<3.0
 pydantic-settings>=2.0,<3.0
 python-dotenv>=1.0,<3.0
 PyYAML>=6.0,<7.0
-tomli>=2.0,<3.0; python_version < "3.11"
+tomli>=2.0,<3.0; python_version < '3.11'
+exceptiongroup>=1.2,<2.0; python_version < '3.11'
 tzdata>=2025.2
 mcp>=1.0,<2.0
-
-# ✅ LangChain (security-patched floors; community stays on 0.3.x for FAISS)
-langchain>=1.3.9,<2.0.0
-langchain-community>=0.3.27,<0.4.0
-langchain-openai>=1.1.14,<2.0.0
-
-# OpenAI SDK (required by langchain-openai >=1.1.14)
 openai>=2.26.0,<3.0.0
-
-# Anthropic SDK
+httpx>=0.27,<1.0
 anthropic>=0.40.0,<1.0.0
-
-# Vector store
-faiss-cpu>=1.7.3,<2.0.0
-
-# Security analysis
 safety>=2.0,<3.0
-cryptography>=49.0.0,<51.0
-
-# Background jobs / cache
+python-docx>=1.1,<2.0
+openpyxl>=3.1,<4.0
+pypdf>=4.0,<7.0
+reportlab>=4.0,<5.0
 redis>=4.5.0,<5.0.0
 rq>=1.10.0,<2.0.0
-
-# Retry utilities
 tenacity>=8.0.0,<9.0.0
+cryptography>=49.0.0,<51.0
+websockets>=12,<16

@@ -15,12 +15,15 @@ class _StructuredModel:
     def __init__(self, payload: dict[str, object]) -> None:
         self.payload = payload
 
-    def with_structured_output(self, _schema, *, method: str, strict: bool):
-        assert method == "json_schema"
-        assert strict is True
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, _messages):
+    def generate_sync(self, _messages, **_native_options):
         return self.payload
 
 
@@ -29,10 +32,15 @@ class _MultiTurnStructuredModel:
         self.responses = list(responses)
         self.invocations: list[list[object]] = []
 
-    def with_structured_output(self, _schema, *, method: str, strict: bool):
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, messages):
+    def generate_sync(self, messages, **_native_options):
         self.invocations.append(messages)
         if self.responses:
             return self.responses.pop(0)
@@ -322,10 +330,15 @@ def test_context_budget_blocked_followup_classification() -> None:
     )
 
     class _BlockedModel:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages):
+        def generate_sync(self, _messages, **_native_options):
             snapshot = BudgetSnapshot(
                 breakdown=ContextBreakdown(),
                 budget=ContextBudget(context_window=8000),
@@ -359,73 +372,29 @@ def test_context_budget_blocked_followup_classification() -> None:
     assert "Context budget blocked" in str(exc_info.value)
 
 
-def test_followup_recovers_when_structured_output_raises_parser_error() -> None:
-    """When with_structured_output raises an OutputParserException (e.g. from reasoning models on OpenAI-compatible endpoints),
-    the classifier falls back to direct model invocation and parses the model's text output safely."""
-    class _ReasoningModelStructuredFailure:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
-
-        def invoke(self, _messages):
-            raise Exception(
-                "Structured Output response does not have a 'parsed' field nor a 'refusal' field. "
-                "Received message: content='' additional_kwargs={'parsed': None, 'refusal': None}"
-            )
-
-    class _RecoveringFollowupModel:
-        def __init__(self) -> None:
-            self._structured = _ReasoningModelStructuredFailure()
-
-        def with_structured_output(self, schema, *, method: str, strict: bool):
-            return self._structured.with_structured_output(schema, method=method, strict=strict)
-
-        def invoke(self, _messages):
-            return (
-                '{\n'
-                '  "action": "classify",\n'
-                '  "category": "new_task",\n'
-                '  "related_task_id": "",\n'
-                '  "safe_to_continue": true,\n'
-                '  "reason": "independent user input"\n'
-                '}'
-            )
-
-    classifier = FollowupClassifier(_RecoveringFollowupModel())
-    decision = classifier.decide(
-        message="write a new script",
-        recent_history=[],
-        candidates=[{"task_id": "task_1", "normalized_intent": "fix chat"}],
-    )
-    assert decision.category == "new_task"
-    assert decision.safe_to_continue is True
-    assert decision.related_task_id == ""
+def test_followup_structured_request_failure_stops_without_plain_retry() -> None:
+    class Model:
+        calls = 0
+        def decide_sync(self, messages, schema, **kwargs):
+            self.calls += 1
+            raise RuntimeError("controlled structured request failure")
+        def generate_sync(self, *args, **kwargs):
+            pytest.fail("A plain-format retry is forbidden")
+    model = Model()
+    with pytest.raises(FollowupClassificationError):
+        FollowupClassifier(model).decide(message="new request", recent_history=[], candidates=[])
+    assert model.calls == 1
 
 
-def test_followup_handles_thinking_tags_and_reasoning_in_direct_invoke() -> None:
-    """When direct invocation produces <think> reasoning tags before JSON, the tags are stripped and decision is coerced."""
-    class _ThinkingFollowupModel:
-        def invoke(self, _messages):
-            return (
-                "<think>\n"
-                "The user is asking to build something new, independent of prior tasks {task_id: 'task_1'}.\n"
-                "</think>\n"
-                "```json\n"
-                "{\n"
-                '  "action": "classify",\n'
-                '  "category": "new_task",\n'
-                '  "related_task_id": "",\n'
-                '  "safe_to_continue": true,\n'
-                '  "reason": "new independent instruction"\n'
-                "}\n"
-                "```"
-            )
-
-    classifier = FollowupClassifier(_ThinkingFollowupModel())
-    decision = classifier.decide(
-        message="build something new",
-        recent_history=[],
-        candidates=[{"task_id": "task_1", "normalized_intent": "fix chat"}],
-    )
-    assert decision.category == "new_task"
-    assert decision.safe_to_continue is True
-    assert decision.reason == "new independent instruction"
+def test_followup_malformed_structured_output_stops_without_plain_retry() -> None:
+    class Model:
+        calls = 0
+        def decide_sync(self, messages, schema, **kwargs):
+            self.calls += 1
+            return schema.model_validate_json("<think>private</think>")
+        def generate_sync(self, *args, **kwargs):
+            pytest.fail("A plain-format retry is forbidden")
+    model = Model()
+    with pytest.raises(FollowupClassificationError):
+        FollowupClassifier(model).decide(message="new request", recent_history=[], candidates=[])
+    assert model.calls == 1

@@ -2,6 +2,15 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased — 2026-11-14
+
+- Routing startup now asks the Main model only for the role assignment, reuses the gateway's tool-worker decision, and reports safe selection errors with role context. OpenRouter requires support for request parameters on schema-constrained Chat Completions. User-owned verification is `python -m pytest -q tests/test_model_routing.py tests/llm/test_providers.py`, then `mana-agent --full-access`. See [routing startup regression](docs/regressions/routing-startup-competition-fields.md).
+- Native inference: replace framework chat/messages/prompts/tools/callbacks with `mana_agent.llm` contracts, OpenAI Responses/Chat Completions and Anthropic Messages adapters. Migrate tool builders, decisions, Batch callers, worker serialization and coding continuation; preserve the existing controller, TaskBoard, Supervisor and external Codex boundaries.
+- Model settings/routing: consolidate capability evidence, exact provider/model discovery and models.dev enrichment, scoped overrides/caches, settings-only probes, expiry and validated Main-model selection. Unknown features fail closed; remove model-name tables and generic token-limit grants.
+- Repository retrieval: retire semantic-search registration, embeddings/FAISS and required embedding settings. Retain local chunk/symbol analysis and use live repository text tools. Explicit cleanup removed five obsolete Mana-owned index sets without unpickling.
+- Dependencies: remove LangChain family and `faiss-cpu`, declare HTTPX directly, synchronize core requirements. Add Python 3.15 CI, clean-wheel/extras/compatibility audit and offline baseline benchmark tooling; retain the existing Python bound.
+- Regression/acceptance: see [native engine guide](docs/native-llm-engine.md) and [migration inventory](docs/native-llm-engine-migration.md). No tests, builds, linters, installs, benchmarks or paid API calls were run by the agent. User-owned commands: `python -m pytest -q tests/llm tests/test_model_capabilities.py tests/test_model_routing.py tests/test_repository_tools.py tests/test_project_search.py`; `python -m pytest -q`; `python -m pip check`. Implementation is local, uncommitted and unverified; no publication or deployment.
+
 ## 0.12.2 — 2026-11-13
 
 - Protocols / ACP SDK 1.0.0 Migration:

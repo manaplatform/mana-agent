@@ -15,13 +15,6 @@ from mana_agent.services.structure_service import StructureService
 from mana_agent.utils.project_search import project_search
 
 
-NO_INDEX_MESSAGE = (
-    "Semantic index is unavailable for the selected route. Run `mana-agent index` "
-    "or ask for a repository search route."
-)
-NO_INDEX_WARNING = "Semantic index unavailable for model-selected semantic route."
-
-
 @dataclass(slots=True)
 class RouteExecutionContext:
     question: str
@@ -43,7 +36,6 @@ class RouteExecutor:
         self,
         *,
         router: EntryRouter,
-        store: Any,
         qna_chain: Any,
         ask_agent: Any | None = None,
         search_service: SearchService | None = None,
@@ -51,7 +43,6 @@ class RouteExecutor:
         project_root: str | Path | None = None,
     ) -> None:
         self.router = router
-        self.store = store
         self.qna_chain = qna_chain
         self.ask_agent = ask_agent
         self.search_service = search_service
@@ -69,8 +60,8 @@ class RouteExecutor:
         )
 
     def _execute_validated(self, decision: RouteDecision, context: RouteExecutionContext) -> AskResponseWithTrace:
-        if decision.kind == "semantic_qa":
-            return self._semantic_qa(context)
+        if decision.kind == "repository_qa":
+            return self._repository_qa(context)
         if decision.kind == "repo_search":
             return self._repo_search(context)
         if decision.kind == "browser_task":
@@ -116,36 +107,19 @@ class RouteExecutor:
             trace=[],
         )
 
-    def _semantic_qa(self, context: RouteExecutionContext) -> AskResponseWithTrace:
-        if context.dir_mode:
-            if self.search_service is None:
-                return self._plain_error("Search service is not configured for dir-mode semantic Q&A.")
-            sources, warnings = self.search_service.search_multi(
-                index_dirs=context.index_dirs,
-                query=context.question,
-                k=context.k,
-            )
+    def _repository_qa(self, context: RouteExecutionContext) -> AskResponseWithTrace:
+        if self.search_service is None:
+            raise RuntimeError("Repository search service is unavailable")
+        root = (context.root_dir or context.project_root).resolve()
+        if context.dir_mode and context.index_dirs:
+            sources, warnings = self.search_service.search_multi(context.index_dirs, query=context.question, k=context.k)
         else:
-            if context.index_dir is None:
-                return self._plain_error("No semantic index was supplied.")
-            sources = self.store.search(context.index_dir, query=context.question, k=context.k)
+            sources = self.search_service.search(repository_root=root, query=context.question, k=context.k)
             warnings = []
         if not sources:
-            return AskResponseWithTrace(
-                answer="The selected semantic route found no indexed context.",
-                sources=[],
-                warnings=list(warnings),
-                mode="route-semantic_qa",
-                trace=[],
-            )
+            return AskResponseWithTrace(answer="Repository search found no matching context.", sources=[], warnings=warnings, mode="route-repository_qa", trace=[])
         answer = self.qna_chain.run(question=context.question, context=_render_context(sources))
-        return AskResponseWithTrace(
-            answer=answer,
-            sources=sources,
-            warnings=list(warnings),
-            mode="route-semantic_qa",
-            trace=[],
-        )
+        return AskResponseWithTrace(answer=answer, sources=sources, warnings=warnings, mode="route-repository_qa", trace=[])
 
     def _repo_search(self, context: RouteExecutionContext) -> AskResponseWithTrace:
         root = (context.root_dir or context.project_root).resolve()
@@ -320,8 +294,6 @@ class RouteExecutor:
             required_prefix = f"mcp__{required_mcp_server}__"
             if decision.kind != "tool_execution" or not selected.startswith(required_prefix):
                 return f"user explicitly required MCP provider '{required_mcp_server}', but no tool from {required_prefix} was selected"
-        if decision.kind == "semantic_qa" and not _index_available(context):
-            return "semantic index unavailable"
         if decision.kind == "command":
             commands = available_command_names(context.project_root)
             if not decision.command_name or decision.command_name not in commands:
@@ -334,12 +306,12 @@ class RouteExecutor:
         return None
 
     def _route_error(self, decision: RouteDecision, context: RouteExecutionContext, *, validation: str) -> AskResponseWithTrace:
-        message = NO_INDEX_MESSAGE if validation == "semantic index unavailable" else f"Selected route cannot run: {validation}."
+        message = f"Selected route cannot run: {validation}."
         return self._attach_route_trace(
             AskResponseWithTrace(
                 answer=decision.user_visible_message or message,
                 sources=[],
-                warnings=[NO_INDEX_WARNING if validation == "semantic index unavailable" else validation],
+                warnings=[validation],
                 mode="route-error",
                 trace=[],
             ),
@@ -413,7 +385,6 @@ def available_tool_names(*, required_mcp_server: str | None = None) -> list[str]
         "command_inventory",
         "repo_search",
         "repo_read",
-        "semantic_search",
         "web_search",
         "github_search",
         "git_status",

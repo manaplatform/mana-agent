@@ -179,12 +179,24 @@ def test_gateway_entry_model_resolves_natural_language_to_registered_command() -
     registry.register(RouteRegistration("command", "shared commands", lambda: RouteAvailability(True), ("sessions",)))
 
     class Model:
-        def invoke(self, _messages):  # noqa: ANN001
+        def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
             return SimpleNamespace(content=json.dumps({
                 "route": "command", "confidence": 0.99, "reason": "list chats",
                 "required_sources": ["none"], "target_urls": [],
                 "command_name": "sessions", "command_arguments": ["list"],
             }))
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = EntryRouter(llm=Model(), registry=registry).route(
         user_prompt="Show my sessions.",

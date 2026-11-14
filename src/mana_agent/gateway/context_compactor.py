@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
-from mana_agent.config.model_catalog import maintained_token_limits
+from mana_agent.config.model_catalog import cached_token_limits
 from mana_agent.config.settings import Settings
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.context_cost.models import AccountingSnapshot
@@ -400,7 +400,7 @@ class ContextCompactor:
             cand_windows = []
             if eff_envelope:
                 for c in getattr(eff_envelope, "model_candidates", ()):
-                    limits = maintained_token_limits(
+                    limits = cached_token_limits(
                         getattr(c, "provider", None), getattr(c, "model_id", None)
                     )
                     if limits:

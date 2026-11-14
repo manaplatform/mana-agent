@@ -86,17 +86,6 @@ def parse_openai_compatible_model_records(
         item = dict(raw)
         model_id = str(item["id"]).strip()
         caps = extract_capabilities_from_record(item)
-        lowered = model_id.lower()
-        if any(marker in lowered for marker in ("embed", "embedding")):
-            caps.add(ModelCapability.EMBEDDING)
-        if norm_provider == "xai" or "grok" in lowered:
-            caps.add(ModelCapability.TEXT_GENERATION)
-            caps.add(ModelCapability.TOOL_CALLING)
-            caps.add(ModelCapability.CODE)
-            caps.add(ModelCapability.REASONING)
-            caps.add(ModelCapability.STRUCTURED_OUTPUT)
-            if any(marker in lowered for marker in ("vision", "image")):
-                caps.add(ModelCapability.IMAGE_INPUT)
         if caps:
             item["capabilities"] = sorted(str(c.value) for c in caps)
         item["id"] = model_id
@@ -105,80 +94,7 @@ def parse_openai_compatible_model_records(
 
 
 def parse_openrouter_models(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Preserve OpenRouter's canonical IDs and useful catalog metadata."""
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return []
-    records: dict[str, dict[str, Any]] = {}
-    for raw in data:
-        if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
-            continue
-        item = dict(raw)
-        model_id = str(item["id"]).strip()
-        architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
-        supported = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), list) else []
-        modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else []
-        if not isinstance(modalities, list):
-            modalities = item.get("input_modalities") if isinstance(item.get("input_modalities"), list) else []
-        capabilities: set[str] = set()
-        lowered_id = model_id.lower()
-        endpoint = item.get("_mana_endpoint", "")
-        out_mods = architecture.get("output_modalities") if isinstance(architecture, dict) else []
-        if not isinstance(out_mods, list):
-            out_mods = []
-        out_mods_lower = [str(m).lower() for m in out_mods]
-
-        if endpoint == "/embeddings/models" or "embeddings" in out_mods_lower or any(marker in lowered_id for marker in ("embed", "embedding", "embedder")):
-            capabilities.add(ModelCapability.EMBEDDING.value)
-        elif endpoint == "/images/models" or "image" in out_mods_lower or any(marker in lowered_id for marker in ("dall-e", "image-gen", "image_generation", "flux", "stable-diffusion", "midjourney")):
-            capabilities.add(ModelCapability.IMAGE_GENERATION.value)
-        elif endpoint == "/videos/models" or "video" in out_mods_lower or isinstance(item.get("supported_durations"), list) or any(marker in lowered_id for marker in ("sora", "video-gen", "video_generation", "runway", "luma", "haiper", "minimax/video", "kling")):
-            capabilities.add(ModelCapability.VIDEO_GENERATION.value)
-        elif "audio" in out_mods_lower or "voice" in out_mods_lower or any(marker in lowered_id for marker in ("tts", "voice", "audio", "speech", "elevenlabs")):
-            capabilities.add(ModelCapability.TEXT_TO_SPEECH.value)
-        else:
-            capabilities.add(ModelCapability.TEXT_GENERATION.value)
-
-        if any(str(value).lower() in {"tools", "tool_choice", "parallel_tool_calls"} for value in supported):
-            capabilities.add(ModelCapability.TOOL_CALLING.value)
-        if any("structured" in str(value).lower() or "response_format" in str(value).lower() for value in supported):
-            capabilities.add(ModelCapability.STRUCTURED_OUTPUT.value)
-        mods_lower = [str(value).lower() for value in modalities or []]
-        if any(value in {"image", "image_url", "vision"} for value in mods_lower):
-            capabilities.add(ModelCapability.IMAGE_INPUT.value)
-        if any(value in {"audio", "voice"} for value in mods_lower):
-            capabilities.add(ModelCapability.AUDIO_INPUT.value)
-            capabilities.add(ModelCapability.SPEECH_TO_TEXT.value)
-        if any(value in {"video"} for value in mods_lower):
-            capabilities.add(ModelCapability.VIDEO_INPUT.value)
-        modality_str = str(architecture.get("modality") or "").lower()
-        if "image" in modality_str:
-            capabilities.add(ModelCapability.IMAGE_INPUT.value)
-        if "audio" in modality_str:
-            capabilities.add(ModelCapability.AUDIO_INPUT.value)
-            capabilities.add(ModelCapability.SPEECH_TO_TEXT.value)
-        if "video" in modality_str:
-            capabilities.add(ModelCapability.VIDEO_INPUT.value)
-        if any("reasoning" in str(value).lower() for value in supported):
-            capabilities.add(ModelCapability.REASONING.value)
-        item["capabilities"] = sorted(capabilities)
-        item["input_modalities"] = modalities
-        top_provider = item.get("top_provider") if isinstance(item.get("top_provider"), dict) else {}
-        if item.get("max_output_tokens") is None and top_provider.get("max_completion_tokens") is not None:
-            item["max_output_tokens"] = top_provider["max_completion_tokens"]
-        pricing = item.get("pricing") if isinstance(item.get("pricing"), dict) else {}
-        for source_key, target_key in (
-            ("prompt", "input_price_per_million"),
-            ("completion", "output_price_per_million"),
-            ("input_cache_read", "cached_input_price_per_million"),
-        ):
-            if pricing.get(source_key) not in (None, ""):
-                try:
-                    item[target_key] = str(Decimal(str(pricing[source_key])) * Decimal(1_000_000))
-                except (InvalidOperation, ValueError):
-                    pass
-        records[model_id] = item
-    return [records[key] for key in sorted(records)]
+    return parse_openai_compatible_model_records(payload, provider="openrouter")
 
 
 def _handle_http_error(provider_label: str, exc: urllib.error.HTTPError) -> None:
@@ -289,73 +205,9 @@ def fetch_openai_compatible_models(
 
 
 def fetch_provider_models(*, provider: str, base_url: str, api_key: str, timeout_seconds: int = 15) -> list[str | dict[str, Any]]:
-    """Fetch one provider catalog without converting multi-tenant hosts into aliases."""
-    if not api_key.strip():
-        raise ProviderAuthenticationFailedError("API key is required to fetch models.")
-    try:
-        definition = PROVIDERS.get(provider)
-    except KeyError as exc:
-        raise ModelListFetchFailedError(str(exc)) from exc
-
-    if provider == "anthropic":
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", **dict(definition.default_headers)}
-    else:
-        headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
-    base = (base_url or definition.default_base_url).rstrip("/")
-
-    def _fetch(endpoint: str) -> dict[str, Any]:
-        request = urllib.request.Request(
-            _provider_url(provider, base, endpoint), headers=headers
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            _handle_http_error(definition.display_name, exc)
-        except urllib.error.URLError as exc:
-            reason = getattr(exc, "reason", exc)
-            if "timed out" in str(reason).lower() or "timeout" in str(reason).lower():
-                raise ProviderConnectionFailedError(
-                    f"{definition.display_name} provider connection failed: timed out: {reason}."
-                ) from exc
-            raise ProviderConnectionFailedError(
-                f"{definition.display_name} provider connection failed: Model fetch failed: {reason}."
-            ) from exc
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ModelListFetchFailedError(
-                f"{definition.display_name} model-list fetch failed: Model fetch failed: {exc}."
-            ) from exc
-
-    if provider == "openrouter":
-        all_data: list[Any] = []
-        seen: set[str] = set()
-        for endpoint in ("/models", "/embeddings/models", "/images/models", "/videos/models"):
-            try:
-                payload = _fetch(endpoint)
-                if isinstance(payload.get("data"), list):
-                    for item in payload["data"]:
-                        if isinstance(item, dict):
-                            item_id = str(item.get("id", ""))
-                            if item_id and item_id not in seen:
-                                seen.add(item_id)
-                                item["_mana_endpoint"] = endpoint
-                                all_data.append(item)
-            except ModelFetchError:
-                if endpoint == "/models":
-                    raise
-        models: list[str | dict[str, Any]] = parse_openrouter_models({"data": all_data})
-    elif provider in {"nvidia", "xai", "x-ai"}:
-        payload = _fetch("/models")
-        models = parse_openai_compatible_model_records(payload, provider=provider)
-    else:
-        payload = _fetch("/models")
-        models = parse_openai_model_records(payload)
-
-    if not models:
-        raise ModelListFetchFailedError(
-            f"{definition.display_name} model-list fetch failed: no model IDs were returned."
-        )
-    return models
+    from mana_agent.llm.discovery import ModelDiscoveryService
+    profiles = ModelDiscoveryService().discover_models(provider=provider, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
+    return [{"id": profile.model_id, **profile.metadata} for profile in profiles]
 
 
 def fetch_provider_model_detail(
@@ -366,31 +218,9 @@ def fetch_provider_model_detail(
     model_id: str,
     timeout_seconds: int = 10,
 ) -> dict[str, Any] | None:
-    """Fetch metadata for a single model from the provider's /models/{model_id} endpoint."""
-    if not api_key.strip() or not model_id.strip():
-        return None
-    try:
-        definition = PROVIDERS.get(provider)
-    except KeyError:
-        return None
-
-    if provider == "anthropic":
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", **dict(definition.default_headers)}
-    else:
-        headers = {"Authorization": f"Bearer {api_key}", **dict(definition.default_headers)}
-    base = (base_url or definition.default_base_url).rstrip("/")
-    endpoint = f"/models/{urllib.parse.quote(model_id, safe='')}"
-    request = urllib.request.Request(_provider_url(provider, base, endpoint), headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-            if isinstance(payload, dict):
-                if isinstance(payload.get("data"), dict):
-                    return payload["data"]
-                return payload
-    except Exception:
-        pass
-    return None
+    from mana_agent.llm.discovery import ModelDiscoveryService
+    profile = ModelDiscoveryService().get_model(model_id, provider=provider, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds)
+    return profile.metadata if profile is not None else None
 
 
 def load_or_fetch_models(
@@ -455,69 +285,13 @@ def select_model(
     return selected
 
 
-def choose_models(
-    *,
-    provider: str,
-    base_url: str,
-    api_key: str,
-    timeout_seconds: int,
-    current: dict[str, object],
-    force_refresh: bool = False,
-) -> dict[str, str]:
-    models: list[str | dict[str, Any]] = []
-    try:
-        models = load_or_fetch_models(
-            provider=provider,
-            base_url=base_url,
-            api_key=api_key,
-            timeout_seconds=timeout_seconds,
-            force_refresh=force_refresh,
-        )
-        info(f"Loaded {len(models)} model(s) from {base_url}.")
-    except ModelFetchError as exc:
-        error(f"{exc}\nManual model entry is available.")
-    descriptors = descriptors_from_catalog(provider, models)
-    text_models = [item.id for item in filter_models(descriptors, ModelPurpose.AGENT)]
-    embedding_models = [item.id for item in filter_models(descriptors, ModelPurpose.EMBEDDING)]
-    main = select_model(
-        title="Main model",
-        role_label="the main chat model",
-        models=text_models,
-        current=str(current.get("OPENAI_CHAT_MODEL") or ""),
-        allow_manual=True,
-    )
-    tool = select_model(
-        title="Tool worker model",
-        role_label="the tool worker model",
-        models=text_models,
-        current=str(current.get("OPENAI_TOOL_WORKER_MODEL") or ""),
-        allow_same_as_main=True,
-        allow_manual=True,
-    )
-    planner = select_model(
-        title="Coding planner model",
-        role_label="the coding planner model",
-        models=text_models,
-        current=str(current.get("OPENAI_CODING_PLANNER_MODEL") or ""),
-        allow_same_as_main=True,
-        allow_manual=True,
-    )
-    embed = select_model(
-        title="Embedding model",
-        role_label="the embedding model",
-        models=embedding_models,
-        current=str(current.get("OPENAI_EMBED_MODEL") or ""),
-        allow_manual=True,
-    )
-    resolved_tool = main if tool == "same_as_main" else tool
-    resolved_planner = main if planner == "same_as_main" else planner
-    return {
-        "OPENAI_CHAT_MODEL": main,
-        "LLM_MODEL": main,
-        "OPENAI_TOOL_WORKER_MODEL": resolved_tool,
-        "OPENAI_CODING_PLANNER_MODEL": resolved_planner,
-        "OPENAI_EMBED_MODEL": embed,
-        "MODEL_LEVEL_3_HIGH_REASONING": main,
-        "MODEL_LEVEL_2_CODING": resolved_planner,
-        "MODEL_LEVEL_1_FAST_TOOL": resolved_tool,
-    }
+def choose_models(*, provider: str, base_url: str, api_key: str, timeout_seconds: int,
+                  current: dict[str, object], force_refresh: bool = False) -> dict[str, str]:
+    models = load_or_fetch_models(provider=provider, base_url=base_url, api_key=api_key,
+        timeout_seconds=timeout_seconds, force_refresh=force_refresh)
+    choices = [item.id for item in descriptors_from_catalog(provider, models)]
+    selected = {}
+    for key, title in (("OPENAI_CHAT_MODEL", "Main model"), ("OPENAI_CODING_PLANNER_MODEL", "Coding model"), ("OPENAI_TOOL_WORKER_MODEL", "Fast model")):
+        selected[key] = select_model(models=choices, current=str(current.get(key) or ""), title=title,
+            role_label=title, allow_manual=True)
+    return selected

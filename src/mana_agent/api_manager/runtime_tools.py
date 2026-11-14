@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mana_agent.api_manager.documentation import SemanticDefinition
@@ -245,7 +245,7 @@ def _json(
 
 
 
-def build_api_manager_langchain_tools(
+def build_api_manager_tools(
     root: str | Path,
     *,
     service: ApiManagerService | None = None,
@@ -542,16 +542,16 @@ def build_api_manager_langchain_tools(
         )
 
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_workflow_decide",
             description=(
                 "Record the model's API workflow outcome requirements. This must be the first "
                 "API-route tool call; completion is validated against evidence, not tool names."
             ),
-            args_schema=_WorkflowDecision,
+            input_model=_WorkflowDecision,
             func=workflow_decide,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_workflow_terminal",
             description=(
                 "Record an evidence-backed terminal API workflow outcome when complete "
@@ -561,10 +561,10 @@ def build_api_manager_langchain_tools(
                 "Supply the exact documentation_ref returned by that inspection. "
                 "This tool never imports, previews, or executes an API request."
             ),
-            args_schema=_WorkflowTerminal,
+            input_model=_WorkflowTerminal,
             func=workflow_terminal,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_docs_inspect",
             description=(
                 "Read one authorized API documentation URL, workspace file, or pasted text source "
@@ -575,21 +575,21 @@ def build_api_manager_langchain_tools(
                 "that an API specification, endpoint, operation, parameter, or authentication "
                 "detail is absent."
             ),
-            args_schema=_Inspect,
+            input_model=_Inspect,
             func=inspect_docs,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_docs_import",
             description=(
                 "Import authorized OpenAPI/Swagger documentation deterministically. Unstructured "
                 "documentation must use api_docs_import_semantic so its typed semantic definition "
                 "cannot be omitted. Never executes documentation content."
             ),
-            args_schema=_ImportArgs,
+            input_model=_ImportArgs,
             func=import_docs,
             metadata={"transactional_adapter": "api_integration"},
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_docs_import_semantic",
             description=(
                 "Validate and import unstructured documentation using a required, cited, strict "
@@ -599,46 +599,46 @@ def build_api_manager_langchain_tools(
                 "mandatory; no heuristic extraction runs. If the integration already exists, "
                 "retry this import with its exact refresh_integration_id."
             ),
-            args_schema=_SemanticImport,
+            input_model=_SemanticImport,
             func=import_semantic_docs,
             metadata={"transactional_adapter": "api_integration"},
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_integrations_list",
             description="List saved API integration metadata. Does not expose credentials.",
-            args_schema=_List,
+            input_model=_List,
             func=list_integrations,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_integration_get",
             description="Inspect one saved normalized API integration without credential values.",
-            args_schema=_IntegrationId,
+            input_model=_IntegrationId,
             func=get_integration,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_integration_update",
             description="Update only explicit mutable integration metadata fields.",
-            args_schema=_Update,
+            input_model=_Update,
             func=update_integration,
             metadata={"transactional_adapter": "api_integration"},
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_integration_delete",
             description="Delete one saved integration only with explicit delete intent.",
-            args_schema=_Delete,
+            input_model=_Delete,
             func=delete_integration,
             metadata={"transactional_adapter": "api_integration"},
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_operations_search",
             description=(
                 "Retrieve and rank operations from enabled integrations. This returns candidates only; "
                 "a structured model decision must select an operation before preview or execution."
             ),
-            args_schema=_Search,
+            input_model=_Search,
             func=search_operations,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_request_preview",
             description=(
                 "Build and validate a saved API operation and return a redacted preview. Use before "
@@ -648,10 +648,10 @@ def build_api_manager_langchain_tools(
                 "trusted-local approval during preview and return permission_required; stop there "
                 "until the TUI or dashboard resolves it. Arbitrary base URL overrides are not accepted."
             ),
-            args_schema=_Request,
+            input_model=_Request,
             func=preview,
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             name="api_request_execute",
             description=(
                 "Execute one validated saved API operation through DNS-pinned SSRF protections. "
@@ -660,7 +660,7 @@ def build_api_manager_langchain_tools(
                 "Mutations and network-policy exceptions fail closed unless the trusted approval "
                 "flow supplies an approval reference."
             ),
-            args_schema=_Execute,
+            input_model=_Execute,
             func=execute,
         ),
     ]

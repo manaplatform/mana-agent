@@ -5,11 +5,11 @@
 ## Requirements
 
 - Python 3.10 through 3.14. [pyproject.toml:1-51](pyproject.toml:1-51)
-- An OpenAI-compatible chat and embedding endpoint. [README.md:1-242](README.md:1-242)
+- A configured inference provider and Main model with current capability evidence. [README.md:1-242](README.md:1-242)
 - An OpenAI API key plus model settings saved through Mana-Agent's first-run
   Settings wizard under `~/.mana`. [README.md:1-242](README.md:1-242)
 
-The default dependency set includes Typer, Rich, Pydantic, python-dotenv, LangChain, OpenAI, FAISS, Safety, Redis, RQ, and Tenacity. [pyproject.toml:1-51](pyproject.toml:1-51)
+The default dependency set includes Typer, Rich, Pydantic, python-dotenv, the OpenAI and Anthropic SDKs, HTTPX, Safety, Redis, RQ, and Tenacity. [pyproject.toml:1-51](pyproject.toml:1-51)
 
 ## Install
 
@@ -41,7 +41,7 @@ mana-agent --configure
 ```
 
 The TUI configures provider authentication, logical High reasoning/Coding/Fast
-model levels, advanced role mappings, embeddings, web search, and GitHub.
+model levels, advanced role mappings, capability evidence, web search, and GitHub.
 Repository `.env` files do not override an explicitly selected credential.
 
 ## Open chat
@@ -69,7 +69,7 @@ mana-agent analyze /path/to/project
 
 The `analyze` command resolves the target path, indexes the project, runs dependency and structure analysis, performs static findings, optionally runs LLM-assisted findings, and writes artifacts under the analyzed project’s `.mana/` directory. [src/mana_agent/commands/analyze_cli.py:1-444](src/mana_agent/commands/analyze_cli.py:1-444)
 
-If you want semantic search results included in the report, add a query:
+Add a query to include live repository text matches in the report:
 
 ```bash
 mana-agent analyze /path/to/project --query "authentication flow"

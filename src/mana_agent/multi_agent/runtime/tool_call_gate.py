@@ -63,7 +63,7 @@ class ToolCallGate:
                 if spec.repository != policy.repository:
                     continue
                 policies[tool_name] = spec
-                schema = getattr(candidate, "args_schema", None)
+                schema = getattr(candidate, "input_model", None)
                 schemas[tool_name] = schema if isinstance(schema, dict) else schema.model_json_schema() if schema is not None else item.input_schema if item else {"type": "object"}
             board = getattr(context, "taskboard", None)
             if board is not None:
@@ -78,7 +78,7 @@ class ToolCallGate:
         def execute(selected):
             if self.transport is not None and policy.repository:
                 return self.transport(request)
-            value = tool.invoke(selected, config=config)
+            value = tool.call(selected, config=config)
             if isinstance(value, str):
                 try:
                     parsed = json.loads(value)

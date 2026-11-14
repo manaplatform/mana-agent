@@ -27,7 +27,6 @@ from mana_agent.multi_agent.runtime.route_executor import (
     available_tool_names,
 )
 from mana_agent.services.search_service import SearchService
-from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.mcp.config import load_mcp_servers
 
 logger = logging.getLogger(__name__)
@@ -42,7 +41,6 @@ class AskCallback(Protocol):
 class AskService:
     def __init__(
         self,
-        store: FaissStore,
         qna_chain: QnAChain,
         ask_agent: AskAgent | None = None,
         search_service: SearchService | None = None,
@@ -50,7 +48,6 @@ class AskService:
         entry_router: EntryRouter | None = None,
         route_executor: RouteExecutor | None = None,
     ) -> None:
-        self.store = store
         self.qna_chain = qna_chain
         self.ask_agent = ask_agent
         self.search_service = search_service
@@ -58,7 +55,6 @@ class AskService:
         self.entry_router = entry_router or EntryRouter(llm=getattr(qna_chain, "llm", None))
         self.route_executor = route_executor or RouteExecutor(
             router=self.entry_router,
-            store=store,
             qna_chain=qna_chain,
             ask_agent=ask_agent,
             search_service=search_service,
@@ -210,7 +206,7 @@ class AskService:
                 manifest = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
             except Exception:
                 manifest = {}
-            legacy_root = index_dir.parent.parent if index_dir.parent.name == ".mana" else index_dir.parent
+            legacy_root = index_dir.parent.parent if index_dir.parent.name == ".mana" else index_dir
             metadata[index_dir] = {
                 "repository_id": str(manifest.get("repository_id") or ""),
                 "repository_name": str(manifest.get("repository_name") or legacy_root.name),
@@ -259,7 +255,7 @@ class AskService:
 
         if not resolved:
             root = Path(root_dir).resolve()
-            msg = f"No usable indexes found under {root}"
+            msg = f"No selected repositories under {root}"
             return AskResponse(answer=msg, sources=[], warnings=[msg])
 
         sources, warnings = self.search_service.search_multi(
@@ -270,7 +266,7 @@ class AskService:
 
         if not sources:
             return AskResponse(
-                answer=f"The selected semantic route found no indexed context under {Path(root_dir).resolve()}.",
+                answer=f"The selected repository search found no matching context under {Path(root_dir).resolve()}.",
                 sources=[],
                 warnings=warnings,
             )
@@ -389,6 +385,4 @@ class AskService:
             )
 
     def _index_available(self, resolved_index: Path) -> bool:
-        if isinstance(self.store, FaissStore):
-            return (resolved_index / "faiss").exists()
-        return True
+        return self.project_root.is_dir()

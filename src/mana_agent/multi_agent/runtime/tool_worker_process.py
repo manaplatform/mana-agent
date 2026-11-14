@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, before_sleep_log
-from langchain_core.callbacks.base import BaseCallbackHandler
 from pydantic import BaseModel, Field, ValidationError
 
 from mana_agent.memory import CodingMemoryService
@@ -22,7 +20,6 @@ from mana_agent.services.search_service import SearchService
 from mana_agent.multi_agent.runtime.ask_agent import AskAgent
 from mana_agent.multi_agent.core.types import ExecutionContext, enrich_event_identity
 from mana_agent.multi_agent.runtime.mutation_plan import validate_mutation_plan
-from mana_agent.vector_store.embeddings import build_embeddings
 from mana_agent.tools import (
     build_apply_patch_tool,
     build_create_file_tool,
@@ -33,7 +30,6 @@ from mana_agent.tools import (
 )
 from mana_agent.tools.apply_patch import extract_patch_touched_files
 from mana_agent.multi_agent.tools import git_tools
-from mana_agent.vector_store.faiss_store import FaissStore
 from mana_agent.utils.redaction import redact_json_line, redact_secrets
 from mana_agent.utils.tool_results import structured_tool_error_detail
 from mana_agent.utils.tool_policy import expand_tool_aliases
@@ -130,31 +126,9 @@ def _configure_worker_logging() -> None:
 # ---------------------------------------------------------------------------
 # Keys that must NEVER be sent to provider APIs as message/input parameters.
 # ---------------------------------------------------------------------------
-_PROVIDER_BANNED_KEYS = frozenset({"status"})
-
-_BANNED_PARAM_ERROR_PATTERNS: list[tuple[str, str]] = [
-    ("unknown parameter", "status"),
-    ("unrecognized parameter", "status"),
-    ("unexpected parameter", "status"),
-    ("invalid parameter", "status"),
-    ("unknown parameter", "input"),
-    ("unrecognized request parameter", ""),
-    ("additional properties", "status"),
-    ("is not allowed", "status"),
-    ("status", "not permitted"),
-    ("status", "not allowed"),
-    ("status", "is not expected"),
-]
 
 
-def _is_banned_param_provider_error(error_message: str) -> bool:
-    msg = error_message.lower()
-    if "unknown parameter" in msg and "status" in msg:
-        return True
-    for pattern_a, pattern_b in _BANNED_PARAM_ERROR_PATTERNS:
-        if pattern_a in msg and (not pattern_b or pattern_b in msg):
-            return True
-    return False
+
 
 
 _NON_RETRIABLE_HTTP_STATUS_CODES = frozenset({400, 401, 403, 404, 405, 409, 410, 413, 414, 422})
@@ -223,16 +197,6 @@ def _is_likely_retriable_runtime_error(exc: BaseException) -> bool:
     return False
 
 
-def _strip_banned_keys(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {
-            k: _strip_banned_keys(v)
-            for k, v in obj.items()
-            if k not in _PROVIDER_BANNED_KEYS
-        }
-    if isinstance(obj, list):
-        return [_strip_banned_keys(item) for item in obj]
-    return obj
 
 
 def _tool_arg_error(tool_name: str, args: dict[str, Any]) -> str:
@@ -349,50 +313,10 @@ def _validate_direct_tool_request(req: "ToolRunRequest", *, repo_root: str | Non
             )
 
 
-def _deep_strip_banned_keys_inplace(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        keys_to_remove = [k for k in obj if k in _PROVIDER_BANNED_KEYS]
-        for k in keys_to_remove:
-            del obj[k]
-        for v in obj.values():
-            _deep_strip_banned_keys_inplace(v)
-    elif isinstance(obj, list):
-        for item in obj:
-            _deep_strip_banned_keys_inplace(item)
-    return obj
 
 
-_CHAT_ALLOWED_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool", "function", "developer"})
-_ROLE_ALIASES = {
-    "ai": "assistant",
-    "assistant_tool": "tool",
-    "human": "user",
-}
 
 
-def _sanitize_chat_message_content(content: Any) -> str | list[dict[str, Any]] | None:
-    if content is None:
-        return None
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        normalized_parts: list[dict[str, Any]] = []
-        for item in content:
-            if not isinstance(item, dict):
-                normalized_parts.append({"type": "text", "text": str(item)})
-                continue
-            item_type = str(item.get("type", "text") or "text")
-            if item_type == "text":
-                text_value = item.get("text", "")
-                if not isinstance(text_value, str):
-                    text_value = json.dumps(text_value, ensure_ascii=False)
-                normalized_parts.append({"type": "text", "text": text_value})
-                continue
-            normalized_parts.append({"type": item_type, "text": json.dumps(item, ensure_ascii=False)})
-        return normalized_parts
-    if isinstance(content, (dict, tuple, set)):
-        return json.dumps(content, ensure_ascii=False)
-    return str(content)
 
 
 def _sanitize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
@@ -423,266 +347,25 @@ def _sanitize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
     return clean_calls
 
 
-def _sanitize_chat_message(message: Any) -> dict[str, Any] | None:
-    if not isinstance(message, dict):
-        if isinstance(message, str):
-            return {"role": "user", "content": message}
-        return None
-
-    role_raw = str(message.get("role", "user") or "user").strip().lower()
-    role = _ROLE_ALIASES.get(role_raw, role_raw)
-    if role not in _CHAT_ALLOWED_MESSAGE_ROLES:
-        role = "user"
-
-    clean: dict[str, Any] = {"role": role}
-
-    if role == "assistant":
-        tool_calls = _sanitize_tool_calls(message.get("tool_calls"))
-        if tool_calls:
-            clean["tool_calls"] = tool_calls
-
-    if role in {"tool", "function"}:
-        tool_call_id = message.get("tool_call_id") or message.get("id")
-        if tool_call_id is not None:
-            clean["tool_call_id"] = str(tool_call_id)
-        elif role == "tool":
-            clean["role"] = "assistant"
-
-    content = _sanitize_chat_message_content(message.get("content", ""))
-    if content is None and clean.get("tool_calls"):
-        content = ""
-    if isinstance(content, str):
-        clean["content"] = content
-    elif isinstance(content, list):
-        clean["content"] = content
-    else:
-        clean["content"] = ""
-
-    name = message.get("name")
-    if isinstance(name, str) and name.strip():
-        clean["name"] = name.strip()
-
-    return clean
 
 
-def _sanitize_tools_payload(tools: Any) -> list[dict[str, Any]]:
-    if not isinstance(tools, list):
-        return []
-    clean_tools: list[dict[str, Any]] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        fn = tool.get("function")
-        if not isinstance(fn, dict):
-            continue
-        fn_name = fn.get("name")
-        if not isinstance(fn_name, str) or not fn_name.strip():
-            continue
-        description = fn.get("description", "")
-        if not isinstance(description, str):
-            description = str(description)
-        parameters = fn.get("parameters", {})
-        if not isinstance(parameters, dict):
-            parameters = {}
-        clean_tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": fn_name.strip(),
-                    "description": description,
-                    "parameters": parameters,
-                },
-            }
-        )
-    return clean_tools
 
 
-def _sanitize_openai_json_payload(payload: Any) -> Any:
-    sanitized = _strip_banned_keys(payload)
-    if not isinstance(sanitized, dict):
-        return sanitized
-
-    if "messages" in sanitized and isinstance(sanitized.get("messages"), list):
-        sanitized["messages"] = [
-            msg for msg in (_sanitize_chat_message(item) for item in sanitized.get("messages", [])) if msg is not None
-        ]
-        if "tools" in sanitized:
-            sanitized["tools"] = _sanitize_tools_payload(sanitized.get("tools"))
-
-    return sanitized
 
 
 # ---------------------------------------------------------------------------
-# Monkey-patch section
+# Native serialization preserves validated JSON state
 # ---------------------------------------------------------------------------
-_PATCHES_APPLIED = False
 
 
-def _apply_global_patches() -> None:
-    global _PATCHES_APPLIED
-    if _PATCHES_APPLIED:
-        return
-    _PATCHES_APPLIED = True
-    
-    try:
-        _patch_langchain_messages()
-    except Exception as e:
-        logger.debug(f"Could not patch LangChain messages: {e}")
-    
-    try:
-        _patch_openai_client()
-    except Exception as e:
-        logger.debug(f"Could not patch OpenAI client: {e}")
-    
-    try:
-        _patch_httpx_client()
-    except Exception as e:
-        logger.debug(f"Could not patch httpx: {e}")
-    
-    try:
-        _patch_litellm()
-    except Exception as e:
-        logger.debug(f"Could not patch LiteLLM: {e}")
-    
-    logger.debug("Global patches applied (or skipped if unavailable)")
 
 
-def _patch_langchain_messages() -> None:
-    try:
-        from langchain_core.messages import BaseMessage
-        
-        if hasattr(BaseMessage, 'model_dump'):
-            _original_model_dump = BaseMessage.model_dump
-            
-            def _patched_model_dump(self, *args, **kwargs):
-                result = _original_model_dump(self, *args, **kwargs)
-                return _strip_banned_keys(result)
-            
-            BaseMessage.model_dump = _patched_model_dump
-        
-        if hasattr(BaseMessage, 'dict'):
-            _original_dict = BaseMessage.dict
-            
-            def _patched_dict(self, *args, **kwargs):
-                result = _original_dict(self, *args, **kwargs)
-                return _strip_banned_keys(result)
-            
-            BaseMessage.dict = _patched_dict
-        
-        logger.debug("Patched LangChain BaseMessage serialization")
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug(f"Could not patch LangChain messages: {e}")
 
 
-def _patch_openai_client() -> None:
-    try:
-        from openai._base_client import SyncAPIClient, AsyncAPIClient
-        
-        if hasattr(SyncAPIClient, '_build_request'):
-            _original_build_request = SyncAPIClient._build_request
-            
-            def _patched_build_request(self, options, *args, **kwargs):
-                if hasattr(options, 'json_data') and options.json_data is not None:
-                    options.json_data = _sanitize_openai_json_payload(options.json_data)
-                return _original_build_request(self, options, *args, **kwargs)
-            
-            SyncAPIClient._build_request = _patched_build_request
-        
-        if hasattr(AsyncAPIClient, '_build_request'):
-            _original_async_build_request = AsyncAPIClient._build_request
-            
-            def _patched_async_build_request(self, options, *args, **kwargs):
-                if hasattr(options, 'json_data') and options.json_data is not None:
-                    options.json_data = _sanitize_openai_json_payload(options.json_data)
-                return _original_async_build_request(self, options, *args, **kwargs)
-            
-            AsyncAPIClient._build_request = _patched_async_build_request
-        
-        logger.debug("Patched OpenAI client request building")
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug(f"Could not patch OpenAI client: {e}")
 
 
-def _patch_httpx_client() -> None:
-    try:
-        import httpx
-        
-        _original_request = httpx.Client.request
-        _original_async_request = httpx.AsyncClient.request
-        
-        def _sanitize_content(content: Any) -> Any:
-            if content is None:
-                return None
-            try:
-                if isinstance(content, bytes):
-                    data = json.loads(content.decode('utf-8'))
-                    return json.dumps(_sanitize_openai_json_payload(data)).encode('utf-8')
-                elif isinstance(content, str):
-                    data = json.loads(content)
-                    return json.dumps(_sanitize_openai_json_payload(data))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
-            return content
-        
-        def _patched_request(self, method, url, *args, **kwargs):
-            if 'json' in kwargs and kwargs['json'] is not None:
-                kwargs['json'] = _sanitize_openai_json_payload(kwargs['json'])
-            if 'content' in kwargs and kwargs['content'] is not None:
-                kwargs['content'] = _sanitize_content(kwargs['content'])
-            return _original_request(self, method, url, *args, **kwargs)
-        
-        async def _patched_async_request(self, method, url, *args, **kwargs):
-            if 'json' in kwargs and kwargs['json'] is not None:
-                kwargs['json'] = _sanitize_openai_json_payload(kwargs['json'])
-            if 'content' in kwargs and kwargs['content'] is not None:
-                kwargs['content'] = _sanitize_content(kwargs['content'])
-            return await _original_async_request(self, method, url, *args, **kwargs)
-        
-        httpx.Client.request = _patched_request
-        httpx.AsyncClient.request = _patched_async_request
-        
-        logger.debug("Patched httpx client")
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug(f"Could not patch httpx: {e}")
 
 
-def _patch_litellm() -> None:
-    try:
-        import litellm
-        
-        _original_completion = litellm.completion
-        _original_acompletion = getattr(litellm, 'acompletion', None)
-        
-        def _patched_completion(*args, **kwargs):
-            if 'messages' in kwargs:
-                kwargs['messages'] = _strip_banned_keys(kwargs['messages'])
-            return _original_completion(*args, **kwargs)
-        
-        litellm.completion = _patched_completion
-        
-        if _original_acompletion is not None:
-            async def _patched_acompletion(*args, **kwargs):
-                if 'messages' in kwargs:
-                    kwargs['messages'] = _strip_banned_keys(kwargs['messages'])
-                return await _original_acompletion(*args, **kwargs)
-            
-            litellm.acompletion = _patched_acompletion
-        
-        logger.debug("Patched LiteLLM")
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug(f"Could not patch LiteLLM: {e}")
-
-
-# Apply patches immediately when module is loaded
-_apply_global_patches()
 
 
 def _infer_trace_row_success(row: dict[str, Any]) -> bool:
@@ -841,6 +524,9 @@ class WorkerInitPayload(BaseModel):
     model: str
     session_id: str
     base_url: str | None = None
+    provider: str | None = None
+    default_headers: dict[str, str] = Field(default_factory=dict)
+    model_configuration: dict[str, Any] = Field(default_factory=dict)
     project_root: str
     repo_root: str
     allowed_prefixes: list[str] | None = None
@@ -969,6 +655,9 @@ class ToolWorkerClient:
         model_level: str = "",
         workspace_id: str | None = None,
         repository_id: str | None = None,
+        provider: str | None = None,
+        default_headers: dict[str, str] | None = None,
+        model_configuration: dict[str, Any] | None = None,
     ) -> None:
         import uuid
         from mana_agent.config.user_config import get_setting, load_effective_settings
@@ -979,7 +668,7 @@ class ToolWorkerClient:
                 from mana_agent.config.inference_provider import credentials_from_mapping
 
                 values = load_effective_settings(include_env=False)
-                provider = str(values.get("MANA_AI_PROVIDER") or "openai")
+                provider = provider or str(values.get("MANA_AI_PROVIDER") or "openai")
                 _key, mapped_base = credentials_from_mapping(values, provider=provider)
                 resolved_base_url = mapped_base or None
             except Exception:
@@ -990,6 +679,9 @@ class ToolWorkerClient:
             model=model,
             session_id=effective_session_id,
             base_url=resolved_base_url,
+            provider=provider,
+            default_headers=default_headers or {},
+            model_configuration=model_configuration or {},
             project_root=str(project_root.resolve()),
             repo_root=str(repo_root.resolve()),
             allowed_prefixes=allowed_prefixes,
@@ -1265,14 +957,10 @@ class ToolWorkerClient:
         repaired = {**policy, "allowed_tools": expanded}
         return repaired, repaired != policy, "registered aliases normalized"
 
-    @staticmethod
-    def _is_banned_param_error(exc: ToolWorkerProcessError) -> bool:
-        return _is_banned_param_provider_error(str(exc))
 
-    _is_status_param_error = _is_banned_param_error
 
     def _prepare_tool_input(self, tool_args: dict[str, Any]) -> dict[str, Any]:
-        return _strip_banned_keys(tool_args)
+        return tool_args
 
     def _can_retry(self, exc: ToolWorkerProcessError) -> bool:
         if exc.code == "tools_only_violation":
@@ -1320,7 +1008,7 @@ class ToolWorkerClient:
             )
         
         request_id = uuid.uuid4().hex
-        sanitized_payload = payload if msg_type == "execute_operation" else _strip_banned_keys(payload)
+        sanitized_payload = payload
         envelope = WorkerEnvelope(type=msg_type, request_id=request_id, payload=sanitized_payload)
         
         logger.debug(f"[ToolWorkerClient._request_with_proc] Sending {msg_type} request: {request_id}")
@@ -1397,12 +1085,7 @@ class ToolWorkerClient:
 
 def _build_worker_ask_agent(payload: WorkerInitPayload) -> AskAgent:
     logger.info(f"[_build_worker_ask_agent] Building AskAgent with model={payload.model}")
-    embeddings = build_embeddings(
-        api_key=payload.api_key,
-        base_url=payload.base_url,
-        model=getattr(payload, "embed_model", None),
-    )
-    search_service = SearchService(store=FaissStore(embeddings))
+    search_service = SearchService(repository_root=Path(payload.project_root))
     governor = ContextCostGovernor(
         session_id=payload.session_id,
         repository_id=str(payload.repository_id or ""),
@@ -1413,6 +1096,9 @@ def _build_worker_ask_agent(payload: WorkerInitPayload) -> AskAgent:
         api_key=payload.api_key,
         model=payload.model,
         base_url=payload.base_url,
+        provider=payload.provider,
+        default_headers=payload.default_headers,
+        model_configuration=payload.model_configuration,
         search_service=search_service,
         project_root=Path(payload.project_root),
         coding_memory_service=CodingMemoryService(project_root=Path(payload.project_root)),
@@ -1450,39 +1136,15 @@ def _build_worker_ask_agent(payload: WorkerInitPayload) -> AskAgent:
 
 
 def _sanitize_trace_for_provider(trace_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _strip_banned_keys(trace_rows)
+    return trace_rows
 
 
-def _should_retry_run_tool_request(exc: BaseException) -> bool:
-    """Decide whether to retry a worker-side tool run.
-
-    Critically, a ``tools_only_violation`` is NOT retried: re-running with the
-    exact same prompt and tool policy when zero tools succeeded changes nothing
-    and only burns API calls. Genuinely transient provider errors (rate limits,
-    timeouts) are still retried.
-    """
-    if isinstance(exc, ToolWorkerProcessError):
-        if exc.code == "tools_only_violation":
-            return False
-        if exc.retriable:
-            return True
-        return exc.code in _CLIENT_RETRYABLE_CODES
-    return _is_likely_retriable_runtime_error(exc)
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=4, max=10),
-    retry=retry_if_exception(_should_retry_run_tool_request),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
 def _run_tool_request(
     *,
     ask_agent: AskAgent,
     req: ToolRunRequest,
     tools_only_strict_default: bool,
-    callbacks: list[BaseCallbackHandler] | None = None,
+    callbacks: list[Any] | None = None,
     repo_root: str | None = None,
 ) -> ToolRunResponse:
     logger.debug("=== EXECUTOR START ===")
@@ -1607,7 +1269,7 @@ def _run_tool_request(
             details={"trace_count": len(trace_rows_raw), "trace_sample": trace_rows_raw[:3]},
         )
 
-    trace_rows_safe = _strip_banned_keys(trace_rows_raw)
+    trace_rows_safe = trace_rows_raw
     logger.debug("Sanitized trace rows: %d", len(trace_rows_safe))
     logger.debug("=== EXECUTOR END ===")
 
@@ -1622,7 +1284,7 @@ def _run_tool_request(
 
     return ToolRunResponse(
         answer=str(getattr(result, "answer", "")),
-        sources=[_strip_banned_keys(s.to_dict() if hasattr(s, 'to_dict') else dict(s)) for s in getattr(result, "sources", [])],
+        sources=[s.to_dict() if hasattr(s, 'to_dict') else dict(s) for s in getattr(result, "sources", [])],
         mode=str(getattr(result, "mode", "agent-tools")),
         trace=trace_rows_safe,
         warnings=[str(item) for item in getattr(result, "warnings", [])],
@@ -1648,7 +1310,7 @@ def run_tool_request_once(
 # Callback Handler
 # ---------------------------------------------------------------------------
 
-class _WorkerToolEventCallback(BaseCallbackHandler):
+class _WorkerToolActivityObserver:
     """Emit per-tool events from worker process back to parent client."""
 
     def __init__(self, *, request_id: str, emit_reply: Callable[[WorkerReply], None], execution_context: ExecutionContext | None = None) -> None:
@@ -1658,10 +1320,10 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
         self._runs: dict[str, tuple[str, float, str]] = {}
         self._run_lock = threading.RLock()
         self._event_counter = 0
-        logger.debug(f"[_WorkerToolEventCallback] Initialized for request {request_id}")
+        logger.debug(f"[_WorkerToolActivityObserver] Initialized for request {request_id}")
 
     def _emit(self, *, name: str, message: str, data: dict[str, Any] | None = None) -> None:
-        logger.debug(f"[_WorkerToolEventCallback] Emitting event: {name}")
+        logger.debug(f"[_WorkerToolActivityObserver] Emitting event: {name}")
         self._emit_reply(
             WorkerReply(
                 type="event",
@@ -1677,7 +1339,7 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
     def _run_key(self, kwargs: dict[str, Any]) -> str:
         return str(kwargs.get("run_id") or f"thread-{threading.get_ident()}")
 
-    def on_tool_start(self, serialized: dict[str, Any] | None, input_str: str, **kwargs: Any) -> None:
+    def tool_started(self, serialized: dict[str, Any] | None, input_str: str, **kwargs: Any) -> None:
         from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
         if current_operation() is not None:
             return
@@ -1694,7 +1356,7 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
             tool, started, event_id = self._runs.pop(self._run_key(kwargs), ("tool", time.monotonic(), None))
         return tool, max(0.0, time.monotonic() - started), event_id
 
-    def on_tool_end(self, output: str, **kwargs: Any) -> None:
+    def tool_finished(self, output: str, **kwargs: Any) -> None:
         from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
         if current_operation() is not None:
             return
@@ -1703,7 +1365,7 @@ class _WorkerToolEventCallback(BaseCallbackHandler):
         self._emit(name="tool_error" if error else "tool_end", message=f"TOOL {'error' if error else 'end'}: {tool}",
             data={"tool": tool, "duration_seconds": round(duration, 3), "error": error or "", "event_id": event_id})
 
-    def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
+    def tool_failed(self, error: BaseException, **kwargs: Any) -> None:
         from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
         if current_operation() is not None:
             return
@@ -1898,7 +1560,7 @@ class _ToolWorkerServer:
             return
 
         try:
-            sanitized_env_payload = _strip_banned_keys(env.payload)
+            sanitized_env_payload = env.payload
             req = ToolRunRequest.model_validate(sanitized_env_payload)
             if req.question == "delegated task" or type(self._ask_agent).__name__ == "SimpleNamespace":
                 raise ToolWorkerProcessError(
@@ -1920,7 +1582,7 @@ class _ToolWorkerServer:
                 )
             _validate_direct_tool_request(req, repo_root=self._repo_root)
 
-            tool_event_cb = _WorkerToolEventCallback(
+            tool_event_cb = _WorkerToolActivityObserver(
                 request_id=env.request_id,
                 emit_reply=self._emit,
                 execution_context=ExecutionContext.from_mapping(req.execution_context),
@@ -1933,7 +1595,7 @@ class _ToolWorkerServer:
                 repo_root=self._repo_root,
             )
 
-            safe_payload = _strip_banned_keys(response.model_dump())
+            safe_payload = response.model_dump()
             self._emit(WorkerReply(type="ok", request_id=env.request_id, payload=safe_payload))
         except ToolWorkerProcessError as exc:
             self._emit(

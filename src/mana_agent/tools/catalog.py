@@ -79,11 +79,6 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
         "search",
     ),
     (
-        "semantic_search",
-        "Search indexed code chunks semantically when a local vector index is available.",
-        "search",
-    ),
-    (
         "repo_search",
         "Search repository text with regex or literal matching (read-only).",
         "search",
@@ -179,7 +174,7 @@ _BUILTIN_AUTO_CHAT_TOOLS: tuple[tuple[str, str, str], ...] = (
         "Load one skills/<name>/SKILL.md body after the skill is selected.",
         "repository",
     ),
-    # Email connector (wired on AskAgent via build_email_langchain_tools)
+    # Email connector (wired on AskAgent via build_email_tools)
     (
         "email_accounts_list",
         "List connected non-secret email accounts and capabilities.",
@@ -415,7 +410,7 @@ def _category_for_name(name: str) -> str:
         return "inbox"
     if n.startswith("mcp__") or n.startswith("mcp.") or n == "mcp":
         return "mcp"
-    if n in {"web_search", "github_search", "semantic_search", "repo_search", "repo_batch_search"}:
+    if n in {"web_search", "github_search", "repo_search", "repo_batch_search"}:
         return "search"
     if n in {
         "edit_file",
@@ -559,11 +554,11 @@ def _add_mcp_entries(
         return warnings
 
     try:
-        from mana_agent.mcp.tools import discovered_mcp_langchain_tools
+        from mana_agent.mcp.tools import discovered_mcp_tools
     except ImportError:
         return warnings
 
-    tools, mcp_warnings = discovered_mcp_langchain_tools(overrides=selected_overrides)
+    tools, mcp_warnings = discovered_mcp_tools(overrides=selected_overrides)
     warnings.extend(str(item) for item in mcp_warnings if str(item).strip())
     for tool in tools:
         name = str(getattr(tool, "name", "") or "").strip()
@@ -587,8 +582,7 @@ _CODING_SURFACE_CATEGORIES: frozenset[str] = frozenset(
 )
 _CODING_SURFACE_SEARCH_ALLOWLIST: frozenset[str] = frozenset(
     {
-        "semantic_search",
-        "repo_search",
+                "repo_search",
         "repo_batch_search",
     }
 )

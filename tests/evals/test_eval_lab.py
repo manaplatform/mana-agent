@@ -11,8 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
+from mana_agent.llm.messages import UserMessage
+from mana_agent.llm.engine import NativeLLMEngine
 from typer.testing import CliRunner
 
 from mana_agent.commands.cli import app
@@ -44,7 +44,7 @@ from mana_agent.evals.runner import EvalRunner
 from mana_agent.evals.scoring import score_run
 from mana_agent.evals.storage import CompletedRunImmutableError, EvalStorage, EvalStorageError
 from mana_agent.evals.workspace import EvalWorkspaceError, LocalWorktreeBackend, workspace_backend
-from mana_agent.multi_agent.runtime.compatibility import CompatibleChatOpenAI, ModelCapabilities
+from mana_agent.llm.engine import NativeLLMEngine
 
 
 def git(root: Path, *args: str) -> str:
@@ -258,27 +258,16 @@ def test_recorder_context_sequence_and_null_behavior(tmp_path: Path) -> None:
     assert current_eval_context() is None
 
 
-def test_common_model_boundary_records_safe_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ChatOpenAI,
-        "_generate",
-        lambda self, messages, stop=None, run_manager=None, **kwargs: SimpleNamespace(
-            llm_output={"token_usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}}
-        ),
-    )
-    model = CompatibleChatOpenAI(
-        api_key="test", model="gpt-4.1-mini",
-        compatibility_capabilities=ModelCapabilities(supports_responses_api=False),
-    )
+def test_common_model_boundary_records_safe_metadata(tmp_path: Path) -> None:
+    from mana_agent.llm.types import InferenceRequest, ModelResponse, Usage
+    model = NativeLLMEngine(provider="openai", api_key="test", model="fixture", base_url="https://unused.invalid", endpoint="responses")
     recorder = ArtifactEvalRecorder(tmp_path, run_id="run", task_id="task", variant_id="variant")
+    request = InferenceRequest(provider="openai", model="fixture", messages=[UserMessage("sk-abcdefghijklmnopqrstuvwxyz")])
     with use_eval_context(EvalExecutionContext("run", "task", "variant", recorder)):
-        model._generate([HumanMessage(content="sk-abcdefghijklmnopqrstuvwxyz")])
-    event = recorder.events()[0]
-    assert event.event_type == "model.call"
+        model._complete(request, ModelResponse(content="safe", usage=Usage(input_tokens=3, output_tokens=2, total_tokens=5)), "", 0)
+    event = next(event for event in recorder.events() if event.event_type == "model.call")
     assert event.payload["usage"]["total_tokens"] == 5
-    persisted = (tmp_path / "events.jsonl").read_text(encoding="utf-8")
-    assert "sk-abcdefghijklmnopqrstuvwxyz" not in persisted
-    assert "prompt_hash" in persisted
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in (tmp_path / "events.jsonl").read_text()
 
 
 def test_storage_indexes_finalizes_and_rejects_mutation(tmp_path: Path) -> None:

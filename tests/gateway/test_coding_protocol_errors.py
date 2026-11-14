@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from mana_agent.config.model_capabilities import (
-    ModelCapabilityDescriptor,
     clear_capability_cache,
     clear_model_capability_overrides,
     resolve_model_capability,

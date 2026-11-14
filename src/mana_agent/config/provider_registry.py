@@ -37,6 +37,9 @@ class ProviderDefinition:
     supports_responses_api: bool = False
     supports_decisions_api: bool = False
     codex_transport: CodexTransport = CodexTransport.UNSUPPORTED
+    inference_protocol: str = "chat_completions"
+    model_catalog_paths: tuple[str, ...] = ("/models",)
+    model_detail_path: str = ""
     custom: bool = False
     aliases: tuple[str, ...] = ()
 
@@ -44,15 +47,16 @@ class ProviderDefinition:
 class ProviderRegistry:
     """Canonical inventory of providers backed by working runtime adapters.
 
-    Mana-Agent currently executes all configured inference through its
-    OpenAI-compatible adapter.  Keeping that fact here prevents the CLI and
-    TUI from advertising providers that the runtime cannot actually call.
+    Protocols are explicit provider configuration. Model capabilities require
+    separate evidence and never follow from this transport inventory.
     """
 
     def __init__(self, providers: tuple[ProviderDefinition, ...] | None = None) -> None:
         self._providers = providers or (
             ProviderDefinition(
                 id="openai",
+                inference_protocol="responses",
+                model_detail_path="/models/{model}",
                 display_name="OpenAI",
                 auth_method=AuthenticationMethod.API_KEY,
                 default_base_url="https://api.openai.com/v1",
@@ -63,6 +67,7 @@ class ProviderRegistry:
             ),
             ProviderDefinition(
                 id="openrouter",
+                model_catalog_paths=("/models", "/images/models", "/videos/models"),
                 display_name="OpenRouter",
                 auth_method=AuthenticationMethod.API_KEY,
                 default_base_url="https://openrouter.ai/api/v1",
@@ -87,6 +92,9 @@ class ProviderRegistry:
             ),
             ProviderDefinition(
                 id="anthropic",
+                inference_protocol="anthropic_messages",
+                model_detail_path="/models/{model}",
+                default_headers=(("anthropic-version", "2023-06-01"),),
                 display_name="Anthropic",
                 auth_method=AuthenticationMethod.API_KEY,
                 default_base_url="https://api.anthropic.com",
@@ -130,9 +138,7 @@ class ProviderRegistry:
 PROVIDERS = ProviderRegistry()
 
 # Providers whose upstream catalog IDs are usually bare model names (not org/model).
-_SIMPLE_UPSTREAM_PROVIDERS = frozenset(
-    {"openai", "custom", "openrouter", "anthropic", "xai", "x-ai"}
-)
+_SIMPLE_UPSTREAM_PROVIDERS = frozenset({"openai", "custom", "openrouter", "anthropic", "xai", "x-ai"})
 
 
 def _known_provider_ids() -> set[str]:
@@ -226,9 +232,26 @@ def split_qualified_model_id(
     if "/" in rest:
         return head_canonical, rest
     # openai/gpt-4.1-mini stored as a bare OpenRouter/NVIDIA upstream ID.
-    if default in {"openrouter", "nvidia"} and head_canonical in {"openai", "custom"}:
+    if default in {"openrouter", "nvidia", "custom"}:
         return default, text
     return head_canonical, rest
+
+
+def model_id_for_provider(provider: str, value: str) -> str:
+    """Resolve an explicit provider/model pair while preserving upstream namespaces."""
+    definition = PROVIDERS.get(provider)
+    model = str(value or "").strip()
+    prefix = f"{definition.id}/"
+    if model.startswith(prefix):
+        remainder = model[len(prefix):]
+        if "/" in remainder or definition.id in _SIMPLE_UPSTREAM_PROVIDERS:
+            return remainder
+    if definition.id in {"openrouter", "nvidia", "custom"}:
+        return model
+    selected, bare = split_qualified_model_id(model, default_provider=definition.id)
+    if selected != definition.id:
+        raise ValueError("Qualified model belongs to a different provider than the supplied connection")
+    return bare
 
 
 def provider_credential_env_names(provider: str) -> tuple[str, str]:

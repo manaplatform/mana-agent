@@ -84,7 +84,6 @@ def ensure_home_layout() -> Path:
         "sessions",
         "cache/files",
         "cache/parsed-chunks",
-        "cache/embeddings",
         "logs",
         "llm_logs",
         "observability",

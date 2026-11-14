@@ -9,7 +9,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mana_agent.evals.ids import stable_hash
@@ -140,7 +140,7 @@ class MultiTaskOrchestrator:
         self.maximum_concurrency = max(1, int(maximum_concurrency))
 
     def decompose(self, *, user_prompt: str, context: dict[str, Any]) -> MultiTaskPlan:
-        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+        if self.llm is None or not callable(getattr(self.llm, "generate_sync", None)):
             raise MultiTaskError(
                 "Model decision failed: multi_task_decomposition. No fallback action was executed. "
                 "Reason: decomposition model is unavailable."
@@ -148,47 +148,11 @@ class MultiTaskOrchestrator:
         request = {"user_prompt": user_prompt, "context": context, "maximum_children": MAX_MULTI_TASK_CHILDREN}
         messages = [
             SystemMessage(content=MULTI_TASK_DECOMPOSITION_PROMPT),
-            HumanMessage(content=json.dumps(request, ensure_ascii=False, sort_keys=True)),
+            UserMessage(content=json.dumps(request, ensure_ascii=False, sort_keys=True)),
         ]
         started = time.perf_counter()
         try:
-            structured = getattr(self.llm, "with_structured_output", None)
-            response = None
-            structured_error = None
-            if callable(structured):
-                try:
-                    response = structured(MultiTaskPlan, method="json_schema", strict=True).invoke(messages)
-                except Exception as exc:
-                    structured_error = exc
-            if response is None:
-                response = self.llm.invoke(messages)
-            try:
-                if isinstance(response, MultiTaskPlan):
-                    plan = response
-                elif isinstance(response, dict):
-                    plan = MultiTaskPlan.model_validate(response)
-                else:
-                    raw = getattr(response, "content", response)
-                    text = extract_model_text(raw)
-                    if text.startswith("```"):
-                        text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-                    start, end = text.find("{"), text.rfind("}")
-                    if start >= 0 and end >= start:
-                        text = text[start : end + 1]
-                    plan = MultiTaskPlan.model_validate_json(text)
-            except Exception as coerce_exc:
-                if callable(structured) and structured_error is None:
-                    direct_response = self.llm.invoke(messages)
-                    raw = getattr(direct_response, "content", direct_response)
-                    text = extract_model_text(raw)
-                    if text.startswith("```"):
-                        text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-                    start, end = text.find("{"), text.rfind("}")
-                    if start >= 0 and end >= start:
-                        text = text[start : end + 1]
-                    plan = MultiTaskPlan.model_validate_json(text)
-                else:
-                    raise coerce_exc
+            plan = self.llm.decide_sync(messages, MultiTaskPlan)
         except Exception as exc:
             record_current(
                 "model.call.failed",
@@ -206,7 +170,7 @@ class MultiTaskOrchestrator:
                 "prompt_hash": stable_hash(MULTI_TASK_DECOMPOSITION_PROMPT),
                 "request_hash": stable_hash(request),
                 "response": plan.model_dump(mode="json"),
-                "usage": getattr(response, "usage_metadata", None),
+                "usage": None,
                 "latency_seconds": time.perf_counter() - started,
             },
         )

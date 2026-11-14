@@ -233,9 +233,7 @@ def test_followup_classifier_structured_query_failure() -> None:
         raise ConnectionError("Network failure during conversation retrieval")
 
     mock_llm = MagicMock()
-    mock_structured = MagicMock()
-    mock_llm.with_structured_output.return_value = mock_structured
-    mock_structured.invoke.side_effect = [
+    mock_llm.decide_sync.side_effect = [
         FollowupClassificationOutput(
             action="retrieve_context",
             category="new_task",

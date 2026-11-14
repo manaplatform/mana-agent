@@ -26,7 +26,7 @@ TRANSACTIONAL_COMPUTER_TOOLS = frozenset({
 })
 
 READ_ONLY_MODEL_TOOLS = frozenset({
-    "semantic_search", "read_file", "chunk_file", "list_tools", "ls", "repo_search",
+    "read_file", "chunk_file", "list_tools", "ls", "repo_search",
     "repo_batch_read", "repo_batch_search", "list_files", "find_symbols", "call_graph",
     "tool_contracts", "read_skill", "github_search", "web_search",
     "git_status", "git_diff", "git_log", "git_show", "git_branch", "git_remote", "git_help",

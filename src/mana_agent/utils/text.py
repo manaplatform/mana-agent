@@ -28,7 +28,7 @@ def extract_model_text(content: Any) -> str:
     """Extract human/assistant-visible text from model output, discarding reasoning/thinking blocks.
 
     Handles string outputs, list-of-blocks structures (from Anthropic, Gemini, OpenAI thinking,
-    LangChain AIMessage, etc.), and nested structures. Discards reasoning and thinking dictionaries
+    native AssistantMessage, etc.), and nested structures. Discards reasoning and thinking dictionaries
     rather than stringifying raw metadata payloads.
     """
     if content is None:

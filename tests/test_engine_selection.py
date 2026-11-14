@@ -43,7 +43,7 @@ class MockLLM:
         self.responses = responses or {}
         self.calls: list[Any] = []
 
-    def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
+    def generate_sync(self, messages: list[Any], **kwargs: Any) -> Any:
         self.calls.append(messages)
         content = messages[-1].content if messages else ""
         text_resp = self.responses.get(str(content))
@@ -62,18 +62,26 @@ class MockLLM:
         from types import SimpleNamespace
         return SimpleNamespace(content=str(text_resp))
 
-    def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
-        class _Runner:
-            def __init__(self, parent: MockLLM) -> None:
-                self.parent = parent
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-            def invoke(self, messages: list[Any]) -> Any:
-                self.parent.calls.append(messages)
-                if isinstance(schema, type) and issubclass(schema, BaseModel):
-                    return schema.model_validate({"key": "extracted_val"})
-                return {"key": "extracted_val"}
 
-        return _Runner(self)
+@pytest.fixture(autouse=True)
+def explicit_decisions_evidence(monkeypatch):
+    from types import SimpleNamespace
+    import mana_agent.engine_selection.selector as selection
+    import mana_agent.engine_selection.decisions_client as clients
+    old = selection.get_setting
+    def settings(name, default=None):
+        return "fixture-decisions-model" if name == "MANA_DECISIONS_MODEL" else old(name, default)
+    monkeypatch.setattr(selection, "get_setting", settings)
+    monkeypatch.setattr(clients, "get_setting", settings)
+    monkeypatch.setattr("mana_agent.llm.registry.resolve_profile", lambda provider, model, **kwargs: SimpleNamespace(supports=lambda capability: provider == "openai" and capability == "decisions_api"))
 
 
 def _make_mock_client(response_dict: dict[str, Any], status_code: int = 200) -> tuple[DecisionsClient, list[httpx.Request]]:
@@ -121,7 +129,7 @@ def test_supported_predicate_uses_decisions() -> None:
     assert result.confidence == 0.95
     assert len(requests) == 1
     req_body = json.loads(requests[0].content)
-    assert req_body["model"] == DEFAULT_DECISIONS_MODEL
+    assert req_body["model"] == "fixture-decisions-model"
     assert req_body["questions"][0]["type"] == "predicate"
 
 
@@ -447,72 +455,19 @@ def test_shared_decisions_are_not_recomputed() -> None:
 # 6. Fallback behavior: API failures trigger safe bounded fallback
 # -----------------------------------------------------------------------------
 
-def test_decisions_refusal_triggers_safe_fallback() -> None:
-    """Model refusal in Decisions triggers bounded fallback to compatible engine."""
+@pytest.mark.parametrize("failure", ["refusal", "timeout", "http_error"])
+def test_decisions_failure_never_uses_another_format(failure):
     selector = EngineSelector()
-    op = choice_op(
-        instructions="Classify this complaint department",
-        choices=["billing", "shipping", "technical"],
-        evidence="I was charged twice.",
-        name="dept_choice",
-    )
-
-    # Decisions client returns a refusal
-    client, requests = _make_mock_client({
-        "answers": [{"type": "refusal", "name": "dept_choice", "refusal": "I cannot answer this question."}]
-    })
-    mock_llm = MockLLM({"dept_choice": json.dumps({"choice": "billing", "reason": "Mentions charged twice"})})
-    dispatcher = SmartDispatcher(selector=selector, decisions_client=client)
-
-    result = dispatcher.execute_auto(op, llm=mock_llm)
-    assert result.success is True
-    assert result.fallback_occurred is True
-    assert "refused" in result.fallback_reason.lower()
-    assert result.result == "billing"
-    assert len(requests) == 1  # 1 Decisions call made (and failed)
-    assert len(mock_llm.calls) == 1  # Safe bounded fallback invoked once
-
-
-def test_decisions_timeout_triggers_safe_fallback() -> None:
-    """Decisions timeout triggers bounded fallback to compatible engine."""
-    selector = EngineSelector()
-    op = predicate_op("Is file clean?", "clean content", name="clean_check")
-
-    def timeout_handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("Connection timed out")
-
-    transport = httpx.MockTransport(timeout_handler)
-    client = DecisionsClient(api_key="test", http_client=httpx.Client(transport=transport))
-    mock_llm = MockLLM({"clean_check": json.dumps({"result": True, "reason": "No issues"})})
-
-    dispatcher = SmartDispatcher(selector=selector, decisions_client=client)
-    result = dispatcher.execute_auto(op, llm=mock_llm)
-
-    assert result.success is True
-    assert result.fallback_occurred is True
-    assert "timed out" in result.fallback_reason.lower()
-    assert result.result is True
-
-
-def test_decisions_http_error_triggers_safe_fallback() -> None:
-    """Decisions HTTP 500 error triggers bounded fallback to compatible engine."""
-    selector = EngineSelector()
-    op = score_op(
-        instructions="Rate quality",
-        levels=[{"label": "Poor"}, {"label": "Good"}],
-        evidence="sample",
-        name="quality_score",
-    )
-
-    client, _ = _make_mock_client({"error": "Internal server error"}, status_code=500)
-    mock_llm = MockLLM({"quality_score": json.dumps({"score": 1.0, "reason": "Good"})})
-
-    dispatcher = SmartDispatcher(selector=selector, decisions_client=client)
-    result = dispatcher.execute_auto(op, llm=mock_llm)
-
-    assert result.success is True
-    assert result.fallback_occurred is True
-    assert "http 500" in result.fallback_reason.lower()
+    if failure == "timeout":
+        def handler(request):
+            raise httpx.ReadTimeout("controlled timeout")
+        client = DecisionsClient(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    else:
+        client, _ = _make_mock_client({"answers": [{"type": "refusal", "name": "check", "refusal": "controlled refusal"}]} if failure == "refusal" else {"error": "controlled"}, status_code=500 if failure == "http_error" else 200)
+    llm = MockLLM()
+    with pytest.raises(RuntimeError, match="No alternate engine"):
+        SmartDispatcher(selector=selector, decisions_client=client).execute_auto(predicate_op("Check", "data", name="check"), llm=llm)
+    assert llm.calls == []
 
 
 # -----------------------------------------------------------------------------
@@ -531,10 +486,10 @@ def test_decisions_disabled_bypasses_decisions_completely() -> None:
     client, requests = _make_mock_client({})
     mock_llm = MockLLM({"valid_check": json.dumps({"result": True})})
     dispatcher = SmartDispatcher(selector=selector, decisions_client=client)
-    result = dispatcher.execute_auto(op, llm=mock_llm)
-
-    assert result.success is True
-    assert len(requests) == 0  # Zero Decisions requests attempted
+    with pytest.raises(RuntimeError, match="No alternate engine"):
+        dispatcher.execute_auto(op, llm=mock_llm)
+    assert len(requests) == 0
+    assert mock_llm.calls == []
 
 
 def test_non_openai_provider_bypasses_decisions_completely() -> None:

@@ -660,7 +660,7 @@ class _MultiTaskMemoryModel:
         self.memory_task_id = memory_task_id
         self.payloads: list[dict[str, Any]] = []
 
-    def invoke(self, messages: list[Any], **_kwargs: Any) -> Any:
+    def generate_sync(self, messages: list[Any], **_kwargs: Any) -> Any:
         content = str(getattr(messages[0], "content", messages[0]))
         if content == MULTI_TASK_DECOMPOSITION_PROMPT:
             return SimpleNamespace(content=self.plan.model_dump_json())
@@ -689,6 +689,18 @@ class _MultiTaskMemoryModel:
                 }
             )
         )
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 class _CapsuleMemoryService:

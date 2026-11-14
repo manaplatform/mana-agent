@@ -15,7 +15,7 @@ class OperationPolicy:
 READ_TOOLS = frozenset({
     "read_file", "read_skill", "list_files", "repo_search", "repo_batch_read",
     "repo_batch_search", "batch_read_files", "batch_search_files", "batch_list_files",
-    "find_symbols", "call_graph", "semantic_search", "git_status", "git_diff", "git_log",
+    "find_symbols", "call_graph", "git_status", "git_diff", "git_log",
     "git_show", "git_help", "conversation_context_read", "memory_read",
 })
 WRITE_TOOLS = frozenset({

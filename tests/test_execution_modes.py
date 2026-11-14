@@ -420,7 +420,7 @@ def test_plan_service_with_llm_proposal_plan(tmp_path: Path) -> None:
     (src_dir / "app.py").write_text("def run(): pass\n")
 
     mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(
+    mock_llm.generate_sync.return_value = MagicMock(
         content="""{
             "objectives": ["LLM Objective 1", "LLM Objective 2"],
             "affected_files": ["src/pkg/app.py"],

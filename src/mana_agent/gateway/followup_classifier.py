@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mana_agent.context_cost.accounting import ModelContextLimitError
@@ -299,7 +299,7 @@ class FollowupClassifier:
         turn_retrieval_cache: dict[str, Any] | None = None,
         retrieval_ledger: Any | None = None,
     ) -> FollowupClassification:
-        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+        if self.llm is None or not callable(getattr(self.llm, "generate_sync", None)):
             raise FollowupClassificationError(
                 "Model decision failed: followup_classification. No fallback action was executed. "
                 "Reason: decision model is unavailable."
@@ -324,31 +324,11 @@ class FollowupClassifier:
 
             messages = [
                 SystemMessage(content=_PROMPT),
-                HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+                UserMessage(content=json.dumps(payload, ensure_ascii=False)),
             ]
             try:
-                structured = getattr(self.llm, "with_structured_output", None)
-                raw = None
-                structured_error = None
-                if callable(structured):
-                    try:
-                        raw = structured(
-                            FollowupClassificationOutput, method="json_schema", strict=True
-                        ).invoke(messages)
-                    except (ContextBudgetExceeded, ModelContextLimitError):
-                        raise
-                    except Exception as exc:
-                        structured_error = exc
-                if raw is None:
-                    raw = self.llm.invoke(messages)
-                try:
-                    output = _coerce_followup_output(raw)
-                except Exception as coerce_exc:
-                    if callable(structured) and structured_error is None:
-                        direct_raw = self.llm.invoke(messages)
-                        output = _coerce_followup_output(direct_raw)
-                    else:
-                        raise coerce_exc
+                raw = self.llm.decide_sync(messages, FollowupClassificationOutput)
+                output = _coerce_followup_output(raw)
             except (ContextBudgetExceeded, ModelContextLimitError) as exc:
                 raise FollowupClassificationError(
                     "Model decision failed: followup_classification. No fallback action was executed. "
@@ -369,8 +349,8 @@ class FollowupClassifier:
                 query = output.retrieval.query if output.retrieval else ""
                 max_turns = output.retrieval.max_turns if output.retrieval else 1
                 try:
-                    if hasattr(conversation_tool, "invoke") and callable(conversation_tool.invoke):
-                        tool_res = conversation_tool.invoke({"query": query, "max_turns": max_turns})
+                    if hasattr(conversation_tool, "call") and callable(conversation_tool.call):
+                        tool_res = conversation_tool.call({"query": query, "max_turns": max_turns})
                     elif callable(conversation_tool):
                         tool_res = conversation_tool(query=query, max_turns=max_turns)
                     else:

@@ -9,7 +9,7 @@ class FakeStore:
     def __init__(self, hits: list[SearchHit]) -> None:
         self.hits = hits
 
-    def search(self, _index_dir: Path, query: str, k: int) -> list[SearchHit]:
+    def search(self, _index_dir: Path | None = None, query: str = "", k: int = 5, **kwargs) -> list[SearchHit]:
         assert query
         assert k
         return self.hits
@@ -115,27 +115,27 @@ def test_ask_service_with_sources() -> None:
             snippet="def add(a,b): return a+b",
         )
     ]
-    router = FakeRouter(RouteDecision(kind="semantic_qa", confidence=0.9, reason="question needs indexed context"))
-    service = AskService(store=FakeStore(sources), qna_chain=FakeQnA(), entry_router=router)
+    router = FakeRouter(RouteDecision(kind="repository_qa", confidence=0.9, reason="question needs indexed context"))
+    service = AskService(search_service=FakeStore(sources), qna_chain=FakeQnA(), entry_router=router)
     response = service.ask(index_dir="/tmp/index", question="How does add work?", k=4)
 
     assert "/tmp/good.py:3-6" in response.answer
     assert response.sources
-    assert response.to_dict()["route_trace"]["route_kind"] == "semantic_qa"
+    assert response.to_dict()["route_trace"]["route_kind"] == "repository_qa"
 
 
 def test_ask_service_without_sources_stays_on_model_selected_route(tmp_path) -> None:
-    router = FakeRouter(RouteDecision(kind="semantic_qa", confidence=0.9, reason="question needs indexed context"))
-    service = AskService(store=FakeStore([]), qna_chain=FakeQnA(), project_root=tmp_path, entry_router=router)
+    router = FakeRouter(RouteDecision(kind="repository_qa", confidence=0.9, reason="question needs indexed context"))
+    service = AskService(search_service=FakeStore([]), qna_chain=FakeQnA(), project_root=tmp_path, entry_router=router)
     response = service.ask(index_dir="/tmp/index", question="How does add work?", k=4)
     assert "could not find relevant indexed code context" not in response.answer.lower()
-    assert "selected semantic route found no indexed context" in response.answer.lower()
+    assert "repository search found no matching context" in response.answer.lower()
     assert "fallback" not in response.to_dict().get("mode", "")
 
 
 def test_ask_service_dir_mode_groups_sources() -> None:
     service = AskService(
-        store=FakeStore([]),
+        
         qna_chain=FakeQnA(),
         search_service=FakeSearchService(),
     )
@@ -152,7 +152,7 @@ def test_ask_service_dir_mode_groups_sources() -> None:
 def test_ask_service_tools_dir_mode_sets_grouped_sources() -> None:
     router = FakeRouter(RouteDecision(kind="tool_execution", confidence=0.8, reason="tools requested"))
     service = AskService(
-        store=FakeStore([]),
+        
         qna_chain=FakeQnA(),
         ask_agent=FakeAskAgent(),
         search_service=FakeSearchService(),

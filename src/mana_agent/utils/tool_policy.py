@@ -19,7 +19,7 @@ from typing import Iterable
 TOOL_GROUPS: dict[str, list[str]] = {
     "file_system": ["ls", "list_files", "read_file", "repo_batch_read", "repo_search", "repo_batch_search"],
     "inspect": ["ls", "list_files", "read_file", "repo_batch_read", "repo_search", "repo_batch_search", "find_symbols", "call_graph"],
-    "search": ["semantic_search", "repo_search", "repo_batch_search", "list_files", "find_symbols", "call_graph"],
+    "search": ["repo_search", "repo_batch_search", "list_files", "find_symbols", "call_graph"],
     "edit": [
         "edit_file",
         "multi_edit_file",
@@ -51,8 +51,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
 # with AskAgent._build_tools / the externally-registered tools.
 REGISTERED_TOOLS: frozenset[str] = frozenset(
     {
-        "semantic_search",
-        "read_file",
+                "read_file",
         "run_command",
         "chunk_file",
         "list_tools",

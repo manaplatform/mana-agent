@@ -353,23 +353,20 @@ class ContextCostGovernor:
             return self._implementation_tokens_remaining()
 
     def _model_profile(self, provider: str, model: str) -> Any | None:
-        normalized_provider = str(provider or "").casefold()
-        normalized_model = str(model or "")
-        if normalized_provider and normalized_model.casefold().startswith(f"{normalized_provider}/"):
-            normalized_model = normalized_model.split("/", 1)[1]
+        from mana_agent.config.provider_registry import split_qualified_model_id
+        normalized_provider, normalized_model = split_qualified_model_id(model, default_provider=provider)
+        if provider and normalized_provider.casefold() != provider.casefold():
+            return None
         matches = [
             profile for profile in self._profiles
             if str(getattr(profile, "model_id", "")) == normalized_model
-            and (not normalized_provider or str(getattr(profile, "provider", "")).casefold() == normalized_provider)
+            and str(getattr(profile, "provider", "")).casefold() == normalized_provider
         ]
         if len(matches) == 1:
             return matches[0]
-        model_matches = [profile for profile in self._profiles if str(getattr(profile, "model_id", "")) == normalized_model]
-        if len(model_matches) == 1:
-            return model_matches[0]
         try:
             return self.profile_resolver.resolve(
-                ModelIdentity(provider or "unknown", model)
+                ModelIdentity(normalized_provider, normalized_model)
             )
         except Exception:
             return None

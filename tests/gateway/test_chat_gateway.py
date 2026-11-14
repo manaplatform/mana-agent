@@ -61,10 +61,15 @@ class _DummyAskService:
     """Minimal stand-in so gateway construction tests do not require OPENAI_API_KEY."""
 
     class _EntryModel:
-        def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, messages, **_kwargs):
+        def generate_sync(self, messages, **_kwargs):
             payload = json.loads(messages[-1].content)
             if "recovery_candidates" in payload or (messages and "You decide whether a new user request may resume" in str(messages[0].content)):
                 return SimpleNamespace(
@@ -2523,10 +2528,15 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
             return None
 
     class _StructuredEntryModel:
-        def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, messages, **_kwargs):
+        def generate_sync(self, messages, **_kwargs):
             payload = json.loads(messages[-1].content)
             if "feature integration decision layer" in str(messages[0].content).lower() or "wiring_targets" in str(payload):
                 return SimpleNamespace(

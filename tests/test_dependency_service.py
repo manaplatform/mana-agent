@@ -20,7 +20,7 @@ def _write_repo(root: Path) -> None:
     (root / "pyproject.toml").write_text(
         """
 [project]
-dependencies = ["typer>=0.12", "langchain>=0.3"]
+dependencies = ["typer>=0.12", "httpx>=0.27"]
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 """.strip(),
@@ -30,7 +30,7 @@ dev = ["pytest>=8.0"]
         """
 import typer
 import pkg.b
-from langchain_openai import ChatOpenAI
+from mana_agent.llm.engine import NativeLLMEngine
 """.strip(),
         encoding="utf-8",
     )
@@ -90,7 +90,7 @@ def test_dependency_service_builds_graph_and_detects_stack(tmp_path: Path) -> No
 
     assert "Typer" in report.frameworks
     assert "React" in report.frameworks
-    assert "langchain" in report.runtime_dependencies
+    assert "httpx" in report.runtime_dependencies
     assert "pytest" in report.dev_dependencies
     assert any(edge.target.endswith("pkg.b") for edge in report.module_edges)
     assert any(edge.target == "typer" for edge in report.dependency_edges)

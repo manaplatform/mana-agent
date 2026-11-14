@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvocationTrace
 from mana_agent.canvas.service import canvas_service_for_root
@@ -52,55 +52,84 @@ def test_ask_agent_detects_wrapped_structured_tool_error() -> None:
     assert "email_provider_error" in AskAgent._tool_error_detail(content)
 
 
-class _FakeAIMessage:
+class _FakeAssistantMessage:
     def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
         self.content = content
         self.tool_calls = tool_calls or []
 
+    @property
+    def message(self):
+        from mana_agent.llm.messages import AssistantMessage
+        return AssistantMessage(content=self.content, tool_calls=getattr(self, "tool_calls", []))
+
 
 class _FakeBoundModel:
-    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+    def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
         self._responses = responses
         self._idx = 0
 
-    def invoke(
+    def generate_sync(
         self, _messages: list[object], config: object | None = None
-    ) -> _FakeAIMessage:
+    , **_native_options) -> _FakeAssistantMessage:
         del config
         value = self._responses[self._idx]
         self._idx += 1
         return value
 
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
+
 
 class _FakeLLM:
-    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+    def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
         self._responses = responses
 
-    def bind_tools(self, _tools: list[object]) -> _FakeBoundModel:
+    def with_tools(self, _tools: list[object], **_native_options) -> _FakeBoundModel:
         return _FakeBoundModel(self._responses)
 
 
 class _CapabilityBindingLLM:
     """Captures each active capability set while replaying model decisions."""
 
-    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+    def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
         self._responses = list(responses)
         self.bound_tool_names: list[set[str]] = []
         self.invocation_kwargs: list[dict[str, object]] = []
 
-    def bind_tools(
+    def with_tools(
         self, tools: list[object], tool_choice: str | None = None
-    ) -> "_CapabilityBindingLLM":
+    , **_native_options) -> "_CapabilityBindingLLM":
         del tool_choice
         self.bound_tool_names.append({str(getattr(tool, "name", "")) for tool in tools})
         return self
 
-    def invoke(
+    def generate_sync(
         self, _messages: list[object], config: object | None = None, **kwargs: object
-    ) -> _FakeAIMessage:
+    ) -> _FakeAssistantMessage:
         del config
         self.invocation_kwargs.append(kwargs)
         return self._responses.pop(0)
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def _build_agent(tmp_path: Path) -> AskAgent:
@@ -127,13 +156,13 @@ def test_ask_agent_enforces_max_steps(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
-                tool_calls=[{"id": "1", "name": "semantic_search", "args": {"query": "find x", "k": 2}}],
+                tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "find x", "k": 2}}],
             ),
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
-                tool_calls=[{"id": "2", "name": "semantic_search", "args": {"query": "find y", "k": 2}}],
+                tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "find y", "k": 2}}],
             ),
         ]
     )
@@ -143,7 +172,7 @@ def test_ask_agent_enforces_max_steps(tmp_path: Path) -> None:
     assert result.answer.strip()
     # The trace is preserved and a best-effort answer is synthesized from evidence.
     assert result.trace
-    assert any(item.tool_name == "semantic_search" for item in result.trace)
+    assert any(item.tool_name == "repo_search" for item in result.trace)
     assert any("returned best-effort final answer" in str(w) for w in result.warnings)
 
 
@@ -155,7 +184,7 @@ def test_ask_agent_executes_canvas_create_through_transactional_adapter(
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
                 tool_calls=[
                     {
@@ -184,7 +213,7 @@ def test_ask_agent_executes_canvas_create_through_transactional_adapter(
                     }
                 ],
             ),
-            _FakeAIMessage("Canvas created.", tool_calls=[]),
+            _FakeAssistantMessage("Canvas created.", tool_calls=[]),
         ]
     )
 
@@ -221,7 +250,7 @@ class _CountingTool:
 
 def _register_tool(agent: AskAgent, name: str, func) -> None:  # noqa: ANN001
     agent.tools = [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=func,
             name=name,
             description=f"Test tool {name}.",
@@ -236,9 +265,9 @@ def test_ask_agent_blocks_exact_duplicate_tool_call(tmp_path: Path) -> None:
     _register_tool(agent, "external_lookup", lambda query: counter(query=query))
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "external_lookup", "args": {"query": "x"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "external_lookup", "args": {"query": "x"}}]),
-            _FakeAIMessage("Done", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "external_lookup", "args": {"query": "x"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "external_lookup", "args": {"query": "x"}}]),
+            _FakeAssistantMessage("Done", tool_calls=[]),
         ]
     )
 
@@ -259,8 +288,8 @@ def test_ask_agent_email_only_turn_does_not_initialize_run_evidence(
     _register_tool(agent, "email_search", lambda query: calls(query=query))
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "email_search", "args": {"query": "newer"}}]),
-            _FakeAIMessage("No new messages.", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "email_search", "args": {"query": "newer"}}]),
+            _FakeAssistantMessage("No new messages.", tool_calls=[]),
         ]
     )
 
@@ -294,7 +323,7 @@ def test_ask_agent_defers_email_schema_until_model_loads_capability(tmp_path: Pa
     agent.context_cost_governor.mode = GovernorMode.SOFT
     llm = _CapabilityBindingLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
                 tool_calls=[
                     {
@@ -304,7 +333,7 @@ def test_ask_agent_defers_email_schema_until_model_loads_capability(tmp_path: Pa
                     }
                 ],
             ),
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
                 tool_calls=[
                     {
@@ -314,7 +343,7 @@ def test_ask_agent_defers_email_schema_until_model_loads_capability(tmp_path: Pa
                     }
                 ],
             ),
-            _FakeAIMessage("No new messages."),
+            _FakeAssistantMessage("No new messages."),
         ]
     )
     agent.llm = llm  # type: ignore[assignment]
@@ -346,22 +375,22 @@ def test_ask_agent_keeps_a_late_loaded_capability_for_the_next_step(tmp_path: Pa
     _register_tool(agent, "email_search", lambda: {"ok": True, "result": "inbox"})
     llm = _CapabilityBindingLLM(
         [
-            _FakeAIMessage("", tool_calls=[{
+            _FakeAssistantMessage("", tool_calls=[{
                 "id": "discover-1", "name": "capability_search", "args": {"query": "unmatched-one"},
             }]),
-            _FakeAIMessage("", tool_calls=[{
+            _FakeAssistantMessage("", tool_calls=[{
                 "id": "discover-2", "name": "capability_search", "args": {"query": "unmatched-two"},
             }]),
-            _FakeAIMessage("", tool_calls=[{
+            _FakeAssistantMessage("", tool_calls=[{
                 "id": "discover-3", "name": "capability_search", "args": {"query": "unmatched-three"},
             }]),
-            _FakeAIMessage("", tool_calls=[{
+            _FakeAssistantMessage("", tool_calls=[{
                 "id": "load-email", "name": "capability_load", "args": {"names": ["email_search"]},
             }]),
-            _FakeAIMessage("", tool_calls=[{
+            _FakeAssistantMessage("", tool_calls=[{
                 "id": "email", "name": "email_search", "args": {},
             }]),
-            _FakeAIMessage("Inbox checked."),
+            _FakeAssistantMessage("Inbox checked."),
         ]
     )
     agent.llm = llm  # type: ignore[assignment]
@@ -392,7 +421,7 @@ def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: P
     _register_tool(agent, "api_workflow_decide", lambda: {"ok": True})
     llm = _CapabilityBindingLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
                 tool_calls=[
                     {
@@ -402,7 +431,7 @@ def test_ask_agent_binds_declared_initial_capability_in_observe_mode(tmp_path: P
                     }
                 ],
             ),
-            _FakeAIMessage("Workflow decision recorded."),
+            _FakeAssistantMessage("Workflow decision recorded."),
         ]
     )
     agent.llm = llm  # type: ignore[assignment]
@@ -433,9 +462,9 @@ def test_ask_agent_deduplicates_similar_repo_searches(tmp_path: Path) -> None:
     _register_tool(agent, "repo_search", lambda query: counter(query=query))
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "README"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "README.md"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "repo_search", "args": {"query": "README*"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "README"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "README.md"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "3", "name": "repo_search", "args": {"query": "README*"}}]),
         ]
     )
 
@@ -453,10 +482,10 @@ def test_ask_agent_stops_on_no_progress(tmp_path: Path) -> None:
     _register_tool(agent, "repo_search", lambda query: counter(query=query))
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "alpha"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "beta"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "repo_search", "args": {"query": "gamma"}}]),
-            _FakeAIMessage("Should not be reached", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "alpha"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "beta"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "3", "name": "repo_search", "args": {"query": "gamma"}}]),
+            _FakeAssistantMessage("Should not be reached", tool_calls=[]),
         ]
     )
 
@@ -470,8 +499,8 @@ def test_ask_agent_forces_final_answer_when_budget_low(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "semantic_search", "args": {"query": "q1", "k": 2}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "semantic_search", "args": {"query": "q2", "k": 2}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "q1", "k": 2}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "q2", "k": 2}}]),
         ]
     )
 
@@ -499,7 +528,7 @@ def test_ask_agent_reuses_external_search_memory_context(tmp_path: Path) -> None
     )
     agent = _build_agent(tmp_path)
     agent.search_config = SearchConfig(enable_ask_agent=True, enable_web=True, enable_github=True)
-    agent.llm = _FakeLLM([_FakeAIMessage("Done", tool_calls=[])])
+    agent.llm = _FakeLLM([_FakeAssistantMessage("Done", tool_calls=[])])
 
     result = agent.run("latest docs", tmp_path / ".mana/index", 2, max_steps=2, timeout_seconds=2)
 
@@ -514,23 +543,35 @@ def test_ask_agent_reuses_external_search_memory_context(tmp_path: Path) -> None
 class _SynthesizingLLM:
     """Fake LLM that drives the tool loop and also answers the synthesis pass."""
 
-    def __init__(self, responses: list[_FakeAIMessage]) -> None:
+    def __init__(self, responses: list[_FakeAssistantMessage]) -> None:
         self._responses = responses
         self.synthesis_calls: list[list[object]] = []
 
-    def bind_tools(self, _tools: list[object]) -> _FakeBoundModel:
+    def with_tools(self, _tools: list[object], **_native_options) -> _FakeBoundModel:
         return _FakeBoundModel(self._responses)
 
-    def invoke(self, messages: list[object]) -> _FakeAIMessage:
-        # Only the tool-free synthesis pass calls llm.invoke() directly.
+    def generate_sync(self, messages: list[object]) -> _FakeAssistantMessage:
+        # Only the tool-free synthesis pass calls llm.generate_sync(**_native_options) directly.
         self.synthesis_calls.append(messages)
-        return _FakeAIMessage("Polished best-effort answer from the model.")
+        return _FakeAssistantMessage("Polished best-effort answer from the model.")
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def test_ask_agent_synthesis_uses_llm_when_available(tmp_path: Path) -> None:
     llm = _SynthesizingLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "semantic_search", "args": {"query": "x", "k": 2}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "x", "k": 2}}]),
         ]
     )
     agent = _build_agent(tmp_path)
@@ -546,7 +587,7 @@ def test_ask_agent_synthesis_falls_back_to_digest_when_llm_unavailable(tmp_path:
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "semantic_search", "args": {"query": "x", "k": 2}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "x", "k": 2}}]),
         ]
     )
     result = agent.run("How?", tmp_path / ".mana/index", 2, max_steps=1, timeout_seconds=2)
@@ -567,9 +608,9 @@ def test_ask_agent_repeated_errors_trigger_no_progress(tmp_path: Path) -> None:
     _register_tool(agent, "repo_search", _always_fail)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "a"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "b"}}]),
-            _FakeAIMessage("Should not be reached", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "a"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "b"}}]),
+            _FakeAssistantMessage("Should not be reached", tool_calls=[]),
         ]
     )
     result = agent.run("err?", tmp_path / ".mana/index", 2, max_steps=9, timeout_seconds=2)
@@ -581,7 +622,7 @@ def test_ask_agent_does_not_merge_searches_with_different_glob(tmp_path: Path) -
     counter = _CountingTool({"ok": True, "result": "hit"}, "repo_search")
     agent = _build_agent(tmp_path)
     agent.tools = [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=lambda query, glob="**/*": counter(query=query, glob=glob),
             name="repo_search",
             description="Test repo_search.",
@@ -589,13 +630,13 @@ def test_ask_agent_does_not_merge_searches_with_different_glob(tmp_path: Path) -
     ]
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "config", "glob": "**/*.py"}}]
             ),
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "config", "glob": "**/*.ts"}}]
             ),
-            _FakeAIMessage("Done", tool_calls=[]),
+            _FakeAssistantMessage("Done", tool_calls=[]),
         ]
     )
     result = agent.run("scope?", tmp_path / ".mana/index", 2, max_steps=5, timeout_seconds=2)
@@ -609,8 +650,8 @@ def test_ask_agent_successful_result_is_not_treated_as_stagnation(tmp_path: Path
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "semantic_search", "args": {"query": "demo", "k": 3}}]),
-            _FakeAIMessage("Final answer from model.", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "demo", "k": 3}}]),
+            _FakeAssistantMessage("Final answer from model.", tool_calls=[]),
         ]
     )
     result = agent.run("ok?", tmp_path / ".mana/index", 3, max_steps=5, timeout_seconds=2)
@@ -681,7 +722,7 @@ def test_ask_agent_does_not_discover_mcp_without_explicit_provider(tmp_path: Pat
         raise AssertionError("MCP discovery must not run for an ordinary chat turn")
 
     monkeypatch.setattr(
-        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_langchain_tools",
+        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_tools",
         _unexpected_discovery,
     )
     tools, _traces, _sources, _warnings = agent._build_tools(k_default=4, timeout_seconds=1)
@@ -699,7 +740,7 @@ def test_ask_agent_discovers_only_the_explicitly_required_mcp_provider(tmp_path:
         return [], []
 
     monkeypatch.setattr(
-        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_langchain_tools",
+        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_tools",
         _discover,
     )
     agent._build_tools(k_default=4, timeout_seconds=1, required_mcp_server="context7")
@@ -714,18 +755,18 @@ def test_ask_agent_mcp_provider_only_policy_binds_only_selected_provider_tools(
     bound_tool_names: list[list[str]] = []
 
     class _RecordingMcpModel:
-        def bind_tools(self, tools, **_kwargs):  # noqa: ANN001
+        def with_tools(self, tools, **_kwargs):  # noqa: ANN001
             bound_tool_names.append([tool.name for tool in tools])
-            return _FakeBoundModel([_FakeAIMessage("Done", tool_calls=[])])
+            return _FakeBoundModel([_FakeAssistantMessage("Done", tool_calls=[])])
 
     def _discover(**_kwargs):
         return [
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=lambda: "ok",
                 name="mcp__kaggle__submit_to_competition",
                 description="Submit a Kaggle competition entry.",
             ),
-            StructuredTool.from_function(
+            ToolBinding.from_callable(
                 func=lambda: "ok",
                 name="mcp__other__unrelated",
                 description="An unrelated MCP tool.",
@@ -733,7 +774,7 @@ def test_ask_agent_mcp_provider_only_policy_binds_only_selected_provider_tools(
         ], []
 
     monkeypatch.setattr(
-        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_langchain_tools",
+        "mana_agent.multi_agent.runtime.ask_agent.discovered_mcp_tools",
         _discover,
     )
 
@@ -1250,24 +1291,24 @@ def test_ask_agent_collects_trace_and_sources(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
-                tool_calls=[{"id": "1", "name": "semantic_search", "args": {"query": "demo", "k": 3}}],
+                tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "demo", "k": 3}}],
             ),
-            _FakeAIMessage("Answer with /tmp/example.py:3-8", tool_calls=[]),
+            _FakeAssistantMessage("Answer with /tmp/example.py:3-8", tool_calls=[]),
         ]
     )
     result = agent.run("Where is demo?", tmp_path / ".mana/index", 3, max_steps=3, timeout_seconds=2)
     assert "example.py:3-8" in result.answer
     assert result.sources
-    assert any(item.tool_name == "semantic_search" for item in result.trace)
+    assert any(item.tool_name == "repo_search" for item in result.trace)
 
 
 def test_ask_agent_extracts_text_from_list_content_blocks(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 [
                     {"id": "rs_1", "summary": [], "type": "reasoning"},
                     {"type": "text", "text": "Only the final answer should be shown."},
@@ -1283,7 +1324,7 @@ def test_ask_agent_extracts_text_from_list_content_blocks(tmp_path: Path) -> Non
 
 def test_ask_agent_run_multi_uses_all_indexes(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
-    agent.llm = _FakeLLM([_FakeAIMessage("Answer with citations", tool_calls=[])])
+    agent.llm = _FakeLLM([_FakeAssistantMessage("Answer with citations", tool_calls=[])])
     first = tmp_path / "a" / ".mana/index"
     second = tmp_path / "b" / ".mana/index"
     result = agent.run_multi("Where?", [first, second], 3, max_steps=2, timeout_seconds=2)
@@ -1336,7 +1377,7 @@ def test_ask_agent_run_multi_continues_when_presearch_has_no_hits(tmp_path: Path
 def test_ask_agent_invokes_externally_registered_tool(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.tools = [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=lambda query: f'{{"ok": true, "query": "{query}"}}',
             name="external_lookup",
             description="Lookup external information.",
@@ -1345,11 +1386,11 @@ def test_ask_agent_invokes_externally_registered_tool(tmp_path: Path) -> None:
     ]
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage(
+            _FakeAssistantMessage(
                 "",
                 tool_calls=[{"id": "1", "name": "external_lookup", "args": {"query": "latest"}}],
             ),
-            _FakeAIMessage("Done", tool_calls=[]),
+            _FakeAssistantMessage("Done", tool_calls=[]),
         ]
     )
 
@@ -1360,7 +1401,7 @@ def test_ask_agent_invokes_externally_registered_tool(tmp_path: Path) -> None:
 def test_ask_agent_does_not_disable_external_tool_after_repeated_calls(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.tools = [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=lambda query: {"ok": True, "query": query, "results": [{"title": "x"}], "error": ""},
             name="external_lookup",
             description="Lookup external information.",
@@ -1369,10 +1410,10 @@ def test_ask_agent_does_not_disable_external_tool_after_repeated_calls(tmp_path:
     ]
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "external_lookup", "args": {"query": "q1"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "external_lookup", "args": {"query": "q2"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "external_lookup", "args": {"query": "q3"}}]),
-            _FakeAIMessage("Done", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "external_lookup", "args": {"query": "q1"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "external_lookup", "args": {"query": "q2"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "3", "name": "external_lookup", "args": {"query": "q3"}}]),
+            _FakeAssistantMessage("Done", tool_calls=[]),
         ]
     )
 
@@ -1405,12 +1446,12 @@ def test_document_binary_targets_are_blocked_for_text_file_tools() -> None:
 def test_ask_agent_stops_progress_after_apply_patch_failures_without_write_retry(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.tools = [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=lambda diff: {"ok": False, "error": "hunk context mismatch", "touched_files": ["src/demo.py"]},
             name="apply_patch",
             description="Apply a patch.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=lambda path, content: {"ok": True, "path": path, "bytes": len(content)},
             name="write_file",
             description="Write a file.",
@@ -1418,13 +1459,13 @@ def test_ask_agent_stops_progress_after_apply_patch_failures_without_write_retry
     ]
     agent.llm = _FakeLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "apply_patch", "args": {"diff": "d1"}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "apply_patch", "args": {"diff": "d2"}}]),
-            _FakeAIMessage(
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "apply_patch", "args": {"diff": "d1"}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "apply_patch", "args": {"diff": "d2"}}]),
+            _FakeAssistantMessage(
                 "",
                 tool_calls=[{"id": "3", "name": "write_file", "args": {"path": "src/demo.py", "content": "print(1)\n"}}],
             ),
-            _FakeAIMessage("Done", tool_calls=[]),
+            _FakeAssistantMessage("Done", tool_calls=[]),
         ]
     )
 
@@ -1435,7 +1476,7 @@ def test_ask_agent_stops_progress_after_apply_patch_failures_without_write_retry
 
 def test_ask_agent_api_workflow_guard_continues_on_premature_answer(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
-    decide_tool = StructuredTool.from_function(
+    decide_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": {
@@ -1454,7 +1495,7 @@ def test_ask_agent_api_workflow_guard_continues_on_premature_answer(tmp_path: Pa
         name="api_workflow_decide",
         description="Workflow decide",
     )
-    search_tool = StructuredTool.from_function(
+    search_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": [
@@ -1468,7 +1509,7 @@ def test_ask_agent_api_workflow_guard_continues_on_premature_answer(tmp_path: Pa
         name="api_operations_search",
         description="Search operations",
     )
-    preview_tool = StructuredTool.from_function(
+    preview_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": {
@@ -1485,11 +1526,11 @@ def test_ask_agent_api_workflow_guard_continues_on_premature_answer(tmp_path: Pa
 
     llm = _CapabilityBindingLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {"query": "annotate"}}]),
-            _FakeAIMessage("Found the POST annotation operation and verified required schema.", tool_calls=[]),
-            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "api_request_preview", "args": {"decision": {"operation_id": "create_annotation"}}}]),
-            _FakeAIMessage("The request has been previewed and is awaiting approval.", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {"query": "annotate"}}]),
+            _FakeAssistantMessage("Found the POST annotation operation and verified required schema.", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "3", "name": "api_request_preview", "args": {"decision": {"operation_id": "create_annotation"}}}]),
+            _FakeAssistantMessage("The request has been previewed and is awaiting approval.", tool_calls=[]),
         ]
     )
     agent.llm = llm
@@ -1511,7 +1552,7 @@ def test_ask_agent_api_workflow_guard_continues_on_premature_answer(tmp_path: Pa
 
 def test_ask_agent_api_workflow_safe_get_executes_and_finishes(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
-    decide_tool = StructuredTool.from_function(
+    decide_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": {
@@ -1523,7 +1564,7 @@ def test_ask_agent_api_workflow_safe_get_executes_and_finishes(tmp_path: Path) -
         name="api_workflow_decide",
         description="Workflow decide",
     )
-    search_tool = StructuredTool.from_function(
+    search_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": [{"operation_id": "get_text", "method": "GET", "risk_level": "read_only"}],
@@ -1531,7 +1572,7 @@ def test_ask_agent_api_workflow_safe_get_executes_and_finishes(tmp_path: Path) -
         name="api_operations_search",
         description="Search operations",
     )
-    execute_tool = StructuredTool.from_function(
+    execute_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": {
@@ -1548,11 +1589,11 @@ def test_ask_agent_api_workflow_safe_get_executes_and_finishes(tmp_path: Path) -
 
     llm = _CapabilityBindingLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {"query": "get text"}}]),
-            _FakeAIMessage("I found the operation get_text.", tool_calls=[]),
-            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "api_request_execute", "args": {"decision": {"operation_id": "get_text"}}}]),
-            _FakeAIMessage("Execution succeeded with text: In the beginning.", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {"query": "get text"}}]),
+            _FakeAssistantMessage("I found the operation get_text.", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "3", "name": "api_request_execute", "args": {"decision": {"operation_id": "get_text"}}}]),
+            _FakeAssistantMessage("Execution succeeded with text: In the beginning.", tool_calls=[]),
         ]
     )
     agent.llm = llm
@@ -1574,7 +1615,7 @@ def test_ask_agent_api_workflow_safe_get_executes_and_finishes(tmp_path: Path) -
 
 def test_ask_agent_api_workflow_stops_on_terminal_blocker_validation_failure(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
-    decide_tool = StructuredTool.from_function(
+    decide_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": {
@@ -1586,7 +1627,7 @@ def test_ask_agent_api_workflow_stops_on_terminal_blocker_validation_failure(tmp
         name="api_workflow_decide",
         description="Workflow decide",
     )
-    search_tool = StructuredTool.from_function(
+    search_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": [{"operation_id": "create_annotation", "method": "POST"}],
@@ -1594,7 +1635,7 @@ def test_ask_agent_api_workflow_stops_on_terminal_blocker_validation_failure(tmp
         name="api_operations_search",
         description="Search operations",
     )
-    preview_tool = StructuredTool.from_function(
+    preview_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": False,
             "error_code": "validation_failure",
@@ -1607,10 +1648,10 @@ def test_ask_agent_api_workflow_stops_on_terminal_blocker_validation_failure(tmp
 
     llm = _CapabilityBindingLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "3", "name": "api_request_preview", "args": {}}]),
-            _FakeAIMessage("Validation failed: missing annotation_text.", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "3", "name": "api_request_preview", "args": {}}]),
+            _FakeAssistantMessage("Validation failed: missing annotation_text.", tool_calls=[]),
         ]
     )
     agent.llm = llm
@@ -1631,7 +1672,7 @@ def test_ask_agent_api_workflow_stops_on_terminal_blocker_validation_failure(tmp
 
 def test_ask_agent_api_workflow_limits_continuations(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
-    decide_tool = StructuredTool.from_function(
+    decide_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": {
@@ -1643,7 +1684,7 @@ def test_ask_agent_api_workflow_limits_continuations(tmp_path: Path) -> None:
         name="api_workflow_decide",
         description="Workflow decide",
     )
-    search_tool = StructuredTool.from_function(
+    search_tool = ToolBinding.from_callable(
         func=lambda **kwargs: {
             "ok": True,
             "result": [{"operation_id": "some_op"}],
@@ -1655,11 +1696,11 @@ def test_ask_agent_api_workflow_limits_continuations(tmp_path: Path) -> None:
 
     llm = _CapabilityBindingLLM(
         [
-            _FakeAIMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
-            _FakeAIMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {}}]),
-            _FakeAIMessage("Prose answer 1", tool_calls=[]),
-            _FakeAIMessage("Prose answer 2", tool_calls=[]),
-            _FakeAIMessage("Final prose answer after max continuations", tool_calls=[]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "api_workflow_decide", "args": {}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "api_operations_search", "args": {}}]),
+            _FakeAssistantMessage("Prose answer 1", tool_calls=[]),
+            _FakeAssistantMessage("Prose answer 2", tool_calls=[]),
+            _FakeAssistantMessage("Final prose answer after max continuations", tool_calls=[]),
         ]
     )
     agent.llm = llm

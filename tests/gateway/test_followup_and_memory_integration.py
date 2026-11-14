@@ -62,10 +62,15 @@ class _StructuredModel:
     def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
 
-    def with_structured_output(self, _schema: Any, *, method: str = "json_schema", strict: bool = True):
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, _messages: Any) -> Any:
+    def generate_sync(self, _messages: Any, **_native_options) -> Any:
         return self.payload
 
 
@@ -74,10 +79,15 @@ class _RouteModel:
         self.routes = list(routes)
         self.payloads: list[dict[str, Any]] = []
 
-    def with_structured_output(self, _schema: Any, *, method: str = "json_schema", strict: bool = True):
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, messages: Any, **_kwargs: Any) -> Any:
+    def generate_sync(self, messages: Any, **_kwargs: Any) -> Any:
         first_content = str(messages[0].content) if messages else ""
         if "Classify this newly received chat turn" in first_content:
             return SimpleNamespace(

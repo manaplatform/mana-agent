@@ -42,10 +42,15 @@ class _RouteModel:
         self.routes = list(routes)
         self.payloads: list[dict[str, Any]] = []
 
-    def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True) -> _RouteModel:
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, messages: list[Any], **_kwargs: Any) -> Any:
+    def generate_sync(self, messages: list[Any], **_kwargs: Any) -> Any:
         if messages[0].content == CHECKPOINT_RESUME_PROMPT:
             return SimpleNamespace(
                 content=json.dumps(
@@ -854,7 +859,7 @@ def test_gateway_route_registry_has_executors_for_every_available_route(
 
 def test_capability_error_cannot_claim_enabled_search_is_unavailable() -> None:
     class _IncorrectCapabilityModel:
-        def invoke(self, _messages: list[Any]) -> Any:
+        def generate_sync(self, _messages: list[Any], **_native_options) -> Any:
             return SimpleNamespace(
                 content=json.dumps(
                     {
@@ -870,6 +875,18 @@ def test_capability_error_cannot_claim_enabled_search_is_unavailable() -> None:
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     router = EntryRouter(llm=_IncorrectCapabilityModel(), registry=_registry())
 
@@ -1563,18 +1580,15 @@ def test_router_uses_structured_output_when_model_supports_it() -> None:
     calls: list[tuple[object, str, bool]] = []
 
     class StructuredModel:
-        def with_structured_output(self, schema, *, method: str, strict: bool):
-            calls.append((schema, method, strict))
-            return SimpleNamespace(
-                invoke=lambda _messages: {
-                    "route": "conversation",
-                    "confidence": 0.9,
-                    "reason": "No tool is needed.",
-                    "required_sources": ["none"],
-                }
-            )
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages):  # pragma: no cover - must not be used
+        def generate_sync(self, _messages, **_native_options):  # pragma: no cover - must not be used
             raise AssertionError("structured output was available")
 
     decision = EntryRouter(llm=StructuredModel(), registry=registry).route(
@@ -1742,7 +1756,7 @@ def test_server_directory_listing_repairs_a_tool_contract_mismatch() -> None:
     }
 
     class Model:
-        def invoke(self, messages: list[Any]) -> Any:
+        def generate_sync(self, messages: list[Any], **_native_options) -> Any:
             calls.append(json.loads(messages[-1].content))
             decision = invalid_decision if len(calls) == 1 else valid_decision
             return SimpleNamespace(
@@ -1756,6 +1770,18 @@ def test_server_directory_listing_repairs_a_tool_contract_mismatch() -> None:
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     decision = EntryRouter(llm=Model(), registry=registry).route(
         user_prompt="Connect to mana-agent-server-1 and list /home/ubuntu.",
@@ -1970,10 +1996,15 @@ def test_entry_routing_context_budget_blocked(tmp_path: Path, monkeypatch) -> No
     )
 
     class _BlockedRouterModel:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages):
+        def generate_sync(self, _messages, **_native_options):
             snapshot = BudgetSnapshot(
                 breakdown=ContextBreakdown(),
                 budget=ContextBudget(context_window=8000),
@@ -2006,10 +2037,15 @@ def test_entry_routing_context_budget_blocked(tmp_path: Path, monkeypatch) -> No
 
 def test_entry_routing_handles_markdown_wrapped_json_from_model(tmp_path: Path, monkeypatch) -> None:
     class _MarkdownJsonRouterModel:
-        def with_structured_output(self, _schema, *, method: str, strict: bool):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, _messages):
+        def generate_sync(self, _messages, **_native_options):
             # Returns a markdown code block string
             return (
                 "```json\n"
@@ -2045,59 +2081,15 @@ def test_entry_routing_handles_markdown_wrapped_json_from_model(tmp_path: Path, 
 
 
 class _ProseWrappedStructuredRouteModel:
-    def with_structured_output(
-        self,
-        schema: Any,
-        **kwargs: Any,
-    ) -> Any:
-        assert schema is EntryRoutingOutput
-        assert kwargs["method"] == "json_schema"
-        assert kwargs["strict"] is True
-        assert kwargs["include_raw"] is True
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-        class _Structured:
-            def invoke(self, messages: list[Any]) -> dict[str, Any]:
-                payload = {
-                    "route": "api",
-                    "confidence": 0.99,
-                    "reason": "Import and use the requested external APIs.",
-                    "required_sources": ["api"],
-                    "target_urls": [
-                        "https://api.open-meteo.com/v1/forecast",
-                        "https://official-joke-api.appspot.com/random_joke",
-                    ],
-                    "requires_live_data": True,
-                    "reason_code": "API_INTEGRATION",
-                    "error_code": "",
-                    "reuse_active_route": False,
-                    "command_name": "",
-                    "command_arguments": [],
-                    "remote_request": None,
-                    "server_request": None,
-                    "mcp_request": None,
-                    "memory_task_id": "",
-                    "artifact_family": "",
-                    "media_request": None,
-                    "automation_operation": "",
-                }
-
-                return {
-                    "raw": SimpleNamespace(
-                        content=(
-                            "Import both APIs and analyze them first.\n"
-                            + json.dumps(payload)
-                        ),
-                        usage_metadata={"input_tokens": 100, "output_tokens": 100},
-                    ),
-                    "parsed": None,
-                    "parsing_error": ValueError(
-                        "Invalid JSON: expected ident at line 1 column 2"
-                    ),
-                }
-
-        return _Structured()
-
-    def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
+    def generate_sync(self, messages: list[Any], **kwargs: Any) -> Any:
         raise AssertionError(
             "raw fallback must not make a second model call"
         )
@@ -2139,7 +2131,7 @@ def test_entry_router_retries_and_corrects_invalid_memory_task_id_on_non_memory_
         def __init__(self) -> None:
             self.calls = 0
 
-        def invoke(self, messages: Any) -> Any:
+        def generate_sync(self, messages: Any, **_native_options) -> Any:
             self.calls += 1
             if self.calls == 1:
                 # First attempt: incorrectly returns memory_task_id on coding route
@@ -2169,6 +2161,18 @@ def test_entry_router_retries_and_corrects_invalid_memory_task_id_on_non_memory_
                     "runtime_capability_change": False,
                 })
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     model = _RetryInvalidMemoryTaskIdModel()
     router = EntryRouter(llm=model, registry=registry)
@@ -2307,7 +2311,7 @@ def test_entry_router_repairs_unoffered_task_for_new_plan_request() -> None:
     calls: list[dict[str, Any]] = []
 
     class Model:
-        def invoke(self, messages: list[Any]) -> Any:
+        def generate_sync(self, messages: list[Any], **_native_options) -> Any:
             payload = json.loads(messages[-1].content)
             calls.append(payload)
             related_task_id = "stale-task" if len(calls) == 1 else ""
@@ -2323,6 +2327,18 @@ def test_entry_router_repairs_unoffered_task_for_new_plan_request() -> None:
                     }
                 )
             )
+
+        def decide_sync(self, messages, schema, **kwargs):
+            import json
+            raw = self.generate_sync(messages)
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+                validate_arguments(value, schema)
+                return value
+            if isinstance(raw, schema):
+                return raw
+            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
     registry = EntryRouteRegistry()
     registry.register(

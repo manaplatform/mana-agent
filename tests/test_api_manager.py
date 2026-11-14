@@ -52,7 +52,7 @@ from mana_agent.api_manager.request_builder import ApiRequestBuilder
 from mana_agent.api_manager.runtime_tools import (
     API_MANAGER_TOOL_NAMES,
     _WorkflowDecision,
-    build_api_manager_langchain_tools,
+    build_api_manager_tools,
 )
 from mana_agent.api_manager.service import ApiManagerService
 from mana_agent.api_manager.transactional import ApiIntegrationActionAdapter
@@ -1100,17 +1100,17 @@ def test_gateway_tools_are_narrow_and_registered(tmp_path: Path) -> None:
         tmp_path,
         registry=ApiIntegrationRegistry(tmp_path / "integrations"),
     )
-    tools = build_api_manager_langchain_tools(tmp_path, service=service)
+    tools = build_api_manager_tools(tmp_path, service=service)
     assert tuple(tool.name for tool in tools) == API_MANAGER_TOOL_NAMES
     semantic_import_schema = next(
         tool for tool in tools if tool.name == "api_docs_import_semantic"
-    ).args_schema.model_json_schema()
+    ).input_model.model_json_schema()
     assert "text" in semantic_import_schema["required"]
     assert "documentation_reference" in semantic_import_schema["required"]
     assert "semantic_definition" in semantic_import_schema["required"]
     execute_schema = next(
         tool for tool in tools if tool.name == "api_request_execute"
-    ).args_schema.model_json_schema()
+    ).input_model.model_json_schema()
     properties = execute_schema["properties"]
     assert "integration_id" in properties
     assert "operation_id" in properties
@@ -1371,7 +1371,7 @@ def test_api_tool_execution_context_binds_session_authoritatively(tmp_path: Path
         execution_id="turn-789",
         source_decision_id="turn-789:decision",
     )
-    tools = build_api_manager_langchain_tools(tmp_path, context=context)
+    tools = build_api_manager_tools(tmp_path, context=context)
     tool_map = {t.name: t for t in tools}
 
     # Calling api_workflow_decide without passing session_id uses host session
@@ -1394,7 +1394,7 @@ def test_api_tool_execution_context_rejects_session_mismatch(tmp_path: Path) -> 
         session_id="host-session-123",
         source_decision_id="turn-789:decision",
     )
-    tools = build_api_manager_langchain_tools(tmp_path, context=context)
+    tools = build_api_manager_tools(tmp_path, context=context)
     tool_map = {t.name: t for t in tools}
 
     with pytest.raises(PermissionError) as exc_info:
@@ -1695,7 +1695,7 @@ def test_unresolved_schema_ref_fails_closed() -> None:
 def test_import_source_selection_is_authoritative_over_model_conflicts(tmp_path: Path) -> None:
     from mana_agent.api_manager.runtime_tools import (
         ApiToolExecutionContext,
-        build_api_manager_langchain_tools,
+        build_api_manager_tools,
     )
 
     service = ApiManagerService(tmp_path)
@@ -1711,7 +1711,7 @@ def test_import_source_selection_is_authoritative_over_model_conflicts(tmp_path:
         session_id="session-source-test",
         source_decision_id="turn-source:decision",
     )
-    tools = build_api_manager_langchain_tools(tmp_path, service=service, context=context)
+    tools = build_api_manager_tools(tmp_path, service=service, context=context)
     tool_map = {t.name: t for t in tools}
 
     # Model emits conflicting source fields (both text and path and url)
@@ -1730,14 +1730,14 @@ def test_import_source_selection_is_authoritative_over_model_conflicts(tmp_path:
 def test_identity_resolution_accepts_model_suffixes_and_blocks_cross_session(tmp_path: Path) -> None:
     from mana_agent.api_manager.runtime_tools import (
         ApiToolExecutionContext,
-        build_api_manager_langchain_tools,
+        build_api_manager_tools,
     )
 
     context = ApiToolExecutionContext(
         session_id="host-session-123",
         source_decision_id="exec_08bb7d218fd84027",
     )
-    tools = build_api_manager_langchain_tools(tmp_path, context=context)
+    tools = build_api_manager_tools(tmp_path, context=context)
     tool_map = {t.name: t for t in tools}
 
     # 1. Model emits a generated suffix on the authoritative host decision ID

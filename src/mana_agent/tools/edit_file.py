@@ -208,10 +208,7 @@ def safe_multi_edit_file(
 
 
 def build_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES):
-    try:
-        from langchain_core.tools import StructuredTool  # type: ignore
-    except Exception:  # pragma: no cover
-        from langchain.tools import StructuredTool  # type: ignore
+    from mana_agent.llm.tools import ToolBinding
 
     def _tool(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict[str, Any]:
         target, rel_posix, err = _resolve_target_path(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
@@ -230,7 +227,7 @@ def build_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence
             result.update({"path": rel_posix, "files_changed": [rel_posix], "before_sha256": _sha(before), "after_sha256": _sha(after), "changed_ranges": [_changed_range(before, after)], "match_lines": matches})
         return result
 
-    return StructuredTool.from_function(
+    return ToolBinding.from_callable(
         func=_tool,
         name="edit_file",
         description="Replace one exact old_string in a repository file. Re-reads the file before editing and never uses line numbers as truth.",
@@ -238,10 +235,7 @@ def build_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence
 
 
 def build_multi_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES):
-    try:
-        from langchain_core.tools import StructuredTool  # type: ignore
-    except Exception:  # pragma: no cover
-        from langchain.tools import StructuredTool  # type: ignore
+    from mana_agent.llm.tools import ToolBinding
 
     def _tool(path: str, edits: list[dict[str, str]]) -> dict[str, Any]:
         target, rel_posix, err = _resolve_target_path(repo_root=repo_root, path=path, allowed_prefixes=allowed_prefixes)
@@ -262,7 +256,7 @@ def build_multi_edit_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Se
             result.update({"path": rel_posix, "files_changed": [rel_posix], "before_sha256": _sha(before), "after_sha256": _sha(current), "changed_ranges": ranges})
         return result
 
-    return StructuredTool.from_function(
+    return ToolBinding.from_callable(
         func=_tool,
         name="multi_edit_file",
         description="Apply several exact-string replacements to one file atomically. Re-reads once, writes once, and aborts on the first failed edit.",

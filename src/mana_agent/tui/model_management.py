@@ -44,7 +44,7 @@ def configured_agent_models(
     models = filter_models(catalog, ModelPurpose.AGENT)
     current = str(values.get("OPENAI_CHAT_MODEL") or "").strip()
     if current and current not in {model.id for model in models}:
-        from mana_agent.config.model_catalog import ModelCapability, normalize_capabilities
+        from mana_agent.config.model_catalog import normalize_capabilities
 
         desc = catalog_svc.get_descriptor(provider, current, base_url=base_url, api_key=_api_key)
         if desc:
@@ -55,7 +55,7 @@ def configured_agent_models(
                 ModelDescriptor(
                     provider=provider,
                     id=current,
-                    capabilities=caps if caps else frozenset({ModelCapability.TEXT_GENERATION}),
+                    capabilities=caps,
                     source="manual",
                 )
             )

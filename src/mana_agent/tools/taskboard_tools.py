@@ -7,7 +7,7 @@ keeping TaskBoard as the authoritative state workspace for task progress.
 from __future__ import annotations
 
 from typing import Any, Callable
-from langchain_core.tools import StructuredTool
+from mana_agent.llm.tools import ToolBinding
 from pydantic import BaseModel, Field
 
 from mana_agent.multi_agent.taskboard.operations import (
@@ -22,8 +22,8 @@ from mana_agent.multi_agent.taskboard.operations import (
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 
 
-def build_taskboard_tools(taskboard: TaskBoard) -> list[StructuredTool]:
-    """Construct structured LangChain tools bound to an authoritative TaskBoard instance."""
+def build_taskboard_tools(taskboard: TaskBoard) -> list[ToolBinding]:
+    """Construct structured native tools bound to an authoritative TaskBoard instance."""
     handler = TaskBoardOperationsHandler(taskboard)
 
     def create_task(
@@ -118,47 +118,47 @@ def build_taskboard_tools(taskboard: TaskBoard) -> list[StructuredTool]:
         return handler.get_progress(root_task_id=root_task_id)
 
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=create_task,
             name="taskboard_create_task",
             description="Create a new task or subtask on the authoritative TaskBoard workspace.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=update_task,
             name="taskboard_update_task",
             description="Update an existing task's description, priority, progress, plan, acceptance criteria, or checklist state.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=delete_task,
             name="taskboard_delete_task",
             description="Safely remove an obsolete or superseded task from the TaskBoard.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=add_subtask,
             name="taskboard_add_subtask",
             description="Decompose a task by adding a subtask with specific acceptance criteria and dependencies.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=mark_completed,
             name="taskboard_mark_completed",
             description="Mark a task as completed or crossed off with completion evidence.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=verify_task,
             name="taskboard_verify_task",
             description="Verify task completion with independent evidence against acceptance criteria. Reopens or marks failed if verification fails.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=reopen_task,
             name="taskboard_reopen_task",
             description="Reopen a failed, blocked, or incomplete task for autonomous replanning and continued work.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=list_tasks,
             name="taskboard_list_tasks",
             description="Query the authoritative TaskBoard to inspect active, pending, or completed tasks.",
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=get_progress,
             name="taskboard_get_progress",
             description="Inspect overall live TaskBoard progress metrics and item statuses.",

@@ -8,7 +8,7 @@ from .display import (
     format_mcp_result_preview,
     is_documentation_mcp_operation,
 )
-from .tools import discovered_mcp_langchain_tools, discovered_mcp_tool_names
+from .tools import discovered_mcp_tools, discovered_mcp_tool_names
 
 __all__ = [
     "McpClient",
@@ -24,6 +24,6 @@ __all__ = [
     "parse_mcp_server_json",
     "save_mcp_token",
     "save_mcp_server",
-    "discovered_mcp_langchain_tools",
+    "discovered_mcp_tools",
     "discovered_mcp_tool_names",
 ]

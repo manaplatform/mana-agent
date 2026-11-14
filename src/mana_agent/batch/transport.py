@@ -13,110 +13,52 @@ from mana_agent.batch.policy import BatchPending, PendingBatchOperation
 from mana_agent.batch.validation import validate_batch_selection
 
 
-def response_message(body: dict[str, Any]) -> dict[str, Any]:
-    """Decode only public assistant output and function calls, never reasoning."""
-    if body.get("error") or body.get("status") in {"failed", "incomplete", "cancelled"}:
-        raise ValueError("Batch model response failed or was incomplete")
-    if "choices" in body:
-        choices = body["choices"]
-        if len(choices) != 1 or choices[0].get("finish_reason") not in {"stop", "tool_calls"}:
-            raise ValueError("Batch response must contain one complete assistant choice")
-        message = dict(choices[0].get("message") or {})
-        if message.get("role") != "assistant":
-            raise ValueError("Batch completion did not return an assistant message")
-        if message.get("refusal"):
-            raise ValueError("Batch model refused the request")
-        if isinstance(message.get("content"), list):
-            parts = message["content"]
-            if any(part.get("type") != "text" for part in parts):
-                raise ValueError("Batch completion returned unsupported assistant content")
-            message["content"] = "".join(str(part.get("text") or "") for part in parts)
-    else:
-        texts: list[str] = []
-        calls: list[dict[str, Any]] = []
-        protocol_items: list[dict[str, Any]] = []
-        for item in body.get("output") or []:
-            if item.get("type") == "message":
-                protocol_items.append(item)
-                for part in item.get("content") or []:
-                    if part.get("type") == "refusal":
-                        raise ValueError("Batch model refused the request")
-                    if part.get("type") == "output_text":
-                        texts.append(str(part.get("text") or ""))
-            elif item.get("type") == "function_call":
-                protocol_items.append(item)
-                calls.append({"id": item.get("call_id"), "type": "function", "function": {
-                    "name": item.get("name"), "arguments": item.get("arguments"),
-                }})
-            elif item.get("type") == "reasoning":
-                if not item.get("encrypted_content"):
-                    raise ValueError("Batch reasoning continuation requires its opaque encrypted receipt")
-                # Keep the provider's opaque continuation, never raw reasoning
-                # text. It stays in protocol checkpoints, outside visible history.
-                protocol_items.append({key: value for key, value in item.items() if key != "content"})
-            else:
-                raise ValueError("Batch response returned an unsupported output item")
-        message = {"role": "assistant", "content": "".join(texts) or body.get("output_text") or ""}
-        if calls:
-            message["tool_calls"] = calls
-        if protocol_items:
-            message["_response_items"] = protocol_items
-    calls = message.get("tool_calls") or []
-    ids: set[str] = set()
-    for call in calls:
-        if call.get("type") != "function" or not call.get("id") or call["id"] in ids or not call.get("function", {}).get("name"):
-            raise ValueError("Batch response contains invalid or duplicate tool calls")
-        ids.add(call["id"])
-        args = json.loads(call["function"]["arguments"])
-        if not isinstance(args, dict):
-            raise ValueError("Batch function arguments must be an object")
-    if not calls and not str(message.get("content") or "").strip():
-        raise ValueError("Empty Batch model output is not completion evidence")
+def response_message(body: dict[str, Any], schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Native normalization; the durable loop retains separate protocol receipts."""
+    from mana_agent.llm.providers.openai import OpenAIProvider
+    from mana_agent.llm.types import InferenceRequest
+    protocol = "chat_completions" if "choices" in body else "responses"
+    adapter = OpenAIProvider(provider="openai", api_key="", base_url="", endpoint=protocol)
+    response = adapter.normalize(body, InferenceRequest(provider="openai", model=body.get("model") or "batch-receipt", messages=[], response_schema=schema))
+    if response.refusal or response.protocol_pending or not (response.content or response.tool_calls):
+        raise ValueError("Batch response did not return a complete public assistant result")
+    message = {"role": "assistant", "content": response.content}
+    if response.tool_calls:
+        message["tool_calls"] = [{"id": call.id, "type": "function", "function": {"name": call.name,
+            "arguments": json.dumps(call.args, ensure_ascii=False)}, **({"caller": call.caller} if call.caller else {})} for call in response.tool_calls]
+    if response.continuation:
+        message["_response_items"] = response.continuation.items
     return message
 
 
 def request_body(model: str, endpoint: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]], schema: dict[str, Any] | None, *, strict_schema: bool = True) -> dict[str, Any]:
-    if schema and strict_schema:
-        def strict(value: Any) -> Any:
-            if isinstance(value, list):
-                return [strict(item) for item in value]
-            if not isinstance(value, dict):
-                return value
-            result = {key: strict(item) for key, item in value.items() if key != "default"}
-            if result.get("type") == "object" or "properties" in result:
-                result["additionalProperties"] = False
-                result["required"] = list(result.get("properties", {}))
-            return result
-        schema = strict(schema)
-    if endpoint == "/v1/chat/completions":
-        body: dict[str, Any] = {"model": model, "messages": [
-            {key: value for key, value in message.items() if not key.startswith("_")} for message in messages
-        ]}
-        if tools:
-            body["tools"] = tools
-        if schema:
-            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "decision", "strict": strict_schema, "schema": schema}}
-        return body
-    if endpoint != "/v1/responses":
-        raise ValueError("Task model turns require Responses or Chat Completions")
-    inputs: list[dict[str, Any]] = []
-    for message in messages:
-        if message["role"] == "tool":
-            inputs.append({"type": "function_call_output", "call_id": message["tool_call_id"], "output": message["content"]})
-            continue
-        if message.get("_response_items"):
-            inputs.extend(message["_response_items"])
-            continue
-        if message.get("content"):
-            inputs.append({"role": message["role"], "content": message["content"]})
-        for call in message.get("tool_calls") or []:
-            inputs.append({"type": "function_call", "call_id": call["id"], **call["function"]})
-    body = {"model": model, "input": inputs, "store": False, "include": ["reasoning.encrypted_content"]}
-    if tools:
-        body["tools"] = [{"type": "function", **tool["function"]} for tool in tools]
-    if schema:
-        body["text"] = {"format": {"type": "json_schema", "name": "decision", "strict": strict_schema, "schema": schema}}
-    return body
+    from mana_agent.llm.providers.openai import OpenAIProvider
+    from mana_agent.llm.messages import messages_from_records
+    from mana_agent.llm.tools import tool_specification
+    from mana_agent.llm.types import InferenceRequest, ContinuationState
+    if endpoint not in {"/v1/responses", "/v1/chat/completions"}:
+        raise ValueError("Task inference requires a registered native Responses or Chat protocol")
+    protocol = "responses" if endpoint == "/v1/responses" else "chat_completions"
+    adapter = OpenAIProvider(provider="openai", api_key="", base_url="", endpoint=protocol)
+    native = messages_from_records([{key: value for key, value in item.items() if key != "_response_items"} for item in messages])
+    from mana_agent.llm.messages import validate_conversation
+    validate_conversation(native)
+    if schema and not strict_schema:
+        raise ValueError("Batch decisions require native strict schema enforcement")
+    request = InferenceRequest(provider="openai", model=model, messages=native,
+        tools=[tool_specification(tool) for tool in tools], response_schema=schema)
+    if protocol == "responses":
+        prefix = []
+        last = 0
+        for index, item in enumerate(messages):
+            if item.get("_response_items"):
+                before = request.model_copy(update={"messages": native[last:index], "response_schema": None, "continuation": None})
+                prefix.extend(adapter.encode(before)["input"])
+                prefix.extend(item["_response_items"])
+                last = index + 1
+        if last:
+            request.continuation = ContinuationState(provider="openai", model=model, endpoint=protocol, items=prefix, message_count=last)
+    return adapter.encode(request)
 
 
 class BatchModelTransport:
@@ -163,4 +105,4 @@ class BatchModelTransport:
         _, results = self.manager.finalize_batch(job.batch_id)
         if len(results) != 1 or results[0].custom_id != operation_id or not results[0].ok:
             raise ValueError("Batch model operation did not return its one successful correlated result")
-        return response_message(results[0].response_body)
+        return response_message(results[0].response_body, schema)

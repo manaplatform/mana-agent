@@ -159,7 +159,7 @@ class EvaluationGate:
         tool_name: str,
         target: str = "",
     ) -> GateResult:
-        if state.evidence_sufficient and tool_name in {"repo_search", "repo_batch_search", "semantic_search", "list_files"}:
+        if state.evidence_sufficient and tool_name in {"repo_search", "repo_batch_search", "list_files"}:
             return GateResult("skip_tool", "evidence is already sufficient; broad discovery is skipped")
         if (
             state.evidence_sufficient

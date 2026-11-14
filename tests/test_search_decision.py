@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from mana_agent.search.config import SearchConfig
 from mana_agent.search.decision import SearchDecisionEngine
@@ -10,8 +11,20 @@ class _ModelRouter:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
 
-    def invoke(self, _messages):  # noqa: ANN001
+    def generate_sync(self, _messages, **_native_options):  # noqa: ANN001
         return type("Msg", (), {"content": json.dumps(self.payload)})()
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def _config() -> SearchConfig:
@@ -48,10 +61,8 @@ def test_web_search_for_latest_docs_model_decision() -> None:
 
 def test_guardrail_does_not_special_case_search_internet_without_model() -> None:
     engine = SearchDecisionEngine(llm=None, config=_config())
-    decision = engine.decide(user_query="search internet about hermes-agent")
-    assert decision.mode == "none"
-    assert decision.targets == []
-    assert decision.queries == []
+    with pytest.raises(RuntimeError, match="decision is unavailable"):
+        engine.decide(user_query="search internet about hermes-agent")
 
 
 def test_github_search_for_like_repo_request() -> None:

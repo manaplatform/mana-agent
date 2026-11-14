@@ -14,7 +14,7 @@ from mana_agent.api.app import create_app
 from mana_agent.canvas.catalog import CatalogValidationError, validate_components
 from mana_agent.canvas.config import CanvasConfig, LOCAL_CATALOG_PATH, MANA_CATALOG_ID
 from mana_agent.canvas.generation import CanvasGenerationError, parse_generated_messages
-from mana_agent.canvas.runtime_tools import build_canvas_langchain_tools
+from mana_agent.canvas.runtime_tools import build_canvas_tools
 from mana_agent.canvas.models import (
     CanvasEventEnvelope,
     CanvasEventType,
@@ -150,7 +150,7 @@ def test_transactional_canvas_create_commits_after_snapshot_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
-    tools = {tool.name: tool for tool in build_canvas_langchain_tools(tmp_path)}
+    tools = {tool.name: tool for tool in build_canvas_tools(tmp_path)}
     arguments = {
         "source_decision_id": "decision-pet",
         "session_id": "session-pet",

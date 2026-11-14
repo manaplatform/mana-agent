@@ -1,7 +1,7 @@
 """
 mana_agent.utils.project_search
 
-Project-wide text search that does not depend on a prebuilt FAISS index.
+Project-wide text search over live repository files.
 
 Prefers ripgrep (``rg``) when available for speed and correctness; falls back
 to a pure-Python recursive search when ``rg`` is not installed. Both paths

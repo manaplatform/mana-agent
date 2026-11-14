@@ -1,62 +1,35 @@
-from __future__ import annotations
-
 from mana_agent.config.session import ConfigurationDraft
 
-
-def test_set_models_allows_empty_selectors_while_provider_is_being_tested() -> None:
-    previous_models = {
-        "MANA_PRIMARY_MODEL": "openai/previous-chat",
-        "MANA_EMBEDDING_MODEL": "openai/previous-embedding",
-        "OPENAI_CHAT_MODEL": "previous-chat",
-        "OPENAI_EMBED_MODEL": "previous-embedding",
-    }
-    draft = ConfigurationDraft(
-        original=dict(previous_models),
-        values=dict(previous_models),
-    )
-
-    draft.set_models(provider="nvidia", high="", coding="", fast="", embedding="")
-
+def test_provider_can_be_tested_before_any_model_is_selected():
+    draft = ConfigurationDraft(original={},values={"OPENAI_CHAT_MODEL":"previous"})
+    draft.set_models(provider="nvidia",high="",coding="",fast="")
     assert draft.values["MANA_AI_PROVIDER"] == "nvidia"
-    assert draft.values["MANA_CONFIGURED_PROVIDERS"] == ["nvidia"]
-    assert {key: draft.values[key] for key in previous_models} == previous_models
+    assert draft.values["OPENAI_CHAT_MODEL"] == "previous"
+
+def test_chat_model_selection_does_not_require_embeddings():
+    draft = ConfigurationDraft(original={},values={})
+    draft.set_models(provider="nvidia",high="org/model",coding="org/code",fast="org/fast")
+    assert draft.values["MANA_PRIMARY_MODEL"] == "nvidia/org/model"
+    assert "MANA_EMBEDDING_MODEL" not in draft.values
+    assert "OPENAI_EMBED_MODEL" not in draft.values
 
 
-def test_set_models_does_not_partially_replace_models_when_required_selector_is_empty() -> None:
-    previous_models = {
-        "MANA_PRIMARY_MODEL": "openai/previous-chat",
-        "MANA_EMBEDDING_MODEL": "openai/previous-embedding",
-        "OPENAI_CHAT_MODEL": "previous-chat",
-        "OPENAI_EMBED_MODEL": "previous-embedding",
-    }
-    draft = ConfigurationDraft(
-        original=dict(previous_models),
-        values=dict(previous_models),
-    )
-
-    draft.set_models(
-        provider="nvidia",
-        high="nvidia/nemotron-chat",
-        coding="",
-        fast="",
-        embedding="",
-    )
-
-    assert {key: draft.values[key] for key in previous_models} == previous_models
+def test_capability_override_roundtrips_as_structured_toml(monkeypatch, tmp_path):
+    from mana_agent.config.user_config import load_user_config, save_user_config
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    override = {"provider": "openai", "model_id": "selected", "capabilities": {"tool_choice": ["required"], "context_window": 4096}}
+    save_user_config({"MANA_MODEL_CAPABILITY_OVERRIDES": [override]}, merge=False)
+    assert load_user_config()["MANA_MODEL_CAPABILITY_OVERRIDES"] == [override]
 
 
-def test_set_models_qualifies_selected_models() -> None:
-    draft = ConfigurationDraft(original={}, values={})
+def test_settings_offer_unclassified_discovered_models_without_selecting_one(monkeypatch, tmp_path):
+    from mana_agent.config.model_catalog import ModelDescriptor
+    from mana_agent.tui.configuration_app import ManaConfigurationApp
 
-    draft.set_models(
-        provider="nvidia",
-        high="meta/llama-chat",
-        coding="meta/llama-code",
-        fast="meta/llama-fast",
-        embedding="nvidia/nv-embed",
-    )
-
-    assert draft.values["MANA_PRIMARY_MODEL"] == "nvidia/meta/llama-chat"
-    assert draft.values["MANA_EMBEDDING_MODEL"] == "nvidia/nvidia/nv-embed"
-    assert draft.values["OPENAI_CODING_PLANNER_MODEL"] == "meta/llama-code"
-    assert draft.values["OPENAI_TOOL_WORKER_MODEL"] == "meta/llama-fast"
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    app = ManaConfigurationApp(draft=ConfigurationDraft(original={}, values={}))
+    unknown = ModelDescriptor(provider="openai", id="org/model", capabilities=frozenset())
+    inactive = ModelDescriptor(provider="openai", id="inactive", capabilities=frozenset(), available=False)
+    assert app._inference_model_options([unknown, inactive], current="configured") == [
+        ("Select an inference model", ""), ("org/model  · Unknown", "org/model"), ("configured · configured", "configured"),
+    ]

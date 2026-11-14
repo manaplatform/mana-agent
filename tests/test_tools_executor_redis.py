@@ -132,7 +132,7 @@ def test_redis_executor_keeps_deterministic_input_order(monkeypatch) -> None:
                     "answer": "second",
                     "sources": [],
                     "mode": "agent-tools",
-                    "trace": [{"idx": 1, "tool_name": "semantic_search", "status": "ok"}],
+                    "trace": [{"idx": 1, "tool_name": "repo_search", "status": "ok"}],
                     "warnings": [],
                 },
                 "duration_ms": 8.0,

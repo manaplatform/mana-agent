@@ -1,41 +1,22 @@
-from pathlib import Path
-
-from mana_agent.analysis.models import SearchHit
 from mana_agent.services.search_service import SearchService
 
-
-class FakeStore:
-    def search(self, _index_dir: Path, query: str, k: int) -> list[SearchHit]:
-        assert query == "find add"
-        assert k == 3
-        suffix = Path(_index_dir).name
-        score = 0.9 if suffix == "idx-a" else 0.8
-        return [
-            SearchHit(
-                score=score,
-                file_path=f"/tmp/{suffix}.py",
-                start_line=1,
-                end_line=5,
-                symbol_name="add",
-                snippet="def add(a, b): return a + b",
-            )
-        ]
+def test_repository_search_requires_no_index_or_credentials(tmp_path):
+    (tmp_path / "sample.py").write_text("native_engine = True\n")
+    results = SearchService(repository_root=tmp_path).search(query="native_engine",k=5)
+    assert len(results) == 1
+    assert results[0].start_line == 1
+    assert results[0].relative_path == "sample.py"
 
 
-def test_search_service_returns_hits() -> None:
-    service = SearchService(store=FakeStore())
-    hits = service.search(index_dir="/tmp/index", query="find add", k=3)
-    assert len(hits) == 1
-    assert hits[0].symbol_name == "add"
+def test_directory_chat_groups_live_matches_by_repository_root(tmp_path):
+    from mana_agent.services.ask_service import AskService
 
+    project = tmp_path / "component"
+    project.mkdir()
+    (project / "sample.py").write_text("native_engine = True\n")
+    hits, warnings = SearchService(repository_root=tmp_path).search_multi([project], query="native_engine", k=5)
 
-def test_search_service_search_multi_merges_and_ranks() -> None:
-    service = SearchService(store=FakeStore())
-    hits, warnings = service.search_multi(
-        index_dirs=[Path("/tmp/idx-b"), Path("/tmp/idx-a")],
-        query="find add",
-        k=3,
-    )
     assert not warnings
-    assert len(hits) == 2
-    assert hits[0].file_path == "/tmp/idx-a.py"
+    group, = AskService._group_sources_by_index(hits, [project])
+    assert group.subproject_root == str(project.resolve())
+    assert group.sources[0].relative_path == "sample.py"

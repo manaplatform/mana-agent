@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_core.messages import AIMessage
+from mana_agent.llm.messages import AssistantMessage
 
 from mana_agent.analysis.models import AskResponseWithTrace, SearchHit
 from mana_agent.multi_agent.runtime.entry_router import EntryRouter, RouteDecision, RouteDecisionError
 from mana_agent.services.ask_service import AskService
-from mana_agent.vector_store.faiss_store import FaissStore
 
 
 class _EmptyStore:
-    def search(self, _index_dir: Path, query: str, k: int) -> list[SearchHit]:
+    def search(self, _index_dir: Path | None = None, query: str = "", k: int = 5, **kwargs) -> list[SearchHit]:
         return []
 
 
@@ -19,7 +18,7 @@ class _HitStore:
     def __init__(self, hits: list[SearchHit]) -> None:
         self._hits = hits
 
-    def search(self, _index_dir: Path, query: str, k: int) -> list[SearchHit]:
+    def search(self, _index_dir: Path | None = None, query: str = "", k: int = 5, **kwargs) -> list[SearchHit]:
         return self._hits
 
 
@@ -39,7 +38,7 @@ class _FakeQnA:
 def test_model_selected_conversation_route_answers_from_session_history(tmp_path: Path) -> None:
     qna = _FakeQnA()
     service = AskService(
-        store=_EmptyStore(),
+        
         qna_chain=qna,
         project_root=tmp_path,
         entry_router=_StaticRouter(
@@ -113,9 +112,21 @@ class _FakeLLM:
         self.content = content
         self.messages = []
 
-    def invoke(self, messages):
+    def generate_sync(self, messages, **_native_options):
         self.messages.append(messages)
-        return AIMessage(content=self.content)
+        return AssistantMessage(content=self.content)
+
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        raw = self.generate_sync(messages)
+        if isinstance(schema, dict):
+            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+            value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
+            validate_arguments(value, schema)
+            return value
+        if isinstance(raw, schema):
+            return raw
+        return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
 
 
 def _make_project(tmp_path: Path) -> Path:
@@ -158,50 +169,35 @@ def _command_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_missing_faiss_index_does_not_automatically_project_search(tmp_path: Path) -> None:
-    service = AskService(
-        store=FaissStore(embeddings=object()),
-        qna_chain=_FakeQnA(),
-        project_root=tmp_path,
-        entry_router=_StaticRouter(RouteDecision(kind="semantic_qa", confidence=0.9, reason="model selected index")),
-    )
-
-    response = service.ask(index_dir=tmp_path / ".mana" / "index", question="add", k=5)
-
-    assert response.sources == []
-    assert "Semantic index is unavailable" in response.answer
-    assert response.route_trace["route_kind"] == "semantic_qa"
-    assert "fallback" not in response.mode
-    assert "fallback" not in response.answer.lower()
-
-
-def test_missing_faiss_index_does_not_re_route_to_repo_search(tmp_path: Path) -> None:
+def test_repository_qa_uses_live_files_without_any_index(tmp_path: Path) -> None:
+    from mana_agent.services.search_service import SearchService
     project = _make_project(tmp_path)
-    router = _StaticRouter(
-        RouteDecision(kind="semantic_qa", confidence=0.9, reason="model selected index"),
-        RouteDecision(kind="repo_search", confidence=0.8, reason="index unavailable; inspect repo"),
-    )
     qna = _FakeQnA()
-    service = AskService(
-        store=FaissStore(embeddings=object()),
-        qna_chain=qna,
-        project_root=project,
-        entry_router=router,
-    )
+    router = _StaticRouter(RouteDecision(kind="repository_qa", confidence=.9, reason="read live repository evidence"))
+    service = AskService(qna_chain=qna, project_root=project, search_service=SearchService(project), entry_router=router)
+    response = service.ask(index_dir=project / ".mana/index", question="add", k=5)
+    assert response.sources
+    assert qna.last_context is not None
+    assert response.route_trace["route_kind"] == "repository_qa"
+    assert len(router.calls) == 1
 
-    response = service.ask(index_dir=project / ".mana" / "index", question="add", k=5)
 
+def test_repository_qa_no_matches_does_not_select_another_route(tmp_path: Path) -> None:
+    from mana_agent.services.search_service import SearchService
+    qna = _FakeQnA()
+    router = _StaticRouter(RouteDecision(kind="repository_qa", confidence=.9, reason="look for repository evidence"))
+    service = AskService(qna_chain=qna, project_root=tmp_path, search_service=SearchService(tmp_path), entry_router=router)
+    response = service.ask(index_dir=tmp_path / ".mana/index", question="absent", k=5)
     assert response.sources == []
     assert qna.last_context is None
-    assert response.route_trace["route_kind"] == "semantic_qa"
-    assert response.route_trace["validation"] == "semantic index unavailable"
+    assert response.route_trace["route_kind"] == "repository_qa"
     assert len(router.calls) == 1
 
 
 def test_command_inventory_routes_through_tool_execution(tmp_path: Path) -> None:
     project = _command_project(tmp_path)
     service = AskService(
-        store=_EmptyStore(),
+        
         qna_chain=_FakeQnA(),
         project_root=project,
         entry_router=_StaticRouter(
@@ -228,7 +224,7 @@ def test_gitops_route_executes_agent_tools_without_repo_search(tmp_path: Path) -
     ask_agent = _RecordingAskAgent()
     qna = _FakeQnA()
     service = AskService(
-        store=_EmptyStore(),
+        
         qna_chain=qna,
         ask_agent=ask_agent,
         project_root=project,
@@ -281,7 +277,7 @@ def test_unknown_command_stops_without_re_routing_to_clarification(tmp_path: Pat
             user_visible_message="I could not find that command. Which Mana-Agent command should run?",
         ),
     )
-    service = AskService(store=_EmptyStore(), qna_chain=_FakeQnA(), project_root=tmp_path, entry_router=router)
+    service = AskService( qna_chain=_FakeQnA(), project_root=tmp_path, entry_router=router)
 
     response = service.ask(index_dir=tmp_path / ".mana" / "index", question="run missing", k=3)
 
@@ -292,7 +288,7 @@ def test_unknown_command_stops_without_re_routing_to_clarification(tmp_path: Pat
 
 def test_agent_failure_does_not_run_classic_route(tmp_path: Path) -> None:
     service = AskService(
-        store=_EmptyStore(),
+        
         qna_chain=_FakeQnA(),
         ask_agent=_FailingAskAgent(),
         project_root=tmp_path,
@@ -309,7 +305,7 @@ def test_agent_failure_does_not_run_classic_route(tmp_path: Path) -> None:
 
 def test_dir_mode_failure_does_not_run_classic_dir_route(tmp_path: Path) -> None:
     service = AskService(
-        store=_EmptyStore(),
+        
         qna_chain=_FakeQnA(),
         ask_agent=_FailingAskAgent(),
         project_root=tmp_path,
@@ -354,7 +350,7 @@ def test_router_can_select_web_search_for_openclaw_request() -> None:
 
 def test_invalid_router_output_stops_without_action(tmp_path: Path) -> None:
     service = AskService(
-        store=_HitStore(
+        search_service=_HitStore(
             [
                 SearchHit(
                     score=0.9,

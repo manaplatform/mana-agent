@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 
 from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
@@ -64,7 +64,7 @@ class BudgetOverrunFinalizationDecider:
         task: TaskRecord,
         result_payload: dict[str, Any],
     ) -> BudgetOverrunFinalizationDecision:
-        if self.llm is None or not callable(getattr(self.llm, "invoke", None)):
+        if self.llm is None or not callable(getattr(self.llm, "generate_sync", None)):
             raise BudgetOverrunDecisionError(
                 "Model decision failed: budget_overrun_finalization. No result was finalized. "
                 "Reason: decision model is unavailable."
@@ -88,28 +88,10 @@ class BudgetOverrunFinalizationDecider:
         }
         messages = [
             SystemMessage(content=_PROMPT),
-            HumanMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
+            UserMessage(content=json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
         ]
         try:
-            structured = getattr(self.llm, "with_structured_output", None)
-            response = None
-            structured_error = None
-            if callable(structured):
-                try:
-                    response = structured(
-                        BudgetOverrunFinalizationDecision, method="json_schema", strict=True
-                    ).invoke(messages)
-                except Exception as exc:
-                    structured_error = exc
-            if response is None:
-                response = self.llm.invoke(messages)
-            try:
-                return _coerce_budget_decision(response)
-            except Exception as coerce_exc:
-                if callable(structured) and structured_error is None:
-                    direct_response = self.llm.invoke(messages)
-                    return _coerce_budget_decision(direct_response)
-                raise coerce_exc
+            return _coerce_budget_decision(self.llm.decide_sync(messages, BudgetOverrunFinalizationDecision))
         except Exception as exc:
             raise BudgetOverrunDecisionError(
                 "Model decision failed: budget_overrun_finalization. No result was finalized. "

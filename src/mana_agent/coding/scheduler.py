@@ -52,8 +52,7 @@ READ_TOOL_NAMES = frozenset({
     "git_diff",
     "git_log",
     "read_skill",
-    "semantic_search",
-    "conversation_context_read",
+        "conversation_context_read",
     "memory_read",
     "ls",
 })

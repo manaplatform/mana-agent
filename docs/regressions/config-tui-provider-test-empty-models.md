@@ -10,7 +10,7 @@ When a user switches the configuration TUI's inference provider to NVIDIA before
 
 ## Permanent fix and regression prevention
 
-`ConfigurationDraft.set_models()` now always records the provider selection, but only replaces model settings when both required selectors (high-reasoning and embedding) contain values. This keeps the last valid model configuration intact while the provider catalog is being tested or selectors are only partially populated. Fully selected models continue to be qualified and stored as before.
+`ConfigurationDraft.set_models()` now always records the provider selection, but only replaces model settings when the required Main/high-reasoning selector contains a value. This keeps the last valid model configuration intact while the provider catalog is being tested or selectors are only partially populated. Repository embeddings have been retired; model configuration no longer requires an embedding selector. Fully selected models continue to be qualified and stored as before.
 
 Regression tests cover all-empty selectors, a partially populated selector set, and normal NVIDIA model qualification.
 
@@ -19,3 +19,5 @@ Regression tests cover all-empty selectors, a partially populated selector set, 
 ## Verification
 
 Run `./venv/bin/pytest tests/test_configuration_session.py -q` to check these regression cases. The test status is determined by the run output; this note does not imply a passing result.
+
+The native migration preserves this empty-selection invariant. User-owned check: `python -m pytest -q tests/test_configuration_session.py`.

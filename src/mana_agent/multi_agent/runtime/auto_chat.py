@@ -90,8 +90,7 @@ MUTATION_TOOLS = frozenset(
     }
 )
 READ_TOOLS = [
-    "semantic_search",
-    "read_file",
+        "read_file",
     "repo_batch_read",
     "chunk_file",
     "list_tools",

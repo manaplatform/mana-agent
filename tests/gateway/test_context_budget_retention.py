@@ -46,10 +46,15 @@ class _MockRoutingModel:
         self.route = route
         self.invoked_messages: list[list[Any]] = []
 
-    def with_structured_output(self, schema: Any, *, method: str = "json_schema", strict: bool = True):
-        return self
+    def decide_sync(self, messages, schema, **kwargs):
+        raw = self.generate_sync(messages, **kwargs)
+        if isinstance(raw, schema):
+            return raw
+        if isinstance(raw, dict):
+            return schema.model_validate(raw)
+        return schema.model_validate_json(getattr(raw, "content", raw))
 
-    def invoke(self, messages: list[Any], **_kwargs: Any) -> Any:
+    def generate_sync(self, messages: list[Any], **_kwargs: Any) -> Any:
         self.invoked_messages.append(messages)
         return SimpleNamespace(
             content=json.dumps({

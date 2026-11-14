@@ -95,8 +95,6 @@ def route_model(request: RoutingRequest, *, global_model: str, profiles=None) ->
         candidates = explicit or profiles_from_legacy_configuration(
             global_model=global_model,
             default_provider=settings.mana_ai_provider,
-            context_window=settings.mana_context_unknown_model_context_window,
-            max_output_tokens=settings.mana_context_unknown_model_max_output_tokens,
         )
         language_preferences = settings.mana_routing_language_preferences if isinstance(settings.mana_routing_language_preferences, dict) else {}
         candidates = tuple(
@@ -210,6 +208,7 @@ def resolve_model_for_role(
             workspace_id=workspace_id,
             repository_id=repository_id,
             execution_lane=execution_lane or role.value,
+            assignment_only=True,
         )
     base_self = resolve_base_self(role=role.value, purpose=request.task_description)
     if routing_authority is not None:

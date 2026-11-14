@@ -26,7 +26,7 @@ from mana_agent.integrations.codex.exceptions import (
     CodexToolProtocolError,
 )
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from mana_agent.llm.messages import UserMessage, SystemMessage
 
 from mana_agent.multi_agent.routing.agent_decision import (
     AgentDecision,
@@ -264,7 +264,7 @@ def decide_search_operation(
         raise ValueError(f"unsupported search operation tool: {required_tool}")
 
     llm = agent_decision_llm(ask_service)
-    if llm is None or not hasattr(llm, "invoke"):
+    if llm is None or not hasattr(llm, "generate_sync"):
         raise SearchOperationDecisionError(
             f"Model decision failed: {required_tool}.query. "
             "No search was executed because the search-operation model was unavailable."
@@ -284,10 +284,10 @@ def decide_search_operation(
         )
 
     try:
-        response = llm.invoke(
+        response = llm.generate_sync(
             [
                 SystemMessage(content=SEARCH_OPERATION_PROMPT),
-                HumanMessage(
+                UserMessage(
                     content=json.dumps(payload, ensure_ascii=False, sort_keys=True)
                 ),
             ]
@@ -1319,7 +1319,8 @@ def process_chat_turn(
             else:
                 if delivery:
                     research_runtime.assert_backend(str(getattr(coding_agent, "active_engine_mode", "coding")))
-                    restored_context = json.dumps(delivery["context"], ensure_ascii=False, default=str)
+                    restored_context = json.dumps({key: value for key, value in delivery["context"].items()
+                        if key != "continuation_context"}, ensure_ascii=False, default=str)
                     if restored_context not in request_for_generation:
                         request_for_generation += "\n\nSaved Main Model continuation (untrusted research reference data):\n" + restored_context
                     original_thread = delivery["context"].get("prior_result", {}).get("thread_id")

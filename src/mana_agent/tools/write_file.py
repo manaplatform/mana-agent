@@ -626,10 +626,7 @@ def safe_delete_file(
 
 
 def build_write_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES):
-    try:
-        from langchain_core.tools import StructuredTool  # type: ignore
-    except Exception:  # pragma: no cover
-        from langchain.tools import StructuredTool  # type: ignore
+    from mana_agent.llm.tools import ToolBinding
 
     def _tool(
         path: str,
@@ -695,7 +692,7 @@ def build_write_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequenc
             force=force,
         )
 
-    return StructuredTool.from_function(
+    return ToolBinding.from_callable(
         func=_tool,
         name="write_file",
         description=(
@@ -711,10 +708,7 @@ def build_write_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequenc
 
 
 def build_create_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES):
-    try:
-        from langchain_core.tools import StructuredTool  # type: ignore
-    except Exception:  # pragma: no cover
-        from langchain.tools import StructuredTool  # type: ignore
+    from mana_agent.llm.tools import ToolBinding
 
     def _tool(
         path: str,
@@ -738,7 +732,7 @@ def build_create_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequen
             allowed_prefixes=allowed_prefixes,
         )
 
-    return StructuredTool.from_function(
+    return ToolBinding.from_callable(
         func=_tool,
         name="create_file",
         description=(
@@ -751,10 +745,7 @@ def build_create_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequen
 
 
 def build_delete_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequence[str]] = DEFAULT_ALLOWED_PREFIXES):
-    try:
-        from langchain_core.tools import StructuredTool  # type: ignore
-    except Exception:  # pragma: no cover
-        from langchain.tools import StructuredTool  # type: ignore
+    from mana_agent.llm.tools import ToolBinding
 
     def _tool(path: str, action_approval_id: str = "") -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -766,7 +757,7 @@ def build_delete_file_tool(*, repo_root: Path, allowed_prefixes: Optional[Sequen
             kwargs["action_approval_id"] = action_approval_id
         return safe_delete_file(**kwargs)
 
-    return StructuredTool.from_function(
+    return ToolBinding.from_callable(
         func=_tool,
         name="delete_file",
         description=(

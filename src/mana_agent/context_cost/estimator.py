@@ -26,7 +26,7 @@ def estimate_tool_schema_tokens(tool: Any) -> int:
     payload = {
         "name": getattr(tool, "name", type(tool).__name__),
         "description": getattr(tool, "description", ""),
-        "args_schema": _schema(getattr(tool, "args_schema", None)),
+        "input_model": _schema(getattr(tool, "input_model", None)),
     }
     return estimate_value_tokens(payload)
 

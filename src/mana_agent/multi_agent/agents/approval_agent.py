@@ -51,7 +51,7 @@ def judge_approval_request(
     if llm is None:
         try:
             from mana_agent.config.user_config import get_setting
-            from mana_agent.multi_agent.runtime.compatibility import create_chat_model
+            from mana_agent.llm.engine import create_model
 
             model = (
                 get_setting("MANA_MODEL_APPROVAL", "")
@@ -61,7 +61,7 @@ def judge_approval_request(
             )
             api_key = get_setting("OPENAI_API_KEY", "") or get_setting("MANA_API_KEY", "") or ""
             if model and api_key:
-                llm = create_chat_model(api_key=api_key, model=model.removeprefix("openai/"))
+                llm = create_model(api_key=api_key, model=model.removeprefix("openai/"))
         except Exception as exc:
             logger.debug("Could not resolve default LLM for approval judgment: %s", exc)
 
@@ -105,38 +105,17 @@ def judge_approval_request(
     if error:
         user_payload["execution_error"] = str(error)
 
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from mana_agent.llm.messages import UserMessage, SystemMessage
 
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=json.dumps(user_payload, ensure_ascii=False)),
+        UserMessage(content=json.dumps(user_payload, ensure_ascii=False)),
     ]
 
     try:
-        raw_res = llm.invoke(messages) if hasattr(llm, "invoke") else llm(messages)
-        text = extract_model_text(raw_res).strip()
-        if text.startswith("```"):
-            text = text.removeprefix("```json").removeprefix("```").strip().removesuffix("```").strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        data = json.loads(text)
-        raw_val = str(data.get("judgment") or "deny").strip().lower()
-        if raw_val in {"accept", "approved", "approve", "allow", "yes"}:
-            judgment_val: Literal["accept", "approval", "deny"] = "accept"
-        elif raw_val in {"approval", "require_approval", "needs_approval", "ask_user", "human_approval"}:
-            judgment_val = "approval"
-        else:
-            judgment_val = "deny"
-
-        return ModelApprovalJudgment(
-            judgment=judgment_val,
-            reason=str(data.get("reason") or "Model evaluated command safety."),
-            suggested_command=str(data.get("suggested_command") or "").strip(),
-            confidence=max(0.0, min(1.0, float(data.get("confidence", 1.0)))),
-            risk_assessment=str(data.get("risk_assessment") or ""),
-        )
+        if not callable(getattr(llm, "decide_sync", None)):
+            raise RuntimeError("The selected approval model lacks native structured decisions")
+        return llm.decide_sync(messages, ModelApprovalJudgment)
     except Exception as exc:
         logger.warning("Model approval judgment evaluation failed: %s", exc)
         return ModelApprovalJudgment(

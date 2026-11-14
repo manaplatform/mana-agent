@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import json
 import pytest
 
-from langchain_core.messages import AIMessage, HumanMessage
+from mana_agent.llm.messages import AssistantMessage, UserMessage
 
 from mana_agent.multi_agent.runtime.qna_chain import QnAChain
 from mana_agent.services.chat_service import ChatService
@@ -18,7 +18,7 @@ def test_qna_chain_chat_includes_recent_history() -> None:
     chain.provider = "mock"
     chain.model = "mock-model"
     mock_llm = MagicMock()
-    mock_response = AIMessage(content="test is 1")
+    mock_response = AssistantMessage(content="test is 1")
     mock_llm.invoke.return_value = mock_response
     chain.llm = mock_llm
 
@@ -32,13 +32,13 @@ def test_qna_chain_chat_includes_recent_history() -> None:
 
     assert mock_llm.invoke.called
     messages_passed = mock_llm.invoke.call_args[0][0]
-    # Check messages structure: SystemMessage, HumanMessage(history), AIMessage(history), HumanMessage(current)
+    # Check messages structure: SystemMessage, UserMessage(history), AssistantMessage(history), UserMessage(current)
     assert len(messages_passed) == 4
-    assert isinstance(messages_passed[1], HumanMessage)
+    assert isinstance(messages_passed[1], UserMessage)
     assert messages_passed[1].content == "remember that test = 1"
-    assert isinstance(messages_passed[2], AIMessage)
+    assert isinstance(messages_passed[2], AssistantMessage)
     assert messages_passed[2].content == "Got it, test = 1."
-    assert isinstance(messages_passed[3], HumanMessage)
+    assert isinstance(messages_passed[3], UserMessage)
     assert messages_passed[3].content == "what is test?"
 
 

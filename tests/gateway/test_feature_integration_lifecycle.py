@@ -525,10 +525,15 @@ def test_p04_stage_aware_state_normalization_on_entry(tmp_path):
 def test_p01_feature_integration_decision_provider_structured_output():
     """P0.1: FeatureIntegrationDecisionProvider extracts structured WiringDecision from model output."""
     class _MockLLM:
-        def with_structured_output(self, schema, **kwargs):
-            return self
+        def decide_sync(self, messages, schema, **kwargs):
+            raw = self.generate_sync(messages, **kwargs)
+            if isinstance(raw, schema):
+                return raw
+            if isinstance(raw, dict):
+                return schema.model_validate(raw)
+            return schema.model_validate_json(getattr(raw, "content", raw))
 
-        def invoke(self, messages, **kwargs):
+        def generate_sync(self, messages, **kwargs):
             return WiringDecision(
                 outcome="already_integrated",
                 edges=_edges(),

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
-from langchain_core.tools import BaseTool, StructuredTool
+from mana_agent.llm.tools import ToolBinding
 
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.context_cost.governor import ContextCostGovernor
@@ -656,8 +656,8 @@ def build_context_retrieval_tools(
     retrieval_ledger: TurnRetrievalLedger | None = None,
     conversation_budget: int = 12000,
     memory_budget: int = 4000,
-) -> list[BaseTool]:
-    """Build LangChain StructuredTools bound to trusted runtime context."""
+) -> list[ToolBinding]:
+    """Build native tools bound to authorized runtime context."""
 
     def conversation_context_read(
         query: str | None = None,
@@ -718,23 +718,25 @@ def build_context_retrieval_tools(
         )
 
     return [
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=conversation_context_read,
             name="conversation_context_read",
             description=(
                 "Read bounded episodic conversation history for this active authorized session. "
                 "Specify query, max_turns, and max_tokens to retrieve relevant past turns."
             ),
-            args_schema=ConversationContextReadInput,
+            input_model=ConversationContextReadInput,
+            metadata={"execution_capability": "context", "execution_effect": "read_only", "repository_operation": False},
         ),
-        StructuredTool.from_function(
+        ToolBinding.from_callable(
             func=memory_read,
             name="memory_read",
             description=(
                 "Read authorized durable memory capsules for the authenticated user and task context. "
                 "Specify semantic query, max_capsules, and max_tokens."
             ),
-            args_schema=MemoryReadInput,
+            input_model=MemoryReadInput,
+            metadata={"execution_capability": "context", "execution_effect": "read_only", "repository_operation": False},
         ),
     ]
 

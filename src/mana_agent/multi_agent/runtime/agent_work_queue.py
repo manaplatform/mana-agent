@@ -542,7 +542,7 @@ def compute_fingerprint(*, kind: str, tool_name: str, tool_args: dict[str, Any],
     if tool == "read_file":
         path = _norm_path(args.get("path") or args.get("file") or args.get("file_path"))
         payload = f"read_file:{path}" if path else f"read_file:{_normalize_text(question)[:160]}"
-    elif tool in {"repo_search", "repo_batch_search", "semantic_search", "list_files"}:
+    elif tool in {"repo_search", "repo_batch_search", "list_files"}:
         query = _normalize_text(args.get("query") or args.get("q") or args.get("pattern") or question)
         payload = f"{tool}:{query}"
     elif tool in _MUTATION_TOOLS:

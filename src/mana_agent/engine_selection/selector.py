@@ -146,11 +146,9 @@ class EngineSelector:
 
         # 2. Endpoint/provider support check
         # Decisions is an OpenAI API capability (/v1/decisions)
-        is_openai_compatible = (
-            self.provider == "openai"
-            or "api.openai.com" in self.base_url
-            or bool(get_setting("MANA_LLM_SUPPORTS_DECISIONS_API", False))
-        )
+        from mana_agent.llm.registry import resolve_profile
+        model = str(get_setting("MANA_DECISIONS_MODEL", "") or "")
+        is_openai_compatible = bool(model) and resolve_profile(self.provider, model, endpoint=self.base_url).supports("decisions_api")
         if not is_openai_compatible:
             return False, f"Provider '{self.provider}' with base URL '{self.base_url}' does not support Decisions API"
 

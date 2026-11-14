@@ -197,7 +197,6 @@ class ActionRecord(StrictModel):
                 "batch_list_files",
                 "find_symbols",
                 "call_graph",
-                "semantic_search",
                 "git_status",
                 "git_diff",
                 "git_log",

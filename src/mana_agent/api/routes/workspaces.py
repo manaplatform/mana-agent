@@ -146,17 +146,10 @@ def relationships(workspace_id: str, refresh: bool = False) -> list[dict]:
 
 @router.post("/workspaces/{workspace_id}/search")
 def search(workspace_id: str, payload: SearchRequest) -> dict:
-    semantic = None
     if payload.mode == "semantic":
-        from mana_agent.commands.cli_internal import Settings, build_search_service
-
-        try:
-            semantic = build_search_service(Settings())
-        except Exception as exc:
-            # Do not expose provider/config exception details to the client.
-            raise ManaApiError(500, "Semantic search is unavailable.") from exc
+        raise ManaApiError(422, "Semantic repository search was removed; use text, file, or symbol")
     try:
-        return WorkspaceSearchService(semantic=semantic).search(
+        return WorkspaceSearchService().search(
             WorkspaceSearchRequest(
                 workspace_id=workspace_id,
                 query=payload.query,

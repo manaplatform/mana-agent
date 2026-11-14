@@ -329,6 +329,7 @@ def classify_runtime_phase(event_type: str, metadata: dict[str, Any] | None = No
         "model_execution_started",
         "model.started",
         "model.completed",
+        "model.stream",
         "assistant.started",
         "assistant.delta",
         "thinking_started",
@@ -397,6 +398,9 @@ def classify_activity_category(
     backend = str(meta.get("backend") or "").strip().lower()
 
     if et.startswith("investigation.coding_research."):
+        return "coding"
+
+    if backend == "internal" and et.startswith("model."):
         return "coding"
 
     if backend in {"codex", "internal", "coding"} and not et.startswith(("turn.", "routing", "model")):
