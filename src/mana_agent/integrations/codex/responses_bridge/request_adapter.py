@@ -9,7 +9,12 @@ from mana_agent.config.model_capabilities import (
     normalize_reasoning_request_overrides,
     resolve_model_request_policy,
 )
-from mana_agent.llm.providers.protocol_messages import validate_chat_messages
+from mana_agent.config.nvidia_model_requests import (
+    apply_nvidia_chat_completion_shaping,
+    is_nvidia_deepseek_model,
+    normalize_nvidia_chat_messages,
+    normalize_nvidia_deepseek_effort,
+)
 from mana_agent.integrations.codex.responses_bridge.models import BridgeUpstreamConfig
 from mana_agent.integrations.codex.text_cleanup import sanitize_assistant_visible_text
 from mana_agent.integrations.codex.tool_conversion import convert_responses_tools
@@ -30,6 +35,8 @@ def normalize_reasoning_effort(
     if effort is None or not str(effort).strip():
         return None
     raw = str(effort).strip().lower()
+    if is_nvidia_deepseek_model(provider=provider, model=model):
+        return normalize_nvidia_deepseek_effort(raw)
     return raw
 
 
@@ -314,7 +321,18 @@ def convert_responses_request_to_chat(
     mapped = normalize_reasoning_effort(
         provider=upstream.provider, model=model, effort=None if effort is None else str(effort)
     )
-    if mapped is not None:
+    if policy.reasoning_required:
+        if mapped in {"none", "off", "0", "false", "disabled"} or not policy.reasoning_effort_configurable:
+            mapped = None
+
+    # Non-DeepSeek hosts may still accept top-level reasoning_effort.
+    if mapped is not None and not is_nvidia_deepseek_model(
+        provider=upstream.provider, model=model
+    ):
+        if policy.reasoning_effort_configurable:
+            payload["reasoning_effort"] = mapped
+    elif mapped is not None:
+        # Stash for NVIDIA DeepSeek shaping below.
         payload["reasoning_effort"] = mapped
 
     # Optional provider/model overrides (never secrets / never routing or
@@ -365,8 +383,53 @@ def convert_responses_request_to_chat(
     payload.clear()
     payload.update(normalized_payload)
 
-    payload["messages"] = validate_chat_messages(payload["messages"])
+    # DeepSeek V4 on NVIDIA requires chat_template_kwargs; bare reasoning_effort
+    # alone can hang, 4xx, or produce empty streams (seen as Codex systemError/410).
+    #
+    # When tools are attached, force thinking off. DeepSeek V4 with
+    # thinking=True + tools routinely emits free-form pseudo-tool text
+    # (DSML / <invoke name="exec_command">) instead of structured tool_calls,
+    # which Codex treats as a completed agentMessage with zero file changes
+    # (SWE-bench empty_patch / status=ok). Mirrors multi-agent compatibility:
+    # tools + chat reasoning is not supported for NVIDIA.
+    effective_effort = mapped or "high"
+    if tools and is_nvidia_deepseek_model(provider=upstream.provider, model=model):
+        effective_effort = "none"
+        # Mark explicit so shaping overrides nested request_overrides defaults.
+        payload["reasoning_effort"] = "none"
+    apply_nvidia_chat_completion_shaping(
+        payload,
+        provider=upstream.provider,
+        model=model,
+        default_effort=effective_effort,
+    )
+
+    # For non-DeepSeek NVIDIA / other bridge hosts still ensure a stable sequence:
+    # system first, tool results retain tool_call_id.
+    if isinstance(payload.get("messages"), list):
+        if is_nvidia_deepseek_model(provider=upstream.provider, model=model):
+            # Already normalized inside apply_nvidia_chat_completion_shaping.
+            pass
+        elif str(upstream.provider or "").strip().lower() == "nvidia":
+            payload["messages"] = normalize_nvidia_chat_messages(payload["messages"])
+        else:
+            payload["messages"] = _ensure_system_first(payload["messages"])
     return payload
+
+
+def _ensure_system_first(messages: list[Any]) -> list[dict[str, Any]]:
+    """Move leading system messages to the front without other rewrites."""
+    systems: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for raw in messages:
+        if not isinstance(raw, dict):
+            continue
+        message = dict(raw)
+        if str(message.get("role") or "").strip().lower() == "system":
+            systems.append(message)
+        else:
+            rest.append(message)
+    return systems + rest
 
 
 def _remap_namespaced_tool_calls(
