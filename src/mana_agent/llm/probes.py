@@ -2,13 +2,53 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 from mana_agent.llm.capabilities import CapabilityState, observation
 from mana_agent.llm.messages import UserMessage
 from mana_agent.llm.registry import GLOBAL_CAPABILITY_REGISTRY
 from mana_agent.llm.types import InferenceRequest
+
+_PROBE_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
+_PROBE_LOCK_GUARD = threading.Lock()
+
+
+def _get_probe_lock(provider: str, model: str, capability: str) -> asyncio.Lock:
+    key = (provider, model, capability)
+    with _PROBE_LOCK_GUARD:
+        if key not in _PROBE_LOCKS:
+            _PROBE_LOCKS[key] = asyncio.Lock()
+        return _PROBE_LOCKS[key]
+
+
+def is_probe_authorized(settings: Any, provider: str, model: str, capability: str) -> bool:
+    """Check if runtime capability verification probe is authorized by settings."""
+    if settings is None:
+        return False
+    perms = getattr(settings, "mana_capability_probe_permissions", None)
+    if isinstance(perms, str):
+        try:
+            import json
+            perms = json.loads(perms)
+        except Exception:
+            perms = {}
+    if not isinstance(perms, dict):
+        return False
+    val = (
+        perms.get(f"{provider}/{model}")
+        or perms.get(provider)
+        or perms.get(model)
+        or perms.get(capability)
+        or perms.get("*")
+        or perms.get("allow_probes")
+    )
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in {"true", "1", "yes", "authorized", "allow", "enabled"}
+    return False
 
 
 class ProbePayload(BaseModel):
@@ -23,32 +63,53 @@ class ProbeResult(BaseModel):
     request_id: str
 
 
-async def run_capability_probe(engine, capability: str, *, user_initiated: bool,
-                               consent: bool, effort: str = "", tool_choice: str = "required",
-                               cancel: asyncio.Event | None = None) -> ProbeResult:
-    """One minimal inference, explicitly authorized by the model-settings user."""
-    if not user_initiated or not consent:
-        raise PermissionError("Capability probes require user initiation and explicit settings consent")
-    if capability not in {"tool_calling", "tool_choice", "native_structured_output", "tool_call_streaming", "reasoning_effort"}:
+async def run_capability_probe(engine, capability: str, *, user_initiated: bool = False,
+                              consent: bool = False, authorized: bool = False, effort: str = "",
+                              tool_choice: str = "required", cancel: asyncio.Event | None = None) -> ProbeResult:
+    """One minimal inference, authorized by explicit settings consent or user policy."""
+    if not (user_initiated and consent) and not authorized:
+        raise PermissionError("Capability probes require user initiation, explicit settings consent, or authorized probe policy")
+    if capability not in {"input_text", "output_text", "tool_calling", "tool_choice", "native_structured_output", "tool_call_streaming", "reasoning_effort"}:
         raise ValueError("Unknown capability probe")
     if capability == "tool_choice" and tool_choice not in {"auto", "required", "none", "function"}:
         raise ValueError("Select a supported probe mode from auto, required, none, or function")
-    from mana_agent.approval.models import ApprovalRequest, ApprovalDecision
-    from mana_agent.approval.policy import get_approval_policy
-    from mana_agent.approval.audit import record_approval_audit
-    identity = f"probe_{uuid.uuid4().hex}"
-    approval = ApprovalRequest(action_type="api", action_id=identity, tool_name="model_capability_probe",
-        intent={"provider": engine.provider, "model": engine.model, "capability": capability, "max_requests": 1, "max_output_tokens": 256},
-        metadata={"user_initiated": True, "harmless_synthetic_tool": True})
-    policy = get_approval_policy()
-    decision = policy.evaluate(approval)
-    if not decision.approved:
-        if not decision.interactive or decision.source not in {"requires_approval", "default_approval_required"}:
-            raise PermissionError("The approval policy denied this capability probe")
-        # The settings consent switch + explicit Test button is the human response.
-        decision = ApprovalDecision(approved=True, mode=policy.mode, source="human", interactive=True,
-            approval_id=identity, reason="User explicitly initiated this bounded model-settings probe")
-        record_approval_audit(decision, approval, result_status="human_approved")
+
+    lock = _get_probe_lock(getattr(engine, "provider", ""), getattr(engine, "model", ""), capability)
+    async with lock:
+        return await _execute_capability_probe(
+            engine,
+            capability,
+            user_initiated=user_initiated,
+            consent=consent,
+            authorized=authorized,
+            effort=effort,
+            tool_choice=tool_choice,
+            cancel=cancel,
+        )
+
+
+async def _execute_capability_probe(engine, capability: str, *, user_initiated: bool = False,
+                                    consent: bool = False, authorized: bool = False, effort: str = "",
+                                    tool_choice: str = "required", cancel: asyncio.Event | None = None) -> ProbeResult:
+    if not authorized:
+        from mana_agent.approval.models import ApprovalRequest, ApprovalDecision
+        from mana_agent.approval.policy import get_approval_policy
+        from mana_agent.approval.audit import record_approval_audit
+        identity = f"probe_{uuid.uuid4().hex}"
+        approval = ApprovalRequest(action_type="api", action_id=identity, tool_name="model_capability_probe",
+            intent={"provider": engine.provider, "model": engine.model, "capability": capability, "max_requests": 1, "max_output_tokens": 256},
+            metadata={"user_initiated": True, "harmless_synthetic_tool": True})
+        policy = get_approval_policy()
+        decision = policy.evaluate(approval)
+        if not decision.approved:
+            if not decision.interactive or decision.source not in {"requires_approval", "default_approval_required"}:
+                raise PermissionError("The approval policy denied this capability probe")
+            # The settings consent switch + explicit Test button is the human response.
+            decision = ApprovalDecision(approved=True, mode=policy.mode, source="human", interactive=True,
+                approval_id=identity, reason="User explicitly initiated this bounded model-settings probe")
+            record_approval_audit(decision, approval, result_status="human_approved")
+    else:
+        identity = f"probe_{uuid.uuid4().hex}"
     request = InferenceRequest(provider=engine.provider, model=engine.model,
         messages=[UserMessage("For this capability test, return value mana-capability-ok. If a function is offered, call only mana_capability_echo with that value.")],
         parameters={**engine.parameters, "max_output_tokens": 256, "n": 1}, request_id=identity)
@@ -109,7 +170,10 @@ async def run_capability_probe(engine, capability: str, *, user_initiated: bool,
             engine.context_cost_governor.record_model_call(reservation, usage=response.usage.model_dump(),
                 provider=engine.provider, model=engine.model, estimated_input=[m.content for m in request.messages])
             reservation = ""
-        if capability == "tool_choice" and tool_choice == "none":
+        if capability in {"input_text", "output_text"}:
+            if not isinstance(response.content, str) or not response.content.strip():
+                raise ValueError("Provider did not return non-empty text")
+        elif capability == "tool_choice" and tool_choice == "none":
             if response.tool_calls or not isinstance(response.content, str) or response.content.strip() != "mana-capability-ok":
                 raise ValueError("Provider did not return the expected text without a tool call")
         elif capability in {"tool_calling", "tool_choice", "tool_call_streaming"}:
@@ -131,11 +195,17 @@ async def run_capability_probe(engine, capability: str, *, user_initiated: bool,
         error = body.get("error", body) if isinstance(body, dict) else {}
         code = error.get("code") if isinstance(error, dict) else None
         parameter = error.get("param") if isinstance(error, dict) else None
-        expected = {"tool_calling": {"tools"}, "tool_choice": {"tool_choice"},
+        expected = {
+            "input_text": set(),
+            "output_text": set(),
+            "tool_calling": {"tools"},
+            "tool_choice": {"tool_choice"},
             "native_structured_output": {"response_format", "text.format", "output_config.format"},
             "reasoning_effort": {"reasoning_effort", "reasoning.effort", "output_config.effort"},
-            "tool_call_streaming": {"stream"}}[capability]
-        if getattr(exc, "status_code", None) in {400, 422} and code in {"unsupported_parameter", "unsupported_feature"} and parameter in expected:
+            "tool_call_streaming": {"stream"},
+        }[capability]
+        status = getattr(exc, "status_code", None)
+        if status in {400, 422} and code in {"unsupported_parameter", "unsupported_feature"} and parameter in expected:
             result.state = CapabilityState.UNSUPPORTED
         result.diagnostic = f"{type(exc).__name__}; HTTP {getattr(exc, 'status_code', 'unavailable')}; capability remains {result.state.value}"
         if reservation:
@@ -154,21 +224,30 @@ async def run_capability_probe(engine, capability: str, *, user_initiated: bool,
                 profile.observations[name] = [fact for fact in observations if fact.method != "user_configuration"]
                 if profile.facts.get(name) is not None and profile.facts[name].method == "user_configuration":
                     profile.facts.pop(name)
-        # A rejection of one level or choice mode says nothing about other levels.
-        if capability in {"reasoning_effort", "tool_choice"}:
-            scoped_capability = f"{capability}.{effort if capability == 'reasoning_effort' else tool_choice}"
+        if capability in {"input_text", "output_text"}:
+            is_sup = result.state is CapabilityState.SUPPORTED
+            facts = {
+                "input_text": observation(True if is_sup else False,
+                    source="probe", scope=profile.configuration_fingerprint, method="text_api", confidence=1),
+                "output_text": observation(True if is_sup else False,
+                    source="probe", scope=profile.configuration_fingerprint, method="text_api", confidence=1),
+            }
         else:
-            scoped_capability = capability
-        value = [effort] if capability == "reasoning_effort" else [tool_choice] if capability == "tool_choice" else True
-        fact = observation(value if result.state is CapabilityState.SUPPORTED else False,
-            source="probe", scope=profile.configuration_fingerprint, method="schema_constrained_api" if capability == "native_structured_output" else "synthetic_tool_api" if request.tools else "observable_provider_configuration", confidence=1)
-        facts = {scoped_capability: fact}
-        if result.state is CapabilityState.SUPPORTED:
-            if scoped_capability != capability:
-                facts[capability] = fact.model_copy(update={"value": value})
-            demonstrated = "tool_calling" if response.tool_calls else "reasoning" if capability == "reasoning_effort" else None
-            if demonstrated and demonstrated != scoped_capability:
-                facts[demonstrated] = observation(True, source="probe", scope=profile.configuration_fingerprint,
-                    method=fact.method, confidence=1)
+            # A rejection of one level or choice mode says nothing about other levels.
+            if capability in {"reasoning_effort", "tool_choice"}:
+                scoped_capability = f"{capability}.{effort if capability == 'reasoning_effort' else tool_choice}"
+            else:
+                scoped_capability = capability
+            value = [effort] if capability == "reasoning_effort" else [tool_choice] if capability == "tool_choice" else True
+            fact = observation(value if result.state is CapabilityState.SUPPORTED else False,
+                source="probe", scope=profile.configuration_fingerprint, method="schema_constrained_api" if capability == "native_structured_output" else "synthetic_tool_api" if request.tools else "observable_provider_configuration", confidence=1)
+            facts = {scoped_capability: fact}
+            if result.state is CapabilityState.SUPPORTED:
+                if scoped_capability != capability:
+                    facts[capability] = fact.model_copy(update={"value": value})
+                demonstrated = "tool_calling" if response.tool_calls else "reasoning" if capability == "reasoning_effort" else None
+                if demonstrated and demonstrated != scoped_capability:
+                    facts[demonstrated] = observation(True, source="probe", scope=profile.configuration_fingerprint,
+                        method=fact.method, confidence=1)
         GLOBAL_CAPABILITY_REGISTRY.merge(profile, facts, persist=True)
     return result

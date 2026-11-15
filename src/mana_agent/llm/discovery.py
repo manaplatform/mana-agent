@@ -190,7 +190,18 @@ class ModelDiscoveryService:
                     facts = {name: fact.model_copy(update={"observed_at": self.catalog_observed_at, "expires_at": self.catalog_observed_at + timedelta(days=1)}) for name, fact in facts.items()}
                 profile = self.registry.merge(profile, facts)
             profile.endpoint = base_url
-            if isinstance(external, dict) and isinstance(external.get("cost"), dict):
+            if isinstance(record.get("pricing"), dict):
+                from datetime import datetime, timezone, timedelta
+                now = datetime.now(timezone.utc)
+                pricing_data = record["pricing"]
+                try:
+                    input_cost = float(pricing_data.get("prompt", 0) or 0) * 1_000_000
+                    output_cost = float(pricing_data.get("completion", 0) or 0) * 1_000_000
+                    profile.metadata["catalog_pricing"] = {"input": input_cost, "output": output_cost}
+                    profile.metadata["catalog_pricing_expires_at"] = (now + timedelta(days=1)).isoformat()
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(external, dict) and isinstance(external.get("cost"), dict):
                 from datetime import datetime, timezone, timedelta
                 observed = getattr(self, "catalog_observed_at", datetime.now(timezone.utc))
                 profile.metadata["catalog_pricing"] = external["cost"]
@@ -204,6 +215,42 @@ class ModelDiscoveryService:
             profiles.append(profile)
         self.registry.save()
         return profiles
+
+    async def refresh_model(self, *, provider: str, model_id: str, settings: Any = None, timeout_seconds: float = 15) -> ModelProfile | None:
+        from mana_agent.config.inference_provider import resolve_inference_connection
+        from mana_agent.config.settings import Settings
+        from mana_agent.config.provider_registry import split_qualified_model_id, PROVIDERS
+        provider, model_id = split_qualified_model_id(model_id, default_provider=provider)
+        try:
+            PROVIDERS.get(provider)
+        except KeyError:
+            return None
+        conn = resolve_inference_connection(settings or Settings(), provider=provider, require_api_key=False)
+        if not conn.api_key and PROVIDERS.get(provider).auth_method.value != "none":
+            return None
+        try:
+            profiles = await self.discover(
+                provider=conn.provider,
+                base_url=conn.base_url,
+                api_key=conn.api_key,
+                timeout_seconds=timeout_seconds,
+                default_headers=conn.headers,
+                query_params=conn.query_params,
+            )
+            return next((p for p in profiles if p.model_id == model_id), None)
+        except Exception:
+            return None
+
+    def refresh_model_sync(self, *, provider: str, model_id: str, settings: Any = None, timeout_seconds: float = 15) -> ModelProfile | None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.refresh_model(provider=provider, model_id=model_id, settings=settings, timeout_seconds=timeout_seconds))
+        import contextvars
+        from concurrent.futures import ThreadPoolExecutor
+        context = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mana-discovery-sync") as pool:
+            return pool.submit(context.run, lambda: asyncio.run(self.refresh_model(provider=provider, model_id=model_id, settings=settings, timeout_seconds=timeout_seconds))).result()
 
     def discover_models(self, *, provider: str, base_url: str, api_key: str = "", timeout_seconds: float = 15) -> list[ModelProfile]:
         return asyncio.run(self.discover(provider=provider, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds))

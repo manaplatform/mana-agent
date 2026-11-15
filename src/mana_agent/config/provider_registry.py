@@ -207,6 +207,8 @@ def split_qualified_model_id(
         default = str(default_provider or "openai").strip().lower() or "openai"
     if not text:
         return default, ""
+    if text.startswith("~"):
+        return "openrouter", text
     if "/" not in text:
         return default, text
     head, rest = text.split("/", 1)

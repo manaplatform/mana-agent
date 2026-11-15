@@ -2,6 +2,33 @@
 
 All notable repository changes should be recorded here.
 
+## 0.13.1 — 2026-11-15
+
+- Release metadata: bump the single-source package version to 0.13.1 in `pyproject.toml` (`[project].version`), consumed by `mana_agent._version.get_version()`, `mana_agent.__version__`, the FastAPI app version, and release/publish tag validation.
+- User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.13.1'; print(__version__)"` and `python -m pytest tests/test_package_version.py -q`.
+
+## Unreleased — 2026-11-15
+
+- Dynamic Model Capability Discovery & AutoRouter Startup Resolution:
+  - 4-State Capability Lifecycle: in `src/mana_agent/llm/capabilities.py`, introduced `CapabilityState.STALE = "STALE"`, enriched `CapabilityFact` with `provider`, `model_id`, `capability`, `expiration_policy`, `last_failure`, and `failure_timestamp`, and updated `ModelProfile.fact(cap)` to distinguish `STALE` and `UNKNOWN` from confirmed `UNSUPPORTED`. Added helpers `is_stale()`, `is_unknown()`, and `is_unsupported()`.
+  - Removal of Static Hardcoded Guesses: in `src/mana_agent/model_routing/profiles.py`, eliminated static fallback guessing of `16_384` context, `4_096` max output tokens, `can_tool_call=True`, and `can_structured_output=True`. Models with unverified limits fail closed under explicit budget bounds while remaining eligible for unconstrained tasks (`assignment_only`). In `src/mana_agent/llm/registry.py`, removed static fallback to `maintained_token_limits` and `normalize_capabilities`.
+  - Multi-Strategy Output Mechanisms: in `src/mana_agent/llm/engine.py`, refactored `NativeLLMEngine.decide()` and `decide_sync()` to dynamically select among: (1) native structured output when supported or strictly required (`require_native_structured_output=True`), (2) tool-calling output with synthetic `record_decision` function when tool calling is supported, and (3) schema-validated text decisions with prompt-embedded JSON schema instructions, markdown code fence cleanup, schema validation, and bounded 1-attempt repair when text generation is supported.
+  - Decoupled Chat Gateway & Main Role: in `src/mana_agent/multi_agent/runtime/model_levels.py`, removed mandatory `structured_output` requirement for `AgentRole.MAIN` and `AgentRole.HEAD_DECISION`. In `src/mana_agent/gateway/chat_gateway.py`, removed unconditional `required_capabilities=frozenset({"structured_output"})` in `_route_entry_turn` and multi-task planning.
+  - Candidate Provider Refresh & AutoRouter Dynamic Evidence: in `src/mana_agent/gateway/routing.py`, updated `_refresh_configured_metadata` to collect all configured providers from pinned profiles, default providers, and qualified model IDs (`provider/...`) to ensure third-party providers (e.g. OpenRouter) are discovered. In `src/mana_agent/model_routing/router.py`, added `_ensure_candidate_evidence` to trigger dynamic provider catalog refresh and authorized minimal runtime probes before model evaluation.
+  - Bounded Runtime Probes & Concurrency Control: in `src/mana_agent/llm/probes.py`, added per-model lock `_get_probe_lock` to prevent concurrent probe storms, added support for `input_text` and `output_text` probes, and separated feature incompatibility (HTTP 400/422 → `UNSUPPORTED`) from transient network or authentication errors (HTTP 401/403/429/500 → `UNKNOWN`).
+  - Actionable Diagnostics & Error Reporting: in `src/mana_agent/model_routing/models.py`, added structured diagnostic fields and `format_diagnostic()` to `CandidateRejection` and `RoutingFailure.format_diagnostics()`. In `src/mana_agent/commands/chat_cli.py`, updated startup error reporting to format candidate rejections with required, available, unknown, stale, and unsupported capabilities alongside explicit recovery commands.
+  - Permanent Regression Coverage: in `tests/test_dynamic_capability_discovery.py`, implemented 17 comprehensive unit and integration tests covering the 4-state lifecycle, absence vs unsupported distinction, multi-strategy engine output, chat gateway role decoupling, dynamic router candidate metadata resolution, probe locking, and actionable diagnostic formatting.
+  - See [dynamic capability discovery regression notes](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md).
+  - User-owned verification:
+    - `python -m pytest tests/test_dynamic_capability_discovery.py -v`
+    - `python -m pytest tests/gateway/test_chat_gateway.py -q`
+    - `python -m pytest tests/test_model_routing.py -q`
+    - `python -m pytest tests/gateway/test_entry_routing.py tests/gateway/test_routing_authority.py -q`
+    - `python -m pytest tests/gateway/test_codex_session_lifecycle.py tests/test_codex_coding_visibility.py tests/test_codex_integration.py tests/test_codex_runtime_lifecycle.py tests/test_codex_tui_lifecycle.py -q`
+    - `python -m pytest tests/test_openai_batch_coding_engine.py tests/test_openai_batch_lifecycle.py tests/test_openai_batch_router.py tests/test_openai_batch_runtime.py tests/test_openai_batch_tools.py -q`
+    - `python -m pytest tests/gateway/test_context_retrieval_tools.py tests/gateway/test_multi_task_orchestration.py tests/llm/test_engine.py -q`
+    - `python -m pytest tests/test_chat_first_configuration.py tests/test_openrouter_provider.py -q`
+
 ## Unreleased — 2026-11-14
 
 - Message Contracts & Test Isolation:
