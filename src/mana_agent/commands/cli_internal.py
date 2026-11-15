@@ -501,17 +501,6 @@ def _project_snapshot(root: Path) -> dict[str, Any]:
     return {"root": str(root), "items": interesting}
 
 
-def _plan_markdown(*, task: str, root: Path, skills: list[Any], no_code: bool, yes: bool, model: str | None = None) -> str:
-    from mana_agent.agent.plan_service import PlanService
-
-    llm = _build_planning_llm(model_override=model)
-    service = PlanService(root, llm=llm)
-    plan = service.generate_plan(task, skills=skills)
-    if yes:
-        plan = plan.with_approval(approved=True, approver="--yes")
-    return plan.to_markdown()
-
-
 @app.command("analyze")
 def analyze_command(
     path_or_task: str = typer.Argument(".", help="Repository path or analysis focus."),
@@ -600,72 +589,71 @@ def plan_command(
     task: str = typer.Argument("", help="Task to plan."),
     repo: str | None = typer.Option(None, "--repo", "--root-dir", help="Repository root to inspect."),
     model: str | None = typer.Option(None, "--model", help="Model override for planning."),
-    yes: bool = typer.Option(False, "--yes", help="Approve implementation after the plan is generated."),
+    yes: bool = typer.Option(False, "--yes", help="Review the exact revision before approving implementation."),
     no_code: bool = typer.Option(False, "--no-code", help="Never implement; only generate and save the plan."),
     save: bool = typer.Option(True, "--save/--no-save", help="Save the generated plan."),
-    output: str | None = typer.Option(None, "--output", help="Plan output path. Defaults to .mana/plans/<task>.md."),
+    output: str | None = typer.Option(None, "--output", help="Plan export outside the target checkout. Defaults to the Mana data directory."),
     skill: list[str] | None = typer.Option(None, "--skill", help="Force-load a skill by name."),
 ) -> None:
-    """Create an approval-gated implementation plan."""
-    _ = model
+    """Prepare a plan and collect approval for the reviewed revision."""
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+    from mana_agent.gateway.config import ChatGatewayConfig
+    from mana_agent.human_inbox.models import ResponseOperation
+
     try:
         ensure_setup(command_needs_llm=True, console=console)
     except NonInteractivePromptError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    root = _resolve_repo(repo)
-    render_mode_header("Plan", "Build a safe implementation plan first", console)
     if not task.strip():
-        try:
-            task = input("Task: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            task = ""
-        if not task.strip():
+        if not sys.stdin.isatty():
             raise typer.BadParameter("Plan mode requires a task.")
-    _record_multi_agent_request(root, task, entrypoint="plan", command_scope=True)
-    manager = SkillManager(root)
-    console.print("[cyan]Inspecting repository...[/cyan]")
-    console.print("[cyan]Loading relevant skills...[/cyan]")
-    try:
-        loaded_skills = manager.load_for_task(task, skill or [])
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    if loaded_skills:
-        console.print("[green]Loaded skills:[/green] " + ", ".join(item.name for item in loaded_skills))
-    else:
-        console.print("[yellow]Loaded skills:[/yellow] none")
-    plan_text = _plan_markdown(task=task, root=root, skills=loaded_skills, no_code=no_code, yes=yes, model=model)
-    console.print(plan_text)
-    plan_path: Path | None = None
-    if save:
-        plan_path = (
-            Path(output).expanduser().resolve()
-            if output
-            else repository_dir(repository_id_for_path(root)) / "plans" / f"{_slug(task)}.md"
-        )
-        plan_path.parent.mkdir(parents=True, exist_ok=True)
-        plan_path.write_text(plan_text, encoding="utf-8")
-        console.print(f"[green]Saved:[/green] {plan_path}")
-    if no_code:
-        console.print("[yellow]No-code mode is active; implementation skipped.[/yellow]")
-        return
+        task = input("Task: ").strip()
+    if not task:
+        raise typer.BadParameter("Plan mode requires a task.")
+    root = _resolve_repo(repo)
+    gateway = AgentChatGateway(root, config=ChatGatewayConfig(
+        model=model, auto_index_missing=False, extra={"read_only_workspace_startup": True},
+    ))
+    session = gateway.create_new_session(frontend="cli")
+    for name in skill or ():
+        try:
+            SkillManager(root).load_for_task(task, [name])
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    render_mode_header("Plan", "Review a repository implementation plan", console)
+    result = gateway.mode_workflow.start(
+        session, task, no_code=no_code, save=save, output=output,
+        llm=_build_planning_llm(model_override=model) if model else None,
+        skill_names=tuple(skill or ()),
+    )
     if yes:
-        console.print("[green]Implementation approved by --yes. Switching to Act Mode.[/green]")
-        console.print("[yellow]Use chat full-auto for execution:[/yellow] mana-agent chat --full-auto " + repr(task))
-        return
-    if not sys.stdin.isatty():
-        console.print("[yellow]Plan ready. Re-run with --yes to approve implementation and enter Act Mode.[/yellow]")
-        return
-    choice = input("Approve implementation plan and enter Act Mode? [yes/save/edit]: ").strip().lower()
-    if choice in {"yes", "y"}:
-        console.print("[green]Implementation approved! Switched to Act Mode.[/green]")
-        console.print("[yellow]Use chat full-auto for execution:[/yellow] mana-agent chat --full-auto " + repr(task))
-    elif choice in {"edit", "e"}:
-        console.print("[yellow]Edit the task and rerun plan mode.[/yellow]")
-    else:
-        if plan_path:
-            console.print(f"[green]Plan saved only (remains in Plan Mode):[/green] {plan_path}")
+        console.print("Review and approve the exact revision shown below.")
+    while True:
+        console.print(result.message)
+        if result.status == "error":
+            raise typer.Exit(code=1)
+        if not result.next_prompt or not sys.stdin.isatty():
+            return
+        prompt = result.next_prompt
+        if prompt["kind"] == "mode.clarification":
+            reply = input("Answer or enter JSON for multiple questions (blank to leave pending): ").strip()
+            if not reply:
+                return
+            active = gateway.mode_workflow.active(session)
+            result = gateway.mode_workflow.receive(session, reply, task=active)
+            if result.status == "error":
+                continue
         else:
-            console.print("[green]Plan generated only (remains in Plan Mode).[/green]")
+            choice = input(f"Approve revision {prompt['revision']}? [approve/revise/reject/save]: ").strip().lower()
+            if choice in {"approve", "yes", "y"}:
+                gateway.mode_workflow.respond(session, prompt["inbox_id"], ResponseOperation.APPROVE, frontend="cli")
+            elif choice in {"revise", "reject"}:
+                comment = "Revise plan:\n" + input("What should change? ") if choice == "revise" else ""
+                gateway.mode_workflow.respond(session, prompt["inbox_id"], ResponseOperation.DENY,
+                                              frontend="cli", comment=comment)
+            else:
+                return
+        result = gateway.mode_workflow.wait_for_response(prompt["task_id"], prompt["inbox_id"])
 
 
 @app.command("api")

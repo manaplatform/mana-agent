@@ -94,6 +94,18 @@ def _respond(inbox_item_id: str, *, operation: ResponseOperation, actor: str, co
     except PermissionError as exc:
         raise typer.BadParameter(str(exc), param_hint="INBOX_ITEM_ID") from exc
     typer.echo(json.dumps(result.card(), indent=2, ensure_ascii=False, default=str))
+    protected = service.repository.read_protected_context(result.protected_context_ref) if result.protected_context_ref else {}
+    if protected.get("mode_task_id") == result.task_id and protected.get("repository_root"):
+        from mana_agent.gateway.chat_gateway import AgentChatGateway
+        from mana_agent.gateway.config import ChatGatewayConfig
+
+        gateway = AgentChatGateway(protected["repository_root"], config=ChatGatewayConfig(
+            auto_index_missing=False, extra={"read_only_workspace_startup": True},
+        ))
+        progress = gateway.mode_workflow.wait_for_response(result.task_id, result.inbox_item_id)
+        typer.echo(progress.message)
+        if progress.status == "error" or progress.data.get("phase") == "blocked":
+            raise typer.Exit(code=1)
 
 
 @inbox_app.command("approve")

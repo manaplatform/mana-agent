@@ -418,7 +418,7 @@ class ToolRunnerAgent:
                         elif key in {"paths", "files"} and isinstance(item, list):
                             for entry in item:
                                 validate_paths({"path": entry} if isinstance(entry, str) else entry)
-                        elif key in {"writes", "moves", "patches", "args"}:
+                        elif key in {"writes", "moves", "patches", "args", "patterns", "queries"}:
                             validate_paths(item)
                         elif key == "patch" and isinstance(item, str):
                             for line in item.splitlines():
@@ -494,7 +494,10 @@ class ToolRunnerAgent:
                 idempotency_key=request.tool_call_id)
             supervisor.update_action(action.action_id, request_state=ActionRequestState.STARTED,
                 attempt_id=attempt_id, lease_token=lease_token)
-        before = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if policy.effect in {"mutation", "command"} else {}
+        observe_mutations = policy.effect == "mutation" or (
+            policy.effect == "command" and not _is_read_only_observation(request.tool_name, request.arguments)
+        )
+        before = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
         operation.emit("tool.started")
         raw: dict[str, Any]
         try:
@@ -521,7 +524,7 @@ class ToolRunnerAgent:
             status = "interrupted" if getattr(exc, "outcome_unknown", False) else "timed_out" if isinstance(exc, subprocess.TimeoutExpired) else "failed"
             raw = {"ok": False, "error": safe_text(str(exc), protected=operation.protected), "error_code": type(exc).__name__,
                    "stdout": str(getattr(exc, "stdout", "") or ""), "stderr": str(getattr(exc, "stderr", "") or "")}
-        after = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if policy.effect in {"mutation", "command"} else {}
+        after = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
         mutations = _mutations(before, after, partial=status != "success")
         if not getattr(before, "complete", True) or not getattr(after, "complete", True) or any(value is None for value in (*before.values(), *after.values())):
             operation.trace_complete = False
@@ -564,6 +567,30 @@ class ToolRunnerAgent:
         result.result["execution"] = result.model_dump(mode="json", exclude={"result", "mutations"})
         result.result["mutations"] = _public_value([m.model_dump() for m in mutations], operation.protected)
         return result
+
+
+def _is_read_only_observation(tool_name: str, arguments: dict[str, Any]) -> bool:
+    """Skip mutation snapshots only for unambiguous, strictly read-only commands.
+
+    This does not change the command's permission, lock, or durable receipt.
+    """
+    if tool_name not in {"run_command", "shell", "run_script_once"}:
+        return False
+    action = arguments.get("action")
+    if action is not None and not isinstance(action, dict):
+        return False
+    action = action or {}
+    forms = [arguments[key] for key in ("command", "cmd", "script") if key in arguments]
+    forms.extend(scope["commands"] for scope in (arguments, action) if "commands" in scope)
+    if len(forms) != 1:
+        return False
+    cmd = forms[0]
+    if isinstance(cmd, list):
+        if len(cmd) != 1 or not isinstance(cmd[0], str):
+            return False
+        cmd = cmd[0]
+    from mana_agent.tools.shell_exec import is_plan_mode_read_only_command
+    return isinstance(cmd, str) and "\n" not in cmd and "\r" not in cmd and is_plan_mode_read_only_command(cmd)
 
 
 class FileSnapshot(dict):

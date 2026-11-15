@@ -214,7 +214,7 @@ def classify_result(item: WorkItem, response: ToolRunResponse, *, repo_root: Pat
             trace=list(response.trace),
         )
 
-    if tool in {"repo_search", "repo_batch_search", "list_files"}:
+    if item.kind in {"search", "discover"} or tool in {"repo_search", "repo_batch_search", "list_files"}:
         ok = not error and (bool(paths) or has_content)
         return WorkResult(
             ok=ok,
@@ -361,6 +361,9 @@ def _policy_for_item(item: WorkItem, tool_policy: dict[str, Any] | None) -> dict
         selected_tool = str(item.tool_name or "").strip()
         if selected_tool:
             item_policy["allowed_tools"] = [selected_tool]
+        elif item.kind in {"search", "discover"}:
+            item_policy["allowed_tools"] = ["ls", "list_files", "repo_search", "repo_batch_search", "find_symbols", "call_graph"]
+            item_policy["require_initial_tool_call"] = True
         item_policy.pop("mutation_required", None)
         item_policy.pop("mutation_strict", None)
         item_policy.pop("verify_requires_mutation", None)
@@ -596,6 +599,9 @@ class CodingAgentSniffer:
                     if str(reference).strip()
                 )
             out: list[WorkItem] = []
+            if (item.gate == "read_explicit_target" and self._execution_scope is not None
+                    and set(self._execution_scope.all_evidence_files).issubset(self._read_files)):
+                return self._finalization_jobs()
             if self._orchestrator is not None and self._orchestrator.state.evidence_sufficient:
                 out.extend(self._finalization_jobs())
                 return out

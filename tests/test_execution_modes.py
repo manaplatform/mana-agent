@@ -228,131 +228,30 @@ def test_shell_execution_engine_blocks_destructive_commands_in_plan_mode(tmp_pat
     assert not (tmp_path / "unknown_mode.txt").exists()
 
 
-def test_plan_service_explores_repo_and_generates_plan(tmp_path: Path) -> None:
-    # Setup dummy project files
-    src_dir = tmp_path / "src" / "dummy"
-    src_dir.mkdir(parents=True)
-    file_a = src_dir / "service.py"
-    file_a.write_text("import os\nimport sys\nfrom dummy import helper\n\ndef run():\n    pass\n")
+def test_plan_service_requires_a_model_and_reads_only_selected_lines(tmp_path: Path) -> None:
+    from mana_agent.agent.plan_service import EvidenceRequest
 
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text('[project]\nname = "dummy"\ndependencies = ["pydantic>=2.0"]\n')
-
-    service = PlanService(tmp_path)
-    exploration = service.explore_context("service run execution", candidate_files=["src/dummy/service.py"])
-
-    assert "src/dummy/service.py" in exploration["discovered_files"]
-    assert "pydantic" in exploration["dependencies"] or "dummy.helper" in exploration["dependencies"]
-
-    plan = service.generate_plan("Refactor service run execution", candidate_files=["src/dummy/service.py"])
-    assert plan.goal == "Refactor service run execution"
-    assert "src/dummy/service.py" in plan.affected_files
-    assert len(plan.objectives) > 0
-    assert len(plan.implementation_steps) > 0
-    assert len(plan.validation_strategies) > 0
-    assert plan.approved is False
-
-    # Test plan markdown rendering
-    md = plan.to_markdown()
-    assert "# Implementation Plan: Refactor service run execution" in md
-    assert "src/dummy/service.py" in md
-
-    # Test plan file save
-    saved_path = service.save_plan(plan)
-    assert saved_path.exists()
-    assert saved_path.read_text(encoding="utf-8") == md
+    (tmp_path / "app.py").write_text("before\nfunction\nafter\n")
+    service = PlanService(tmp_path, llm=None)
+    read = EvidenceRequest(tool="read_file", level=1, paths=("app.py",),
+                           start_line=2, end_line=2, reason="Reported location")
+    assert service.inspect(read)["content"] == "function\n"
+    with pytest.raises(RuntimeError, match="native decision model"):
+        service.next_decision("plan", {"request": "Refactor this function"})
 
 
-def test_gateway_session_mode_tracking_and_plan_approval(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "mana_agent.commands.cli_internal.build_ask_service",
-        lambda *a, **k: None,
-    )
+def test_gateway_session_mode_is_auto_until_user_selects_plan(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("mana_agent.commands.cli_internal.build_ask_service", lambda *a, **k: None)
     gw = AgentChatGateway(root=tmp_path, coding_agent=False)
-    session_id = gw.create_session(frontend="cli")
-
-    # Default mode is plan
-    assert gw.get_session_execution_mode(session_id) == "plan"
-
-    # Switch to act mode
-    gw.set_session_execution_mode(session_id, "act")
-    assert gw.get_session_execution_mode(session_id) == "act"
-
-    # Switch back to plan mode
-    gw.set_session_execution_mode(session_id, "plan")
-    assert gw.get_session_execution_mode(session_id) == "plan"
-
-    # Set active plan
-    dummy_plan = StructuredPlan(task_id="p-test", goal="Test Plan Goal")
-    gw.set_session_active_plan(session_id, dummy_plan)
-    loaded_plan = gw.get_session_active_plan(session_id)
-    assert loaded_plan is not None
-    assert loaded_plan["goal"] == "Test Plan Goal"
-    assert loaded_plan["approved"] is False
-
-    # Approving plan sets approved=True and switches to act mode
-    approved = gw.approve_session_plan(session_id, approver="alice")
-    assert approved is True
-    assert gw.get_session_execution_mode(session_id) == "act"
-    plan_after = gw.get_session_active_plan(session_id)
-    assert plan_after["approved"] is True
-    assert plan_after["approved_by"] == "alice"
-
-
-def test_chat_commands_mode_and_approval(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "mana_agent.commands.cli_internal.build_ask_service",
-        lambda *a, **k: None,
-    )
-    gw = AgentChatGateway(root=tmp_path, coding_agent=False)
-    session_id = gw.create_session(frontend="cli")
-    ctx = CommandContext(session_id=session_id, frontend="cli", gateway=gw)
-
-    # Check /mode status
-    res = _execution_mode_command(ctx, ["status"])
-    assert res.status == "success"
-    assert "PLAN" in res.message
-
-    # Attempt to switch to act when an unapproved plan is active
-    gw.set_session_active_plan(session_id, StructuredPlan(task_id="p-1", goal="Test"))
-    res_act_blocked = _execution_mode_command(ctx, ["act"])
-    assert res_act_blocked.status == "error"
-    assert "unapproved plan is pending" in res_act_blocked.message
-
-    # Explicit /approve command
-    res_app = _approve_command(ctx, [])
-    assert res_app.status == "success"
-    assert "explicitly approved" in res_app.message
-    assert res_app.data["execution_request"] == "Test"
-    assert gw.get_session_execution_mode(session_id) == "act"
-
-    # Switch back to plan
-    res_switch_plan = _execution_mode_command(ctx, ["plan"])
-    assert res_switch_plan.status == "success"
-    assert "PLAN" in res_switch_plan.message
-    assert gw.get_session_execution_mode(session_id) == "plan"
-
-    # /act command directly approves and switches
-    gw.set_session_active_plan(session_id, StructuredPlan(task_id="p-2", goal="Test 2"))
-    res_act = _act_command(ctx, [])
-    assert res_act.status == "success"
-    assert "Act Mode" in res_act.message
-    assert res_act.data["execution_request"] == "Test 2"
-    assert gw.get_session_execution_mode(session_id) == "act"
-
-    # /plan command generates plan, stays in plan mode, and saves active plan
-    activity_events: list[dict[str, object]] = []
-    ctx.frontend_data["activity_sink"] = activity_events.append
-    res_plan = _plan_command(ctx, ["Refactor database connection pool"])
-    assert res_plan.status == "success"
-    assert "Implementation Plan: Refactor database connection pool" in res_plan.message
-    assert gw.get_session_execution_mode(session_id) == "plan"
-    active_plan = gw.get_session_active_plan(session_id)
-    assert active_plan is not None
-    assert active_plan["goal"] == "Refactor database connection pool"
-    assert active_plan["approved"] is False
-    assert any(event.get("tool_name") == "repo_search" for event in activity_events)
-    assert any(event.get("title") == "Implementation plan ready for approval" for event in activity_events)
+    session = gw.create_session(frontend="cli")
+    assert gw.get_session_execution_mode(session) == "auto"
+    switched = gw.dispatch_command("/mode plan", session_id=session, frontend="cli")
+    assert switched.status == "success"
+    assert gw.get_session_execution_mode(session) == "plan"
+    assert gw.get_session_active_plan(session) is None
+    no_revision = gw.dispatch_command("/approve", session_id=session, frontend="cli")
+    assert no_revision.status == "error"
+    assert "inbox-id" in no_revision.message
 
 
 def test_coding_task_plan_mode_read_only_default() -> None:
@@ -364,77 +263,17 @@ def test_coding_task_plan_mode_read_only_default() -> None:
     assert task_act.requires_repository_write is True
 
 
-def test_plan_service_smart_querying_filters_noise_and_finds_relevant_code(tmp_path: Path) -> None:
-    # Setup dummy project files mimicking repository layout
-    github_dir = tmp_path / ".github"
-    github_dir.mkdir(parents=True)
-    (github_dir / "pull_request_template.md").write_text("Request pull template with approval")
-    (tmp_path / "CHANGELOG.md").write_text("Change log with approval and activity details")
-
-    src_widgets = tmp_path / "src" / "mana_agent" / "tui" / "widgets"
-    src_widgets.mkdir(parents=True)
-    activity_file = src_widgets / "activity_boxes.py"
-    activity_file.write_text(
-        "class MainActivityBox:\n"
-        "    def render_activity(self):\n"
-        "        pass\n\n"
-        "class CodingActivityBox:\n"
-        "    def render_coding_activity(self):\n"
-        "        pass\n"
-    )
-
-    tests_dir = tmp_path / "tests"
-    tests_dir.mkdir(parents=True)
-    (tests_dir / "test_tui_approval_realtime.py").write_text("def test_realtime_approval(): pass\n")
-
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text('[project]\nname = "test-pkg"\ndependencies = ["rich", "textual"]\n')
-
-    service = PlanService(tmp_path)
-    task = "approval request dont show in seperate box,only show in activity box and coding activity. for confirm too , dont show in seperate card."
-    context = service.explore_context(task)
-
-    discovered = context["discovered_files"]
-    # Noise files must be filtered out
-    assert not any(".github" in f for f in discovered)
-    assert not any("CHANGELOG" in f for f in discovered)
-
-    # Relevant code and tests must be discovered
-    assert any("activity_boxes.py" in f for f in discovered)
-
-    # Generated plan must be grounded in the discovered code structure
-    plan = service.generate_plan(task)
-    assert any("activity_boxes.py" in f for f in plan.affected_files)
-
-    steps_text = "\n".join(plan.implementation_steps)
-    # The generated steps must explicitly mention the discovered class or file
-    assert "activity_boxes.py" in steps_text or "MainActivityBox" in steps_text or "CodingActivityBox" in steps_text
-    # Validation strategies must include targeted test commands
-    val_text = "\n".join(plan.validation_strategies)
-    assert "test_tui_approval_realtime.py" in val_text or "pytest" in val_text
-
-
-def test_plan_service_with_llm_proposal_plan(tmp_path: Path) -> None:
-    src_dir = tmp_path / "src" / "pkg"
-    src_dir.mkdir(parents=True)
-    (src_dir / "app.py").write_text("def run(): pass\n")
-
+def test_plan_service_validates_structured_model_decision(tmp_path: Path) -> None:
     mock_llm = MagicMock()
-    mock_llm.generate_sync.return_value = MagicMock(
-        content="""{
-            "objectives": ["LLM Objective 1", "LLM Objective 2"],
-            "affected_files": ["src/pkg/app.py"],
-            "implementation_steps": ["Step 1: Refactor app.py", "Step 2: Add validation"],
-            "potential_risks": ["Risk 1: Breaking change"],
-            "validation_strategies": ["pytest tests/test_app.py -v"]
-        }"""
-    )
-
+    mock_llm.decide_sync.return_value = {
+        "action": "inspect", "reason": "Find the target", "evidence": {
+            "tool": "repo_search", "level": 1, "paths": ["app.py"],
+            "query": "handler", "reason": "Named in the request",
+        },
+    }
     service = PlanService(tmp_path, llm=mock_llm)
-    plan = service.generate_plan("Refactor app", candidate_files=["src/pkg/app.py"])
-
-    assert plan.objectives == ["LLM Objective 1", "LLM Objective 2"]
-    assert plan.affected_files == ["src/pkg/app.py"]
-    assert plan.implementation_steps == ["Step 1: Refactor app.py", "Step 2: Add validation"]
-    assert plan.potential_risks == ["Risk 1: Breaking change"]
-    assert plan.validation_strategies == ["pytest tests/test_app.py -v"]
+    decision = service.next_decision("plan", {"request": "Inspect app.py"})
+    assert decision.evidence.paths == ("app.py",)
+    mock_llm.decide_sync.return_value = {"action": "draft", "reason": "missing material"}
+    with pytest.raises(RuntimeError, match="ModeDecision"):
+        service.next_decision("plan", {"request": "Inspect app.py"})

@@ -319,6 +319,8 @@ class InternalCodingEngine(CodingEngine):
             provider=self.provider,
             llm=runtime_llm,
             completed_operations=(task.context.get("coding_resume_context") or {}).get("executed_operations"),
+            cache_enabled=self.cache_enabled,
+            cache_ttl_seconds=self.cache_ttl_seconds,
         )
         from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
         from mana_agent.multi_agent.core.types import AgentRole
@@ -473,7 +475,7 @@ class InternalCodingEngine(CodingEngine):
                 changed_files = list(saved_run.get("changed_files", changed_files))
                 session.state.commands_run = list(saved_run.get("commands_run", session.state.commands_run))
                 verification_results = list(saved_run.get("verification_results", []))
-            if not changed_files and execution_mode != "batch" and workspace.worktree_path.is_dir():
+            if not changed_files and execution_mode != "batch" and task.requires_repository_write and workspace.worktree_path.is_dir():
                 try:
                     from mana_agent.tools.repository import git_status
                     st = git_status(workspace.worktree_path)
@@ -543,6 +545,14 @@ class InternalCodingEngine(CodingEngine):
             self._cancellation_events.pop(task_id, None)
             return result
 
+    def _workspace_instruction(self, workspace: WorkspaceContext) -> str:
+        from mana_agent.prompting.repo_rules import render_repo_rules
+        from mana_agent.prompting.skills_index import render_stable_skills_index
+
+        rules = workspace.repository_instructions or render_repo_rules(repo_root=workspace.worktree_path)
+        skills = render_stable_skills_index(repo_root=workspace.worktree_path)
+        return "\n\n".join((self.system_instruction, rules, skills))
+
     async def _run_model_tool_loop(
         self,
         task: CodingTask,
@@ -601,7 +611,7 @@ class InternalCodingEngine(CodingEngine):
         user_content = "\n\n".join(context_parts)
 
         messages: list[Any] = [
-            SystemMessage(content=self.system_instruction),
+            SystemMessage(content=self._workspace_instruction(workspace)),
             UserMessage(content=user_content),
         ]
         logger.info(
@@ -1125,7 +1135,7 @@ class InternalCodingEngine(CodingEngine):
                              config=getattr(self, "batch_autonomous_config", None),
                              **getattr(self, "batch_authority", {}))
         messages = [
-            {"role": "system", "content": self.system_instruction + "\n" + workspace.repository_instructions + "\n" + CODING_DEBUGGING_HANDOFF_INSTRUCTION},
+            {"role": "system", "content": self._workspace_instruction(workspace) + "\n" + CODING_DEBUGGING_HANDOFF_INSTRUCTION},
             {"role": "user", "content": json.dumps({
                 "goal": task.goal, "requirements": task.requirements,
                 "acceptance_criteria": task.acceptance_criteria, "allowed_files": task.allowed_files,

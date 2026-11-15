@@ -2,6 +2,18 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased — 2026-11-16
+
+- Repository discovery: remove eager index and checkout scans from native Chat and Coding, scope repository tools to model-selected paths, and share the same search behavior with Plan and Debug. Explicit audits remain available, valid file evidence can be reused, and strictly read-only commands skip mutation snapshots. See [intent-driven discovery regression notes](docs/regressions/intent-driven-repository-discovery.md).
+- Verification to reproduce: `python -m pytest -q tests/test_intent_driven_discovery.py tests/test_ask_agent.py tests/test_ask_service.py tests/test_ask_entry_router.py tests/gateway/test_debug_plan_mode_contract.py`.
+- Debug and Plan modes now use scoped repository evidence and share the gateway across terminal entry points. Debug expands investigation only when earlier evidence warrants it. Plan retains clarification decisions, binds approval to one durable revision, and checks each step before applying a patch from either coding engine.
+- User verification: `venv/bin/python -m pytest tests/test_execution_modes.py tests/test_chat_planning_mode.py tests/test_chat_command_dispatcher.py tests/test_cli_modes_skills.py tests/gateway/test_debug_plan_mode_contract.py tests/test_codex_integration.py -q`.
+
+## 0.13.2 — 2026-11-15
+
+- Release metadata: bump the single-source package version to 0.13.2 in `pyproject.toml` (`[project].version`), consumed by `mana_agent._version.get_version()`, `mana_agent.__version__`, the FastAPI app version, and release/publish tag validation.
+- User-owned verification (not run by the agent): `python -c "from mana_agent import __version__; assert __version__ == '0.13.2'; print(__version__)"` and `python -m pytest tests/test_package_version.py -q`.
+
 ## 0.13.1 — 2026-11-15
 
 - Release metadata: bump the single-source package version to 0.13.1 in `pyproject.toml` (`[project].version`), consumed by `mana_agent._version.get_version()`, `mana_agent.__version__`, the FastAPI app version, and release/publish tag validation.

@@ -714,7 +714,7 @@ def test_queue_manager_targets_default_skill_registry_without_framework_search_l
             self.requests.append(request)
             name = request.tool_name or ""
             if name == "repo_search":
-                assert request.tool_args == {"query": "DEFAULT_SKILL_NAMES"}
+                assert request.tool_args == {"query": "DEFAULT_SKILL_NAMES", "paths": ["src/mana_agent/skills/manager.py"]}
                 return ToolRunResponse(
                     answer="src/mana_agent/skills/manager.py",
                     mode="agent-tools",
@@ -853,7 +853,7 @@ def test_typo_target_resolution_clears_missing_required_files(tmp_path: Path):
         def run_tools(self, request, on_event=None):  # noqa: ANN001
             self.requests.append(request)
             tool = request.tool_name or ""
-            if tool == "repo_search":
+            if not tool and request.tool_policy.get("require_initial_tool_call"):
                 return ToolRunResponse(
                     answer="docs/08-architecture.md",
                     mode="agent-tools",
@@ -1303,7 +1303,7 @@ def test_mutation_command_executes_once_per_plan(tmp_path: Path) -> None:
 
         def run_tools(self, request, on_event=None):  # noqa: ANN001
             tool = request.tool_name or ""
-            if tool == "repo_search":
+            if not tool and request.tool_policy.get("require_initial_tool_call"):
                 return ToolRunResponse(answer="README.md", mode="agent-tools", trace=[{"tool_name": "repo_search", "status": "ok"}])
             if tool == "read_file":
                 path = str(request.tool_args.get("path"))

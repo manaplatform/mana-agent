@@ -340,7 +340,10 @@ class MainAgent:
             worker_ids = self._ensure_tool_workers(task.task_id, target_count=1)
             if worker_ids:
                 self.queue_manager.default_worker_agent_id = worker_ids[0]
-        if len(scope.repository_ids) > 1:
+        multi_repository_inspection = len(scope.repository_ids) > 1 and route.route_name in {
+            "analyze", "repo_search", "coding",
+        }
+        if multi_repository_inspection:
             if not worker_ids:
                 worker_ids = self._ensure_tool_workers(task.task_id, target_count=1)
             self._run_multi_repository_context(
@@ -402,7 +405,7 @@ class MainAgent:
                         self.taskboard.add_blocker(task.task_id, f"Managed workspace failed to enter running: {exc}")
                 if git_intent is not None:
                     self._delegate_git_intent_work(task.task_id, git_intent)
-                else:
+                elif route.route_name == "coding" and (not multi_repository_inspection or managed_workspace is not None):
                     self._delegate_initial_tool_work(task.task_id, request, route.route_name)
             if route.risk_level.value in {"medium", "high"} or len(route.required_agents) > 4:
                 self._agent(AgentRole.REVIEWER, ReviewerAgent).review(task.task_id, f"Risk level is {route.risk_level.value}; route requires {len(route.required_agents)} agents.")

@@ -13,7 +13,7 @@ from mana_agent.memory import MultiAgentMemoryService
 from mana_agent.documents.service import DocumentService
 from mana_agent.multi_agent.tools import git_tools
 from mana_agent.tools.apply_patch import safe_apply_patch
-from mana_agent.tools.repository import repo_batch_read, repo_search
+from mana_agent.tools.repository import execute_repository_discovery, repo_batch_read, selected_file_versions
 from mana_agent.mcp import McpClient, load_mcp_servers
 from mana_agent.execution import build_execution_manager
 from mana_agent.execution.manager import ExecutionManager
@@ -127,12 +127,14 @@ class ToolsManager:
     def _execute_job_inner(self, job: QueueJob) -> ToolResult:
         try:
             root = self.execution_root_for_job(job)
-            cache_key = self._cache_key(job, root=root)
+            file_versions = self._repository_file_versions(job, root)
+            cache_key = self._cache_key(job, root=root, file_versions=file_versions)
             if cache_key and self.memory_service is not None:
                 memory_args = {**job.payload, "execution_repo_root": str(root)}
                 cached_tool = self.memory_service.get_reusable_tool_result(
                     tool_name=job.job_type.value,
                     args=memory_args,
+                    **({"relevant_file_hashes": file_versions} if file_versions else {}),
                 )
                 if cached_tool is not None:
                     result = copy.deepcopy(cached_tool.result)
@@ -250,6 +252,7 @@ class ToolsManager:
                         {"content": path.read_text(encoding="utf-8"), "path": str(path), "execution_repo_root": str(root)},
                     ),
                     cache_key,
+                    file_versions,
                 )
             if job.job_type == QueueJobType.REPO_BATCH_READ:
                 paths = job.payload.get("files") or job.payload.get("paths") or []
@@ -286,6 +289,7 @@ class ToolsManager:
                             None if ok else "one or more batch reads failed",
                         ),
                         cache_key,
+                        file_versions,
                     )
                 result = repo_batch_read(root, files=[str(item) for item in paths])
                 ok = bool(result.get("ok"))
@@ -295,6 +299,7 @@ class ToolsManager:
                     job,
                     ToolResult(new_message_id(), job.task_id, ok, result, None if ok else "one or more batch reads failed"),
                     cache_key,
+                    file_versions,
                 )
             if job.job_type == QueueJobType.APPLY_PATCH:
                 patch = str(job.payload.get("patch", ""))
@@ -343,14 +348,7 @@ class ToolsManager:
                     result = {**result, "execution_repo_root": str(root)}
                 return ToolResult(new_message_id(), job.task_id, ok, result, error)
             if job.job_type == QueueJobType.REPO_SEARCH:
-                query = str(job.payload.get("query", ""))
-                result = repo_search(
-                    root,
-                    query=query,
-                    glob=str(job.payload.get("glob") or "**/*"),
-                    regex=bool(job.payload.get("regex", False)),
-                    limit=int(job.payload.get("limit") or 100),
-                )
+                result = execute_repository_discovery(root, "repo_search", job.payload)
                 stdout = "\n".join(
                     f"{item.get('file')}:{item.get('line')}:{item.get('text')}"
                     for item in result.get("matches", [])
@@ -371,6 +369,7 @@ class ToolsManager:
                         },
                     ),
                     cache_key,
+                    file_versions,
                 )
             return ToolResult(new_message_id(), job.task_id, False, error=f"unsupported tool job: {job.job_type.value}")
         except Exception as exc:
@@ -514,7 +513,20 @@ class ToolsManager:
             raise ValueError("path escapes repository root") from exc
         return resolved
 
-    def _cache_key(self, job: QueueJob, *, root: Path | None = None) -> str:
+    @staticmethod
+    def _repository_file_versions(job: QueueJob, root: Path) -> dict[str, str] | None:
+        if job.job_type == QueueJobType.REPO_READ:
+            paths = [job.payload.get("path")]
+        elif job.job_type == QueueJobType.REPO_BATCH_READ:
+            paths = job.payload.get("files") or job.payload.get("paths") or []
+        elif job.job_type == QueueJobType.REPO_SEARCH:
+            paths = job.payload.get("paths") or []
+        else:
+            return None
+        return selected_file_versions(root, paths)
+
+    def _cache_key(self, job: QueueJob, *, root: Path | None = None,
+                   file_versions: dict[str, str] | None = None) -> str:
         if job.job_type not in {
             QueueJobType.GIT,
             QueueJobType.GIT_STATUS,
@@ -527,11 +539,16 @@ class ToolsManager:
             QueueJobType.MCP_RESOURCE_READ,
         }:
             return ""
+        if job.job_type in {QueueJobType.REPO_READ, QueueJobType.REPO_BATCH_READ, QueueJobType.REPO_SEARCH} and not file_versions:
+            return ""  # Directory-wide search has no cheap complete version.
         payload = json.dumps(job.payload, ensure_ascii=False, sort_keys=True, default=str)
         root_key = str(root or self.execution_root_for_job(job))
-        return f"{job.job_type.value}:{root_key}:{payload}"
+        return f"{job.job_type.value}:{root_key}:{payload}:{json.dumps(file_versions, sort_keys=True)}"
 
-    def _cache_result(self, job: QueueJob, result: ToolResult, cache_key: str) -> ToolResult:
+    def _cache_result(self, job: QueueJob, result: ToolResult, cache_key: str,
+                      file_versions: dict[str, str] | None = None) -> ToolResult:
+        if file_versions and file_versions != self._repository_file_versions(job, self.execution_root_for_job(job)):
+            return result
         if cache_key and result.ok:
             payload = copy.deepcopy(result.result)
             payload.setdefault("cache_hit", False)
@@ -547,6 +564,7 @@ class ToolsManager:
                     status="ok",
                     result_summary="ok",
                     result=copy.deepcopy(payload),
+                    **({"relevant_file_hashes": file_versions} if file_versions else {}),
                 )
             result.result = payload
         return result

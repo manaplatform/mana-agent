@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 from mana_agent.tools.apply_patch import safe_apply_patch
 from mana_agent.multi_agent.tools import git_tools
@@ -85,9 +85,167 @@ def _iter_files(repo_root: Path):
             yield Path(root) / filename
 
 
+def _scoped_files(root: Path, scope: tuple[str, ...] | None) -> Iterator[Path]:
+    if scope is None:
+        yield from _iter_files(root)
+        return
+    for relative in dict.fromkeys(scope):
+        target, _ = _safe_rel(root, relative)
+        if target is None or target != root / relative or any(
+            _is_skipped_dir(part) for part in Path(relative).parts
+        ):
+            continue
+        if target.is_file():
+            yield target
+        elif target.is_dir():
+            yield from _iter_files(target)
+
+
+def _glob_root(glob: str) -> str:
+    parts = glob.replace("\\", "/").removeprefix("./").split("/")
+    prefix: list[str] = []
+    for part in parts[:-1]:
+        if not part or part in {".", ".."} or any(token in part for token in "*?["):
+            break
+        prefix.append(part)
+    return "/".join(prefix)
+
+
+def _discovery_files(root: Path, glob: str, scope: tuple[str, ...] | None) -> list[Path]:
+    prefix = _glob_root(glob)
+    if prefix:
+        if scope is None:
+            scope = (prefix,)
+        else:
+            scope = tuple(prefix if prefix.startswith(f"{path}/") else path for path in scope
+                          if prefix == path or prefix.startswith(f"{path}/") or path.startswith(f"{prefix}/"))
+    return sorted(set(_scoped_files(root, scope)), key=lambda path: path.relative_to(root).as_posix())
+
+
+def _searchable(root: Path, path: Path) -> bool:
+    return (not path.is_symlink() and path.resolve().is_relative_to(root)
+            and not any(part.startswith(".env") or part in {
+                ".ssh", "secrets.toml", "credentials.json", "id_rsa", "id_ed25519",
+            } for part in path.relative_to(root).parts))
+
+
+def selected_file_versions(root: Path, paths: list[str]) -> dict[str, str] | None:
+    """Version known files without reading their contents or enumerating a directory."""
+    if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
+        return None
+    versions: dict[str, str] = {}
+    for path in paths:
+        target, relative = _safe_rel(root, path)
+        if target is None or relative is None or not _searchable(root, target) or not target.is_file():
+            return None
+        try:
+            stat = target.stat()
+        except OSError:
+            return None
+        versions[relative] = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+    return versions
+
+
+DISCOVERY_DESCRIPTION = (
+    "Select relevant relative files/directories in paths, or a targeted glob (such as an owning "
+    "directory or a distinctive filename). Start with the known file or symbol, then follow observed "
+    "callers, tests, and dependencies as needed. An unrestricted search requires repository_reason "
+    "identifying the requested audit, systemic evidence, or what a narrower search failed to find."
+)
+
+
+def _selected_discovery_scope(args: dict[str, Any], *, repository_search_allowed: bool = True) -> tuple[str, ...] | None:
+    paths = args.get("paths") or []
+    if not isinstance(paths, (list, tuple)):
+        raise ValueError("Discovery paths must be an array of relative files or directories")
+    normalized: list[str] = []
+    for raw in paths:
+        if not isinstance(raw, str):
+            raise ValueError("Discovery paths must be relative strings")
+        path = raw.strip().replace("\\", "/").removeprefix("./").rstrip("/")
+        parsed = PurePosixPath(path)
+        if (not parsed.parts or parsed.is_absolute() or ".." in parsed.parts
+                or any(char in path for char in "\x00:*?[")):
+            raise ValueError("Discovery paths must name files or directories inside the repository")
+        normalized.append(parsed.as_posix())
+
+    glob = str(args.get("glob") or "**/*").replace("\\", "/")
+    if glob.startswith("/") or ".." in glob.split("/") or "\x00" in glob or ":" in glob:
+        raise ValueError("Discovery globs must be repository-relative")
+    if normalized:
+        return tuple(dict.fromkeys(normalized))
+    if _glob_root(glob):
+        return None  # Traversal is anchored at the literal directory prefix.
+    name = glob.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    if any(char.isalnum() for char in re.sub(r"\[[^]]*\]", "", stem)):
+        return None  # Only matching candidates are opened; names may be visited.
+    reason = args.get("repository_reason")
+    if isinstance(reason, str) and reason.strip():
+        if not repository_search_allowed:
+            raise ValueError("Repository-wide search is outside the parent task's discovery scope")
+        return None
+    raise ValueError(DISCOVERY_DESCRIPTION)
+
+
+def validate_delegated_discovery(tool: str, args: dict[str, Any]) -> None:
+    """Fence scoped parent jobs before handing their arguments to a tool worker."""
+    if tool in {"repo_search", "list_files", "find_symbols", "call_graph"}:
+        _selected_discovery_scope(args, repository_search_allowed=False)
+    elif tool in {"repo_batch_search", "batch_search_files"}:
+        for entry in args.get("patterns") or []:
+            _selected_discovery_scope(entry, repository_search_allowed=False)
+    elif tool == "batch_list_files":
+        for entry in args.get("queries") or ["**/*"]:
+            spec = {"glob": entry} if isinstance(entry, str) else {**entry, "glob": entry.get("pattern") or entry.get("glob")}
+            _selected_discovery_scope(spec, repository_search_allowed=False)
+
+
+def list_repository_directories(root: Path) -> dict[str, Any]:
+    return {"ok": True, "directories": sorted(
+        path.name for path in root.iterdir()
+        if not path.name.startswith(".") and not _is_skipped_dir(path.name)
+        and not path.is_symlink() and path.is_dir()
+    )}
+
+
+def execute_repository_discovery(
+    root: Path, tool: str, args: dict[str, Any], *, repository_search_allowed: bool = True,
+) -> dict[str, Any]:
+    """Execute a model-selected discovery operation; missing scope never triggers a scan."""
+    if tool in {"repo_batch_search", "batch_search_files"}:
+        result = repo_batch_search(root, patterns=args.get("patterns") or [], model_selected=True,
+                                   repository_search_allowed=repository_search_allowed,
+                                   default_limit=50 if tool == "batch_search_files" else 20)
+        if tool == "batch_search_files":
+            result["total_queries"] = len(result["results"])
+        return result
+    if tool == "batch_list_files":
+        from mana_agent.tools.batch_file_ops import batch_list_files
+        return batch_list_files(root, queries=args.get("queries") or [], limit=args.get("limit") or 200,
+                                model_selected=True, repository_search_allowed=repository_search_allowed)
+    try:
+        options = {"glob": str(args.get("glob") or "**/*"),
+                   "scope": _selected_discovery_scope(args, repository_search_allowed=repository_search_allowed)}
+        if tool == "list_files":
+            return list_files(root, limit=int(args.get("limit") or 200), **options)
+        query = str(args.get("query") or "")
+        limit = int(args.get("limit") or 100)
+        if tool == "repo_search":
+            return repo_search(root, query=query, regex=bool(args.get("regex")), limit=limit, **options)
+        if tool == "find_symbols":
+            return find_symbols(root, query=query, limit=limit, **options)
+        if tool == "call_graph":
+            return call_graph(root, query=query, limit=limit, **options)
+        raise ValueError("Unknown repository discovery tool")
+    except (ValueError, re.error) as exc:
+        return {"ok": False, "error": str(exc), "error_code": "INVALID_DISCOVERY_SELECTION"}
+
+
 def _is_binary(path: Path) -> bool:
     try:
-        return b"\x00" in path.read_bytes()[:4096]
+        with path.open("rb") as stream:
+            return b"\x00" in stream.read(4096)
     except Exception:
         return True
 
@@ -100,27 +258,40 @@ def _matches_file_glob(rel_path: str, pattern: str) -> bool:
     the useful contract is simpler: ``dir/**`` and ``dir/**/*`` both mean every
     file under ``dir``.
     """
-    rel_path = rel_path.replace("\\", "/").lstrip("./")
-    pattern = str(pattern or "**/*").replace("\\", "/").lstrip("./")
+    pattern = str(pattern or "**/*").replace("\\", "/").removeprefix("./")
     if pattern in {"**", "**/*"}:
         return True
-    for suffix in ("/**/*", "/**"):
-        if pattern.endswith(suffix):
-            prefix = pattern[: -len(suffix)].rstrip("/")
-            return rel_path.startswith(f"{prefix}/") if prefix else True
-    if "/" not in pattern and fnmatch.fnmatch(Path(rel_path).name, pattern):
-        return True
-    return PurePosixPath(rel_path).match(pattern)
+    if "/" not in pattern:
+        return fnmatch.fnmatch(PurePosixPath(rel_path).name, pattern)
+    pattern_parts = pattern.split("/")
+    if pattern_parts[-1] == "**":
+        pattern_parts.append("*")
+    path_parts = rel_path.split("/")
+
+    from functools import lru_cache
+
+    @lru_cache(maxsize=None)
+    def match(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        part = pattern_parts[pattern_index]
+        if part == "**":
+            return any(match(index, pattern_index + 1) for index in range(path_index, len(path_parts) + 1))
+        return (path_index < len(path_parts) and fnmatch.fnmatchcase(path_parts[path_index], part)
+                and match(path_index + 1, pattern_index + 1))
+
+    return match(0, 0)
 
 
-def list_files(repo_root: Path, *, glob: str = "**/*", limit: int = 200) -> dict[str, Any]:
+def list_files(repo_root: Path, *, glob: str = "**/*", limit: int = 200,
+               scope: tuple[str, ...] | None = None) -> dict[str, Any]:
     """List repository files with deterministic ordering."""
 
     root = repo_root.resolve()
     pattern = str(glob or "**/*")
     max_items = max(1, min(int(limit or 200), 5000))
     files: list[str] = []
-    for path in sorted(_iter_files(root), key=lambda item: item.relative_to(root).as_posix()):
+    for path in _discovery_files(root, pattern, scope):
         rel = path.relative_to(root).as_posix()
         if _matches_file_glob(rel, pattern):
             files.append(rel)
@@ -136,6 +307,7 @@ def repo_search(
     glob: str = "**/*",
     regex: bool = False,
     limit: int = 100,
+    scope: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Search text files in the repository."""
 
@@ -146,19 +318,17 @@ def repo_search(
     max_items = max(1, min(int(limit or 100), 1000))
     pattern = re.compile(needle) if regex else None
     matches: list[dict[str, Any]] = []
-    for path in sorted(_iter_files(root), key=lambda item: item.relative_to(root).as_posix()):
+    for path in _discovery_files(root, glob, scope):
         rel = path.relative_to(root).as_posix()
         if not _matches_file_glob(rel, glob):
             continue
-        if path.is_symlink() or not path.resolve().is_relative_to(root):
-            continue
-        if path.name == ".env" or path.name.startswith(".env.") or path.name in {"secrets.toml", "credentials.json"}:
+        if not _searchable(root, path):
             continue
         if _is_binary(path):
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
+        except (OSError, UnicodeDecodeError):
             continue
         for line_no, line in enumerate(lines, start=1):
             found = bool(pattern.search(line)) if pattern is not None else needle in line
@@ -208,9 +378,10 @@ def repo_batch_read(
             out.append(err)
             continue
         try:
-            raw_bytes = target.read_bytes()
-            truncated = len(raw_bytes) > per_file_cap or len(raw_bytes) > remaining
-            chunk = raw_bytes[: min(per_file_cap, remaining)]
+            size = target.stat().st_size
+            with target.open("rb") as stream:
+                chunk = stream.read(min(per_file_cap, remaining))
+            truncated = size > len(chunk)
             content = chunk.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             out.append(
                 {
@@ -219,7 +390,7 @@ def repo_batch_read(
                     "content": content,
                     "truncated": bool(truncated),
                     "bytes_read": len(chunk),
-                    "file_size_bytes": len(raw_bytes),
+                    "file_size_bytes": size,
                 }
             )
             remaining -= len(chunk)
@@ -236,22 +407,55 @@ def repo_batch_read(
     return {"ok": not errors, "files": out, "errors": errors, "truncated": remaining <= 0}
 
 
-def repo_batch_search(repo_root: Path, *, patterns: list[dict[str, Any]]) -> dict[str, Any]:
-    """Run multiple literal/regex searches in one repository pass."""
+def repo_batch_search(
+    repo_root: Path, *, patterns: list[dict[str, Any]], model_selected: bool = False, default_limit: int = 20,
+    repository_search_allowed: bool = True,
+) -> dict[str, Any]:
+    """Share traversal and reads between queries with the same selected roots."""
+    from mana_agent.utils.redaction import redact_secrets
 
-    queries = list(patterns or [])[:50]
+    root = repo_root.resolve()
     grouped: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
-    for index, item in enumerate(queries):
-        query = str(item.get("query", "") if isinstance(item, dict) else "")
-        glob = str(item.get("glob", "**/*") if isinstance(item, dict) else "**/*")
-        regex = bool(item.get("regex", False) if isinstance(item, dict) else False)
-        limit = int(item.get("limit", 20) if isinstance(item, dict) else 20)
-        result = repo_search(repo_root, query=query, glob=glob, regex=regex, limit=limit)
-        row = {"index": index, "query": query, "glob": glob, "regex": regex, **result}
+    candidates: dict[tuple[str, tuple[str, ...] | None], list[tuple[dict[str, Any], Any]]] = {}
+    for index, item in enumerate((patterns or [])[:50]):
+        item = item if isinstance(item, dict) else {}
+        query = str(item.get("query") or "")
+        glob = str(item.get("glob") or "**/*")
+        regex = bool(item.get("regex", False))
+        row = {"index": index, "query": query, "glob": glob, "regex": regex, "matches": [], "truncated": False}
         grouped.append(row)
-        if not result.get("ok"):
+        try:
+            if not query:
+                raise ValueError("query is required")
+            scope = (_selected_discovery_scope(item, repository_search_allowed=repository_search_allowed)
+                     if model_selected else None)
+            row.update(ok=True, limit=max(1, min(int(item.get("limit") or default_limit), 1000)))
+            matcher = re.compile(query).search if regex else lambda line, term=query: term in line
+            candidates.setdefault((_glob_root(glob), scope), []).append((row, matcher))
+        except (TypeError, ValueError, re.error) as exc:
+            row.update(ok=False, error=str(exc))
             errors.append(row)
+    for (prefix, scope), queries in candidates.items():
+        for path in _discovery_files(root, f"{prefix}/**" if prefix else "**/*", scope):
+            if all(row["truncated"] for row, _ in queries):
+                break
+            rel = path.relative_to(root).as_posix()
+            active = [(row, matcher) for row, matcher in queries
+                      if not row["truncated"] and _matches_file_glob(rel, row["glob"])]
+            if not active or not _searchable(root, path) or _is_binary(path):
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for row, matcher in active:
+                for number, line in enumerate(lines, 1):
+                    if matcher(line):
+                        row["matches"].append({"file": rel, "line": number, "text": redact_secrets(line[:500])})
+                        if len(row["matches"]) >= row["limit"]:
+                            row["truncated"] = True
+                            break
     return {"ok": not errors, "results": grouped, "errors": errors}
 
 
@@ -343,20 +547,22 @@ def apply_patch_batch(repo_root: Path, *, patches: list[dict[str, Any]]) -> dict
     return {"ok": True, "results": results, "changed_files": sorted(set(changed))}
 
 
-def find_symbols(repo_root: Path, *, query: str = "", limit: int = 100) -> dict[str, Any]:
+def find_symbols(repo_root: Path, *, query: str = "", limit: int = 100, glob: str = "**/*",
+                 scope: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Find Python classes/functions/methods using ast."""
 
     root = repo_root.resolve()
     needle = str(query or "").lower()
     max_items = max(1, min(int(limit or 100), 1000))
     symbols: list[dict[str, Any]] = []
-    for path in sorted(_iter_files(root), key=lambda item: item.relative_to(root).as_posix()):
-        if path.suffix != ".py" or _is_binary(path):
+    for path in _discovery_files(root, glob, scope):
+        if (path.suffix != ".py" or not _matches_file_glob(path.relative_to(root).as_posix(), glob)
+                or not _searchable(root, path) or _is_binary(path)):
             continue
         rel = path.relative_to(root).as_posix()
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:
+        except (SyntaxError, OSError, UnicodeDecodeError):
             continue
         parents: list[str] = []
         for node in ast.walk(tree):
@@ -424,7 +630,8 @@ class _CallGraphVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def call_graph(repo_root: Path, *, query: str = "", limit: int = 100) -> dict[str, Any]:
+def call_graph(repo_root: Path, *, query: str = "", limit: int = 100, glob: str = "**/*",
+               scope: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Build a lightweight Python AST call graph.
 
     This is a local static-inspection tool, not a semantic vector search. It is
@@ -436,13 +643,14 @@ def call_graph(repo_root: Path, *, query: str = "", limit: int = 100) -> dict[st
     needle = str(query or "").lower()
     max_items = max(1, min(int(limit or 100), 1000))
     edges: list[dict[str, Any]] = []
-    for path in sorted(_iter_files(root), key=lambda item: item.relative_to(root).as_posix()):
-        if path.suffix != ".py" or _is_binary(path):
+    for path in _discovery_files(root, glob, scope):
+        if (path.suffix != ".py" or not _matches_file_glob(path.relative_to(root).as_posix(), glob)
+                or not _searchable(root, path) or _is_binary(path)):
             continue
         rel = path.relative_to(root).as_posix()
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:
+        except (SyntaxError, OSError, UnicodeDecodeError):
             continue
         visitor = _CallGraphVisitor(rel)
         visitor.visit(tree)

@@ -206,7 +206,10 @@ def _first_heading_and_paragraph(content: str) -> tuple[str, str]:
 
 
 def parse_skill_index_item(path: Path, *, fallback_name: str | None = None) -> SkillIndexItem:
-    content = path.read_text(encoding="utf-8")
+    # Catalog construction needs frontmatter and a short legacy description.
+    # The rest of a skill is loaded only by the selected read_skill operation.
+    with path.open(encoding="utf-8") as stream:
+        content = stream.read(8_192)
     meta, body = _parse_frontmatter(content)
     derived_name = path.parent.name if path.name == "SKILL.md" else path.stem
     name = _normalize_name(meta.get("name") or fallback_name or derived_name)
@@ -286,13 +289,11 @@ class SkillManager:
     def global_skills_dir(self) -> Path:
         return self.home / ".mana" / "skills"
 
-    def _builtin_content(self, name: str) -> str | None:
+    def _builtin_content(self, name: str, *, index_only: bool = False) -> str | None:
         try:
-            return (
-                resources.files("mana_agent.default_skills")
-                .joinpath(f"{name}.md")
-                .read_text(encoding="utf-8")
-            )
+            entry = resources.files("mana_agent.default_skills").joinpath(f"{name}.md")
+            with entry.open(encoding="utf-8") as stream:
+                return stream.read(8_192) if index_only else stream.read()
         except (FileNotFoundError, ModuleNotFoundError):
             return None
 
@@ -385,7 +386,7 @@ class SkillManager:
             for name in DEFAULT_SKILL_NAMES:
                 if name in items:
                     continue
-                content = self._builtin_content(name)
+                content = self._builtin_content(name, index_only=True)
                 if content is None:
                     continue
                 meta, body = _parse_frontmatter(content)

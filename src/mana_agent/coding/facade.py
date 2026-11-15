@@ -123,6 +123,10 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
         return self._dispatch("generate_dir_mode", request, kwargs)
 
     def _dispatch(self, method: str, request: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if kwargs.get("coding_mode_proposal") and (
+            kwargs.get("execution_mode") != "read_only" or not kwargs.get("coding_mode_files")
+        ):
+            raise PermissionError("Coding patch proposals require read-only execution and explicit file targets")
         with self._execution_lock:
             if self._task_in_progress:
                 raise RuntimeError(
@@ -131,8 +135,14 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             self._task_in_progress = True
             task_id = str(kwargs.get("gateway_task_id") or f"task_{uuid.uuid4().hex[:12]}")
             self._active_task_id = task_id
+            prior_directory = self.working_directory
 
         try:
+            if kwargs.get("coding_mode_proposal"):
+                proposal_root = Path(kwargs["coding_mode_root"]).resolve()
+                if proposal_root != self.repo_root.resolve():
+                    raise PermissionError("The coding proposal belongs to a different checkout")
+                self.working_directory = proposal_root
             policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})
             if self._active_mode == "external" and not policy.required:
                 func = getattr(super(), method)
@@ -145,6 +155,8 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             return self._execute_internal(task_id, request, kwargs)
         finally:
             with self._execution_lock:
+                if kwargs.get("coding_mode_proposal"):
+                    self.working_directory = prior_directory
                 self._task_in_progress = False
                 self._active_task_id = None
 
@@ -173,7 +185,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
                 required_capability="context", effect="read_only", repository_operation=False)
             engine.extra_tools[tool.name] = invoke_context
         policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})
-        allowed_files: list[str] = []
+        allowed_files: list[str] = list(kwargs.get("coding_mode_files") or [])
         prechecklist = kwargs.get("prechecklist_payload")
         if isinstance(prechecklist, dict):
             pre_data = prechecklist.get("prechecklist")
@@ -191,6 +203,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             context={"batch_resume": kwargs.get("batch_resume") or {},
                      "coding_resume_context": kwargs.get("coding_resume_context") or {},
                      "coding_research_context": kwargs.get("coding_research_context") or {},
+                     "mode_patch_proposal": bool(kwargs.get("coding_mode_proposal")),
                      "coding_continuation_id": kwargs.get("coding_continuation_id") or "",
                      "conversation_context_in_request": bool(kwargs.get("conversation_context_in_request"))},
         )

@@ -221,6 +221,8 @@ class CodexCodingBackend:
         return result
 
     async def stream(self, task: CodingTask, workspace: WorkspaceContext) -> AsyncIterator[AgentEvent]:
+        if task.context.get("mode_patch_proposal") and (task.requires_repository_write or workspace.sandbox != "readOnly"):
+            raise CodexExecutionError("Plan patch proposals require the read-only workspace sandbox")
         self._validate_workspace(task, workspace)
         execution_dir = _execution_directory(workspace)
         if not execution_dir.is_dir():
@@ -507,8 +509,12 @@ class CodexCodingBackend:
                         "threadId": thread_id,
                         "input": [{"type": "text", "text": prompt}],
                         "cwd": str(_execution_directory(workspace)),
-                        "approvalPolicy": self.settings.approval_policy,
-                        "sandbox": _codex_sandbox(workspace),
+                        "approvalPolicy": "never" if task.context.get("mode_patch_proposal") else self.settings.approval_policy,
+                        **({
+                            "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+                            "outputSchema": {"type": "object", "properties": {"patch": {"type": "string"}},
+                                             "required": ["patch"], "additionalProperties": False},
+                        } if task.context.get("mode_patch_proposal") else {"sandbox": _codex_sandbox(workspace)}),
                         **({"model": self.settings.model} if self.settings.model else {}),
                     },
                 )

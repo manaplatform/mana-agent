@@ -1365,6 +1365,9 @@ class AgentChatGateway:
         self._lane_coordinator.set_human_resume_dispatcher(
             self._dispatch_resumed_transactional_action
         )
+        from mana_agent.gateway.mode_workflow import ModeWorkflow
+
+        self.mode_workflow = ModeWorkflow(self)
         self._recover_queued_transactional_action_dispatches()
         from mana_agent.config.autonomous_config import AutonomousExecutionConfig
         from mana_agent.execution.autonomous_controller import AutonomousExecutionController
@@ -1422,6 +1425,7 @@ class AgentChatGateway:
         # Gateway construction must not create a workspace/chat session. The
         # frontend opens exactly one session through create_session(), and all
         # route/model/connector work reuses that identity.
+        self.mode_workflow.recover_queued_responses()
 
     # ------------------------------------------------------------------
     # Typed media gateway operations
@@ -1451,6 +1455,9 @@ class AgentChatGateway:
 
         item = self.human_inbox_service.repository.get(inbox_item_id)
         protected = self.human_inbox_service.repository.read_protected_context(item.protected_context_ref) if item.protected_context_ref else {}
+        if protected.get("mode_task_id") == task_id:
+            self.mode_workflow.resume(task_id, item, protected, resume_claim_id)
+            return
         branch = self._lane_coordinator.execution_supervisor.get_task(task_id)
         if protected.get("coding_research_task_id") == task_id:
             if item.task_id != task_id or item.resume_claim_id != resume_claim_id or item.status is not InboxStatus.ANSWERED:
@@ -4181,11 +4188,6 @@ class AgentChatGateway:
     def _new_session_state(
         self, session_id: str, *, frontend: str = "cli"
     ) -> dict[str, Any]:
-        analysis = None
-        try:
-            analysis = load_analysis_context(self.root)
-        except Exception:
-            analysis = None
         messages = self._history_store.list(session_id)
         completed: dict[str, dict[str, str]] = {}
         for message in messages:
@@ -4212,51 +4214,39 @@ class AgentChatGateway:
             "root": str(self.root),
             "active_flow_id": default_flow,
             "auto_chat_state": None,
-            "analysis_context": analysis,
             "pending_prechecklist": None,
             "pending_prechecklist_source": "",
             "pending_prechecklist_warning": "",
-            "execution_mode": "plan",
-            "active_plan": None,
-            "plan_approved": False,
-            "plan_approval_state": None,
+            "execution_mode": "auto",
         }
 
     def get_session_execution_mode(self, session_id: str) -> str:
-        sess = self._session(session_id)
-        return str(sess.get("execution_mode") or "plan")
+        if self.mode_workflow.active(session_id):
+            return "plan"
+        if self.mode_workflow.active(session_id, mode="debug"):
+            return "debug"
+        return str(self._session(session_id).get("execution_mode") or "auto")
 
     def set_session_execution_mode(self, session_id: str, mode: str) -> str:
-        sess = self._session(session_id)
-        norm = "act" if str(mode or "").strip().lower() in {"act", "edit"} else "plan"
-        sess["execution_mode"] = norm
-        return norm
+        if mode not in {"auto", "act", "plan"}:
+            raise ValueError("Select auto, plan, or act")
+        if mode != "plan" and self.mode_workflow.active(session_id):
+            raise PermissionError("Resolve the active plan before leaving Plan Mode")
+        self._session(session_id)["execution_mode"] = mode
+        return mode
 
     def get_session_active_plan(self, session_id: str) -> dict[str, Any] | None:
-        sess = self._session(session_id)
-        plan = sess.get("active_plan")
-        if plan is not None and hasattr(plan, "model_dump"):
-            return plan.model_dump()
-        return plan if isinstance(plan, dict) else None
+        task = self.mode_workflow.active(session_id)
+        return task.mode_workflow.get("plan") if task else None
 
-    def set_session_active_plan(self, session_id: str, plan: Any) -> None:
-        sess = self._session(session_id)
-        sess["active_plan"] = plan
-        sess["plan_approved"] = False
-
-    def approve_session_plan(self, session_id: str, approver: str = "user") -> bool:
-        sess = self._session(session_id)
-        if sess.get("active_plan") is None:
-            return False
-        sess["plan_approved"] = True
-        plan = sess.get("active_plan")
-        if hasattr(plan, "with_approval"):
-            sess["active_plan"] = plan.with_approval(approved=True, approver=approver)
-        elif isinstance(plan, dict):
-            plan["approved"] = True
-            plan["approved_by"] = approver
-        sess["execution_mode"] = "act"
-        return True
+    @staticmethod
+    def _mode_turn_result(rendered):
+        return ChatTurnResult(
+            answer=rendered.message, error="mode_blocked" if rendered.status == "error" else None,
+            mode="repository-workflow", changed_files=rendered.data.get("changed_files", []),
+            payload={**rendered.data, "next_prompt": rendered.next_prompt,
+                     "status": "waiting" if rendered.status == "input_required" else rendered.status},
+        )
 
     def _session(self, session_id: str) -> dict[str, Any]:
         if session_id not in self._sessions:
@@ -4890,7 +4880,8 @@ class AgentChatGateway:
         self._active.add(session_id)
         try:
             # Prefer full turn engine when coding stack or agent tools are active
-            if self._coding_agent is not None or bool(self.config.agent_tools):
+            if (self._coding_agent is not None or bool(self.config.agent_tools)
+                    or self.get_session_execution_mode(session_id) in {"plan", "debug"}):
                 result = await asyncio.to_thread(self.process_turn, session_id, text)
                 if result.error and not result.answer:
                     return f"(Gateway error: {result.error})"
@@ -5035,6 +5026,7 @@ class AgentChatGateway:
             self._lane_coordinator.cancel_tree(
                 task.task_id, reason=reason, source=source
             )
+            self.mode_workflow.note_cancellation(task.task_id)
         self._active.discard(session_id)
         return True
 
@@ -5155,6 +5147,11 @@ class AgentChatGateway:
 
     def resume_task(self, task_id: str) -> dict[str, Any]:
         """Resume a paused/waiting task, or same-task retry when already stopped."""
+        mode_task = self._lane_coordinator.taskboard.store.repository.get_task_or_none(task_id)
+        if mode_task and mode_task.mode_workflow:
+            if mode_task.mode_workflow.get("plan_id"):
+                raise LaneCoordinatorError("Resume the owning plan, which checks the approved step scope")
+            return self.mode_workflow.retry(task_id).model_dump()
         try:
             execution = self._lane_coordinator.ensure_recoverable_execution(task_id)
         except LaneCoordinatorError:
@@ -5183,10 +5180,19 @@ class AgentChatGateway:
             if include_children
             else (self._lane_coordinator.cancel_task(task_id).task_id,)
         )
+        for cancelled_id in cancelled:
+            self.mode_workflow.note_cancellation(cancelled_id)
         return {"task_id": task_id, "cancelled_task_ids": list(cancelled)}
 
     def retry_task_control(self, task_id: str, *, session_id: str = "") -> dict[str, Any]:
         """Operator-authorized same-task retry through the lane recovery path."""
+        mode_task = self._lane_coordinator.taskboard.store.repository.get_task_or_none(task_id)
+        if mode_task and mode_task.mode_workflow:
+            if session_id and session_id != mode_task.session_id:
+                raise PermissionError("The mode task belongs to a different session")
+            if mode_task.mode_workflow.get("plan_id"):
+                raise LaneCoordinatorError("Retry the owning plan, which checks the approved step scope")
+            return self.mode_workflow.retry(task_id).model_dump()
         decision = RecoveryDecision(
             decision_id=f"operator-gateway:retry:{task_id}:{uuid.uuid4().hex[:12]}",
             task_id=task_id,
@@ -5210,6 +5216,9 @@ class AgentChatGateway:
 
     def replan_task_control(self, task_id: str, *, session_id: str = "") -> dict[str, Any]:
         """Operator-authorized same-task replan that restarts incomplete job steps."""
+        mode_task = self._lane_coordinator.taskboard.store.repository.get_task_or_none(task_id)
+        if mode_task and mode_task.mode_workflow:
+            raise LaneCoordinatorError("Use /revise on the owning plan so the new scope can be reviewed")
         decision = RecoveryDecision(
             decision_id=f"operator-gateway:replan:{task_id}:{uuid.uuid4().hex[:12]}",
             task_id=task_id,
@@ -5912,6 +5921,19 @@ class AgentChatGateway:
                     "is_resumable": False,
                 },
             )
+        if not text.lstrip().startswith("/"):
+            plan_task = self.mode_workflow.active(session_id)
+            debug_task = self.mode_workflow.active(session_id, mode="debug")
+            if plan_task or debug_task or self._session(session_id).get("execution_mode") == "plan":
+                session = self._session(session_id)
+                local = session.get("frontend") in {"cli", "tui"}
+                actor = str(options.get("authenticated_user_id") or (getpass.getuser() if local else ""))
+                rendered = self.mode_workflow.receive(session_id, text, task=plan_task or debug_task,
+                    read_only=bool(options.get("protocol_read_only")), actor_id=actor)
+                turn_id = str(options.get("turn_id") or f"turn_{uuid.uuid4().hex[:20]}")
+                self._append_session_message(session_id, role="user", content=text, turn_id=turn_id)
+                self._append_session_message(session_id, role="assistant", content=rendered.message, turn_id=turn_id)
+                return self._mode_turn_result(rendered)
         self._bind_runtime_session(session_id)
         self._active.add(session_id)
 
@@ -6450,6 +6472,21 @@ class AgentChatGateway:
                     {"decision": entry_decision.to_dict(), "turn_id": turn_id},
                 )
                 state["active_route"] = entry_decision.route
+                if entry_decision.coding_workflow:
+                    workflow = entry_decision.coding_workflow
+                    rendered = self.mode_workflow.start(
+                        session_id, entry_decision.resolved_request or text,
+                        mode="plan" if workflow == "plan" else "debug",
+                        repair=workflow == "debug_repair",
+                        read_only=bool(options.get("protocol_read_only")),
+                        execution_policy=entry_decision.execution_policy.model_dump(mode="json"),
+                        reviewer_id=route_context.authenticated_user_id,
+                    )
+                    return self._finalize_turn_result(
+                        result=self._mode_turn_result(rendered), session_id=session_id,
+                        conversation_id=conversation_id, turn_id=turn_id, text=text,
+                        state=state, memory_warning=memory_warning,
+                    )
                 if entry_decision.memory_task_id:
                     offered_task_ids = {
                         str(item.get("task_id") or "").strip()
@@ -6481,6 +6518,13 @@ class AgentChatGateway:
                                 },
                             )
                 if entry_decision.route == "command":
+                    if entry_decision.command_name in {"approve", "accept", "act", "reject", "revise", "inbox"}:
+                        return self._finalize_turn_result(
+                            result=ChatTurnResult(answer="Use an explicit command or the inbox to respond to a plan.",
+                                                  mode="plan-control-required"),
+                            session_id=session_id, conversation_id=conversation_id, turn_id=turn_id,
+                            text=text, state=state, memory_warning=memory_warning,
+                        )
                     import shlex
 
                     command_text = "/" + entry_decision.command_name
@@ -6515,7 +6559,7 @@ class AgentChatGateway:
                     if (
                         entry_decision.command_name == "plan"
                         and command_result is not None
-                        and command_result.status != "success"
+                        and command_result.status == "error"
                     ):
                         publish_command_activity({
                             "event_id": f"plan-preparation-{session_id}",
@@ -11354,6 +11398,12 @@ class AgentChatGateway:
         expected_operation = ((run or {}).get("gateway_pending_operation") or (run or {}).get("pending_operation") or {}).get("operation_id", (run or {}).get("last_operation_id", ""))
         if run is None or (not from_human and expected_operation != operation_id):
             raise RuntimeError("Batch wake does not match the saved checkpoint")
+        mode_task_id = (run.get("resume") or {}).get("mode_task_id")
+        if mode_task_id:
+            if from_human:
+                raise PermissionError("A plan coding proposal cannot consume unrelated human approval")
+            self.mode_workflow.resume_batch(mode_task_id, task_id, operation_id, run)
+            return
         if run.get("gateway_workspace_fingerprint"):
             from mana_agent.execution.batch_loop import workspace_fingerprint
             if workspace_fingerprint(Path(run["root"])) != run["gateway_workspace_fingerprint"]:

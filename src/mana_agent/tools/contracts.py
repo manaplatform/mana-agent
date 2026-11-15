@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from mana_agent.tools.repository import DISCOVERY_DESCRIPTION
+
 
 class ToolContract(BaseModel):
     """Strict contract metadata exposed to agents and tests."""
@@ -29,6 +31,14 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
         "required": required or [],
         "additionalProperties": False,
     }
+
+
+_DISCOVERY_PROPERTIES = {
+    "paths": {"type": "array", "items": {"type": "string"}, "description": "Relevant relative files or directories."},
+    "glob": {"type": "string", "description": "Targeted filename or repository-relative pattern."},
+    "repository_reason": {"type": "string", "description": "Required for an unrestricted investigation."},
+}
+
 
 
 def _command_action_output() -> dict[str, Any]:
@@ -400,11 +410,11 @@ def coding_tool_contracts() -> list[ToolContract]:
         *email_contracts,
         ToolContract(
             name="repo_search",
-            description="Search repository text with regex or literal matching.",
+            description="Search repository text with regex or literal matching. " + DISCOVERY_DESCRIPTION,
             input_schema=_schema(
                 {
                     "query": {"type": "string"},
-                    "glob": {"type": "string"},
+                    **_DISCOVERY_PROPERTIES,
                     "regex": {"type": "boolean"},
                     "limit": {"type": "integer"},
                 },
@@ -413,7 +423,7 @@ def coding_tool_contracts() -> list[ToolContract]:
             output_schema=_schema({"matches": {"type": "array"}, "truncated": {"type": "boolean"}}),
             error_format=common_error,
             safety_rules=["Search is read-only.", "Binary files and ignored metadata directories are skipped."],
-            examples=[{"input": {"query": "class CodingAgent", "glob": "*.py", "regex": False}}],
+            examples=[{"input": {"query": "class CodingAgent", "glob": "*coding_agent.py", "regex": False}}],
         ),
         ToolContract(
             name="read_file",
@@ -476,7 +486,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="repo_batch_search",
-            description="Run multiple repository text searches in one call and return grouped results per query.",
+            description="Run scoped text searches in one pass per selected set of paths. " + DISCOVERY_DESCRIPTION,
             input_schema=_schema({"patterns": {"type": "array"}}, ["patterns"]),
             output_schema=_schema({"results": {"type": "array"}, "errors": {"type": "array"}}),
             error_format=common_error,
@@ -485,7 +495,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 "Use this instead of multiple repo_search calls for independent queries.",
                 "Respect per-query limits.",
             ],
-            examples=[{"input": {"patterns": [{"query": "Skill", "glob": "**/*.py", "regex": False, "limit": 20}]}}],
+            examples=[{"input": {"patterns": [{"query": "Skill", "glob": "*skill*.py", "regex": False, "limit": 20}]}}],
         ),
         ToolContract(
             name="batch_read_files",
@@ -567,10 +577,10 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="batch_search_files",
-            description="Run multiple regex or literal text searches concurrently across repository files and return grouped results.",
+            description="Run multiple scoped regex or literal searches. " + DISCOVERY_DESCRIPTION,
             input_schema=_schema(
                 {
-                    "patterns": {"type": "array", "description": "List of search specifications: query, glob, regex, limit"},
+                    "patterns": {"type": "array", "description": "Each spec: query, paths or glob, regex, limit, and repository_reason for unrestricted scope"},
                     "concurrency": {"type": "integer", "description": "Search worker concurrency limit"},
                 },
                 ["patterns"],
@@ -582,10 +592,10 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="batch_list_files",
-            description="List repository files matching multiple glob patterns in a single filesystem traversal.",
+            description="List files matching multiple scoped patterns. " + DISCOVERY_DESCRIPTION,
             input_schema=_schema(
                 {
-                    "queries": {"type": "array", "description": "List of glob pattern strings or query spec objects"},
+                    "queries": {"type": "array", "description": "Scoped glob strings or objects with glob, paths, and repository_reason for unrestricted scope"},
                     "limit": {"type": "integer", "description": "Maximum files returned per pattern"},
                 },
                 ["queries"],
@@ -841,9 +851,16 @@ def coding_tool_contracts() -> list[ToolContract]:
             examples=[{"input": {"path": "docs/obsolete-note.md"}}],
         ),
         ToolContract(
+            name="ls",
+            description="List immediate directories in the assigned repository without descending.",
+            input_schema=_schema({}),
+            output_schema=_schema({"directories": {"type": "array"}}),
+            error_format=common_error,
+        ),
+        ToolContract(
             name="list_files",
-            description="List repository files with optional glob filtering.",
-            input_schema=_schema({"glob": {"type": "string"}, "limit": {"type": "integer"}}),
+            description="List repository files with optional glob filtering. " + DISCOVERY_DESCRIPTION,
+            input_schema=_schema({**_DISCOVERY_PROPERTIES, "limit": {"type": "integer"}}),
             output_schema=_schema({"files": {"type": "array"}, "truncated": {"type": "boolean"}}),
             error_format=common_error,
             safety_rules=["Read-only.", "Skip VCS, cache, virtualenv, and binary-like metadata directories."],
@@ -851,17 +868,17 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="find_symbols",
-            description="Find Python functions, classes, and methods by name.",
-            input_schema=_schema({"query": {"type": "string"}, "limit": {"type": "integer"}}),
+            description="Find Python functions, classes, and methods by name. " + DISCOVERY_DESCRIPTION,
+            input_schema=_schema({**_DISCOVERY_PROPERTIES, "query": {"type": "string"}, "limit": {"type": "integer"}}),
             output_schema=_schema({"symbols": {"type": "array"}, "truncated": {"type": "boolean"}}),
             error_format=common_error,
             safety_rules=["Read-only.", "Parse Python with ast instead of regular expressions where possible."],
-            examples=[{"input": {"query": "CodingAgent", "limit": 20}}],
+            examples=[{"input": {"query": "CodingAgent", "glob": "*coding_agent.py", "limit": 20}}],
         ),
         ToolContract(
             name="call_graph",
-            description="Inspect Python AST call edges by caller, callee, or file path.",
-            input_schema=_schema({"query": {"type": "string"}, "limit": {"type": "integer"}}),
+            description="Inspect Python AST call edges by caller, callee, or file path. " + DISCOVERY_DESCRIPTION,
+            input_schema=_schema({**_DISCOVERY_PROPERTIES, "query": {"type": "string"}, "limit": {"type": "integer"}}),
             output_schema=_schema({"edges": {"type": "array"}, "truncated": {"type": "boolean"}}),
             error_format=common_error,
             safety_rules=[

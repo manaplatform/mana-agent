@@ -15,12 +15,14 @@ from mana_agent.tools.contracts import coding_tool_contracts
 
 
 class ToolCallGate:
-    def __init__(self, *, root: Path, tools: dict[str, Any], task_id: str, transport=None, repository_read_only: bool = False, externally_locked: bool = False):
+    def __init__(self, *, root: Path, tools: dict[str, Any], task_id: str, transport=None, repository_read_only: bool = False, externally_locked: bool = False,
+                 repository_search_allowed: bool = True):
         self.root, self.tools = Path(root).resolve(), tools
         self.task_id = task_id
         self.transport = transport
         self.repository_read_only = repository_read_only
         self.externally_locked = externally_locked
+        self.repository_search_allowed = repository_search_allowed
         context = current_activity_context()
         self.registry = getattr(context, "execution_registry", None) or AgentRegistry()
         self.runners: dict[str, ToolRunnerAgent] = {}
@@ -77,6 +79,10 @@ class ToolCallGate:
             decision_id=call_id or uuid.uuid4().hex)
         def execute(selected):
             if self.transport is not None and policy.repository:
+                if not self.repository_search_allowed:
+                    from mana_agent.tools.repository import validate_delegated_discovery
+
+                    validate_delegated_discovery(name, selected)
                 return self.transport(request)
             value = tool.call(selected, config=config)
             if isinstance(value, str):

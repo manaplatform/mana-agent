@@ -1094,10 +1094,6 @@ def test_gateway_process_turn_coding_path(tmp_path: Path, monkeypatch) -> None:
             "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
         ).AutoChatMode.EDIT,
     )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.is_plan_execution_request",
-        lambda q: False,
-    )
 
     gw = AgentChatGateway(
         tmp_path,
@@ -1955,10 +1951,6 @@ def test_gateway_checkpoint_resume_after_core_implementation_no_boundary_attr(
             "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
         ).AutoChatMode.EDIT,
     )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.is_plan_execution_request",
-        lambda q: False,
-    )
 
     gw = AgentChatGateway(
         tmp_path,
@@ -2176,10 +2168,6 @@ def test_gateway_checkpoint_resume_legacy_payload_boundary(
         lambda q: __import__(
             "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
         ).AutoChatMode.EDIT,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.is_plan_execution_request",
-        lambda q: False,
     )
 
     gw = AgentChatGateway(
@@ -2404,10 +2392,6 @@ def test_gateway_checkpoint_resume_other_boundary_does_not_invent_after_core_imp
         lambda q: __import__(
             "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
         ).AutoChatMode.EDIT,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.is_plan_execution_request",
-        lambda q: False,
     )
 
     gw = AgentChatGateway(

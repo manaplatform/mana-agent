@@ -463,246 +463,79 @@ def _engine(context: CommandContext, args: list[str]) -> CommandResult:
 
 
 def _plan_command(context: CommandContext, args: list[str]) -> CommandResult:
-    if context.gateway is None:
-        return CommandResult(status="error", message="/plan requires an active agent gateway.")
-
-    plan_task = " ".join(args).strip() if args else ""
-    if not plan_task:
-        plan_task = "analyze and plan the next repository change"
-
-    original_activity_sink = context.frontend_data.get("activity_sink")
-    plan_turn_id = str(context.frontend_data.get("activity_turn_id") or "plan-" + __import__("uuid").uuid4().hex)
-    def activity_sink(event):
-        from mana_agent.services.execution_event_hub import get_execution_event_hub
-        from mana_agent.workspaces.paths import repository_id_for_path
-        root = Path(getattr(context.gateway, "root", None) or Path.cwd())
-        event = {**event, "execution_mode": "plan", "operation_id": event.get("event_id", "")}
-        get_execution_event_hub().publish(event, conversation_id=context.session_id, execution_id=plan_turn_id,
-                                          repository_id=repository_id_for_path(root))
-        if callable(original_activity_sink):
-            original_activity_sink(event)
-    preparation_event_id = f"plan-preparation-{plan_turn_id}"
-    if callable(activity_sink):
-        activity_sink({
-            "event_id": preparation_event_id,
-            "event_type": "agent.planning",
-            "title": "Preparing implementation plan",
-            "status": "running",
-            "metadata": {"phase": "plan"},
-        })
-
-    if hasattr(context.gateway, "set_session_execution_mode"):
+    workflow = context.gateway.mode_workflow
+    task = workflow.active(context.session_id)
+    if task:
+        return workflow.describe(task)
+    request = " ".join(args).strip()
+    if not request:
         context.gateway.set_session_execution_mode(context.session_id, "plan")
-
-    repo_root = (
-        getattr(context.gateway, "root", None)
-        or getattr(context.gateway, "repo_root", None)
-        or Path.cwd()
-    )
-
-    from mana_agent.agent.plan_service import PlanService
-    from mana_agent.skills.manager import SkillManager
-
-    loaded_skills = []
-    if callable(activity_sink):
-        activity_sink({
-            "event_id": f"{preparation_event_id}-skills",
-            "event_type": "agent.planning",
-            "title": "Checking relevant skills",
-            "status": "running",
-            "metadata": {"phase": "plan"},
-        })
-    try:
-        manager = SkillManager(repo_root)
-        loaded_skills = manager.load_for_task(plan_task, [])
-    except Exception:
-        loaded_skills = []
-    if callable(activity_sink):
-        activity_sink({
-            "event_id": f"{preparation_event_id}-skills",
-            "event_type": "agent.planning",
-            "title": "Skill check complete",
-            "status": "completed",
-            "metadata": {"phase": "plan"},
-            "detail": f"Loaded {len(loaded_skills)} relevant skills",
-        })
-
-    llm = None
-    if context.gateway is not None:
-        try:
-            if hasattr(context.gateway, "get_ask_service"):
-                from mana_agent.gateway.turn_engine import agent_decision_llm
-                llm = agent_decision_llm(context.gateway.get_ask_service())
-            if llm is None:
-                llm = getattr(getattr(context.gateway, "_entry_router", None), "llm", None) or getattr(context.gateway, "llm", None)
-        except Exception:
-            llm = None
-
-    plan_service = PlanService(repo_root, llm=llm, progress_callback=activity_sink)
-    structured_plan = plan_service.generate_plan(plan_task, skills=loaded_skills)
-    save_event_id = f"{preparation_event_id}-save"
-    if callable(activity_sink):
-        activity_sink({
-            "event_id": save_event_id,
-            "event_type": "tool.started",
-            "title": "Saving implementation plan",
-            "status": "running",
-            "tool_name": "write_file",
-            "metadata": {"phase": "plan", "tool_name": "write_file"},
-        })
-    saved_path = plan_service.save_plan(structured_plan)
-
-    if hasattr(context.gateway, "set_session_active_plan"):
-        context.gateway.set_session_active_plan(context.session_id, structured_plan)
-
-    if callable(activity_sink):
-        activity_sink({
-            "event_id": save_event_id,
-            "event_type": "tool.completed",
-            "title": "Saved implementation plan",
-            "status": "completed",
-            "tool_name": "write_file",
-            "metadata": {"phase": "plan", "tool_name": "write_file"},
-            "detail": str(saved_path),
-        })
-        activity_sink({
-            "event_id": preparation_event_id,
-            "event_type": "agent.planning",
-            "title": "Implementation plan ready for approval",
-            "status": "completed",
-            "metadata": {"phase": "plan"},
-        })
-
-    markdown_plan = structured_plan.to_markdown()
-    guidance = (
-        f"\n\n**Saved plan artifact:** `{saved_path}`\n\n"
-        "To approve and execute this plan, type `/approve` or `/act`.\n"
-        "To reject this plan, type `/reject`."
-    )
-    return CommandResult(
-        status="success",
-        message=markdown_plan + guidance,
-        data={
-            "mode": "plan",
-            "plan_id": structured_plan.task_id,
-            "saved_path": str(saved_path),
-            "plan": structured_plan.to_dict(),
-        },
-    )
+        return CommandResult(status="input_required", message="What would you like to plan?")
+    return workflow.start(context.session_id, request)
 
 
 def _execution_mode_command(context: CommandContext, args: list[str]) -> CommandResult:
-    if context.gateway is None:
-        return CommandResult(status="error", message="/mode requires an active agent gateway.")
-    current = "plan"
-    if hasattr(context.gateway, "get_session_execution_mode"):
-        current = context.gateway.get_session_execution_mode(context.session_id)
+    current = context.gateway.get_session_execution_mode(context.session_id)
     if not args or args[0].lower() in {"show", "status"}:
-        desc = (
-            "Plan Mode (Read-only exploration & structured plan generation)"
-            if current == "plan"
-            else "Act Mode (Authorized execution & modifications)"
-        )
-        return CommandResult(
-            status="success",
-            message=f"Current execution mode: {current.upper()} ({desc})",
-            data={"mode": current},
-        )
-    target = args[0].lower()
-    if target in {"plan", "act"}:
-        if target == "act":
-            has_plan = False
-            is_approved = False
-            if hasattr(context.gateway, "get_session_active_plan"):
-                plan = context.gateway.get_session_active_plan(context.session_id)
-                has_plan = plan is not None
-                is_approved = bool(plan and plan.get("approved"))
-            if has_plan and not is_approved:
-                return CommandResult(
-                    status="error",
-                    message="An unapproved plan is pending. Use /approve or /act to approve the plan before switching to Act Mode.",
-                    data={"mode": "plan", "plan_pending": True},
-                )
-        if hasattr(context.gateway, "set_session_execution_mode"):
-            context.gateway.set_session_execution_mode(context.session_id, target)
-        desc = (
-            "Plan Mode (Read-only exploration & structured plan generation)"
-            if target == "plan"
-            else "Act Mode (Authorized execution & modifications)"
-        )
-        return CommandResult(
-            status="success",
-            message=f"Switched execution mode to {target.upper()} ({desc}).",
-            data={"mode": target},
-        )
-    raise ValueError("Usage: /mode [show|plan|act]")
+        return CommandResult(status="success", message=f"Current execution mode: {current.upper()}.", data={"mode": current})
+    mode = context.gateway.set_session_execution_mode(context.session_id, args[0].lower())
+    return CommandResult(status="success", message=f"Execution mode: {mode.upper()}.", data={"mode": mode})
 
 
 def _act_command(context: CommandContext, args: list[str]) -> CommandResult:
-    if context.gateway is None:
-        return CommandResult(status="error", message="/act requires an active agent gateway.")
-    plan = None
-    if hasattr(context.gateway, "get_session_active_plan"):
-        plan = context.gateway.get_session_active_plan(context.session_id)
-    has_plan = plan is not None
-    if has_plan and hasattr(context.gateway, "approve_session_plan"):
-        context.gateway.approve_session_plan(context.session_id)
-        if hasattr(context.gateway, "set_session_execution_mode"):
-            context.gateway.set_session_execution_mode(context.session_id, "act")
-        return CommandResult(
-            status="success",
-            message="Plan approved! Switched to Act Mode. The agent is ready to execute the approved plan.",
-            data={"mode": "act", "plan_approved": True, "execution_request": str(plan.get("goal") or "")},
-        )
-    if hasattr(context.gateway, "set_session_execution_mode"):
-        context.gateway.set_session_execution_mode(context.session_id, "act")
-    return CommandResult(
-        status="success",
-        message="Switched to Act Mode. The agent can now perform authorized modifications and verification.",
-        data={"mode": "act"},
-    )
+    if context.gateway.mode_workflow.active(context.session_id):
+        return _approve_command(context, args)
+    return _execution_mode_command(context, ["act"])
 
 
 def _approve_command(context: CommandContext, args: list[str]) -> CommandResult:
-    if context.gateway is None:
-        return CommandResult(status="error", message="/approve requires an active agent gateway.")
-    plan = (
-        context.gateway.get_session_active_plan(context.session_id)
-        if hasattr(context.gateway, "get_session_active_plan")
-        else None
-    )
-    if hasattr(context.gateway, "approve_session_plan"):
-        success = context.gateway.approve_session_plan(context.session_id)
-        if success:
-            return CommandResult(
-                status="success",
-                message="Implementation plan explicitly approved! Switched to Act Mode.",
-                data={"mode": "act", "plan_approved": True, "execution_request": str((plan or {}).get("goal") or "")},
-            )
+    from mana_agent.human_inbox.models import ResponseOperation
 
-    return CommandResult(
-        status="error",
-        message="No pending plan. Review and approve requests in the approval dialog or inbox.",
-    )
+    if context.frontend not in {"cli", "tui"}:
+        return CommandResult(status="error", message="Use the authenticated inbox to approve this revision.")
+    if len(args) != 1:
+        return CommandResult(status="error", message="Use /approve <inbox-id> for the displayed revision. Use /plan to view it.")
+    return context.gateway.mode_workflow.respond(context.session_id, args[0], ResponseOperation.APPROVE,
+                                                  frontend=context.frontend)
 
 
 def _reject_command(context: CommandContext, args: list[str]) -> CommandResult:
-    if context.gateway is None:
-        return CommandResult(status="error", message="/reject requires an active agent gateway.")
-    plan = context.gateway.get_session_active_plan(context.session_id) if hasattr(context.gateway, "get_session_active_plan") else None
-    if plan:
-        context.gateway.set_session_active_plan(context.session_id, None)
-        if hasattr(context.gateway, "set_session_execution_mode"):
-            context.gateway.set_session_execution_mode(context.session_id, "plan")
-        return CommandResult(
-            status="success",
-            message="Active plan rejected and cleared. Retained in Plan Mode without making changes.",
-            data={"mode": "plan", "plan_rejected": True},
-        )
-    return CommandResult(
-        status="error",
-        message="No active plan found to reject.",
-    )
+    from mana_agent.human_inbox.models import ResponseOperation
+
+    if context.frontend not in {"cli", "tui"}:
+        return CommandResult(status="error", message="Use the authenticated inbox to reject this revision.")
+    workflow = context.gateway.mode_workflow
+    task = workflow.active(context.session_id)
+    if not task:
+        return CommandResult(status="error", message="There is no active plan.")
+    key = task.mode_workflow.get("inbox_id")
+    if task.mode_workflow["phase"] == "awaiting_approval" and key:
+        return workflow.respond(context.session_id, key, ResponseOperation.DENY, frontend=context.frontend)
+    context.gateway.cancel_task(task.task_id)
+    return CommandResult(status="success", message="Plan cancelled.")
+
+
+def _revise_command(context: CommandContext, args: list[str]) -> CommandResult:
+    from mana_agent.human_inbox.models import ResponseOperation
+
+    if context.frontend not in {"cli", "tui"}:
+        return CommandResult(status="error", message="Use the authenticated inbox to request a revision.")
+    if not args:
+        return CommandResult(status="input_required", message="What should change in the plan or your answers?")
+    workflow = context.gateway.mode_workflow
+    task = workflow.active(context.session_id)
+    if not task:
+        return CommandResult(status="error", message="There is no active plan to revise.")
+    key = task.mode_workflow.get("inbox_id")
+    instructions = " ".join(args).strip()
+    if task.mode_workflow["phase"] == "awaiting_approval" and key:
+        return workflow.respond(context.session_id, key, ResponseOperation.DENY, frontend=context.frontend,
+                                comment="Revise plan:\n" + instructions)
+    if task.mode_workflow["phase"] == "blocked":
+        return workflow.revise_blocked(task, instructions)
+    result = context.gateway.submit_steering(context.session_id, instructions, kind="scope_change",
+                                              execution_id=task.task_id)
+    return CommandResult(status="success", message="Revision request submitted.", data=result)
 
 
 def _activity(context: CommandContext, args: list[str]) -> CommandResult:
@@ -796,9 +629,10 @@ def definitions() -> list[CommandDefinition]:
         rows.append(CommandDefinition(canonical_name=name, description=description, required_capability="gateway", handler=_gateway(name)))
     rows.extend([
         CommandDefinition(canonical_name="plan", description="Create a repository-aware implementation plan.", argument_schema="[request]", free_text_arguments=True, required_capability="gateway", handler=_plan_command),
-        CommandDefinition(canonical_name="mode", description="Inspect or switch execution mode (plan or act).", argument_schema="[show|plan|act]", required_capability="gateway", handler=_execution_mode_command),
-        CommandDefinition(canonical_name="act", description="Approve pending plan and switch to Act Mode.", argument_schema="[--approve]", required_capability="gateway", handler=_act_command),
-        CommandDefinition(canonical_name="approve", aliases=("accept",), description="Explicitly approve the current implementation plan.", required_capability="gateway", handler=_approve_command),
+        CommandDefinition(canonical_name="mode", description="Inspect or switch execution mode.", argument_schema="[show|auto|plan|act]", required_capability="gateway", handler=_execution_mode_command),
+        CommandDefinition(canonical_name="act", description="Enter Act Mode or approve the displayed revision.", argument_schema="[inbox-id]", required_capability="gateway", handler=_act_command),
+        CommandDefinition(canonical_name="approve", aliases=("accept",), description="Approve the displayed plan revision.", argument_schema="<inbox-id>", required_capability="gateway", handler=_approve_command),
+        CommandDefinition(canonical_name="revise", description="Propose changes to the active plan.", argument_schema="<changes>", free_text_arguments=True, required_capability="gateway", handler=_revise_command),
         CommandDefinition(canonical_name="reject", description="Reject the pending implementation plan.", required_capability="gateway", handler=_reject_command),
         CommandDefinition(canonical_name="analyze", description="Analyze the selected repository context.", argument_schema="[request]", free_text_arguments=True, required_capability="gateway", execution_mode="task", handler=_agent_command("analyze")),
         CommandDefinition(canonical_name="doctor", description="Diagnose Mana-Agent and optionally apply safe repairs.", argument_schema="[--safe-fixes]", required_capability="gateway", confirmation_actions=frozenset({"--safe-fixes", "safe-fixes"}), execution_mode="task", handler=_agent_command("doctor")),

@@ -37,7 +37,6 @@ from mana_agent.multi_agent.runtime.auto_chat import (
     AutoChatMode,
     AutoChatSessionState,
     classify_auto_chat_intent,
-    is_plan_execution_request,
     load_auto_chat_state,
     resolve_auto_followup,
     save_auto_chat_state,
@@ -787,7 +786,7 @@ def process_chat_turn(
     """Run one model-driven chat turn (non-UI).
 
     Session state keys (mutated):
-      history, active_flow_id, auto_chat_state, analysis_context
+      history, active_flow_id, auto_chat_state
     """
     root = Path(root).expanduser().resolve()
     original_question = str(text or "").strip()
@@ -843,11 +842,6 @@ def process_chat_turn(
             raise
         except Exception:
             pass
-
-    analysis_context = session_state.get("analysis_context")
-    if analysis_context is None:
-        analysis_context = load_analysis_context(root)
-        session_state["analysis_context"] = analysis_context
 
     _emit("agent.decision", "Decision routing", status="running")
     if agent_decision is None:
@@ -910,8 +904,6 @@ def process_chat_turn(
         agent_decision,
         classify_auto_chat_intent(question),
     )
-    if is_plan_execution_request(question):
-        auto_chat_mode = AutoChatMode.EDIT
 
     # External research tools selected by model
     selected = list(agent_decision.selected_tools or [])
@@ -959,7 +951,7 @@ def process_chat_turn(
     plan_trigger_request = bool(
         agent_decision.intent == "plan" or auto_chat_mode == AutoChatMode.PLAN_ONLY
     )
-    force_plan_only = plan_trigger_request and not is_plan_execution_request(question)
+    force_plan_only = plan_trigger_request
     force_auto_execute_edit = bool(coding_agent is not None and auto_execute_plan and edit_request)
 
     # Auto-chat routing (TUI parity): Gmail / MCP / general Q&A → ChatService.ask
@@ -1090,8 +1082,6 @@ def process_chat_turn(
         execute_plan_now and hasattr(coding_agent, "generate_auto_execute")
     )
     request_for_generation = model_question
-    if analysis_context:
-        request_for_generation = f"{analysis_context}\n\n{request_for_generation}"
 
     def _extract_and_apply_pending_steering() -> list[str]:
         guidance_items: list[str] = []

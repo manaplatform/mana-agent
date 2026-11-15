@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Sequence
 
 from mana_agent.analysis.models import AskResponse, AskResponseWithTrace, SearchHit, ToolInvocationTrace
@@ -12,6 +13,7 @@ from mana_agent.search.models import SearchDecision, SearchQuery
 from mana_agent.search.router import SearchRouter
 from mana_agent.services.search_service import SearchService
 from mana_agent.services.structure_service import StructureService
+from mana_agent.tools.repository import execute_repository_discovery
 from mana_agent.utils.project_search import project_search
 
 
@@ -62,10 +64,8 @@ class RouteExecutor:
         )
 
     def _execute_validated(self, decision: RouteDecision, context: RouteExecutionContext) -> AskResponseWithTrace:
-        if decision.kind == "repository_qa":
-            return self._repository_qa(context)
-        if decision.kind == "repo_search":
-            return self._repo_search(context)
+        if decision.kind in {"repository_qa", "repo_search"}:
+            return self._repository_evidence(decision, context)
         if decision.kind == "browser_task":
             return self._browser_tools(context)
         if decision.kind == "tool_execution":
@@ -109,53 +109,58 @@ class RouteExecutor:
             trace=[],
         )
 
-    def _repository_qa(self, context: RouteExecutionContext) -> AskResponseWithTrace:
-        if self.search_service is None:
-            raise RuntimeError("Repository search service is unavailable")
+    def _repository_evidence(self, decision: RouteDecision, context: RouteExecutionContext) -> AskResponseWithTrace:
         root = (context.root_dir or context.project_root).resolve()
-        if context.dir_mode and context.index_dirs:
-            sources, warnings = self.search_service.search_multi(context.index_dirs, query=context.question, k=context.k)
-        else:
-            sources = self.search_service.search(repository_root=root, query=context.question, k=context.k)
-            warnings = []
-        if not sources:
-            return AskResponseWithTrace(answer="Repository search found no matching context.", sources=[], warnings=warnings, mode="route-repository_qa", trace=[])
-        answer = self.qna_chain.run(question=context.question, context=_render_context(sources))
-        return AskResponseWithTrace(answer=answer, sources=sources, warnings=warnings, mode="route-repository_qa", trace=[])
+        mode = f"route-{decision.kind}"
+        if not decision.tool_plan:
+            if self.ask_agent is None:
+                return self._plain_error("Repository discovery requires a scoped tool operation.")
+            response = self.ask_agent.run(
+                question=context.question, index_dir=context.index_dir or root,
+                index_dirs=context.index_dirs, k=context.k, max_steps=context.max_steps,
+                timeout_seconds=context.timeout_seconds, callbacks=context.callbacks,
+                tool_policy={
+                    "allowed_tools": ["ls", "list_files", "repo_search", "repo_batch_search",
+                                      "read_file", "repo_batch_read", "find_symbols", "call_graph"],
+                    "disable_external_search": True,
+                    "require_initial_tool_call": True,
+                },
+            )
+            response.mode = mode
+            return response
+        if len(decision.tool_plan) != 1:
+            return self._plain_error("Repository routing must select one search or one batch search.")
+        operation = decision.tool_plan[0]
+        tool = operation.get("tool")
+        if tool not in {"repo_search", "repo_batch_search"}:
+            return self._plain_error("Selected repository route does not authorize this operation.")
+        args = operation.get("args") or {}
+        started = perf_counter()
+        from mana_agent.services.activity_context import current_activity_context
 
-    def _repo_search(self, context: RouteExecutionContext) -> AskResponseWithTrace:
-        root = (context.root_dir or context.project_root).resolve()
-        result = project_search(context.question, root, max_results=max(5, int(context.k) * 4))
+        activity = current_activity_context()
+        if activity and activity.task_id:
+            from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
+
+            result = execute_host_operation(
+                root=root, task_id=activity.task_id, tool_name=tool, arguments=args,
+                implementation=lambda selected: execute_repository_discovery(root, tool, selected),
+            )
+        else:
+            result = execute_repository_discovery(root, tool, args)
+        matches = [match for row in result.get("results", [result]) for match in row.get("matches", [])]
         sources = [
-            SearchHit(
-                score=0.0,
-                file_path=match.file_path,
-                start_line=match.line_number,
-                end_line=match.line_number,
-                symbol_name="match",
-                snippet=match.line_text[:500],
-            )
-            for match in result.matches
+            SearchHit(score=1.0, file_path=str(root / item["file"]), start_line=item["line"],
+                      end_line=item["line"], symbol_name="", snippet=item["text"], relative_path=item["file"])
+            for item in matches
         ]
-        if not result.matches:
-            return AskResponseWithTrace(
-                answer=f"No direct project matches for that query under {root}.",
-                sources=[],
-                warnings=[],
-                mode="route-repo_search",
-                trace=[],
-            )
-        try:
-            answer = self.qna_chain.run(question=context.question, context=_render_project_context(result.matches))
-        except Exception:
-            answer = result.format(root)
-        return AskResponseWithTrace(
-            answer=answer,
-            sources=sources,
-            warnings=[],
-            mode="route-repo_search",
-            trace=[],
-        )
+        error = str(result.get("error") or "; ".join(str(row.get("error")) for row in result.get("errors", [])))
+        answer = (str(self.qna_chain.run(question=context.question, context=_render_context(sources)))
+                  if sources else error or "The selected scope contains no matching evidence.")
+        return AskResponseWithTrace(answer=answer, sources=sources, warnings=[error] if error else [], mode=mode,
+            trace=[ToolInvocationTrace(tool_name=tool, args_summary="Model-selected repository discovery",
+                duration_ms=(perf_counter() - started) * 1000, status="ok" if result.get("ok") else "error",
+                output_preview=f"{len(matches)} matches")])
 
     def _tool_execution(self, decision: RouteDecision, context: RouteExecutionContext) -> AskResponseWithTrace:
         if not decision.tool_plan:
@@ -361,21 +366,6 @@ def _render_context(sources: list[SearchHit]) -> str:
                     f"symbol: {src.symbol_name}",
                     "snippet:",
                     src.snippet,
-                ]
-            )
-        )
-    return "\n\n---\n\n".join(blocks)
-
-
-def _render_project_context(matches: list[Any]) -> str:
-    blocks: list[str] = []
-    for match in matches:
-        blocks.append(
-            "\n".join(
-                [
-                    f"source: {match.file_path}:{match.line_number}",
-                    "snippet:",
-                    match.line_text,
                 ]
             )
         )

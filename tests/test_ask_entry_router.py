@@ -173,7 +173,8 @@ def test_repository_qa_uses_live_files_without_any_index(tmp_path: Path) -> None
     from mana_agent.services.search_service import SearchService
     project = _make_project(tmp_path)
     qna = _FakeQnA()
-    router = _StaticRouter(RouteDecision(kind="repository_qa", confidence=.9, reason="read live repository evidence"))
+    router = _StaticRouter(RouteDecision(kind="repository_qa", confidence=.9, reason="read live repository evidence",
+        tool_plan=[{"tool": "repo_search", "args": {"query": "add", "paths": ["mod.py"]}}]))
     service = AskService(qna_chain=qna, project_root=project, search_service=SearchService(project), entry_router=router)
     response = service.ask(index_dir=project / ".mana/index", question="add", k=5)
     assert response.sources
@@ -185,7 +186,8 @@ def test_repository_qa_uses_live_files_without_any_index(tmp_path: Path) -> None
 def test_repository_qa_no_matches_does_not_select_another_route(tmp_path: Path) -> None:
     from mana_agent.services.search_service import SearchService
     qna = _FakeQnA()
-    router = _StaticRouter(RouteDecision(kind="repository_qa", confidence=.9, reason="look for repository evidence"))
+    router = _StaticRouter(RouteDecision(kind="repository_qa", confidence=.9, reason="look for repository evidence",
+        tool_plan=[{"tool": "repo_search", "args": {"query": "absent", "paths": ["mod.py"]}}]))
     service = AskService(qna_chain=qna, project_root=tmp_path, search_service=SearchService(tmp_path), entry_router=router)
     response = service.ask(index_dir=tmp_path / ".mana/index", question="absent", k=5)
     assert response.sources == []

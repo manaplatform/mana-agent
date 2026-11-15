@@ -247,39 +247,10 @@ class AskService:
         k: int,
         root_dir: str | Path,
     ) -> AskResponse:
-
-        if self.search_service is None:
-            raise RuntimeError("search service is not configured")
-
-        resolved = sorted({Path(p).resolve() for p in index_dirs})
-
-        if not resolved:
-            root = Path(root_dir).resolve()
-            msg = f"No selected repositories under {root}"
-            return AskResponse(answer=msg, sources=[], warnings=[msg])
-
-        sources, warnings = self.search_service.search_multi(
-            index_dirs=resolved,
-            query=question,
-            k=k,
-        )
-
-        if not sources:
-            return AskResponse(
-                answer=f"The selected repository search found no matching context under {Path(root_dir).resolve()}.",
-                sources=[],
-                warnings=warnings,
-            )
-
-        context = self._render_context(sources)
-        answer = self.qna_chain.run(question=question, context=context)
-
-        return AskResponse(
-            answer=answer,
-            sources=sources,
-            source_groups=self._group_sources_by_index(sources, resolved),
-            warnings=warnings,
-        )
+        if not index_dirs:
+            message = f"No selected repositories under {Path(root_dir).resolve()}"
+            return AskResponse(answer=message, sources=[], warnings=[message])
+        return self.ask_with_tools_dir_mode(index_dirs, question, k, root_dir=root_dir)
 
     def ask_with_tools_dir_mode(
         self,

@@ -92,7 +92,7 @@ def watch(arguments: dict[str, str]) -> None:
             gateways[session_id] = AgentChatGateway(root, config=ChatGatewayConfig(
                 **saved.get("gateway_config", {}),
                 session_id=session_id, model=run["model"], coding_model=run["model"],
-                extra={"batch_watcher_process": True},
+                extra={"batch_watcher_process": True, "read_only_workspace_startup": bool(saved.get("mode_task_id"))},
             ))
         return gateways[session_id]
 

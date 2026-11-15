@@ -484,6 +484,7 @@ class LaneCoordinator:
                 self.emit(
                     "human_input.dispatch_failed",
                     task_id=task_id,
+                    lane_id=execution.owning_lane if execution is not None else LaneId.RESEARCH,
                     inbox_item_id=inbox_item_id,
                     resume_claim_id=resume_claim_id,
                     error_type=type(exc).__name__,

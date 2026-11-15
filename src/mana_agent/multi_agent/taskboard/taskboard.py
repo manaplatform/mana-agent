@@ -390,9 +390,12 @@ class TaskBoard:
         crossed_off: bool | None = None,
         status: TaskStatus | None = None,
         status_reason: str | None = None,
+        mode_workflow: dict[str, Any] | None = None,
     ) -> TaskBoardItem:
         """Update task details, progress, or assignment atomically."""
         task = self.get_task(task_id)
+        if mode_workflow is not None:
+            task.mode_workflow = dict(mode_workflow)
         if title is not None:
             task.title = str(title).strip()
         if description is not None:

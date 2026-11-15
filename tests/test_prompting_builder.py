@@ -73,8 +73,8 @@ def test_coding_prompt_builder_composes_stable_layers(tmp_path: Path, monkeypatc
     assert prompt.index("Safety and Verification Rules") < prompt.index("Ephemeral Prompt Context")
     assert "description: Focused verification skill." in prompt
     assert "trigger: Use when tests or pytest are mentioned." in prompt
-    assert "Matched Skill Content" in prompt
-    assert "SECRET FULL BODY SHOULD ONLY BE EPHEMERAL." in prompt
+    assert "Matched Skill Content" not in prompt
+    assert "SECRET FULL BODY SHOULD ONLY BE EPHEMERAL." not in prompt
     assert "Project Memory Snapshot" in prompt
     assert "Known command: pytest -q" in prompt
     assert "Current Task Context" in prompt

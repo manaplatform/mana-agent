@@ -113,6 +113,7 @@ class WorkspaceRepository:
         extra = {
             "routing_evidence": task.routing_evidence,
             "execution_policy": task.execution_policy,
+            "mode_workflow": task.mode_workflow,
             "supervisor_verification_evidence": task.supervisor_verification_evidence,
             "decomposition_id_map": task.decomposition_id_map,
             "reachability_edges": task.reachability_edges,
@@ -522,6 +523,7 @@ class WorkspaceRepository:
             entry_route=str(row["entry_route"]),
             owning_lane=str(row["owning_lane"]),
             routing_evidence=extra.get("routing_evidence", {}),
+            mode_workflow=extra.get("mode_workflow", {}),
             execution_policy=extra.get("execution_policy", {}),
             result_summary=str(row["result_summary"]),
             verification_status=str(row["verification_status"]),
