@@ -944,7 +944,8 @@ def chat(
         effective_base_url = inference_connection.base_url
         effective_api_key = inference_connection.api_key
     except RoutingFailure as exc:
-        console.print(f"Chat startup failed. {exc}", markup=False)
+        diag = exc.format_diagnostics() if hasattr(exc, "format_diagnostics") else str(exc)
+        console.print(f"Chat startup failed.\n{diag}", markup=False)
         raise typer.Exit(code=1) from exc
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

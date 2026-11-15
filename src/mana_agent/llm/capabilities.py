@@ -11,6 +11,7 @@ class CapabilityState(str, Enum):
     SUPPORTED = "SUPPORTED"
     UNSUPPORTED = "UNSUPPORTED"
     UNKNOWN = "UNKNOWN"
+    STALE = "STALE"
 
 
 class CapabilityFact(BaseModel):
@@ -23,10 +24,32 @@ class CapabilityFact(BaseModel):
     confidence: float = Field(default=0, ge=0, le=1)
     scope: str = ""
     expires_at: datetime | None = None
+    expiration_policy: str = "ttl"
+    last_failure: str | None = None
+    failure_timestamp: datetime | None = None
+    provider: str = ""
+    model_id: str = ""
+    capability: str = ""
 
     def current(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(timezone.utc)
         return self.expires_at is None or self.expires_at > now
+
+
+_VIEWS: dict[str, str] = {
+    "tool_calls": "tool_calling", "supports_tool_calls": "tool_calling", "function_calling": "tool_calling",
+    "function_calling_supported": "tool_calling", "supports_repository_read": "tool_calling",
+    "supports_repository_write": "tool_calling", "supports_shell": "tool_calling",
+    "structured_output": "native_structured_output", "supports_structured_output": "native_structured_output", "structured_output_supported": "native_structured_output",
+    "supports_streaming": "streaming", "streaming_supported": "streaming",
+    "supports_reasoning": "reasoning", "supports_public_reasoning_summaries": "public_reasoning_summaries",
+    "parallel_tools": "parallel_tool_calls", "supports_parallel_tools": "parallel_tool_calls", "parallel_function_calling_supported": "parallel_tool_calls",
+    "supports_server_tools": "server_tools", "programmatic_tool_calling": "programmatic_tool_calling",
+    "computer_use": "computer_use", "image_generation": "image_generation",
+    "prompt_caching_supported": "prompt_caching", "web_search": "web_search", "file_search": "file_search",
+    "code_interpreter": "code_interpreter", "shell_and_local_shell": "tool_calling",
+    "apply_patch": "tool_calling", "mcp": "tool_calling", "tool_search": "tool_search", "skills": "tool_calling",
+}
 
 
 class ModelProfile(BaseModel):
@@ -47,27 +70,59 @@ class ModelProfile(BaseModel):
         return self.model_id
 
     def fact(self, capability: str) -> CapabilityFact:
-        value = self.facts.get(capability, CapabilityFact())
-        return value if value.current() else CapabilityFact(source=value.source, method="expired")
+        canonical = _VIEWS.get(capability, capability)
+        value = self.facts.get(canonical, self.facts.get(capability))
+        if value is None:
+            return CapabilityFact(
+                provider=self.provider,
+                model_id=self.model_id,
+                capability=canonical,
+                state=CapabilityState.UNKNOWN,
+            )
+        if not value.current():
+            return value.model_copy(
+                update={
+                    "state": CapabilityState.STALE,
+                    "method": "expired",
+                    "provider": self.provider,
+                    "model_id": self.model_id,
+                    "capability": canonical,
+                }
+            )
+        return value
 
-    def supports(self, capability: str) -> bool:
-        return self.fact(capability).state is CapabilityState.SUPPORTED
+    def is_stale(self, capability: str) -> bool:
+        return self.fact(capability).state is CapabilityState.STALE
+
+    def is_unknown(self, capability: str) -> bool:
+        return self.fact(capability).state is CapabilityState.UNKNOWN
+
+    def is_unsupported(self, capability: str) -> bool:
+        return self.fact(capability).state is CapabilityState.UNSUPPORTED
+
+    def supports(self, capability: str, *, allow_stale: bool = False) -> bool:
+        fact = self.fact(capability)
+        if fact.state is CapabilityState.SUPPORTED:
+            return True
+        if allow_stale and fact.state is CapabilityState.STALE:
+            return bool(fact.value and fact.value is not False)
+        return False
 
     def supports_value(self, capability: str, value: str) -> bool:
         choices = []
         parents = self.observations.get(capability, [self.fact(capability)])
         specifics = self.observations.get(f"{capability}.{value}", [self.fact(f"{capability}.{value}")])
         for parent in parents:
-            if not parent.current() or parent.state is CapabilityState.UNKNOWN or parent.scope not in {"", self.configuration_fingerprint}:
+            if parent.state is CapabilityState.UNKNOWN or parent.scope not in {"", self.configuration_fingerprint}:
                 continue
-            if parent.state is CapabilityState.UNSUPPORTED:
+            if parent.state is CapabilityState.UNSUPPORTED or parent.value is False:
                 choices.append((parent, False))
             elif isinstance(parent.value, list):
                 if value in parent.value or parent.source != "probe":
                     choices.append((parent, value in parent.value))
         for specific in specifics:
-            if specific.current() and specific.state is not CapabilityState.UNKNOWN and specific.scope in {"", self.configuration_fingerprint}:
-                choices.append((specific, specific.state is CapabilityState.SUPPORTED))
+            if specific.state is not CapabilityState.UNKNOWN and specific.scope in {"", self.configuration_fingerprint}:
+                choices.append((specific, (specific.state is CapabilityState.SUPPORTED or specific.state is CapabilityState.STALE) and specific.value is not False))
         priority = {"unknown": 0, "models.dev": 1, "provider": 2, "probe": 3, "override": 4}
         choices.sort(key=lambda item: (priority.get(item[0].source, 0), item[0].observed_at.isoformat() if item[0].observed_at else ""), reverse=True)
         return choices[0][1] if choices else False
@@ -78,8 +133,13 @@ class ModelProfile(BaseModel):
         if rejected:
             raise CapabilityError(f"{self.provider}/{self.model_id}: {', '.join(rejected)}. Open model settings to refresh metadata, configure an override, or initiate a capability test.")
 
-    def value(self, name: str, default: Any = None) -> Any:
-        return self.fact(name).value if self.supports(name) else default
+    def value(self, name: str, default: Any = None, *, allow_stale: bool = True) -> Any:
+        fact = self.fact(name)
+        if fact.state is CapabilityState.SUPPORTED:
+            return fact.value
+        if allow_stale and fact.state is CapabilityState.STALE and fact.value is not None and fact.value is not False:
+            return fact.value
+        return default
 
     @property
     def is_known(self) -> bool:
@@ -87,21 +147,21 @@ class ModelProfile(BaseModel):
 
     @property
     def capability_source(self) -> str:
-        return ",".join(sorted({f.source for f in self.facts.values() if f.current() and f.source != "unknown"})) or "unknown"
+        return ",".join(sorted({f.source for f in self.facts.values() if f.source != "unknown"})) or "unknown"
 
     @property
     def capability_confidence(self) -> str:
-        scores = [f.confidence for f in self.facts.values() if f.current() and f.state is not CapabilityState.UNKNOWN]
+        scores = [f.confidence for f in self.facts.values() if f.state is not CapabilityState.UNKNOWN]
         return "unknown" if not scores else "high" if min(scores) >= .8 else "medium" if min(scores) >= .5 else "low"
 
     @property
     def context_window(self) -> int | None:
-        value = self.value("context_window")
+        value = self.value("context_window", allow_stale=True)
         return value if type(value) is int and value > 0 else None
 
     @property
     def max_output_tokens(self) -> int | None:
-        value = self.value("max_output_tokens")
+        value = self.value("max_output_tokens", allow_stale=True)
         return value if type(value) is int and value > 0 else None
 
     @property
@@ -190,33 +250,19 @@ class ModelProfile(BaseModel):
 
 # These views expose the canonical facts to existing Mana domain contracts.
 # Client tool support describes inference, never workspace permissions.
-_VIEWS = {
-    "supports_tool_calls": "tool_calling", "function_calling": "tool_calling",
-    "function_calling_supported": "tool_calling", "supports_repository_read": "tool_calling",
-    "supports_repository_write": "tool_calling", "supports_shell": "tool_calling",
-    "supports_structured_output": "native_structured_output", "structured_output_supported": "native_structured_output",
-    "supports_streaming": "streaming", "streaming_supported": "streaming",
-    "supports_reasoning": "reasoning", "supports_public_reasoning_summaries": "public_reasoning_summaries",
-    "supports_parallel_tools": "parallel_tool_calls", "parallel_function_calling_supported": "parallel_tool_calls",
-    "supports_server_tools": "server_tools", "programmatic_tool_calling": "programmatic_tool_calling",
-    "computer_use": "computer_use", "image_generation": "image_generation",
-    "prompt_caching_supported": "prompt_caching", "web_search": "web_search", "file_search": "file_search",
-    "code_interpreter": "code_interpreter", "shell_and_local_shell": "tool_calling",
-    "apply_patch": "tool_calling", "mcp": "tool_calling", "tool_search": "tool_search", "skills": "tool_calling",
-}
 for _attribute, _capability in _VIEWS.items():
-    setattr(ModelProfile, _attribute, property(lambda self, name=_capability: self.supports(name)))
+    setattr(ModelProfile, _attribute, property(lambda self, name=_capability: self.supports(name, allow_stale=True)))
 
 
-def observation(value: Any, *, source: str, scope: str = "", method: str = "metadata", confidence: float = .8) -> CapabilityFact:
+def observation(value: Any, *, source: str, scope: str = "", method: str = "metadata", confidence: float = .8, provider: str = "", model_id: str = "", capability: str = "") -> CapabilityFact:
     now = datetime.now(timezone.utc)
     state = CapabilityState.UNKNOWN if value is None else CapabilityState.UNSUPPORTED if value is False else CapabilityState.SUPPORTED
     return CapabilityFact(state=state, value=value, source=source, method=method,
-        observed_at=now, confidence=confidence, scope=scope,
+        observed_at=now, confidence=confidence, scope=scope, provider=provider, model_id=model_id, capability=capability,
         expires_at=None if source == "override" else now + timedelta(days=7 if source == "probe" else 1))
 
 
-def metadata_facts(record: dict[str, Any], *, source: str, scope: str = "") -> dict[str, CapabilityFact]:
+def metadata_facts(record: dict[str, Any], *, source: str, scope: str = "", provider: str = "", model_id: str = "") -> dict[str, CapabilityFact]:
     """Only explicit fields grant capabilities. Model names are never inspected."""
     values: dict[str, Any] = {}
     names = {"image_request_format": "image_request_format", "image_flexible_dimensions": "image_flexible_dimensions",
@@ -224,6 +270,8 @@ def metadata_facts(record: dict[str, Any], *, source: str, scope: str = "") -> d
         "tool_choice": "tool_choice", "reasoning": "reasoning", "reasoning_effort": "reasoning_effort",
         "thinking_control": "thinking_control",
         "structured_output": "native_structured_output", "native_structured_output": "native_structured_output",
+        "structured_outputs": "native_structured_output", "response_format": "native_structured_output",
+        "json_output": "json_output",
         "tool_call_streaming": "tool_call_streaming", "streaming": "streaming",
         "parallel_tool_calls": "parallel_tool_calls", "context_window": "context_window",
         "context_length": "context_window", "max_output_tokens": "max_output_tokens",
@@ -245,7 +293,7 @@ def metadata_facts(record: dict[str, Any], *, source: str, scope: str = "") -> d
                 values[names[key]] = True
     parameters = record.get("supported_parameters")
     if isinstance(parameters, list):
-        for key, native in {"tools": "tool_calling", "tool_choice": "tool_choice", "reasoning": "reasoning", "reasoning_effort": "reasoning_effort", "structured_outputs": "native_structured_output", "parallel_tool_calls": "parallel_tool_calls"}.items():
+        for key, native in {"tools": "tool_calling", "tool_choice": "tool_choice", "reasoning": "reasoning", "reasoning_effort": "reasoning_effort", "structured_outputs": "native_structured_output", "response_format": "native_structured_output", "parallel_tool_calls": "parallel_tool_calls"}.items():
             if key in parameters:
                 values.setdefault(native, True)
     limits = record.get("limit")
@@ -271,10 +319,15 @@ def metadata_facts(record: dict[str, Any], *, source: str, scope: str = "") -> d
             for modality in value:
                 if isinstance(modality, str):
                     values.setdefault(f"{key}_{modality}", True)
+    modality_val = str(modalities.get("modality") or record.get("modality") or "").lower()
+    if "text->" in modality_val:
+        values.setdefault("input_text", True)
+    if "->text" in modality_val or modality_val == "text":
+        values.setdefault("output_text", True)
     for option in record.get("reasoning_options") or []:
         if isinstance(option, dict) and option.get("type") == "effort":
             values["reasoning_effort"] = option.get("values")
     for name in ("context_window", "max_input_tokens", "max_output_tokens"):
         if name in values and (type(values[name]) is not int or values[name] <= 0):
             values[name] = None
-    return {name: observation(value, source=source, scope=scope) for name, value in values.items()}
+    return {name: observation(value, source=source, scope=scope, provider=provider, model_id=model_id, capability=name) for name, value in values.items()}

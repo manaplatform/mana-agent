@@ -42,7 +42,7 @@ from mana_agent.context_cost.accounting import (
     TokenEstimationRequest,
     VerificationBudgetExceededError,
 )
-from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver
+from mana_agent.context_cost.profiles import ModelIdentity, ModelTokenProfileResolver, UnknownModelProfileError
 from mana_agent.context_cost.store import AccountingStore
 from mana_agent.execution_supervisor.models import BudgetForecast
 from mana_agent.telemetry.tokens import TokenUsage, TokenUsageTracker, token_usage_from_provider
@@ -391,21 +391,54 @@ class ContextCostGovernor:
         lane_policy_limit: int | None = None,
     ):
         """Estimate one final, already-selected provider/model execution."""
-        estimate = self.accounting.estimate(TokenEstimationRequest(
-            model_identity=ModelIdentity(provider or "unknown", model),
-            components=components,
-            route=route,
-            lane=lane,
-            expected_tool_steps=expected_tool_steps,
-            expected_model_calls=expected_model_calls,
-            requested_output_tokens=requested_output_tokens,
-            historical_prediction_enabled=historical_prediction_enabled,
-            execution_kind=execution_kind,
-            tool_count=tool_count,
-            task_token_remaining=self._implementation_tokens_remaining(),
-            session_token_remaining=self.ledger.remaining_tokens,
-            lane_policy_limit=lane_policy_limit,
-        ))
+        try:
+            estimate = self.accounting.estimate(TokenEstimationRequest(
+                model_identity=ModelIdentity(provider or "unknown", model),
+                components=components,
+                route=route,
+                lane=lane,
+                expected_tool_steps=expected_tool_steps,
+                expected_model_calls=expected_model_calls,
+                requested_output_tokens=requested_output_tokens,
+                historical_prediction_enabled=historical_prediction_enabled,
+                execution_kind=execution_kind,
+                tool_count=tool_count,
+                task_token_remaining=self._implementation_tokens_remaining(),
+                session_token_remaining=self.ledger.remaining_tokens,
+                lane_policy_limit=lane_policy_limit,
+            ))
+        except UnknownModelProfileError:
+            from mana_agent.context_cost.profiles import ModelTokenProfile
+            from mana_agent.context_cost.accounting import TokenEstimate
+            model_id = ModelIdentity(provider or "unknown", model)
+            unk_cw = int(getattr(self.settings, "mana_context_unknown_model_context_window", 16_384))
+            unk_mo = int(getattr(self.settings, "mana_context_unknown_model_max_output_tokens", 4_096))
+            prof = ModelTokenProfile(
+                identity=model_id,
+                context_window=unk_cw,
+                max_output_tokens=unk_mo,
+                source="unverified",
+                confidence="low",
+                metadata={"unknown_model": True},
+            )
+            sized_components = {
+                k: max(1, len(str(v).split())) for k, v in components.items()
+            } if isinstance(components, dict) else {}
+            input_tokens = sum(sized_components.values())
+            out_tokens = (requested_output_tokens or 0) * max(1, expected_model_calls)
+            estimate = TokenEstimate(
+                model_identity=model_id,
+                profile=prof,
+                input_tokens=input_tokens,
+                output_tokens=out_tokens,
+                total_tokens=input_tokens + out_tokens,
+                estimated_cost=None,
+                confidence="unverified",
+                components=sized_components,
+                assumptions=("token_limits_unverified",),
+                effective_total_limit=unk_cw,
+                remaining_context_tokens=max(0, unk_cw - input_tokens),
+            )
         metadata = {
             "provider": provider,
             "model": model,

@@ -23,6 +23,11 @@ def _winner(observations: list[CapabilityFact], scope: str) -> CapabilityFact:
     applicable = [(stamp, fact) for stamp, fact in candidates.values()
         if fact.current() and fact.state is not CapabilityState.UNKNOWN]
     if not applicable:
+        expired = [(stamp, fact) for stamp, fact in candidates.values()
+            if fact.state not in {CapabilityState.UNKNOWN, CapabilityState.STALE}]
+        if expired:
+            latest = max(expired, key=lambda item: (_PRIORITY.get(item[1].source, 0), item[0]))[1]
+            return latest.model_copy(update={"state": CapabilityState.STALE, "method": "expired"})
         return CapabilityFact()
     return max(applicable, key=lambda item: (_PRIORITY.get(item[1].source, 0), item[0]))[1]
 

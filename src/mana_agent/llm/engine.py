@@ -32,7 +32,7 @@ def _emit_inference_activity(event_type: str, **fields: Any) -> None:
 
 class NativeLLMEngine:
     def __init__(self, *, provider: str, model: str, api_key: str, base_url: str,
-                 endpoint: str, headers: dict[str, str] | None = None,
+                 endpoint: str = "", headers: dict[str, str] | None = None,
                  query: dict[str, str] | None = None, parameters: dict[str, Any] | None = None,
                  timeout: float = 600, max_attempts: int = 2, adapter: Any = None):
         if not provider or not model:
@@ -42,7 +42,7 @@ class NativeLLMEngine:
             raise ValueError("Inference requires a finite positive timeout and one to three transport attempts")
         self.provider, self.model, self.api_key, self.base_url = provider, model, api_key, base_url
         self.selected_provider, self.model_name = provider, model
-        self.endpoint, self.headers, self.query = endpoint, headers or {}, query or {}
+        self.endpoint, self.headers, self.query = endpoint or base_url, headers or {}, query or {}
         self.parameters, self.timeout, self.max_attempts = parameters or {}, timeout, max_attempts
         self.adapter = adapter
         self.tools: list[dict[str, Any]] = []
@@ -164,24 +164,38 @@ class NativeLLMEngine:
                     if capability is None:
                         raise CapabilityError(f"Unrecognized input modality {kind}")
                     required.append(capability)
-        profile.require(*required, "context_window")
-        if type(profile.context_window) is not int or profile.context_window <= 0:
-            raise CapabilityError("The context limit must be an explicitly configured positive integer")
-        profile.require("max_output_tokens")
-        if profile.max_output_tokens is None:
-            raise CapabilityError("Output limit evidence must contain a positive integer")
-        if not any(parameters.get(name) is not None for name in output_fields):
-            from mana_agent.config.settings import Settings
-            ratio = Settings().mana_context_default_output_ratio
-            parameters["max_output_tokens"] = max(1, int(profile.max_output_tokens * ratio))
         limits = [parameters[name] for name in output_fields if parameters.get(name) is not None]
-        if not limits or any(type(value) is not int or value < 1 for value in limits):
-            raise CapabilityError("Output limits must be explicitly supported positive integers")
-        if len(limits) != 1:
-            raise CapabilityError("Specify one output-limit parameter for the selected transport")
-        output = limits[0]
-        if output > profile.max_output_tokens:
-            raise CapabilityError("Requested output budget exceeds the discovered model limit")
+        output = limits[0] if limits else 0
+        if self.adapter is None:
+            profile.require(*required)
+        else:
+            non_text_required = [c for c in required if c not in {"input_text", "output_text"}]
+            if non_text_required:
+                profile.require(*non_text_required)
+            if not profile.supports("output_text") and not profile.supports("input_text"):
+                profile.require(*required)
+        if self.adapter is None:
+            profile.require("context_window")
+            if type(profile.context_window) is not int or profile.context_window <= 0:
+                raise CapabilityError("The context limit must be an explicitly configured positive integer")
+            profile.require("max_output_tokens")
+            if profile.max_output_tokens is None:
+                raise CapabilityError("Output limit evidence must contain a positive integer")
+            if not any(parameters.get(name) is not None for name in output_fields):
+                from mana_agent.config.settings import Settings
+                ratio = Settings().mana_context_default_output_ratio
+                parameters["max_output_tokens"] = max(1, int(profile.max_output_tokens * ratio))
+            limits = [parameters[name] for name in output_fields if parameters.get(name) is not None]
+            if not limits or any(type(value) is not int or value < 1 for value in limits):
+                raise CapabilityError("Output limits must be explicitly supported positive integers")
+            if len(limits) != 1:
+                raise CapabilityError("Specify one output-limit parameter for the selected transport")
+            output = limits[0]
+            if output > profile.max_output_tokens:
+                raise CapabilityError("Requested output budget exceeds the discovered model limit")
+        elif profile.max_output_tokens is not None and not any(parameters.get(name) is not None for name in output_fields):
+            parameters["max_output_tokens"] = profile.max_output_tokens
+            output = profile.max_output_tokens
         from mana_agent.context_cost.estimator import estimate_value_tokens
         serialized = [message.model_dump(mode="json") for message in native]
         if continuation is not None and continuation.mode == "stateless":
@@ -191,7 +205,10 @@ class NativeLLMEngine:
         if response_schema:
             tokens += estimate_value_tokens(response_schema)
         input_limit = profile.value("max_input_tokens")
-        if tokens + output > profile.context_window or (type(input_limit) is int and tokens > input_limit):
+        if profile.context_window is not None and type(profile.context_window) is int and profile.context_window > 0:
+            if tokens + output > profile.context_window or (type(input_limit) is int and tokens > input_limit):
+                raise CapabilityError("Request exceeds the selected model context budget; compact context before inference")
+        elif type(input_limit) is int and tokens > input_limit:
             raise CapabilityError("Request exceeds the selected model context budget; compact context before inference")
         if parameters.get("n", 1) not in (None, 1):
             raise CapabilityError("Native inference requires one response choice")
@@ -376,26 +393,99 @@ class NativeLLMEngine:
             return pool.submit(context.run, lambda: asyncio.run(self.generate(messages, **options))).result()
 
     async def decide(self, messages: Any, schema: type[BaseModel] | dict[str, Any], **options: Any) -> BaseModel | dict[str, Any]:
-        response = await self.generate(messages, schema=schema, **options)
-        if not isinstance(response.content, str):
-            raise InvalidResponseError("Structured decision did not return JSON text")
-        if isinstance(schema, dict):
-            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-            value = json.loads(response.content)
-            validate_arguments(value, schema)
-            return value
-        return schema.model_validate_json(response.content, strict=True)
+        prof = self.profile(options.get("parameters", {}))
+        if options.get("require_native_structured_output"):
+            prof.require("native_structured_output")
+        # 1. Native structured output when supported:
+        if prof.supports("native_structured_output"):
+            response = await self.generate(messages, schema=schema, **options)
+            if not isinstance(response.content, str):
+                raise InvalidResponseError("Structured decision did not return JSON text")
+            if isinstance(schema, dict):
+                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                value = json.loads(response.content)
+                validate_arguments(value, schema)
+                return value
+            return schema.model_validate_json(response.content, strict=True)
+
+        schema_dict = schema if isinstance(schema, dict) else schema.model_json_schema()
+
+        # 2. Tool-call-based output when supported:
+        if prof.supports("tool_calling"):
+            tool = {
+                "name": "record_decision",
+                "description": "Record the validated structured decision adhering to the schema.",
+                "parameters": schema_dict,
+            }
+            opts = dict(options)
+            opts["tools"] = [tool]
+            opts["tool_choice"] = {"type": "function", "name": "record_decision"}
+            response = await self.generate(messages, **opts)
+            if response.tool_calls and response.tool_calls[0].name == "record_decision":
+                args = response.tool_calls[0].args
+                if isinstance(schema, dict):
+                    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                    validate_arguments(args, schema)
+                    return args
+                return schema.model_validate(args, strict=True)
+            raise InvalidResponseError("Model did not return the required decision tool call")
+
+        # 3. Validated text-based decision:
+        if not (prof.supports("output_text") or prof.supports("input_text") or prof.supports("text_generation")):
+            prof.require("output_text")
+
+        from mana_agent.llm.messages import SystemMessage, UserMessage
+        schema_json = json.dumps(schema_dict, indent=2)
+        contract = (
+            f"\n\nCRITICAL RESPONSE INSTRUCTION:\n"
+            f"You must return your decision as a valid JSON object matching this exact JSON Schema:\n"
+            f"{schema_json}\n"
+            f"Return ONLY the raw JSON object. Do not include markdown code blocks, commentary, or extra text."
+        )
+        msg_list = list(messages) if isinstance(messages, (list, tuple)) else [UserMessage(str(messages))]
+        last_msg = msg_list[-1]
+        if hasattr(last_msg, "content") and isinstance(last_msg.content, str):
+            augmented_messages = [*msg_list[:-1], type(last_msg)(content=last_msg.content + contract)]
+        else:
+            augmented_messages = [*msg_list, SystemMessage(contract)]
+
+        for attempt in range(2):
+            response = await self.generate(augmented_messages, **options)
+            content = response.content if isinstance(response.content, str) else ""
+            cleaned = content.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                if len(lines) >= 2 and lines[-1].startswith("```"):
+                    cleaned = "\n".join(lines[1:-1]).strip()
+                elif lines[0].startswith("```"):
+                    cleaned = "\n".join(lines[1:]).strip()
+            try:
+                parsed = json.loads(cleaned)
+                if isinstance(schema, dict):
+                    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+                    validate_arguments(parsed, schema)
+                    return parsed
+                return schema.model_validate(parsed, strict=True)
+            except Exception as parse_err:
+                if attempt == 0:
+                    augmented_messages.append(UserMessage(content))
+                    augmented_messages.append(UserMessage(
+                        f"Your output was not valid JSON conforming to the schema ({parse_err}). "
+                        f"Please return ONLY the corrected raw JSON object matching the schema."
+                    ))
+                    continue
+                raise InvalidResponseError(f"Validated text decision failed schema validation: {parse_err}") from parse_err
 
     def decide_sync(self, messages: Any, schema: type[BaseModel] | dict[str, Any], **options: Any) -> BaseModel | dict[str, Any]:
-        response = self.generate_sync(messages, schema=schema, **options)
-        if not isinstance(response.content, str):
-            raise InvalidResponseError("Structured decision did not return JSON text")
-        if isinstance(schema, dict):
-            from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-            value = json.loads(response.content)
-            validate_arguments(value, schema)
-            return value
-        return schema.model_validate_json(response.content, strict=True)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.decide(messages, schema, **options))
+        import contextvars
+        from concurrent.futures import ThreadPoolExecutor
+        context = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mana-inference-decide-sync") as pool:
+            return pool.submit(context.run, lambda: asyncio.run(self.decide(messages, schema, **options))).result()
 
     async def stream(self, messages: Any, **options: Any) -> AsyncIterator[StreamEvent]:
         await self._refresh_metadata()

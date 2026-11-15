@@ -327,11 +327,34 @@ class GatewayRoutingAuthority:
     def _refresh_configured_metadata(self) -> None:
         from concurrent.futures import ThreadPoolExecutor
         from mana_agent.llm.discovery import ModelDiscoveryService
-        from mana_agent.config.user_config import load_model_cache
+        from mana_agent.config.user_config import load_model_cache, get_setting
+        from mana_agent.config.provider_registry import split_qualified_model_id
         from datetime import datetime, timedelta, timezone
         ai_provider = getattr(self.settings, "mana_ai_provider", "openai") or "openai"
         configured_providers = getattr(self.settings, "mana_configured_providers", ["openai"]) or ["openai"]
-        providers = list(dict.fromkeys([ai_provider, *configured_providers]))
+        candidate_providers = set()
+        raw_profiles = getattr(self.settings, "mana_model_profiles", []) or []
+        if isinstance(raw_profiles, str):
+            try:
+                import json
+                raw_profiles = json.loads(raw_profiles)
+            except Exception:
+                raw_profiles = []
+        if isinstance(raw_profiles, list):
+            for item in raw_profiles:
+                if isinstance(item, dict):
+                    p = item.get("provider") or split_qualified_model_id(item.get("model_id") or item.get("model") or "")[0]
+                    if p:
+                        candidate_providers.add(p)
+        for setting_name in ("mana_primary_model", "openai_chat_model", "mana_codex_model",
+                             "MODEL_LEVEL_1_FAST_TOOL", "MODEL_LEVEL_2_CODING", "MODEL_LEVEL_3_HIGH_REASONING",
+                             "MANA_MODEL_MAIN", "MANA_MODEL_HEAD_DECISION"):
+            val = str(getattr(self.settings, setting_name, None) or get_setting(setting_name, "") or "").strip()
+            if val:
+                p = split_qualified_model_id(val, default_provider=ai_provider)[0]
+                if p:
+                    candidate_providers.add(p)
+        providers = list(dict.fromkeys([ai_provider, *configured_providers, *sorted(candidate_providers)]))
         connections = [resolve_inference_connection(self.settings, provider=provider, require_api_key=False) for provider in providers]
         def refresh(connection):
             if not connection.api_key:

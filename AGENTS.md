@@ -333,3 +333,24 @@ Follow [native engine recovery and regression notes](docs/native-llm-engine.md)
 and the [migration inventory](docs/native-llm-engine-migration.md). Verification
 remains user-owned under Rule 40; adding tests or CI entries does not establish
 compatibility or authorize paid requests.
+
+## Dynamic model capability discovery & AutoRouter contract — 2026-11-15
+
+Model capability evidence follows a strict 4-state lifecycle: `SUPPORTED`,
+`UNSUPPORTED`, `UNKNOWN`, and `STALE`. Omission is `UNKNOWN`, never `UNSUPPORTED`.
+Expired evidence transitions to `STALE`. Neither state justifies permanent model
+rejection until dynamic discovery and permitted runtime probes have been attempted.
+Prohibit hardcoded model capability tables, static context window assumptions, and
+guessing prices or token limits. Unknown metrics fail closed under explicit budget
+bounds, but allow unconstrained tasks (`assignment_only`).
+
+AutoRouter and decision loops must dynamically select among three output strategies:
+1. Native structured output when verified or strictly mandated (`require_native_structured_output=True`).
+2. Tool-call-based output with synthetic decision functions when `tool_calling` is supported.
+3. Schema-validated text decisions with bounded 1-attempt repair when text generation is supported.
+Ordinary chat startup and `AgentRole.MAIN` must never mandate native `structured_output`.
+Candidate rejection must provide actionable diagnostics detailing verified, unknown,
+stale, and unsupported capabilities, probe authorization state, and recovery guidance.
+Live paid capability probes require explicit user permission and per-model locks to
+prevent concurrent probe storms. See [dynamic discovery regression notes](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md).
+

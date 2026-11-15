@@ -107,8 +107,6 @@ def profiles_for_pinned_models(models: list[str] | tuple[str, ...], *, default_p
             row["can_verify"] = True
             row["input_text"] = True
             row["output_text"] = True
-            row.setdefault("context_window", context_window or 16_384)
-            row.setdefault("max_output_tokens", max_output_tokens or 4_096)
         rows.append(row)
     return configured_profiles(rows)
 
@@ -179,7 +177,5 @@ def profiles_from_legacy_configuration(*, global_model: str = "", default_provid
             row["can_verify"] = True
             row["input_text"] = True
             row["output_text"] = True
-            row.setdefault("context_window", context_window or 16_384)
-            row.setdefault("max_output_tokens", max_output_tokens or 4_096)
         rows.append(row)
     return configured_profiles(rows)

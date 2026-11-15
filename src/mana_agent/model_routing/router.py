@@ -97,9 +97,137 @@ class ModelRouter:
             raise ValueError("routing outcome references an unregistered provider/model")
         self.history.record(outcome)
 
+    def _candidate_rejection(self, profile: ModelProfile, request: RoutingRequest, reasons: list[str]) -> CandidateRejection:
+        from mana_agent.llm.capabilities import CapabilityState
+        desc = getattr(profile, "capability_descriptor", None)
+        unknown_caps = []
+        stale_caps = []
+        unsupported_caps = []
+        available_caps = {}
+        if desc is not None and hasattr(desc, "fact"):
+            check_caps = set(request.required_capabilities) | {"input_text", "output_text", "native_structured_output"}
+            for cap in sorted(check_caps):
+                fact = desc.fact(cap)
+                available_caps[cap] = fact.state.value
+                if fact.state is CapabilityState.UNKNOWN:
+                    unknown_caps.append(cap)
+                elif fact.state is CapabilityState.STALE:
+                    stale_caps.append(cap)
+                elif fact.state is CapabilityState.UNSUPPORTED:
+                    unsupported_caps.append(cap)
+        from mana_agent.llm.probes import is_probe_authorized
+        from mana_agent.config.settings import Settings
+        settings = getattr(self, "settings", None) or Settings()
+        probe_ok = any(is_probe_authorized(settings, profile.provider, profile.model_id, c) for c in (unknown_caps + stale_caps))
+        recovery_action = (
+            "Refresh provider metadata and verify eligible capabilities before evaluating routing."
+            if (unknown_caps or stale_caps)
+            else "Configure an override or choose a model that supports the required capabilities."
+        )
+        return CandidateRejection(
+            model=profile.key,
+            reasons=tuple(reasons),
+            required_capabilities=tuple(sorted(request.required_capabilities)),
+            available_capabilities=available_caps,
+            unknown_capabilities=tuple(unknown_caps),
+            stale_capabilities=tuple(stale_caps),
+            unsupported_capabilities=tuple(unsupported_caps),
+            last_verified_at=desc.fact("output_text").observed_at.isoformat() if desc and hasattr(desc, "fact") and desc.fact("output_text").observed_at else None,
+            automatic_verification_permitted=probe_ok,
+            next_recovery_action=recovery_action,
+        )
+
+    def _ensure_candidate_evidence(self, request: RoutingRequest) -> None:
+        """Attempt discovery and permitted verification for candidates with missing/stale evidence."""
+        from mana_agent.llm.capabilities import CapabilityState
+        from mana_agent.llm.discovery import ModelDiscoveryService
+        from mana_agent.config.model_capabilities import resolve_model_capability
+        from mana_agent.llm.probes import run_capability_probe, is_probe_authorized
+        from mana_agent.config.settings import Settings
+        import asyncio
+
+        settings = getattr(self, "settings", None) or Settings()
+        discovery_service = ModelDiscoveryService()
+        updated_profiles = list(self.profiles)
+
+        for idx, profile in enumerate(updated_profiles):
+            desc = getattr(profile, "capability_descriptor", None)
+            needs_refresh = (
+                desc is None
+                or not desc.is_known
+                or not (desc.supports("input_text", allow_stale=True) and desc.supports("output_text", allow_stale=True))
+                or (desc.context_window is None or desc.max_output_tokens is None)
+                or any(desc.fact(c).state is CapabilityState.UNKNOWN for c in request.required_capabilities)
+            )
+            if not needs_refresh:
+                continue
+
+            refreshed = discovery_service.refresh_model_sync(
+                provider=profile.provider,
+                model_id=profile.model_id,
+                settings=settings,
+                timeout_seconds=2.0,
+            )
+            if refreshed is not None:
+                desc = refreshed
+            elif desc is None:
+                desc = resolve_model_capability(profile.provider, profile.model_id)
+            else:
+                resolved = resolve_model_capability(profile.provider, profile.model_id)
+                if resolved.is_known:
+                    for k, f in resolved.facts.items():
+                        if k not in desc.facts or desc.facts[k].state is CapabilityState.UNKNOWN:
+                            desc.facts[k] = f
+
+            needed_capabilities = set(request.required_capabilities)
+            if not desc.supports("input_text", allow_stale=True) or not desc.supports("output_text", allow_stale=True):
+                needed_capabilities.add("output_text")
+
+            for cap in needed_capabilities:
+                if not desc.supports(cap, allow_stale=True) and is_probe_authorized(settings, profile.provider, profile.model_id, cap):
+                    try:
+                        from mana_agent.llm.engine import NativeLLMEngine
+                        from mana_agent.config.inference_provider import resolve_inference_connection
+                        conn = resolve_inference_connection(settings, provider=profile.provider, require_api_key=False)
+                        engine = NativeLLMEngine(
+                            provider=profile.provider,
+                            model=profile.model_id,
+                            api_key=conn.api_key,
+                            base_url=conn.base_url,
+                        )
+                        asyncio.run(run_capability_probe(
+                            engine,
+                            cap,
+                            authorized=True,
+                        ))
+                        desc = resolve_model_capability(profile.provider, profile.model_id)
+                    except Exception:
+                        pass
+
+            if desc is not None and desc.is_known:
+                pricing = desc.catalog_pricing
+                pricing_known = all(profile.configuration.get(s, pricing.get(f)) is not None for s, f in
+                    (("input_cost_per_million", "input"), ("output_cost_per_million", "output")))
+                updated_profile = replace(
+                    profile,
+                    context_window=int(desc.context_window or profile.context_window or 0),
+                    max_output_tokens=int(desc.max_output_tokens or profile.max_output_tokens or 0),
+                    can_tool_call=desc.supports_tool_calls or profile.can_tool_call,
+                    can_structured_output=desc.supports_structured_output or profile.can_structured_output,
+                    capability_descriptor=desc,
+                )
+                updated_profile.configuration["pricing_known"] = pricing_known or updated_profile.configuration.get("pricing_known", False)
+                updated_profiles[idx] = updated_profile
+
+        self.profiles = tuple(updated_profiles)
+        self.accounting = ModelTokenAccountingService(
+            ModelTokenProfileResolver(self.profiles, unknown_policy="require_metadata")
+        )
+
     def route(self, request: RoutingRequest, *, fallback_of_decision_id: str = "", fallback_reason: str = "") -> RoutingDecision:
         if not self.policy.enabled:
             raise RoutingFailure("Adaptive model routing is disabled. No fallback action was executed.")
+        self._ensure_candidate_evidence(request)
         if self.decision_model is not None:
             return self._route_with_model(request, fallback_of_decision_id=fallback_of_decision_id, fallback_reason=fallback_reason)
         return self._route_deterministic(request, fallback_of_decision_id=fallback_of_decision_id, fallback_reason=fallback_reason)
@@ -112,7 +240,7 @@ class ModelRouter:
             resource = self._resource_score(profile, request)
             reasons = self._reject(profile, request, resource)
             if reasons:
-                rejected.append(CandidateRejection(profile.key, tuple(reasons)))
+                rejected.append(self._candidate_rejection(profile, request, reasons))
             else:
                 candidates[profile.key] = (profile, resource)
             if not request.assignment_only and profile.can_verify and not self._reject(profile, verification_request, resource):
@@ -281,7 +409,7 @@ class ModelRouter:
             resource = self._resource_score(profile, request)
             reasons = self._reject(profile, request, resource)
             if reasons:
-                rejected.append(CandidateRejection(profile.key, tuple(reasons)))
+                rejected.append(self._candidate_rejection(profile, request, reasons))
                 desc = getattr(profile, "capability_descriptor", None)
                 transport = getattr(desc, "transport", "") or "direct_responses"
                 record_current(
@@ -300,7 +428,7 @@ class ModelRouter:
             item = self._score(profile, request, resource)
             if item.confidence < self.policy.minimum_confidence:
                 rejection_reason = f"confidence {item.confidence:.3f} is below {self.policy.minimum_confidence:.3f}"
-                rejected.append(CandidateRejection(profile.key, (rejection_reason,)))
+                rejected.append(self._candidate_rejection(profile, request, [rejection_reason]))
                 desc = getattr(profile, "capability_descriptor", None)
                 transport = getattr(desc, "transport", "") or "direct_responses"
                 record_current(
@@ -447,7 +575,18 @@ class ModelRouter:
             reasons.append(resource.reason or "provider resource is unavailable")
         if request.role not in profile.supported_roles and "*" not in profile.supported_roles:
             reasons.append(f"role {request.role!r} is unsupported")
-        if profile.context_window <= 0 or profile.max_output_tokens <= 0:
+        requires_token_accounting = bool(
+            not request.assignment_only
+            and (
+                self.decision_model is not None
+                or request.budgets.task_cost_limit is not None
+                or request.budgets.session_cost_remaining is not None
+                or request.expected_response_tokens > 0
+                or request.retrieved_context_tokens > 0
+                or (request.expected_prompt_tokens > 2000 and request.task_type not in {"routing", "routine"})
+            )
+        )
+        if requires_token_accounting and (profile.context_window <= 0 or profile.max_output_tokens <= 0):
             reasons.append("context/output limits are UNKNOWN")
         pricing_known = bool(
             profile.configuration.get("pricing_known")
@@ -462,8 +601,11 @@ class ModelRouter:
             reasons.append(
                 f"model capabilities are unknown (provider={profile.provider!r}, model={profile.model_id!r}, transport={getattr(desc, 'transport', '')!r})"
             )
-        if desc is not None and (not desc.context_window or not desc.max_output_tokens or not desc.supports("input_text") or not desc.supports("output_text")):
-            reasons.append("Text or token-limit evidence is absent or expired")
+        if desc is not None:
+            if desc.is_unsupported("input_text") or desc.is_unsupported("output_text"):
+                reasons.append("Text capability is explicitly unsupported")
+            elif requires_token_accounting and (not desc.context_window or not desc.max_output_tokens):
+                reasons.append("Text or token-limit evidence is absent or expired")
         missing_tools = request.required_tools - profile.supported_tools
         if request.required_tools and (not profile.can_tool_call or (desc is not None and not desc.supports_tool_calls)):
             reasons.append("model cannot call tools")
@@ -477,9 +619,14 @@ class ModelRouter:
             if desc is not None
             else ("repository_read" in profile.supported_tools or "*" in profile.supported_tools)
         )
+        supports_structured = (
+            profile.can_structured_output
+            or (desc is not None and (desc.supports_structured_output or desc.supports_tool_calls or desc.supports("output_text")))
+        )
         capability_flags = {
             "patch": profile.can_patch and supports_write,
-            "structured_output": profile.can_structured_output and (desc.supports_structured_output if desc is not None else True),
+            "structured_output": supports_structured,
+            "native_structured_output": profile.can_structured_output and (desc.supports_structured_output if desc is not None else True),
             "tool_calls": profile.can_tool_call and (desc.supports_tool_calls if desc is not None else True),
             "verification": profile.can_verify,
             "reasoning": bool(desc.supports_reasoning if desc is not None else (profile.reasoning_settings - {"none"})),
@@ -495,7 +642,8 @@ class ModelRouter:
         try:
             estimate = self._token_estimate(profile, request)
         except (ModelContextLimitError, UnknownModelProfileError) as exc:
-            reasons.append(str(exc))
+            if requires_token_accounting:
+                reasons.append(str(exc))
             estimate = None
         if _LATENCY[profile.latency_class] > _LATENCY[request.latency_requirement]:
             reasons.append(f"latency class {profile.latency_class.value} exceeds {request.latency_requirement.value}")
@@ -530,8 +678,11 @@ class ModelRouter:
         quality = (profile.reliability_score + benchmark + reasoning * demand) / (2 + demand)
         languages = set(request.repository.languages)
         language = 1.0 if not languages or not profile.supported_languages else len(languages & profile.supported_languages) / len(languages)
-        estimate = self._token_estimate(profile, request)
-        estimated_cost = float(estimate.estimated_cost) if estimate.estimated_cost is not None else None
+        try:
+            estimate = self._token_estimate(profile, request)
+        except (ModelContextLimitError, UnknownModelProfileError):
+            estimate = None
+        estimated_cost = float(estimate.estimated_cost) if estimate and estimate.estimated_cost is not None else None
         cost_scale = request.budgets.task_cost_limit or request.budgets.session_cost_remaining
         if cost_scale is not None:
             cost_score = 0.0 if estimated_cost is None else max(0.0, 1.0 - estimated_cost / max(cost_scale, 1e-9))
@@ -567,10 +718,13 @@ class ModelRouter:
             f"estimated cost={'unknown' if estimated_cost is None else f'{estimated_cost:.6f}'}, latency={profile.latency_class.value}",
             f"provider capacity={resource.provider_capacity:.3f}, quota health={resource.quota_health:.3f}, resource confidence={resource.resource_confidence:.3f}",
         )
-        estimated_input, estimated_output = self._estimated_tokens(profile, request)
+        estimated_input, estimated_output = (estimate.input_tokens, estimate.output_tokens) if estimate else (0, 0)
         return _Scored(
             profile, score, confidence, estimated_input, estimated_output, estimated_cost,
-            estimate.confidence, dict(estimate.components), estimate.assumptions, reasons, resource,
+            estimate.confidence if estimate else "unverified",
+            dict(estimate.components) if estimate else {},
+            estimate.assumptions if estimate else (),
+            reasons, resource,
         )
 
     def _estimated_tokens(self, profile: ModelProfile, request: RoutingRequest) -> tuple[int, int]:

@@ -328,6 +328,30 @@ class RoutingRequest:
 class CandidateRejection:
     model: str
     reasons: tuple[str, ...]
+    required_capabilities: tuple[str, ...] = ()
+    available_capabilities: dict[str, str] = field(default_factory=dict)
+    unknown_capabilities: tuple[str, ...] = ()
+    stale_capabilities: tuple[str, ...] = ()
+    unsupported_capabilities: tuple[str, ...] = ()
+    last_verified_at: str | None = None
+    automatic_verification_permitted: bool = False
+    next_recovery_action: str = ""
+
+    def format_diagnostic(self) -> str:
+        lines = [f"Model: {self.model}"]
+        if self.available_capabilities:
+            for cap, state in sorted(self.available_capabilities.items()):
+                lines.append(f"{cap}: {state}")
+        elif self.unknown_capabilities or self.unsupported_capabilities:
+            for cap in self.unknown_capabilities:
+                lines.append(f"{cap}: UNKNOWN")
+            for cap in self.unsupported_capabilities:
+                lines.append(f"{cap}: UNSUPPORTED")
+            for cap in self.stale_capabilities:
+                lines.append(f"{cap}: STALE")
+        if self.next_recovery_action:
+            lines.append(f"\nAction:\n{self.next_recovery_action}")
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,6 +427,14 @@ class RoutingFailure(RuntimeError):
     def __init__(self, message: str, *, rejected: tuple[CandidateRejection, ...] = ()) -> None:
         super().__init__(message)
         self.rejected = rejected
+
+    def format_diagnostics(self) -> str:
+        lines = [str(self)]
+        if self.rejected:
+            lines.append("\nRejected candidates:")
+            for item in self.rejected:
+                lines.append(item.format_diagnostic())
+        return "\n".join(lines)
 
     def as_dict(self) -> dict[str, Any]:
         return {
