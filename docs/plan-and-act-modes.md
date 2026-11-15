@@ -14,6 +14,8 @@ TaskBoard records step progress. The Execution Supervisor owns the active attemp
 
 Each coding proposal is read-only. The internal engine uses registered read tools, and external Codex uses a read-only app-server turn with networking disabled. Mana checks the exact step, current scope, file operations, checkout state, and patch content before the existing Tool Runner and action policy apply a mutation. Scope changes from live steering return the task to review. Git publishing and mutations to external services keep their existing approval flows.
 
+If the action policy requires a separate approval for a destructive patch, review that action in the inbox and resume the plan. Mana reuses the exact reviewed patch and checks the plan revision again before applying it.
+
 Verification commands run with the reviewed argv against a disposable source copy, without host secrets or sandbox networking. Use a locally available Docker image that contains the project's verification dependencies. A step can name that image in the plan. With no image specified, the configured local Docker provider default applies. If the environment or command is unavailable, the task shows verification as incomplete. Fix the environment and use `/task resume <task-id>` to retry from the saved progress.
 
 ## Debug a failure
