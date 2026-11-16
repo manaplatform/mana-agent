@@ -400,7 +400,7 @@ class NativeLLMEngine:
 
     async def decide(
         self, messages: Any, schema: type[BaseModel] | dict[str, Any], *,
-        repair_decision: bool = False, **options: Any,
+        repair_decision: bool = False, validation_context: dict[str, Any] | None = None, **options: Any,
     ) -> BaseModel | dict[str, Any]:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
@@ -456,7 +456,7 @@ class NativeLLMEngine:
                         return payload
                     # These strategies all return JSON. Strict Python validation
                     # would reject JSON arrays that represent typed tuples.
-                    return schema.model_validate_json(content, strict=True)
+                    return schema.model_validate_json(content, strict=True, context=validation_context)
                 except ValueError as exc:
                     failure = exc
 

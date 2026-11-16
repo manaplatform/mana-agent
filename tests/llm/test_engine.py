@@ -182,6 +182,54 @@ def test_mode_decision_corrects_invalid_file_read(tmp_path, native_profile, monk
     assert service.inspect(decision.evidence)["content"] == "target\n"
 
 
+@pytest.mark.parametrize("invalid_fields,detail", [
+    ({"level": 3}, "The next permitted level is 2."),
+    ({"prior_evidence": []}, "Levels above 1 require prior_evidence IDs."),
+    ({"prior_evidence": ["fixture-rejected-id"]}, "Use only prior_evidence IDs from evidence_levels."),
+    ({"prior_evidence": ["evidence-2"]}, "cite at least one prior_evidence ID from level 1."),
+])
+def test_mode_decision_corrects_investigation_scope(tmp_path, native_profile, monkeypatch, invalid_fields, detail):
+    import json
+
+    from mana_agent.agent.plan_service import InvestigationScope, PlanService
+
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            evidence = {
+                "tool": "repo_search", "level": 2, "paths": ["app.py"], "query": "target",
+                "prior_evidence": ["evidence-1"], "reason": "Follow up on the earlier observation",
+            }
+            if len(requests) == 1:
+                evidence.update(invalid_fields)
+            return ModelResponse(content=json.dumps({"decision": {
+                "action": "inspect", "reason": "Inspect the local handler", "evidence": evidence,
+            }}))
+
+    service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
+    # An older result can fall outside the detailed history window while its ID still applies.
+    recent = [{"id": "evidence-2", "level": 0, "result": {}}]
+    scope = InvestigationScope({"evidence-1": 1, "evidence-2": 0})
+    decision = service.next_decision("debug", {"request": "Inspect app.py", "evidence": recent},
+                                     investigation_scope=scope)
+
+    assert len(requests) == 2
+    assert requests[0].response_schema == requests[1].response_schema
+    assert "validation_context" not in requests[0].parameters
+    data = json.loads(requests[0].messages[1].content)
+    assert data["evidence"] == recent
+    assert data["investigation_scope"] == {
+        "highest_observed_level": 1, "max_next_level": 2, "evidence_levels": scope.evidence_levels,
+    }
+    correction = requests[1].messages[-1].content
+    assert detail in correction
+    assert "fixture-rejected-id" not in correction
+    assert decision.evidence.level == 2
+    assert decision.evidence.prior_evidence == ("evidence-1",)
+
+
 def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path, native_profile, monkeypatch):
     import json
 

@@ -59,6 +59,26 @@ observation, approval, lock and receipt paths. TaskBoard and Execution
 Supervisor keep their existing roles. External Codex continues to own its inner
 tool loop; Mana no longer prepends unrelated project analysis to the handoff.
 
+## Investigation scope correction in Plan and Debug
+
+A correctly shaped inspection decision could still block the task with
+`Investigation expansion requires observed evidence from the narrower scope`.
+In the reported incident, the persisted investigation had three level-1
+observations. An ordinary next operation could use level 2 with a valid
+citation. The rejected selection's level and IDs were unavailable. The prompt
+described broadening generally, while the gateway checked the next-level and
+citation rules only after inference. The prompt also showed detailed results
+for only the most recent 12 observations, so an older observation at the
+highest level could be absent.
+
+Each decision now gets the highest observed level, next permitted ordinary
+level, and IDs and levels of all stored observations. Detailed results still
+use the bounded history window. Native inference uses that same task-state
+snapshot to validate inspection decisions during its existing correction
+attempt. The correction distinguishes skipped levels, missing IDs, unknown
+IDs, and missing citations at the highest observed level. The gateway checks
+the scope again before executing the selected read-only operation.
+
 ## Do not reintroduce
 
 - Never map the whole request to a source search or run a compatibility index
@@ -69,6 +89,8 @@ tool loop; Mana no longer prepends unrelated project analysis to the handoff.
   Reuse file evidence only in its permitted checkout and at its observed version.
 - Never collect mutation snapshots around a strictly read-only command solely
   because it uses the command transport.
+- Never hide the scope ceiling and evidence IDs from the decision model or
+  invent observations to satisfy an expansion gate.
 
 ## Verification
 
@@ -82,3 +104,11 @@ the shell executor, transactional action policy, and shell executor tests. It
 did not walk the repository root. The replay does not implement sudo support
 or call a live model. For interactive acceptance, submit the example in a disposable checkout,
 inspect the execution trace, and stop before applying any proposed sudo change.
+
+For Plan and Debug scope correction, run
+
+    venv/bin/python -m pytest -q tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'investigation_scope or unjustified_expansion or repository_audit'
+
+The fixtures cover the four correction reasons, references to older
+observations, rejection before a broader tool runs, and the explicit audit
+path. The agent did not run these tests or make a live provider call.

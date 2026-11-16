@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Plan and Debug now provide the current investigation scope and evidence IDs to the model and allow the existing correction attempt to fix invalid scope choices. See [repository discovery regression notes](docs/regressions/intent-driven-repository-discovery.md#investigation-scope-correction-in-plan-and-debug).
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'investigation_scope or unjustified_expansion or repository_audit'`.
 - Plan and Debug model responses now use action-specific schemas. The selected action requires its own payload and rejects fields from other actions. See [action payload regression](docs/regressions/debug-plan-execution-contract.md#action-payload-regression).
 - User verification: `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py tests/test_execution_modes.py`.
 - Plan and Debug now keep live model and tool activity on the originating turn. Chat Completions output-limit and filter stops surface safe diagnostics in the model activity and mode result. See [decision activity and provider stops](docs/regressions/debug-plan-execution-contract.md#decision-activity-and-provider-stops).

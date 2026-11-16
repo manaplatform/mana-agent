@@ -159,7 +159,11 @@ def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion
     )
     result = workflow.start("session", "Traceback points at app.py:1", mode="debug", llm=model)
     assert result.status == "error"
-    assert "narrower scope" in result.message
+    assert "The next permitted level is 2." in result.message
+    assert model.inputs[0]["investigation_scope"]["max_next_level"] == 1
+    assert model.inputs[1]["investigation_scope"] == {
+        "max_next_level": 2, "highest_observed_level": 1, "evidence_levels": {"evidence-1": 1},
+    }
     assert opened == ["app.py"]
 
 

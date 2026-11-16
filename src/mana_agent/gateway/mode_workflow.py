@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 from mana_agent.agent.mode import ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
-from mana_agent.agent.plan_service import PlanService
+from mana_agent.agent.plan_service import InvestigationScope, PlanService
 from mana_agent.batch.policy import TaskExecutionPolicy
 from mana_agent.chat_commands.models import CommandResult
 from mana_agent.execution_supervisor.models import ExecutionState
@@ -219,11 +219,13 @@ class ModeWorkflow:
                 break
             state["decision_count"] = state.get("decision_count", 0) + 1
             self._persist(task_id, state)
+            evidence = state["evidence"]
+            scope = InvestigationScope({item["id"]: item["level"] for item in evidence})
             decision = service.next_decision(state["mode"], {
                 "request": state["goal"], "constraints": state["constraints"], "skills": state["skills"],
-                "evidence": state["evidence"][-12:], "revision_request": state.get("revision_request", ""),
+                "evidence": evidence[-12:], "revision_request": state.get("revision_request", ""),
                 "repair_authorized": state["repair"],
-            })
+            }, investigation_scope=scope)
             self._check_live(task_id)
             allowed = ({"inspect", "clarify", "draft", "block"} if state["mode"] == "plan"
                        else {"inspect", "clarify", "diagnose", "repair", "research", "block"})
@@ -231,19 +233,7 @@ class ModeWorkflow:
                 raise ValueError("The model selected an action outside the active mode")
             if decision.action == "inspect":
                 request = decision.evidence
-                evidence = state["evidence"]
-                prior = {item["id"] for item in evidence}
-                highest = max((item["level"] for item in evidence), default=0)
-                initial_broad = not evidence and bool(request.initial_repository_scope)
-                if not initial_broad and (request.level > highest + 1 or (
-                    request.level > 1 and (
-                        not request.prior_evidence or not set(request.prior_evidence).issubset(prior)
-                        or (request.level > highest and not any(
-                            item["level"] == highest and item["id"] in request.prior_evidence for item in evidence
-                        ))
-                    )
-                )):
-                    raise ValueError("Investigation expansion requires observed evidence from the narrower scope")
+                scope.validate(request)
                 if any(item["fingerprint"] == request.fingerprint for item in evidence):
                     raise ValueError("The model selected an unchanged investigation operation")
                 if len(evidence) >= config.max_tool_calls:
