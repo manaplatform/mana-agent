@@ -380,8 +380,8 @@ def test_internal_engine_model_tool_calling_loop_and_events(tmp_path: Path) -> N
     assert "tool.call.completed" in event_types
     assert "turn.completed" in event_types
 
-    # Verify first message was the exact system instruction
-    assert mock_llm.received_messages[0].content == INTERNAL_CODING_SYSTEM_INSTRUCTION
+    # Repository instructions may follow the engine's base system instruction.
+    assert mock_llm.received_messages[0].content.startswith(INTERNAL_CODING_SYSTEM_INSTRUCTION)
 
 
 def test_tool_definitions_conform_to_openai_name_pattern(tmp_path: Path) -> None:

@@ -323,6 +323,7 @@ class CodexCodingAgentShim:
             user_message_id=kwargs.get("user_message_id"),
             dispatch_source=kwargs.get("dispatch_source") or "generate",
             coding_continuation_id=kwargs.get("coding_continuation_id", ""),
+            mode_proposal=tuple(kwargs.get("coding_mode_files") or ()) if kwargs.get("coding_mode_proposal") else (),
         )
 
     def generate_dir_mode(self, request: str, **kwargs: Any) -> dict[str, Any]:
@@ -409,6 +410,7 @@ class CodexCodingAgentShim:
         dispatch_source: str = "",
         _mutation_recovery: bool = False,
         coding_continuation_id: str = "",
+        mode_proposal: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Run a coding turn with bounded mutation recovery (explicit attempt loop).
 
@@ -421,6 +423,10 @@ class CodexCodingAgentShim:
         validate_prepared_repository(self.repo_root, self.working_directory)
 
         auth_key = str(gateway_task_id or turn_id or user_message_id or "").strip()
+        if mode_proposal:
+            if requires_repository_write:
+                raise PermissionError("A patch proposal requires the read-only Codex sandbox")
+            auth_key = f"{auth_key}:{turn_id}"
         if coding_continuation_id:
             auth_key = f"{auth_key}:{coding_continuation_id}"
         effective_source = dispatch_source or ("mutation_recovery" if _mutation_recovery else "execute_turn")
@@ -535,6 +541,7 @@ class CodexCodingAgentShim:
                     turn_id=turn_id,
                     is_recovery=is_recovery,
                     coding_continuation_id=coding_continuation_id,
+                    **({"mode_proposal": mode_proposal} if mode_proposal else {}),
                 )
                 last_payload = payload
                 combined_warnings.extend(str(w) for w in (payload.get("warnings") or []) if str(w).strip())
@@ -634,6 +641,7 @@ class CodexCodingAgentShim:
         turn_id: Any = None,
         is_recovery: bool = False,
         coding_continuation_id: str = "",
+        mode_proposal: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
         # connector must not manufacture a second task identity after routing:
@@ -755,6 +763,7 @@ class CodexCodingAgentShim:
         task = CodingTask(
             task_id=task_id,
             goal=goal,
+            allowed_files=list(mode_proposal),
             requirements=requirements,
             acceptance_criteria=[
                 "The response directly satisfies the user's stated goal.",
@@ -773,7 +782,8 @@ class CodexCodingAgentShim:
                 "or native coding executor before or after this turn."
             ),
             requires_repository_write=requires_repository_write,
-            context={"coding_research_resume": bool(coding_continuation_id), "coding_continuation_id": coding_continuation_id},
+            context={"coding_research_resume": bool(coding_continuation_id), "coding_continuation_id": coding_continuation_id,
+                     "mode_patch_proposal": bool(mode_proposal)},
         )
 
         manager: WorkspaceManager | None = None
@@ -946,6 +956,9 @@ class CodexCodingAgentShim:
             workspace_path=(str(workspace.worktree_path) if requires_repository_write else ""),
             requires_repository_write=requires_repository_write,
         )
+        if mode_proposal:
+            payload["output"] = result.summary
+            return payload
         selected_flow_id = str(result.thread_id or flow_id or task_id).strip()
         payload["flow_id"] = selected_flow_id
         self._active_flow_id = selected_flow_id

@@ -25,7 +25,7 @@ from mana_agent.prompting.memory_snapshot import render_memory_snapshot
 from mana_agent.prompting.mode_rules import render_mode_rules
 from mana_agent.prompting.output_contract import render_output_contract
 from mana_agent.prompting.repo_rules import render_repo_rules
-from mana_agent.prompting.skills_index import render_matched_skill_context, render_stable_skills_index
+from mana_agent.prompting.skills_index import render_stable_skills_index
 from mana_agent.context_cost.estimator import estimate_value_tokens
 from mana_agent.spirit.compiler import compile_spirit_instruction, strip_spirit_instruction
 from mana_agent.spirit.self_model import RuntimeSelf, compose_runtime_self
@@ -370,7 +370,6 @@ def build_coding_system_prompt(
         render_task_context(flow.context),
         mode=flow.context.mode,
         retrieved_files=[
-            render_matched_skill_context(request, repo_root=repo_root),
             render_memory_snapshot(repo_root=repo_root),
         ],
         recent_summary=flow_context,

@@ -136,7 +136,7 @@ class _RouteModel:
         if schema_name == "InspectionDecision":
             return schema.model_validate({
                 "tool": "repo_search",
-                "arguments": {"query": "README"},
+                "arguments": {"query": "README", "glob": "README.md"},
                 "reason": "Inspect task target",
             })
         raw = self.generate_sync(messages)
@@ -683,7 +683,7 @@ def test_tool_result_reused_when_args_same(tmp_path):
         task_id=task.task_id,
         requested_by_agent_id="agent_coding_0001",
         job_type=QueueJobType.REPO_SEARCH,
-        payload={"query": "needle"},
+        payload={"query": "needle", "paths": ["README.md"]},
     )
     queue.run_next()
     memory.queue_fingerprints.clear()
@@ -691,7 +691,7 @@ def test_tool_result_reused_when_args_same(tmp_path):
         task_id=task.task_id,
         requested_by_agent_id="agent_coding_0001",
         job_type=QueueJobType.REPO_SEARCH,
-        payload={"query": "needle"},
+        payload={"query": "needle", "paths": ["README.md"]},
     )
     queue.run_next()
 

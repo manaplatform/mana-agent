@@ -8,6 +8,14 @@ from mana_agent.spirit.self_model import compose_runtime_self
 
 
 def build_codex_prompt(task: CodingTask, workspace: WorkspaceContext) -> str:
+    if task.context.get("mode_patch_proposal"):
+        return (
+            f"Read-only patch proposal for {workspace.working_directory or workspace.worktree_path}.\n"
+            f"Approved file targets: {', '.join(task.allowed_files)}\n"
+            "Read only evidence needed for this step. Return the patch as the structured result.\n\n"
+            f"{workspace.repository_instructions}\n\n{task.goal}"
+        )
+
     def lines(values: list[str]) -> str:
         return "\n".join(f"- {value}" for value in values) or "- None specified"
 

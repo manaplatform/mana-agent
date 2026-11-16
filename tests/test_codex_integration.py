@@ -255,6 +255,19 @@ def test_codex_backend_translates_read_only_sandbox_for_protocol(tmp_path: Path)
     assert fake.requests[1][1]["sandbox"] == "read-only"
 
 
+def test_plan_proposal_turn_is_read_only_even_with_an_existing_thread(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path).model_copy(update={"sandbox": "readOnly"})
+    fake = _FakeClient(("codex", "app-server"))
+    backend = CodexCodingBackend(CodexSettings(enabled=True, approval_policy="on-request"),
+                                  client_factory=lambda _: fake, resume_thread_id="thread-1")
+    task = _task().model_copy(update={"requires_repository_write": False, "context": {"mode_patch_proposal": True}})
+    asyncio.run(backend.execute(task, workspace))
+    turn = next(payload for method, payload in fake.requests if method == "turn/start")
+    assert turn["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
+    assert turn["approvalPolicy"] == "never"
+    assert turn["outputSchema"]["required"] == ["patch"]
+
+
 def test_codex_backend_reports_turn_started_only_after_turn_start_accepts(
     tmp_path: Path,
 ) -> None:

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -9,22 +10,33 @@ from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
 runner = CliRunner()
 
 
-def test_plan_mode_loads_matching_skills_and_saves(tmp_path: Path) -> None:
-    result = runner.invoke(
-        app,
-        [
-            "plan",
-            "--repo",
-            str(tmp_path),
-            "--no-code",
-            "Add CLI smoke test",
-        ],
-    )
+def test_plan_command_passes_explicit_skill_and_export_to_workflow(tmp_path: Path, monkeypatch) -> None:
+    from mana_agent.chat_commands.models import CommandResult
 
-    assert result.exit_code == 0
-    assert "Loaded skills: cli, testing" in result.output
+    calls = []
+
+    def start(*args, **kwargs):
+        calls.append((args, kwargs))
+        return CommandResult(status="success", message="# Implementation Plan")
+
+    class Gateway:
+        def __init__(self, root, **_kwargs):
+            assert root == tmp_path.resolve()
+            self.mode_workflow = SimpleNamespace(start=start)
+
+        def create_new_session(self, **_kwargs):
+            return "review-session"
+
+    monkeypatch.setattr("mana_agent.gateway.chat_gateway.AgentChatGateway", Gateway)
+    result = runner.invoke(app, [
+        "plan", "--repo", str(tmp_path), "--no-code", "--skill", "cli", "Add CLI smoke test",
+    ])
+    assert result.exit_code == 0, result.output
     assert "# Implementation Plan" in result.output
-    assert (repository_dir(repository_id_for_path(tmp_path)) / "plans" / "add-cli-smoke-test.md").exists()
+    assert calls[0][0] == ("review-session", "Add CLI smoke test")
+    assert calls[0][1]["no_code"]
+    assert calls[0][1]["save"]
+    assert calls[0][1]["skill_names"] == ("cli",)
 
 
 def test_skills_init_list_show_uses_root_directory(tmp_path: Path) -> None:
@@ -81,16 +93,26 @@ def test_read_skill_returns_safe_error_for_missing_or_invalid_skill(tmp_path: Pa
     assert read_skill("missing", project_root=tmp_path) == "Error: skill 'missing' was not found."
 
 
-def test_root_flag_dispatches_plan_mode(tmp_path: Path) -> None:
-    result = runner.invoke(
-        app,
-        ["--plan", "--repo", str(tmp_path)],
-        input="Add CLI banner\n",
-    )
+def test_root_flag_dispatches_plan_mode(tmp_path: Path, monkeypatch) -> None:
+    import sys
+    from mana_agent.chat_commands.models import CommandResult
 
-    assert result.exit_code == 0
+    calls = []
+    gateway = SimpleNamespace(
+        create_new_session=lambda **_kw: "review-session",
+        mode_workflow=SimpleNamespace(start=lambda *args, **kw: (
+            calls.append(args) or CommandResult(status="success", message="# Implementation Plan")
+        )),
+    )
+    monkeypatch.setattr("mana_agent.gateway.chat_gateway.AgentChatGateway", lambda *a, **kw: gateway)
+    cli_sys = SimpleNamespace(**vars(sys))
+    cli_sys.stdin = SimpleNamespace(isatty=lambda: True)
+    monkeypatch.setattr("mana_agent.commands.cli_internal.sys", cli_sys)
+    result = runner.invoke(app, ["--plan", "--repo", str(tmp_path)], input="Add CLI banner\n")
+    assert result.exit_code == 0, result.output
     assert "Plan Mode" in result.output
-    assert "Loaded skills: cli" in result.output
+    assert calls == [("review-session", "Add CLI banner")]
+    assert not (tmp_path / ".git").exists()
 
 
 def test_new_framework_built_in_skills_are_registered(tmp_path: Path) -> None:

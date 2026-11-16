@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import json
 from types import SimpleNamespace
 import pytest
 from mana_agent.llm.messages import UserMessage, AssistantMessage, ToolCall, ToolResultMessage
@@ -148,7 +149,6 @@ def test_provider_extras_cannot_replace_validated_operation(parameters):
 
 
 def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
-    import json
     from mana_agent.llm.providers.openai import strict_schema, decode_structured
     schema = {"type": "object", "properties": {"arguments": {"type": "object", "additionalProperties": True}}, "required": ["arguments"]}
     wire = strict_schema(schema)
@@ -156,6 +156,155 @@ def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
     assert json.loads(decode_structured('{"arguments":"{\\"path\\":\\"README.md\\"}"}', schema)) == {"arguments": {"path": "README.md"}}
     with pytest.raises(ValueError):
         decode_structured('{"arguments":"invalid JSON"}', schema)
+
+
+@pytest.mark.parametrize("action,fields", [
+    ("inspect", {"evidence"}),
+    ("clarify", {"questions"}),
+    ("draft", {"draft"}),
+    ("diagnose", {"root_cause", "cause_evidence", "uncertainty"}),
+    ("repair", {"draft", "root_cause", "cause_evidence", "uncertainty"}),
+    ("research", {"debugging_report"}),
+    ("block", set()),
+])
+def test_mode_decision_wire_schema_exposes_only_the_selected_action_fields(action, fields):
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import strict_schema
+
+    wire = strict_schema(ModeDecision.model_json_schema())
+    assert wire["type"] == "object"
+    assert wire["required"] == ["decision"]
+    branches = [wire["$defs"][ref["$ref"].rsplit("/", 1)[-1]]
+                for ref in wire["properties"]["decision"]["anyOf"]]
+    branch = next(shape for shape in branches if shape["properties"]["action"]["const"] == action)
+    assert set(branch["required"]) == {"action", "reason"} | fields
+    assert branch["additionalProperties"] is False
+
+
+@pytest.mark.parametrize("payload", [
+    {"action": "inspect", "reason": "Inspect the file"},
+    {"action": "clarify", "reason": "Two choices", "questions": []},
+    {"action": "draft", "reason": "Ready", "draft": None},
+    {"action": "research", "reason": "Need documentation"},
+    {"action": "block", "reason": "Evidence unavailable", "evidence": None},
+])
+def test_mode_decision_rejects_missing_and_unrelated_payloads(payload):
+    from pydantic import ValidationError
+
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import decode_structured
+
+    content = json.dumps({"decision": payload})
+    with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
+        decode_structured(content, ModeDecision.model_json_schema())
+    with pytest.raises(ValidationError):
+        ModeDecision.model_validate_json(content, strict=True)
+
+
+def test_mode_evidence_wire_schema_separates_file_reads_from_discovery():
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import decode_structured, strict_schema
+
+    schema = ModeDecision.model_json_schema()
+    wire = strict_schema(schema)
+    read_fields = wire["$defs"]["FileReadEvidence"]["properties"]
+    assert read_fields["level"]["enum"] == [1, 2, 3]
+    assert read_fields["paths"]["minItems"] == read_fields["paths"]["maxItems"] == 1
+
+    read = ModeDecision.model_validate({"decision": {
+        "action": "inspect", "reason": "Read the reported location",
+        "evidence": {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file"},
+    }})
+    search = ModeDecision.model_validate({"decision": {
+        "action": "inspect", "reason": "Audit the requested repository",
+        "evidence": {"tool": "repo_search", "level": 4, "query": "target", "reason": "Explicit repository audit",
+                     "initial_repository_scope": "explicit_audit"},
+    }})
+    for decision in (read, search):
+        encoded = decision.model_dump_json()
+        decoded = decode_structured(encoded, schema)
+        assert ModeDecision.model_validate_json(decoded, strict=True) == decision
+
+    for invalid in ({"level": 4}, {"paths": []}, {"paths": ["app.py", "other.py"]},
+                    {"initial_repository_scope": "explicit_audit"}):
+        payload = read.model_dump(mode="json")
+        payload["decision"]["evidence"].update(invalid)
+        with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
+            decode_structured(json.dumps(payload), schema)
+
+
+@pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
+def test_native_mode_decision_uses_typed_records_and_preserves_plan_digest(endpoint):
+    from mana_agent.agent.mode import PlanRevision
+    from mana_agent.agent.plan_service import DraftDecision, ModeDecision
+
+    legacy = DraftDecision.model_validate({
+        "action": "draft", "reason": "Ready",
+        "draft": {"objectives": ["Fix the handler"], "findings": "Wrong return value", "scope": ["Handler"], "steps": [
+            {"step_id": "fix", "instruction": "Fix the handler", "changes": {"app.py": ["update"]},
+             "acceptance_criteria": ["Return the expected value"]},
+            {"step_id": "verify", "instruction": "Run focused test", "depends_on": ["fix"],
+             "verification": [{"argv": ["pytest"]}], "acceptance_criteria": ["The test passes"]},
+        ]},
+    })
+    selected = request(response_schema=ModeDecision.model_json_schema())
+    adapter = OpenAIProvider(provider="openai", api_key="test", base_url="https://example.org", endpoint=endpoint)
+    encoded = adapter.encode(selected)
+    shape = (encoded["text"]["format"]["schema"] if endpoint == "responses"
+             else encoded["response_format"]["json_schema"]["schema"])
+    operations = shape["$defs"]["PlanStep"]["properties"]["changes"]["items"]["properties"]["operations"]
+    assert operations["type"] == "array"
+    assert operations["minItems"] == 1
+    assert operations["items"]["enum"] == ["add", "update", "delete"]
+
+    def normalize(payload):
+        content = json.dumps(payload)
+        if endpoint == "responses":
+            raw = {"status": "completed", "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": content}]},
+            ]}
+        else:
+            raw = {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+        return adapter.normalize(raw, selected).content
+
+    wire = {"decision": legacy.model_dump(mode="json")}
+    fix, verify = wire["decision"]["draft"]["steps"]
+    fix["changes"] = [{"path": "app.py", "operations": ["update"]}]
+    verify["changes"] = []
+    parsed = ModeDecision.model_validate_json(normalize(wire), strict=True).decision
+    assert parsed == legacy
+    revision = PlanRevision(plan_id="plan", revision=1, session_id="session", workspace_id="workspace",
+                            repository_id="repo", repository_root="/project", goal="Fix the handler",
+                            constraints={}, draft=legacy.draft)
+    assert revision.model_copy(update={"draft": parsed.draft}).digest == revision.digest
+    saved = revision.model_dump_json()
+    assert json.loads(saved)["draft"]["steps"][0]["changes"] == {"app.py": ["update"]}
+    assert PlanRevision.model_validate_json(saved, strict=True).digest == revision.digest
+
+    fix["changes"] = '{"app.py":"update"}'
+    with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
+        normalize(wire)
+
+    fix["changes"] = [{"path": "app.py", "operations": ["update"]}, {"path": "app.py", "operations": ["delete"]}]
+    with pytest.raises(ValueError, match="entries must use unique path values"):
+        ModeDecision.model_validate_json(normalize(wire), strict=True)
+
+
+def test_native_debug_report_maps_are_typed_records():
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import decode_structured
+
+    legacy = ModeDecision.model_validate({"decision": {
+        "action": "research", "reason": "Need dependency information",
+        "debugging_report": {"unresolved_error": "Method unavailable", "local_evidence": ["Local method lookup failed"],
+                             "dependency_versions": {"example": "1.0"},
+                             "missing_external_information": "Method signature for the installed version"},
+    }})
+    wire = legacy.model_dump(mode="json")
+    wire["decision"]["debugging_report"]["dependency_versions"] = [{"name": "example", "value": "1.0"}]
+    wire["decision"]["debugging_report"]["runtime_environment"] = []
+    content = decode_structured(json.dumps(wire), ModeDecision.model_json_schema())
+    assert ModeDecision.model_validate_json(content, strict=True) == legacy
 
 
 def test_anthropic_signed_thinking_stays_in_volatile_receipt():

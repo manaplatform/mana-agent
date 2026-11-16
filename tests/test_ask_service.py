@@ -16,9 +16,12 @@ class FakeStore:
 
 
 class FakeQnA:
+    last_context: str = ""
+
     def run(self, question: str, context: str) -> str:
         assert question == "How does add work?"
         assert "source:" in context
+        self.last_context = context
         return "The add function sums two integers. /tmp/good.py:3-6"
 
 
@@ -104,49 +107,39 @@ class FakeRouter:
         return self.decision
 
 
-def test_ask_service_with_sources() -> None:
-    sources = [
-        SearchHit(
-            score=0.9,
-            file_path="/tmp/good.py",
-            start_line=3,
-            end_line=6,
-            symbol_name="add",
-            snippet="def add(a,b): return a+b",
-        )
-    ]
-    router = FakeRouter(RouteDecision(kind="repository_qa", confidence=0.9, reason="question needs indexed context"))
-    service = AskService(search_service=FakeStore(sources), qna_chain=FakeQnA(), entry_router=router)
+def test_ask_service_with_sources(tmp_path) -> None:
+    (tmp_path / "good.py").write_text("def add(a, b): return a + b\n")
+    router = FakeRouter(RouteDecision(kind="repository_qa", confidence=0.9, reason="question needs file evidence",
+        tool_plan=[{"tool": "repo_search", "args": {"query": "def add", "paths": ["good.py"]}}]))
+    qna = FakeQnA()
+    service = AskService(project_root=tmp_path, qna_chain=qna, entry_router=router)
     response = service.ask(index_dir="/tmp/index", question="How does add work?", k=4)
 
-    assert "/tmp/good.py:3-6" in response.answer
-    assert response.sources
+    assert "good.py:1-1" in qna.last_context
+    assert [source.relative_path for source in response.sources] == ["good.py"]
     assert response.to_dict()["route_trace"]["route_kind"] == "repository_qa"
 
 
 def test_ask_service_without_sources_stays_on_model_selected_route(tmp_path) -> None:
-    router = FakeRouter(RouteDecision(kind="repository_qa", confidence=0.9, reason="question needs indexed context"))
+    router = FakeRouter(RouteDecision(kind="repository_qa", confidence=0.9, reason="question needs file evidence",
+        tool_plan=[{"tool": "repo_search", "args": {"query": "def add", "paths": ["good.py"]}}]))
     service = AskService(search_service=FakeStore([]), qna_chain=FakeQnA(), project_root=tmp_path, entry_router=router)
     response = service.ask(index_dir="/tmp/index", question="How does add work?", k=4)
-    assert "could not find relevant indexed code context" not in response.answer.lower()
-    assert "repository search found no matching context" in response.answer.lower()
-    assert "fallback" not in response.to_dict().get("mode", "")
+    assert "selected scope contains no matching evidence" in response.answer.lower()
+    assert response.mode == "route-repository_qa"
 
 
-def test_ask_service_dir_mode_groups_sources() -> None:
-    service = AskService(
-        
-        qna_chain=FakeQnA(),
-        search_service=FakeSearchService(),
-    )
-    response = service.ask_dir_mode(
-        index_dirs=[Path("/tmp/proj-a/.mana/index"), Path("/tmp/proj-b/.mana/index")],
-        question="How does add work?",
-        k=4,
-        root_dir="/tmp",
-    )
-    assert response.sources
-    assert len(response.source_groups) == 2
+def test_ask_service_dir_mode_does_not_search_unselected_projects(tmp_path) -> None:
+    (tmp_path / "main.py").write_text("def add(a, b): return a + b\n")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "main.py").write_text("def add(a, b): return a + b\n")
+    router = FakeRouter(RouteDecision(kind="repository_qa", confidence=0.9, reason="request names a file",
+        tool_plan=[{"tool": "repo_search", "args": {"query": "def add", "paths": ["main.py"]}}]))
+    service = AskService(qna_chain=FakeQnA(), project_root=tmp_path, entry_router=router)
+    result = service.ask_dir_mode([tmp_path / ".mana/index", other / ".mana/index"],
+                                  "How does add work?", 4, root_dir=tmp_path)
+    assert [source.file_path for source in result.sources] == [str(tmp_path / "main.py")]
 
 
 def test_ask_service_tools_dir_mode_sets_grouped_sources() -> None:

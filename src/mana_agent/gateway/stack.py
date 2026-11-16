@@ -180,7 +180,7 @@ def build_chat_stack(
     cfg = config.normalized()
     settings = settings or Settings()
 
-    if cfg.coding_agent and prepared_repository is None:
+    if cfg.coding_agent and prepared_repository is None and not cfg.extra.get("read_only_workspace_startup"):
         workspace_service = WorkspaceService()
         expected_workspace_id: str | None = None
         if cfg.session_id:

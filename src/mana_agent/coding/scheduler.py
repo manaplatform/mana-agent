@@ -419,7 +419,7 @@ class ParallelToolExecutor:
                     is_cached = False
                     cache_key = ""
 
-                    if self.cache_enabled and node.kind == OperationKind.READ:
+                    if self.cache_enabled and node.kind == OperationKind.READ and not getattr(dispatcher, "owns_read_cache", False):
                         cached = self.cache.get(node.tool_name, node.arguments)
                         if cached is not None:
                             result = cached
@@ -436,7 +436,8 @@ class ParallelToolExecutor:
                             # Invalidate cached reads for touched paths
                             modified = node.target_paths | set(result.get("files_changed") or result.get("changed_files") or [])
                             self.cache.invalidate_paths(modified)
-                        elif self.cache_enabled and node.kind == OperationKind.READ and result.get("ok"):
+                        elif (self.cache_enabled and node.kind == OperationKind.READ and result.get("ok")
+                              and not getattr(dispatcher, "owns_read_cache", False)):
                             self.cache.put(node.tool_name, node.arguments, result, node.target_paths)
 
                     node.duration_ms = int((time.perf_counter() - t0) * 1000)

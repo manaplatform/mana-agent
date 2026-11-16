@@ -206,8 +206,15 @@ class CodingAgent(BaseAgent):
         llm = getattr(self, "routing_llm", None)
         if llm is None:
             raise RuntimeError("Coding inspection requires its selected decision model")
-        decision = llm.decide_sync("Select the first repository inspection for this delegated coding task. "
-            "Return only the registered tool, exact arguments, and a brief reason. Task: " + request, InspectionDecision)
+        from mana_agent.tools.repository import DISCOVERY_DESCRIPTION
+
+        selection = llm.decide_sync(
+            "Select the next repository inspection for this delegated task. Use a direct line read "
+            "for a known path. Workers execute the selected operation without widening it. "
+            f"{DISCOVERY_DESCRIPTION} Task: {request}",
+            InspectionDecision,
+        )
+        decision = InspectionDecision.model_validate(selection)
         job_type = {"repo_search": QueueJobType.REPO_SEARCH, "repo_read": QueueJobType.REPO_READ,
                     "repo_batch_read": QueueJobType.REPO_BATCH_READ}[decision.tool]
         job = self.request_operation(task_id, job_type=job_type, payload=decision.arguments,

@@ -1,11 +1,19 @@
 from types import SimpleNamespace
 
+from mana_agent.chat_commands.models import CommandResult
 from mana_agent.chat_commands import CommandContext, CommandDispatcher, build_default_registry
 
 
 class RecordingGateway:
     def __init__(self) -> None:
         self.requests: list[str] = []
+        self.mode_workflow = SimpleNamespace(active=lambda _: None, start=self.start_plan)
+
+    def start_plan(self, session_id: str, request: str) -> CommandResult:
+        assert session_id == "session-1"
+        self.requests.append(request)
+        return CommandResult(status="success", message=f"Implementation Plan: {request}",
+                             data={"plan": {"goal": request}})
 
     def process_turn(self, session_id: str, request: str) -> SimpleNamespace:
         assert session_id == "session-1"

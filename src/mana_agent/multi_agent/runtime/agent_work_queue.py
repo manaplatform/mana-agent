@@ -1764,6 +1764,7 @@ class QueueManager:
         scope_budget = budget_for_scope(selected_task_scope)
         resolved_tool_policy["search_budget"] = scope_decision.max_search_operations
         resolved_tool_policy["read_budget"] = scope_decision.max_unique_file_reads
+        resolved_tool_policy["repository_search_allowed"] = scope_decision.search_scope == "repository"
         profile = active_goal_profile(request)
         if profile is not None:
             def _relevant(path: str) -> bool:
@@ -1774,12 +1775,8 @@ class QueueManager:
 
         direct_read_targets = list(scope_decision.all_evidence_files)
         explicit_direct_read = (
-            not default_skill_registry_request
-            and
-            selected_task_scope in {"direct_edit", "localized_change"}
-            and bool(direct_read_targets)
+            not default_skill_registry_request and bool(direct_read_targets)
             and all((self.repo_root / path).is_file() for path in direct_read_targets)
-            and scope_decision.search_scope == "none"
         )
         seed_finalization_without_read = False
         if explicit_direct_read:
@@ -1822,36 +1819,28 @@ class QueueManager:
                         )
                     )
         elif default_skill_registry_request:
-            queue.submit(
-                WorkItem(
-                    kind="discover",
-                    tool_name="repo_search",
-                    tool_args={"query": "DEFAULT_SKILL_NAMES"},
-                    question=(
-                        "Locate the built-in skill registry by searching DEFAULT_SKILL_NAMES. "
-                        "Prefer src/mana_agent/skills/manager.py and ignore dependency detection files."
-                    ),
-                    gate="locate_skill_registry",
-                    priority=10,
-                )
-            )
-            queue.submit(
-                WorkItem(
-                    kind="discover",
-                    tool_name="list_files",
-                    tool_args={"glob": "src/mana_agent/default_skills/*.md"},
-                    question="List flat built-in skill markdown files under src/mana_agent/default_skills/*.md.",
-                    gate="locate_builtin_skill_files",
-                    priority=11,
-                )
-            )
+            # Compatibility for the explicit built-in-skill editor. Its
+            # existing registry target is already known; confine the search.
+            queue.submit(WorkItem(
+                kind="discover", tool_name="repo_search",
+                tool_args={"query": "DEFAULT_SKILL_NAMES", "paths": [
+                    path for path in required_files if (self.repo_root / path).is_file()
+                ]},
+                question="Read DEFAULT_SKILL_NAMES from the selected skill registry file.",
+                gate="locate_skill_registry", priority=10,
+            ))
+            queue.submit(WorkItem(
+                kind="discover", tool_name="list_files", tool_args={"glob": "src/mana_agent/default_skills/*.md"},
+                question="List flat built-in skill markdown files under src/mana_agent/default_skills/*.md.",
+                gate="locate_builtin_skill_files", priority=11,
+            ))
         elif scope_decision.max_search_operations > 0:
             queue.submit(
                 WorkItem(
                     kind="discover",
-                    tool_name="repo_search",
-                    tool_args={"query": request},
-                    question=f"Run planner-selected repository discovery for: {request}",
+                    question=(f"Locate the relevant evidence for: {request}\n"
+                              f"Parent-selected evidence: {scope_decision.required_evidence}\n"
+                              f"Known targets and dependencies: {list(scope_decision.all_evidence_files)}"),
                     gate="locate_candidates",
                     priority=10,
                 )

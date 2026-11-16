@@ -445,6 +445,13 @@ class ManaChatApp(App):
 
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
         event_id = str(event.get("event_id") or event.get("id") or "").strip()
+        if event_type == "mode.input_ready":
+            prompt = (event.get("metadata") or {}).get("next_prompt")
+            if self.is_running and threading.get_ident() != getattr(self, "_ui_thread_id", None):
+                self.call_from_thread(self._show_mode_prompt, prompt)
+            elif self.is_running:
+                self._show_mode_prompt(prompt)
+            return
         if event_type in {"activity.degraded", "activity.backpressure"} and not event.get("execution_id"):
             title = safe_text(event.get("title") or "Activity stream degraded", 120)
             if self.is_running and threading.get_ident() != getattr(self, "_ui_thread_id", None):
@@ -1611,6 +1618,41 @@ class ManaChatApp(App):
         self.notify("API request completed. Response added to chat.")
         self.update_status("API request completed")
 
+    def _show_mode_prompt(self, prompt) -> None:
+        if not prompt or prompt.get("kind") not in {"mode.approval", "mode.clarification"}:
+            return
+        from mana_agent.tui.mode_prompt import ModePrompt
+
+        if isinstance(self.screen, ModePrompt):
+            return
+        workflow = self.gateway.mode_workflow
+        task = workflow.active(self._gateway_session_id) or workflow.active(self._gateway_session_id, mode="debug")
+        if task is None or task.mode_workflow.get("inbox_id") != prompt.get("inbox_id"):
+            return
+
+        def finish(result):
+            if result:
+                self.run_worker(self._respond_to_mode_prompt(prompt, result))
+
+        self.push_screen(ModePrompt(prompt), finish)
+
+    async def _respond_to_mode_prompt(self, prompt, result) -> None:
+        from mana_agent.human_inbox.models import ResponseOperation
+
+        action, value = result
+        operation = {"approve": ResponseOperation.APPROVE, "reject": ResponseOperation.DENY,
+                     "revise": ResponseOperation.DENY, "answer": ResponseOperation.ANSWER}[action]
+        try:
+            response = await asyncio.to_thread(
+                self.gateway.mode_workflow.respond, self._gateway_session_id,
+                prompt["inbox_id"], operation, frontend="tui",
+                answer=value if action == "answer" else None,
+                comment="Revise plan:\n" + value if action == "revise" else "",
+            )
+            self.history.add(AssistantMessageEvent(content=response.message))
+        except (PermissionError, ValueError, RuntimeError) as exc:
+            self.notify(str(exc), severity="error")
+
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""
         self.status_text = text
@@ -1928,7 +1970,7 @@ class ManaChatApp(App):
                 self._gateway_session_id = self.gateway.create_session(frontend="tui")
             command_name = text.split(maxsplit=1)[0].lower()
             plan_command = command_name == "/plan"
-            approval_command = command_name in {"/approve", "/act"}
+            approval_command = command_name in {"/approve", "/accept", "/act", "/revise", "/reject"}
             activity_turn = UserMessageEvent(content=text) if plan_command or approval_command else None
             if activity_turn is not None:
                 self.history.add(activity_turn)
@@ -2039,38 +2081,7 @@ class ManaChatApp(App):
                         content=result.message,
                         turn_id=activity_turn.turn_id if activity_turn is not None else "",
                     ))
-                execution_request = str(result.data.get("execution_request") or "").strip()
-                if (
-                    approval_command
-                    and result.status == "success"
-                    and result.data.get("plan_approved")
-                    and execution_request
-                ):
-                    execution_turn = UserMessageEvent(
-                        content=execution_request,
-                        turn_id=activity_turn.turn_id,
-                    )
-                    self.history.add(execution_turn)
-                    self._safe_post_activity(
-                        {
-                            "event_id": f"{activity_turn.event_id}-execution-started",
-                            "event_type": "coding_started",
-                            "title": "Starting approved plan execution",
-                            "status": "running",
-                            "backend": "internal",
-                            "metadata": {"backend": "internal", "phase": "execution"},
-                        },
-                        activity_turn.turn_id,
-                    )
-                    self._turn_in_progress = True
-                    self.update_status("Executing approved plan…")
-                    if self.input:
-                        self.input.reset()
-                    await asyncio.sleep(0)
-                    self.run_worker(
-                        self._handle_real_turn_guarded(execution_turn), exclusive=True
-                    )
-                    return
+                self._show_mode_prompt(result.next_prompt)
                 if self.input:
                     self.input.reset()
                 self.update_status("Ready")
@@ -2608,6 +2619,7 @@ class ManaChatApp(App):
                                 turn_id=turn_id,
                             )
                         )
+                    self._show_mode_prompt(result_payload.get("next_prompt"))
                     if not route_mode:
                         self.update_status("Ready")
                     else:

@@ -1,315 +1,85 @@
-import logging
-import types
-from pathlib import Path
+"""CLI chat planning shares the durable workflow and approval commands."""
+from types import SimpleNamespace
 
-import pytest
-from typer.testing import CliRunner
-
-from mana_agent.analysis.models import AskResponse, SearchHit
-from mana_agent.commands import cli
-from mana_agent.multi_agent.routing.agent_decision import AgentDecision
-
-runner = CliRunner()
+from mana_agent.chat_commands import CommandContext, CommandDispatcher, build_default_registry
+from mana_agent.chat_commands.models import CommandResult
+from mana_agent.human_inbox.models import ResponseOperation
 
 
-@pytest.fixture(autouse=True)
-def _validated_chat_route(monkeypatch) -> None:
-    """Exercise frontend planning against the shared gateway's public contract."""
-    from mana_agent.gateway.turn_engine import ChatTurnResult
-    from mana_agent.commands.chat_cli import _planning_questions
-    RecordingCodingAgent.calls = []
-    monkeypatch.setattr("mana_agent.commands.chat_cli._generate_planning_question_llm",
-        lambda *, asked_count, max_questions, **kwargs: _planning_questions(max_questions)[asked_count])
-    def process_turn(gateway, session_id, question, **kwargs):
-        payload = gateway._coding_agent.generate(question)
-        return ChatTurnResult(answer=payload["answer"], payload=payload, used_coding_agent=True)
-    monkeypatch.setattr("mana_agent.gateway.AgentChatGateway.process_turn", process_turn)
-    monkeypatch.setattr(
-        "mana_agent.commands.chat_cli._decide_chat_route",
-        lambda **_kwargs: AgentDecision(
-            intent="answer",
-            confidence=1.0,
-            selected_tools=[],
-            requested_effect="none",
-            target_surface="conversation",
-            required_subagents=[],
-            reasoning_summary="Test fixture supplied a validated conversational route.",
-            verifier_passed=True,
-            verifier_summary="selected tools are consistent with the routed intent",
-        ),
-    )
+def dispatcher_for(workflow, **gateway_methods):
+    gateway = SimpleNamespace(mode_workflow=workflow, **gateway_methods)
+    dispatcher = CommandDispatcher(build_default_registry())
+    context = CommandContext(session_id="session", frontend="cli", gateway=gateway, capabilities={"gateway"})
+    return lambda text: dispatcher.dispatch(text, context)
 
 
-class DummySettings:
-    openai_api_key = "test"
-    openai_base_url = None
-    openai_chat_model = "fake"
-    openai_tool_worker_model = None
-    openai_coding_planner_model = None
-    openai_embed_model = "fake"
-    default_top_k = 8
-    coding_flow_max_turns = 5
-    coding_flow_max_tasks = 20
-    coding_plan_max_steps = 8
-    coding_search_budget = 4
-    coding_read_budget = 6
-    coding_require_read_files = 2
-    mana_coding_research_enabled = False
-    mana_coding_research_max_searches = 12
-    mana_coding_research_max_rounds = 4
+def test_plan_enters_explicit_mode_without_making_up_a_goal():
+    selected = []
+    dispatch = dispatcher_for(SimpleNamespace(active=lambda _: None),
+                              set_session_execution_mode=lambda *args: selected.append(args))
+    result = dispatch("/plan")
+    assert result.status == "input_required"
+    assert selected == [("session", "plan")]
 
 
-class RecordingAskService:
-    def __init__(self, calls: list[str]) -> None:
-        self.calls = calls
-        self.ask_agent = types.SimpleNamespace()
-
-    def ask(self, index_dir: str, question: str, k: int) -> AskResponse:
-        _ = index_dir
-        _ = k
-        self.calls.append(question)
-        return AskResponse(
-            answer="Plan response",
-            sources=[
-                SearchHit(0.9, "/tmp/a.py", 1, 5, "a", "snippet"),
-                SearchHit(0.8, "/tmp/b.py", 2, 8, "b", "snippet"),
-            ],
-        )
+def test_plan_status_reuses_pending_clarification_without_another_model_call():
+    pending = object()
+    dispatch = dispatcher_for(SimpleNamespace(
+        active=lambda _: pending,
+        describe=lambda task: CommandResult(status="input_required", message="Which behavior?",
+                                            next_prompt={"kind": "mode.clarification", "item": task is pending}),
+    ))
+    result = dispatch("/plan")
+    assert result.next_prompt == {"kind": "mode.clarification", "item": True}
 
 
-class FakeWorkerClient:
-    def __init__(self, **_kwargs: object) -> None:
-        return None
-
-    def start(self) -> None:
-        return None
-
-    def health(self) -> dict[str, str]:
-        return {"status": "ok"}
-
-    def stop(self) -> None:
-        return None
-
-
-class RecordingCodingAgent:
-    calls: list[str] = []
-
-    def __init__(self, **_kwargs: object) -> None:
-        self.active = "flow-plan-test"
-
-    def set_tools_manager_orchestrator(self, _orchestrator: object) -> None:
-        return None
-
-    def get_active_flow_id(self) -> str | None:
-        return self.active
-
-    def is_conflicting_request(self, request: str, flow_id: str | None = None) -> bool:
-        _ = (request, flow_id)
-        return False
-
-    def generate(self, request: str, **_kwargs: object) -> dict:
-        self.calls.append(request)
-        return {
-            "answer": "Plan response",
-            "changed_files": [],
-            "warnings": [],
-            "diff": "",
-            "flow_id": self.active,
-            "actions_taken": [],
-        }
-
-    def generate_dir_mode(self, request: str, **kwargs: object) -> dict:
-        return self.generate(request, **kwargs)
+def test_approval_aliases_require_and_forward_the_exact_reviewed_item():
+    responses = []
+    workflow = SimpleNamespace(active=lambda _: object(), respond=lambda *args, **kw: (
+        responses.append((args, kw)) or CommandResult(status="success", message="Approved")
+    ))
+    dispatch = dispatcher_for(workflow)
+    assert dispatch("/act").status == "error"
+    assert dispatch("/approve").status == "error"
+    assert responses == []
+    for command in ["/approve", "/accept", "/act"]:
+        assert dispatch(f"{command} inbox-review-2").status == "success"
+    assert responses == [(("session", "inbox-review-2", ResponseOperation.APPROVE), {"frontend": "cli"})] * 3
 
 
-def test_chat_planning_mode_asks_questions_and_resets(monkeypatch, tmp_path: Path) -> None:
-    calls: list[str] = []
-    RecordingCodingAgent.calls = []
+def test_model_failure_remains_visible_at_the_entry_point():
+    def start(*_args):
+        raise RuntimeError("Invalid or unavailable ModeDecision model decision")
 
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
-    )
-    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
-
-    user_input = "\n".join(
-        [
-            "plan auth module",
-            "success means no open implementation choices",
-            "scope src/auth only; no schema changes",
-            "markdown with milestones and tests",
-            "plan billing module",
-            "success means migration-safe rollout",
-            "scope billing services and CLI flags",
-            "include rollout and rollback checks",
-            "quit",
-        ]
-    ) + "\n"
-
-    result = runner.invoke(
-        cli.app,
-        ["chat", "--planning-mode", "--no-auto-execute-plan", "--planning-max-questions", "3"],
-        input=user_input,
-    )
-
-    assert result.exit_code == 0
-    assert result.stdout.count("Planning question 1/3") == 2
-    assert "Generating decision-complete plan" in result.stdout
-    assert len(RecordingCodingAgent.calls) == 2
-    assert "You are in planning mode." in RecordingCodingAgent.calls[0]
-    assert "plan auth module" in RecordingCodingAgent.calls[0]
-    assert "A3: markdown with milestones and tests" in RecordingCodingAgent.calls[0]
-    assert "plan billing module" in RecordingCodingAgent.calls[1]
+    dispatch = dispatcher_for(SimpleNamespace(active=lambda _: None, start=start))
+    result = dispatch("/plan Update the service")
+    assert result.status == "error"
+    assert "ModeDecision" in result.message
 
 
-def test_main_does_not_emit_retired_framework_warning_for_python_314(monkeypatch) -> None:
-    monkeypatch.setattr("mana_agent.commands.cli.setup_logging", lambda **_: Path("/tmp/mana.log"))
-    monkeypatch.setattr(cli.sys, "version_info", (3, 14, 0), raising=False)
+def test_tui_returns_the_selected_clarification():
+    import asyncio
 
-    # main() is the Typer root callback; a subcommand is "invoked" so it does not
-    # dispatch to chat. The retired framework warning must be absent.
-    ctx = types.SimpleNamespace(invoked_subcommand="chat")
-    import warnings
-    with warnings.catch_warnings(record=True) as observed:
-        cli.main(ctx, verbose=False, debug_llm=False, log_dir=None, output_dir=None)
-    assert not any("Python 3.14" in str(w.message) for w in observed)
+    from textual.app import App
+    from textual.widgets import Select
+    from mana_agent.tui.mode_prompt import ModePrompt
 
+    prompt = {
+        "kind": "mode.clarification",
+        "questions": [{"field_id": "behavior", "prompt": "What should happen?",
+                       "choices": {"keep": "Keep the value", "reject": "Reject the value"},
+                       "recommended_choice": "keep", "allow_free_form": True}],
+    }
+    answers = []
 
-def test_chat_planning_mode_uses_llm_generated_questions(monkeypatch, tmp_path: Path) -> None:
-    calls: list[str] = []
-    generated_args: list[dict] = []
+    async def run():
+        app = App()
+        async with app.run_test() as pilot:
+            app.push_screen(ModePrompt(prompt), answers.append)
+            await pilot.pause()
+            app.screen.query_one("#answer-0", Select).value = "reject"
+            await pilot.click("#submit")
+            await pilot.pause()
 
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
-    )
-
-    def _fake_llm_question(
-        *,
-        ask_service,
-        planning_request: str,
-        prior_questions: list[str],
-        prior_answers: list[str],
-        asked_count: int,
-        max_questions: int,
-    ) -> str:
-        _ = (ask_service, planning_request, max_questions)
-        generated_args.append(
-            {
-                "prior_questions": list(prior_questions),
-                "prior_answers": list(prior_answers),
-                "asked_count": asked_count,
-            }
-        )
-        return f"LLM question {asked_count + 1}?"
-
-    monkeypatch.setattr("mana_agent.commands.chat_cli._generate_planning_question_llm", _fake_llm_question)
-    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
-
-    user_input = "\n".join(
-        [
-            "plan auth module",
-            "answer one",
-            "answer two",
-            "answer three",
-            "quit",
-        ]
-    ) + "\n"
-
-    result = runner.invoke(
-        cli.app,
-        ["chat", "--planning-mode", "--no-auto-execute-plan", "--planning-max-questions", "3"],
-        input=user_input,
-    )
-
-    assert result.exit_code == 0
-    assert "LLM question 1?" in result.stdout
-    assert "LLM question 2?" in result.stdout
-    assert "LLM question 3?" in result.stdout
-    assert generated_args[1]["prior_answers"] == ["answer one"]
-    assert generated_args[2]["prior_answers"] == ["answer one", "answer two"]
-
-
-def test_chat_planning_mode_stops_on_llm_question_failure(monkeypatch, tmp_path: Path) -> None:
-    calls: list[str] = []
-
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
-    )
-    monkeypatch.setattr(
-        "mana_agent.commands.chat_cli._generate_planning_question_llm",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("llm question failed")),
-    )
-    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
-
-    user_input = "\n".join(
-        [
-            "plan auth module",
-            "answer one",
-            "answer two",
-            "answer three",
-            "quit",
-        ]
-    ) + "\n"
-
-    result = runner.invoke(
-        cli.app,
-        ["chat", "--planning-mode", "--no-auto-execute-plan", "--planning-max-questions", "3"],
-        input=user_input,
-    )
-
-    assert result.exit_code == 0
-    assert "Planning question generation failed" in result.stdout
-    assert "What is the concrete goal and the success criteria?" not in result.stdout
-    assert not calls
-
-
-def test_planning_question_auth_failure_stops_without_static_fallback(monkeypatch, tmp_path: Path, caplog) -> None:
-    calls: list[str] = []
-    llm_calls = 0
-
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_ask_service",
-        lambda _s, model_override=None, **_kwargs: RecordingAskService(calls),
-    )
-
-    def _raise_auth(**_kwargs):
-        nonlocal llm_calls
-        llm_calls += 1
-        raise RuntimeError("Error code: 401 - Incorrect API key provided: test")
-
-    monkeypatch.setattr("mana_agent.commands.chat_cli._generate_planning_question_llm", _raise_auth)
-    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", RecordingCodingAgent)
-
-    user_input = "\n".join(
-        [
-            "plan auth module",
-            "answer one",
-            "answer two",
-            "answer three",
-            "quit",
-        ]
-    ) + "\n"
-
-    with caplog.at_level(logging.WARNING, logger="mana_agent.commands.chat_cli"):
-        result = runner.invoke(
-            cli.app,
-            ["chat", "--planning-mode", "--no-auto-execute-plan", "--planning-max-questions", "3"],
-            input=user_input,
-        )
-
-    assert result.exit_code == 0
-    assert llm_calls == 1
-    assert "Planning question generation failed" in result.stdout
-    assert "What should be in scope and out of scope?" not in result.stdout
-    assert "using static fallback" not in caplog.text
-    assert not calls
+    asyncio.run(run())
+    assert answers == [("answer", {"behavior": "reject"})]

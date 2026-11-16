@@ -118,60 +118,6 @@ def _is_interactive_terminal() -> bool:
         return False
 
 
-def _load_analysis_context(root) -> str | None:
-    """Load the compact ``agent_context.json`` produced by ``/analyze``.
-
-    Returns a bounded text block suitable for prepending to chat/coding-agent
-    context so later questions ("explain architecture") are grounded in the most
-    recent analysis. Returns ``None`` when no analysis exists or it cannot be read.
-    """
-    import json
-    from pathlib import Path as _Path
-
-    from mana_agent.workspaces.paths import repository_analysis_dir, repository_id_for_path
-
-    ctx_path = repository_analysis_dir(repository_id_for_path(root)) / "agent_context.json"
-    if not ctx_path.exists():
-        return None
-    try:
-        context = json.loads(ctx_path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - context load is best-effort
-        return None
-    if not isinstance(context, dict):
-        return None
-
-    lines: list[str] = ["Project analysis (from .mana/analyze/agent_context.json):"]
-    summary = str(context.get("project_summary", "") or "").strip()
-    if summary:
-        lines.append(f"- Summary: {summary}")
-    stack = ", ".join(context.get("detected_stack", []) or [])
-    if stack:
-        lines.append(f"- Stack: {stack}")
-    arch = str(context.get("architecture_summary", "") or "").strip()
-    if arch:
-        lines.append(f"- Architecture: {arch[:600]}")
-    workflow = str(context.get("agent_workflow", "") or "").strip()
-    if workflow:
-        lines.append(f"- Agent workflow: {workflow[:400]}")
-    risks = context.get("risks", []) or []
-    if risks:
-        lines.append("- Top risks:")
-        for item in risks[:5]:
-            if isinstance(item, dict):
-                loc = f" ({item.get('file')}:{item.get('line')})" if item.get("file") else ""
-                lines.append(f"  - [{item.get('severity', 'info')}] {item.get('title', '')}{loc}")
-    tasks = context.get("recommended_tasks", []) or []
-    if tasks:
-        lines.append("- Recommended tasks:")
-        for item in tasks[:5]:
-            if isinstance(item, dict):
-                lines.append(f"  - {item.get('title', '')}")
-    when = str(context.get("last_analyzed_at", "") or "").strip()
-    if when:
-        lines.append(f"- Last analyzed at: {when}")
-    return "\n".join(lines)
-
-
 def _planning_questions(max_questions: int) -> list[str]:
     questions = [
         "What is the concrete goal and the success criteria?",
@@ -212,6 +158,34 @@ def _generate_planning_question_llm(
     if not content:
         raise RuntimeError("planning question LLM returned an empty question")
     return content
+
+
+def _is_planning_question_auth_failure(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in ("error code: 401", "status code: 401", "incorrect api key", "unauthorized"))
+
+
+def _build_planning_instruction(
+    planning_request: str,
+    planning_answers: list[str],
+    max_questions: int,
+    *,
+    questions: list[str] | None = None,
+) -> str:
+    lines = [
+        "You are in planning mode.",
+        "Produce a decision-complete implementation plan. Do not edit files.",
+        "",
+        f"Original request: {planning_request}",
+        "",
+        "Clarifications:",
+    ]
+    effective_questions = questions or _planning_questions(max_questions)
+    for idx, answer in enumerate(planning_answers, start=1):
+        question = effective_questions[idx - 1] if idx - 1 < len(effective_questions) else f"Question {idx}"
+        lines.append(f"Q{idx}: {question}")
+        lines.append(f"A{idx}: {answer}")
+    return "\n".join(lines)
 
 
 def _agent_decision_llm(ask_service):
@@ -363,11 +337,6 @@ def _run_web_research_answer(*, ask_service, question: str, root: Path, decision
     return str(answer or "").strip(), sources, trace
 
 
-def _is_planning_question_auth_failure(exc: Exception) -> bool:
-    text = str(exc or "").lower()
-    return any(marker in text for marker in ("error code: 401", "status code: 401", "incorrect api key", "unauthorized"))
-
-
 def _should_use_coding_agent_turn(
     *,
     coding_agent_available: bool,
@@ -393,29 +362,6 @@ def _should_use_coding_agent_turn(
         reason="chat turn routing",
     )
     return route.uses_coding_agent
-
-
-def _build_planning_instruction(
-    planning_request: str,
-    planning_answers: list[str],
-    max_questions: int,
-    *,
-    questions: list[str] | None = None,
-) -> str:
-    lines = [
-        "You are in planning mode.",
-        "Produce a decision-complete implementation plan. Do not edit files.",
-        "",
-        f"Original request: {planning_request}",
-        "",
-        "Clarifications:",
-    ]
-    effective_questions = questions or _planning_questions(max_questions)
-    for idx, answer in enumerate(planning_answers, start=1):
-        question = effective_questions[idx - 1] if idx - 1 < len(effective_questions) else f"Question {idx}"
-        lines.append(f"Q{idx}: {question}")
-        lines.append(f"A{idx}: {answer}")
-    return "\n".join(lines)
 
 
 def _auto_select_ui_option(block: dict[str, Any]) -> dict[str, Any] | None:
@@ -912,6 +858,7 @@ def chat(
         agent_timeout_seconds=agent_timeout_seconds,
         session_id=gateway_session_id,
         memory_user_id=resolve_local_user_id(settings),
+        extra={"read_only_workspace_startup": planning_mode},
     )
     try:
         gateway = AgentChatGateway(root, config=gateway_config, settings=settings)
@@ -979,7 +926,7 @@ def chat(
         context_cost_governor=stack.context_cost_governor,
     )
     gateway.create_session(frontend="cli", session_id=chat_ui_state.session_id)
-    if hasattr(gateway, "set_session_execution_mode"):
+    if planning_mode:
         gateway.set_session_execution_mode(chat_ui_state.session_id, "plan")
     shutdown_coordinator = ShutdownCoordinator(gateway=gateway)
     shutdown_coordinator.register_session(chat_ui_state.session_id)
@@ -1197,7 +1144,6 @@ def chat(
         session_turns: list[ChatTurnTelemetry] = []
         # Most recent /analyze output, loaded so later chat answers are grounded in
         # the analysis. Refreshed whenever /analyze runs during the session.
-        analysis_context_text: str | None = _load_analysis_context(root)
         auto_chat_state: AutoChatSessionState = load_auto_chat_state(root)
         full_auto_pass_window_logs: list[dict[str, Any]] = []
         full_auto_pass_window_decisions: list[dict[str, Any]] = []
@@ -1448,13 +1394,6 @@ def chat(
                                 lines.append(f"- [{status}] {title}")
                     if lines:
                         flow_context_text = "\n".join(lines)
-
-            if analysis_context_text:
-                flow_context_text = (
-                    f"{analysis_context_text}\n\n{flow_context_text}"
-                    if flow_context_text
-                    else analysis_context_text
-                )
 
             preview_payload: dict[str, Any] = {}
             if hasattr(orchestrator, "preview_plan"):
@@ -1864,8 +1803,6 @@ def chat(
                 render_mode=str(payload.get("render_mode", "default") or "default"),
                 fallback_reason=str(payload.get("fallback_reason", "") or ""),
                 planning_mode=planning_mode,
-                planning_question_source=planning_question_source,
-                planning_question_index=planning_questions_asked_count,
                 auto_execute_plan=True,
                 auto_execute_passes=int(payload.get("passes", 0) or 0),
                 auto_execute_terminal_reason=str(payload.get("terminal_reason", "") or ""),
@@ -2255,120 +2192,30 @@ def chat(
             chat_ui_state.start_turn(current_turn_id)
             if question.lower() == "/help":
                 question = "help"
-            if question.strip().startswith("/mode"):
-                mode_args = question.strip()[len("/mode"):].strip().lower()
-                current_mode = gateway.get_session_execution_mode(chat_ui_state.session_id)
-                if not mode_args or mode_args in {"show", "status"}:
-                    desc = "Plan Mode (read-only exploration & planning)" if current_mode == "plan" else "Act Mode (execution & modifications)"
-                    console.print(f"[cyan]Current execution mode: [bold]{current_mode.upper()}[/bold] ({desc})[/cyan]")
-                elif mode_args in {"plan", "act"}:
-                    if mode_args == "act":
-                        plan = gateway.get_session_active_plan(chat_ui_state.session_id)
-                        if plan and not plan.get("approved"):
-                            console.print("[yellow]An unapproved plan is pending. Use /approve or /act to approve before switching to Act Mode.[/yellow]")
-                            _finish_ui_turn(current_turn_id)
-                            continue
-                    gateway.set_session_execution_mode(chat_ui_state.session_id, mode_args)
-                    desc = "Plan Mode (read-only exploration & planning)" if mode_args == "plan" else "Act Mode (execution & modifications)"
-                    console.print(f"[green]Switched execution mode to [bold]{mode_args.upper()}[/bold] ({desc}).[/green]")
-                else:
-                    console.print("[yellow]Usage: /mode [show|plan|act][/yellow]")
-                _finish_ui_turn(current_turn_id)
-                continue
-
-            if question.strip().startswith("/act"):
-                plan = gateway.get_session_active_plan(chat_ui_state.session_id)
-                if plan:
-                    gateway.approve_session_plan(chat_ui_state.session_id)
-                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
-                    console.print("[green]Implementation plan approved! Switched to [bold]ACT MODE[/bold]. Ready to execute.[/green]")
-                else:
-                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
-                    console.print("[green]Switched to [bold]ACT MODE[/bold]. Authorized for execution.[/green]")
-                _finish_ui_turn(current_turn_id)
-                continue
-
-            if question.strip() in {"/approve", "/accept"}:
-                success = gateway.approve_session_plan(chat_ui_state.session_id)
-                if success:
-                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
-                    plan = gateway.get_session_active_plan(chat_ui_state.session_id)
-                    goal = plan.get("goal", "") if plan else ""
-                    console.print("[green]Implementation plan explicitly approved! Switched to [bold]ACT MODE[/bold]. Starting execution...[/green]")
-                    if goal:
-                        question = goal
-                    else:
-                        _finish_ui_turn(current_turn_id)
-                        continue
-                else:
-                    console.print("[yellow]No pending plan. Review requests in the approval dialog or inbox.[/yellow]")
+            name = question.split(maxsplit=1)[0].lower()
+            if name in {"/plan", "/mode", "/act", "/approve", "/accept", "/reject", "/revise", "/inbox"}:
+                cmd_result = gateway.dispatch_command(question, session_id=chat_ui_state.session_id, frontend="cli")
+                if cmd_result:
+                    console.print(Markdown(cmd_result.message))
                     _finish_ui_turn(current_turn_id)
+                    if single_shot_noninteractive and cmd_result.status == "error":
+                        single_shot_exit_code = 1
                     continue
-
-            if question.strip() == "/reject":
-                plan = gateway.get_session_active_plan(chat_ui_state.session_id)
-                if plan:
-                    gateway.set_session_active_plan(chat_ui_state.session_id, None)
-                    gateway.set_session_execution_mode(chat_ui_state.session_id, "plan")
-                    console.print("[green]Active plan rejected. Remained in Plan Mode without making changes.[/green]")
-                else:
-                    console.print("[yellow]No active plan found to reject.[/yellow]")
+            active_mode_task = (
+                gateway.mode_workflow.active(chat_ui_state.session_id)
+                or gateway.mode_workflow.active(chat_ui_state.session_id, mode="debug")
+            )
+            if active_mode_task is not None:
+                mode_result = gateway.mode_workflow.receive(
+                    chat_ui_state.session_id, question,
+                    task=active_mode_task,
+                    question_limit=planning_question_limit if planning_mode else None,
+                )
+                console.print(Markdown(mode_result.message))
                 _finish_ui_turn(current_turn_id)
+                if single_shot_noninteractive and mode_result.status == "error":
+                    single_shot_exit_code = 1
                 continue
-
-            if question.strip().startswith("/plan"):
-                plan_task = question.strip()[len("/plan"):].strip()
-                if not plan_task:
-                    plan_task = "analyze and plan the next repository change"
-                gateway.set_session_execution_mode(chat_ui_state.session_id, "plan")
-                console.print(f"[cyan]Plan Mode: exploring repository context for:[/cyan] {plan_task}")
-                from mana_agent.agent.plan_service import PlanService
-                from mana_agent.skills.manager import SkillManager
-
-                manager = SkillManager(root)
-                try:
-                    loaded_skills = manager.load_for_task(plan_task, [])
-                except Exception:
-                    loaded_skills = []
-                plan_llm = _agent_decision_llm(ask_service) if "ask_service" in locals() and ask_service else None
-                plan_service = PlanService(root, llm=plan_llm)
-                structured_plan = plan_service.generate_plan(plan_task, skills=loaded_skills)
-                saved_path = plan_service.save_plan(structured_plan)
-                gateway.set_session_active_plan(chat_ui_state.session_id, structured_plan)
-
-                console.print(Markdown(structured_plan.to_markdown()))
-                console.print(f"[green]Saved plan artifact:[/green] {saved_path}")
-
-                decision = ""
-                if queued_questions:
-                    decision = queued_questions.pop(0).strip().lower()
-                elif sys.stdin.isatty():
-                    try:
-                        decision = _read_chat_input(
-                            console,
-                            prompt="Accept plan and start implementation? [accept/reject]: ",
-                            multiline_enabled=False,
-                            multiline_terminator="",
-                        ).strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        decision = ""
-
-                if decision in {"accept", "yes", "y", "approve", "start"}:
-                    gateway.approve_session_plan(chat_ui_state.session_id)
-                    gateway.set_session_execution_mode(chat_ui_state.session_id, "act")
-                    console.print("[green]Plan accepted! Switched to Act Mode. Starting implementation...[/green]")
-                    question = plan_task
-                elif decision in {"reject", "no", "n"}:
-                    gateway.set_session_active_plan(chat_ui_state.session_id, None)
-                    console.print("[yellow]Plan rejected. Remained in Plan Mode without making changes.[/yellow]")
-                    chat_ui_state.begin_conversation_turn(f"/plan {plan_task}", current_turn_id)
-                    _finish_ui_turn(current_turn_id)
-                    continue
-                else:
-                    console.print("[cyan]Plan saved. Type [bold]/approve[/bold] or [bold]/act[/bold] to execute, or [bold]/reject[/bold] to discard.[/cyan]")
-                    chat_ui_state.begin_conversation_turn(f"/plan {plan_task}", current_turn_id)
-                    _finish_ui_turn(current_turn_id)
-                    continue
             chat_ui_state.begin_conversation_turn(question, current_turn_id)
 
             # -----------------------------
@@ -2387,12 +2234,6 @@ def chat(
                     ),
                     llm_analyzer=_build_project_llm_analyzer(),
                 )
-                # Refresh the in-session analysis grounding so the next chat
-                # questions can use the freshly generated report.
-                if outcome.status == "generated":
-                    refreshed = _load_analysis_context(root)
-                    if refreshed:
-                        analysis_context_text = refreshed
                 _render_answer_header(console, title="Analyze")
                 style = "yellow" if outcome.status == "error" else "white"
                 console.print(f"[{style}]{outcome.message}[/{style}]")
@@ -2672,36 +2513,24 @@ def chat(
                 )
 
             from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent, is_plan_execution_request
-            session_exec_mode = gateway.get_session_execution_mode(chat_ui_state.session_id)
-            if session_exec_mode == "plan":
-                auto_chat_mode = AutoChatMode.PLAN_ONLY
-                edit_request = False
-                plan_trigger_request = True
-                from mana_agent.agent.plan_service import PlanService
-                try:
-                    plan_llm = _agent_decision_llm(ask_service) if "ask_service" in locals() and ask_service else None
-                    plan_service = PlanService(root, llm=plan_llm)
-                    structured_plan = plan_service.generate_plan(question)
-                    gateway.set_session_active_plan(chat_ui_state.session_id, structured_plan)
-                except Exception:
-                    pass
-            else:
-                auto_chat_mode = _auto_chat_mode_from_agent_decision(
-                    agent_decision,
-                    classify_auto_chat_intent(question),
-                )
-                plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or is_plan_execution_request(question))
-                edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
 
-            if session_exec_mode == "act" and edit_request:
-                active_plan = gateway.get_session_active_plan(chat_ui_state.session_id)
-                if active_plan and not active_plan.get("approved"):
-                    console.print(
-                        "[yellow]An implementation plan exists but is not yet approved.[/yellow] "
-                        "Type [bold]/approve[/bold] or [bold]/act[/bold] to approve the plan before execution."
-                    )
-                    _finish_ui_turn(current_turn_id)
-                    continue
+            if not planning_mode and (agent_decision.intent == "plan" or agent_decision.coding_workflow):
+                workflow = agent_decision.coding_workflow
+                mode_result = gateway.mode_workflow.start(
+                    chat_ui_state.session_id, question, mode="debug" if workflow else "plan",
+                    repair=workflow == "debug_repair",
+                )
+                console.print(Markdown(mode_result.message))
+                _finish_ui_turn(current_turn_id)
+                if single_shot_noninteractive and mode_result.status == "error":
+                    single_shot_exit_code = 1
+                continue
+
+            auto_chat_mode = _auto_chat_mode_from_agent_decision(
+                agent_decision, classify_auto_chat_intent(question)
+            )
+            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or is_plan_execution_request(question))
+            edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
             if (
                 coding_agent_instance is None
                 and agent_tools

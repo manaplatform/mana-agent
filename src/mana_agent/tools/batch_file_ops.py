@@ -614,31 +614,38 @@ def batch_list_files(
     *,
     queries: list[str | dict[str, Any]],
     limit: int = 200,
+    model_selected: bool = False,
+    repository_search_allowed: bool = True,
 ) -> dict[str, Any]:
     """List repository files matching multiple patterns in a single filesystem traversal."""
     root = repo_root.resolve()
+    from mana_agent.tools.repository import _discovery_files, _glob_root, _selected_discovery_scope
+
     query_specs: list[dict[str, Any]] = []
     for item in queries or ["**/*"]:
         if isinstance(item, str):
             query_specs.append({"pattern": item, "limit": limit})
         elif isinstance(item, dict):
-            query_specs.append({"pattern": item.get("pattern") or item.get("glob") or "**/*", "limit": item.get("limit", limit)})
+            query_specs.append({**item, "pattern": item.get("pattern") or item.get("glob") or "**/*"})
 
-    # Gather repository files once
-    repo_files: list[str] = []
-    for path in root.rglob("*"):
-        rel_parts = path.relative_to(root).parts
-        if any(part in _SKIP_DIRS for part in rel_parts):
-            continue
-        if path.is_file():
-            repo_files.append(path.relative_to(root).as_posix())
-    repo_files.sort()
-
+    listings: dict[tuple[str, tuple[str, ...] | None], list[str]] = {}
     grouped_results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     for spec in query_specs:
         pat = spec["pattern"]
-        lim = max(1, min(int(spec["limit"] or limit), 2000))
-        matched = [f for f in repo_files if _matches_pattern(f, pat)]
+        try:
+            lim = max(1, min(int(spec.get("limit") or limit), 2000))
+            scope = (_selected_discovery_scope({**spec, "glob": pat},
+                                                repository_search_allowed=repository_search_allowed)
+                     if model_selected else None)
+        except (TypeError, ValueError) as exc:
+            errors.append({"pattern": pat, "error": str(exc)})
+            grouped_results.append({"pattern": pat, "files": [], "total_matches": 0, "truncated": False})
+            continue
+        key = (_glob_root(pat), scope)
+        if key not in listings:
+            listings[key] = [path.relative_to(root).as_posix() for path in _discovery_files(root, pat, scope)]
+        matched = [f for f in listings[key] if _matches_pattern(f, pat)]
         grouped_results.append({
             "pattern": pat,
             "files": matched[:lim],
@@ -647,7 +654,8 @@ def batch_list_files(
         })
 
     return {
-        "ok": True,
+        "ok": not errors,
+        "errors": errors,
         "results": grouped_results,
         "total_patterns": len(grouped_results),
     }

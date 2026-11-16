@@ -1,82 +1,27 @@
-# Plan Mode and Act Mode in Mana-Agent
+# Plan, Act, and Debug in Mana-Agent
 
-Mana-Agent features two primary execution modes: **Plan Mode** and **Act Mode**. These modes ensure that the agent thoroughly analyzes tasks, explores codebase context, identifies dependencies, and produces structured implementation plans before applying any changes.
+Use **Plan** when you want to review the proposed changes before work begins. In ordinary chat, the model can select **Debug** for a reported repository problem. Adding a bug report to a Plan request keeps it in the plan approval workflow. The global logging flag is still called `--debug`.
 
----
+## Plan a change
 
-## 1. Overview
+- In chat or the TUI, use `/plan <request>`. Use `/plan` by itself to inspect the active task or start planning your next message. `/mode plan` also selects planning for subsequent messages. Use `/mode auto` to return to ordinary routing after resolving an active plan.
+- From a terminal, use `mana-agent plan 'Upgrade the connection pool'`. Use `--no-code` for a draft with no execution approval. `--no-save` skips the Markdown export. For `--output`, select a path outside the target checkout. The default export resides under Mana's repository state directory.
+- If a decision would change the implementation, Mana asks through the durable inbox. Select an option or enter a custom answer when available. In console chat, reply directly to one question or use `/inbox answer <item-id> '<JSON answers keyed by question ID>'` for a group.
+- Review the exact requirements, boundaries, dependencies, file operations, and checks. Use the TUI approval controls or `/approve <item-id>` (`/accept` and `/act` are aliases in that context). In a standalone invocation, use the displayed review prompt or run `mana-agent inbox approve <item-id>`. A bare `--yes` or a Full Access session does not approve a generated revision.
+- Use `/revise <change>` to update the plan. To correct a stored clarification answer, supply a JSON object keyed by its question ID. A new revision requires a new approval. Use `/reject` or the existing cancellation controls to stop the task.
 
-| Execution Mode | Purpose | Permissions | Mutations Allowed? |
-| :--- | :--- | :--- | :--- |
-| **Plan Mode** | Analyze tasks, explore codebase context, map dependencies, assess risks, and formulate structured plans. | Read-Only | **No** (File writes, patches, and destructive commands are blocked) |
-| **Act Mode** | Execute implementation steps, apply authorized patches, and run verification. | Read/Write (Authorized) | **Yes** (Subject to approved plans and safety policies) |
+If a model response fails validation, Mana requests one correction using the same model and response format. If the correction fails, Mana shows the failed field or check. Run `/plan` to see the blocked task, then use the displayed `/task resume <task-id>` command to retry planning.
 
----
+The model returns typed records for file operations and clarification choices. Mana validates those records before using them. Saved revisions and their approval digests use the existing plan format.
 
-## 2. Plan Mode Guarantees
+TaskBoard records step progress. The Execution Supervisor owns the active attempt and lease. The human inbox records the reviewer, timestamp, and digest of the approved revision. Ordinary mode switches and free text cannot substitute for an inbox response. Completed steps are kept when their scope and evidence still match. A patch with an uncertain outcome requires reconciliation before retry.
 
-In **Plan Mode**, the agent operates under strict read-only guarantees:
-- **No File Modifications**: Tools such as `write_file`, `edit_file`, `multi_edit_file`, `apply_patch`, `create_file`, `delete_file`, and document update tools are deterministically blocked at the execution boundary.
-- **No Destructive Commands**: Shell execution in Plan Mode permits only non-mutating inspection commands (such as `ls`, `git status`, `git diff`, `git log`, `grep`, `pwd`). Any command attempting file redirection, deletion, or modification fails with `PlanModeError`.
-- **Deep Codebase Exploration**: The agent can inspect symbols, call graphs, ASTs, file contents, and project configuration to understand system architecture and dependencies.
-- **Structured Plan Generation**: Produces a comprehensive `StructuredPlan` containing:
-  - **Objectives**: Clear, verifiable targets.
-  - **Context & Dependencies**: Repository context, module structure, and package dependencies.
-  - **Affected Files**: Discovered files and candidate modification targets.
-  - **Implementation Steps**: Sequential, reviewable steps.
-  - **Potential Risks & Mitigations**: Architectural risks, compatibility, or edge cases.
-  - **Validation Strategies & Verification Commands**: Exact commands (e.g. pytest, linters) to verify the change.
+Each coding proposal is read-only. The internal engine uses registered read tools, and external Codex uses a read-only app-server turn with networking disabled. Mana checks the exact step, current scope, file operations, checkout state, and patch content before the existing Tool Runner and action policy apply a mutation. Scope changes from live steering return the task to review. Git publishing and mutations to external services keep their existing approval flows.
 
-Plans are persisted in `.mana/plans/<task-slug>.md` for traceability.
+If the action policy requires a separate approval for a destructive patch, review that action in the inbox and resume the plan. Mana reuses the exact reviewed patch and checks the plan revision again before applying it.
 
----
+Verification commands run with the reviewed argv against a disposable source copy, without host secrets or sandbox networking. Use a locally available Docker image that contains the project's verification dependencies. A step can name that image in the plan. With no image specified, the configured local Docker provider default applies. If the environment or command is unavailable, the task shows verification as incomplete. Fix the environment and use `/task resume <task-id>` to retry from the saved progress.
 
-## 3. Act Mode and User Approval Gating
+## Debug a failure
 
-Transitioning from Plan Mode to Act Mode and executing a proposed plan requires **explicit user approval**:
-- **Cannot Execute Unapproved Plans**: Attempting to execute mutations in Act Mode while an unapproved plan is pending prompts the user for approval.
-- **Approval Methods**:
-  - **CLI**: Pass `--yes` to pre-approve the generated plan, or answer `yes` at the interactive prompt.
-  - **Chat / TUI**: Use `/approve` or `/act` to explicitly approve the active plan and switch to Act Mode.
-- **Context Preservation**: When switching from Plan Mode to Act Mode, all explored files, identified dependencies, session history, and the active plan are preserved.
-
----
-
-## 4. Usage
-
-### CLI Commands
-
-Create an implementation plan:
-```bash
-# Generate and save a plan without implementing
-mana-agent plan "Refactor database connection pool" --no-code
-
-# Generate a plan and prompt for approval to execute
-mana-agent plan "Refactor database connection pool"
-
-# Pre-approve implementation and switch to Act Mode immediately
-mana-agent plan "Refactor database connection pool" --yes
-```
-
-### In-Chat Slash Commands & Interactive Workflow
-
-Within interactive chat sessions (`mana-agent chat`):
-- `/plan <task>`: Enter Plan Mode, explore repository context, generate a structured markdown plan, save the plan artifact to `.mana/plans/<task-slug>.md`, and prompt for `[accept/reject]`.
-  - When **accepted**: The plan is approved, mode switches to **Act Mode**, and implementation starts immediately.
-  - When **rejected**: The session safely remains in **Plan Mode** without mutating any files.
-- `/mode`: View current execution mode.
-- `/mode plan`: Switch to Plan Mode.
-- `/mode act`: Switch to Act Mode (requires approval if a plan is pending).
-- `/approve` / `/accept`: Explicitly approve the current implementation plan.
-- `/reject`: Reject the pending plan and keep the session in Plan Mode.
-- `/act`: Approve the active plan and enter Act Mode.
-
----
-
-## 5. Architectural Alignment with AGENTS.md
-
-- **Rule 07 (Plan Proportionally)**: Plan Mode itself never makes repository changes without an authorized transition to execution.
-- **Rule 08 (TaskBoard Authority)**: TaskBoard maintains the authoritative task state, while Plan Mode defines the objectives and acceptance criteria.
-- **Rule 11 & 12 (Model Decision Validation)**: Decisions to transition between modes and execute tools are explicitly validated before execution.
-- **Rule 21 (Tool-Specific Authority)**: Enforces read-only confinement at the execution boundary rather than relying only on prompt instructions.
-- **Rule 40 & 41 (Verification & User Commands)**: Plan Mode defines explicit, user-owned verification commands without silently executing arbitrary verification scripts.
+Describe the failure in ordinary chat. A stack trace, failing command, or affected file and line helps Mana select the first observation. Ask it to diagnose the problem or to diagnose and fix it. A repair starts with causal evidence and ends with focused verification. External dependency research uses the existing coding research settings and tool permissions. The Activity panels show the current investigation, justified scope expansions, patch work, and verification results.

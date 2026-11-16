@@ -484,6 +484,7 @@ class LaneCoordinator:
                 self.emit(
                     "human_input.dispatch_failed",
                     task_id=task_id,
+                    lane_id=execution.owning_lane if execution is not None else LaneId.RESEARCH,
                     inbox_item_id=inbox_item_id,
                     resume_claim_id=resume_claim_id,
                     error_type=type(exc).__name__,
@@ -2387,7 +2388,7 @@ class LaneCoordinator:
                 }
             )
             task = self.taskboard.get_task(execution.taskboard_task_id)
-            if task.status is TaskStatus.FAILED:
+            if task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
                 self.taskboard.reopen(task.task_id, reason=decision.reason)
             self.taskboard.add_decision(task.task_id, decision.decision_id)
             self._persist_locked()

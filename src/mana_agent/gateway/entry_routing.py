@@ -154,6 +154,7 @@ class EntryRoutingDecision:
     automation_operation: AutomationOperation | str = ""
     source: str = "model"
     runtime_capability_change: bool = False
+    coding_workflow: Literal["", "plan", "debug_diagnose", "debug_repair"] = ""
     execution_policy: TaskExecutionPolicy = field(default_factory=TaskExecutionPolicy)
     resolved_request: str = ""
     source_message_ids: tuple[str, ...] = ()
@@ -262,6 +263,7 @@ class EntryRoutingOutput(_StrictRoutingOutput):
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
     runtime_capability_change: bool = False
+    coding_workflow: Literal["", "plan", "debug_diagnose", "debug_repair"] = ""
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
     resolved_request: str = ""
     source_message_ids: list[str] = Field(default_factory=list)
@@ -548,6 +550,7 @@ Return JSON only:
   "source_message_ids": [],
   "related_task_id": "",
   "clarification_question": "",
+  "coding_workflow": "|plan|debug_diagnose|debug_repair",
   "response_kind": "task",
   "context_request": null
 }
@@ -557,7 +560,8 @@ Examples:
 - “What can you do?” -> conversation, ["none"].
 - “check what is this?” (with attached image) -> conversation, ["none"] (visual question answering / inspection of an attached image using the model's native multimodal capabilities).
 - “Change this function and run its tests” -> coding, ["repository"] (one atomic workflow).
-- “Plan how to add a harmless CLI flag, but do not edit anything” -> coding, ["repository"]
+- For repository bugs use coding_workflow=debug_diagnose for diagnosis alone and debug_repair only when the user asks for repair. Use plan for requests to propose an implementation plan before editing and leave coding_workflow empty for other routes.
+- “Plan how to add a harmless CLI flag, but do not edit anything” -> coding, ["repository"], coding_workflow=plan
   (repository planning / plan-only still uses the coding workflow; not conversation).
 - “Continue the active plan without applying it” -> coding, ["repository"] (plan continuation).
 - “Verify the repository tests without modifying files” -> coding, ["repository"].
@@ -1402,6 +1406,7 @@ class EntryRouter:
             media_request=dict(media_request) if isinstance(media_request, dict) else {},
             automation_operation=automation_operation,
             runtime_capability_change=bool(payload.get("runtime_capability_change")),
+            coding_workflow=payload.get("coding_workflow", "") if route == "coding" else "",
             execution_policy=execution_policy,
             resolved_request=str(payload.get("resolved_request") or ""),
             source_message_ids=source_message_ids,

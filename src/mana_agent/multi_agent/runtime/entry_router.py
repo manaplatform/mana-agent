@@ -129,6 +129,13 @@ Return JSON only with this schema:
   "user_visible_message": null
 }
 
+For repository_qa and repo_search, select a concrete term and scoped paths or glob
+in one repo_search/repo_batch_search tool_plan entry when the request supplies enough
+evidence. Otherwise leave tool_plan empty so the repository tool loop can choose a
+bounded operation and expand from its results. An unrestricted search needs
+args.repository_reason grounded in the request or evidence. Never use the whole
+question as a text query or assume an analysis index is required.
+
 When selecting `web_search` or `github_search`, include exactly one matching
 `tool_plan` entry with a compact, standalone `args.query` (at most 400
 characters). The executor runs that exact model-selected query; it never sends

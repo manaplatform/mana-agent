@@ -10,6 +10,12 @@ from mana_agent.llm.types import ContinuationState, InferenceRequest, ModelRespo
 from mana_agent.utils.text import _strip_thinking_tags
 
 
+_CHAT_STOP_DETAILS = {
+    "length": "The provider reached the output-token limit before completing its response.",
+    "content_filter": "The provider's content filter stopped the response.",
+}
+
+
 def plain(value: Any) -> Any:
     return value.model_dump(mode="json", exclude_none=True) if hasattr(value, "model_dump") else value
 
@@ -255,8 +261,10 @@ class OpenAIProvider:
         choice, message = choices[0], choices[0].get("message") or {}
         if message.get("role") not in {None, "assistant"}:
             raise InvalidResponseError("Provider choice did not contain an assistant message")
-        if choice.get("finish_reason") in {"length", "content_filter"}:
-            raise InvalidResponseError(f"Incomplete provider response: {choice['finish_reason']}")
+        finish_reason = choice.get("finish_reason") or "stop"
+        if finish_reason in _CHAT_STOP_DETAILS:
+            raise InvalidResponseError(f"Incomplete provider response: {finish_reason}",
+                                       public_detail=_CHAT_STOP_DETAILS[finish_reason])
         calls = [ToolCall(id=call["id"], name=call["function"]["name"], args=json.loads(call["function"]["arguments"])) for call in message.get("tool_calls") or []]
         content = message.get("content") or ""
         if isinstance(content, str) and not request.response_schema:
@@ -267,7 +275,7 @@ class OpenAIProvider:
             content = decode_structured(content, request.response_schema)
         return ModelResponse(id=data.get("id", ""), provider=request.provider, model=request.model,
             content=content, tool_calls=calls, usage=usage(data.get("usage")),
-            finish_reason=choice.get("finish_reason") or "stop", refusal=message.get("refusal"),
+            finish_reason=finish_reason, refusal=message.get("refusal"),
             configuration_observation={"reasoning_effort": data.get("reasoning_effort")})
 
     async def generate(self, request: InferenceRequest) -> ModelResponse:
@@ -373,7 +381,10 @@ class OpenAIProvider:
                     yield StreamEvent(request_id=request.request_id, sequence=sequence, **event)
             if self.endpoint != "responses":
                 if final_reason not in {"stop", "tool_calls"}:
-                    raise InvalidResponseError(f"Incomplete Chat Completions stream: {final_reason}")
+                    raise InvalidResponseError(
+                        f"Incomplete Chat Completions stream: {final_reason}",
+                        public_detail=_CHAT_STOP_DETAILS.get(final_reason, ""),
+                    )
                 response = ModelResponse(provider=request.provider, model=request.model, content="".join(texts),
                     tool_calls=[ToolCall(id=item["id"], name=item["name"], args=json.loads(item["arguments"])) for _, item in sorted(calls.items())],
                     usage=usage(final_usage), finish_reason=final_reason)

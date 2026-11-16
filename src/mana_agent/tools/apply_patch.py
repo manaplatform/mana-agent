@@ -1101,6 +1101,16 @@ def extract_patch_touched_files(patch: Any) -> dict[str, Any]:
     return {"ok": True, "touched_files": [item.path for item in parsed]}
 
 
+def extract_patch_operations(patch: str) -> list[tuple[str, str]]:
+    text, error = _normalise_patch_payload(patch)
+    if error:
+        raise ValueError(error)
+    parsed, error = _parse_codex_patch(text)
+    if error or not parsed:
+        raise ValueError(error or "patch has no file operations")
+    return [(item.path, item.op) for item in parsed]
+
+
 def _safe_apply_patch_direct(
     *,
     repo_root: Path,
@@ -1357,6 +1367,7 @@ def safe_apply_patch(
     require_read: bool = False,
     enable_recovery: bool = True,
     action_approval_id: str = "",
+    mutation_fence=None,
 ) -> dict[str, Any]:
     """Preview read-only, but gate every patch mutation through ActionGateway."""
     if check_only:
@@ -1455,22 +1466,25 @@ def safe_apply_patch(
             )
 
         def execute(self, action: ActionIntent) -> dict[str, Any]:
-            current = {
-                item.path: hashlib.sha256((root / item.path).read_bytes()).hexdigest()
-                if (root / item.path).is_file() else "missing"
-                for item in parsed
-            }
-            if current != before_hashes:
-                raise ActionInvalidatedError("patch targets changed after preview; policy and approval must be reevaluated")
-            return _safe_apply_patch_direct(
-                repo_root=root,
-                patch=patch,
-                allowed_prefixes=allowed_prefixes,
-                check_only=False,
-                read_files=read_files,
-                require_read=require_read,
-                enable_recovery=enable_recovery,
-            )
+            from contextlib import nullcontext
+
+            with mutation_fence() if mutation_fence else nullcontext():
+                current = {
+                    item.path: hashlib.sha256((root / item.path).read_bytes()).hexdigest()
+                    if (root / item.path).is_file() else "missing"
+                    for item in parsed
+                }
+                if current != before_hashes:
+                    raise ActionInvalidatedError("patch targets changed after preview; policy and approval must be reevaluated")
+                return _safe_apply_patch_direct(
+                    repo_root=root,
+                    patch=patch,
+                    allowed_prefixes=allowed_prefixes,
+                    check_only=False,
+                    read_files=read_files,
+                    require_read=require_read,
+                    enable_recovery=enable_recovery,
+                )
 
         def verify(self, action: ActionIntent, result: dict[str, Any]) -> VerificationEvidence:
             checks: list[dict[str, Any]] = [{"check": "execution_result", "ok": bool(result.get("ok"))}]

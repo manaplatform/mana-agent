@@ -158,11 +158,11 @@ def test_ask_agent_enforces_max_steps(tmp_path: Path) -> None:
         [
             _FakeAssistantMessage(
                 "",
-                tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "find x", "k": 2}}],
+                tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "find x", "paths": ["example.py"]}}],
             ),
             _FakeAssistantMessage(
                 "",
-                tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "find y", "k": 2}}],
+                tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "find y", "paths": ["example.py"]}}],
             ),
         ]
     )
@@ -499,8 +499,8 @@ def test_ask_agent_forces_final_answer_when_budget_low(tmp_path: Path) -> None:
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "q1", "k": 2}}]),
-            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "q2", "k": 2}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "q1", "paths": ["example.py"]}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "2", "name": "repo_search", "args": {"query": "q2", "paths": ["example.py"]}}]),
         ]
     )
 
@@ -571,7 +571,7 @@ class _SynthesizingLLM:
 def test_ask_agent_synthesis_uses_llm_when_available(tmp_path: Path) -> None:
     llm = _SynthesizingLLM(
         [
-            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "x", "k": 2}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "x", "paths": ["example.py"]}}]),
         ]
     )
     agent = _build_agent(tmp_path)
@@ -587,7 +587,7 @@ def test_ask_agent_synthesis_falls_back_to_digest_when_llm_unavailable(tmp_path:
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "x", "k": 2}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "x", "paths": ["example.py"]}}]),
         ]
     )
     result = agent.run("How?", tmp_path / ".mana/index", 2, max_steps=1, timeout_seconds=2)
@@ -650,7 +650,7 @@ def test_ask_agent_successful_result_is_not_treated_as_stagnation(tmp_path: Path
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
-            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "demo", "k": 3}}]),
+            _FakeAssistantMessage("", tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "demo", "paths": ["example.py"]}}]),
             _FakeAssistantMessage("Final answer from model.", tool_calls=[]),
         ]
     )
@@ -1288,12 +1288,13 @@ def test_ask_agent_read_file_without_flow_id_uses_only_ephemeral_cache(tmp_path:
 
 
 def test_ask_agent_collects_trace_and_sources(tmp_path: Path) -> None:
+    (tmp_path / "example.py").write_text("def demo(): pass\n", encoding="utf-8")
     agent = _build_agent(tmp_path)
     agent.llm = _FakeLLM(
         [
             _FakeAssistantMessage(
                 "",
-                tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "demo", "k": 3}}],
+                tool_calls=[{"id": "1", "name": "repo_search", "args": {"query": "demo", "paths": ["example.py"]}}],
             ),
             _FakeAssistantMessage("Answer with /tmp/example.py:3-8", tool_calls=[]),
         ]
@@ -1332,14 +1333,13 @@ def test_ask_agent_run_multi_uses_all_indexes(tmp_path: Path) -> None:
     assert len(agent._resolved_indexes) == 2
 
 
-def test_ask_agent_run_multi_continues_when_presearch_has_no_hits(tmp_path: Path) -> None:
-    class _NoHitSearchService:
-        def search_multi(self, index_dirs: list[Path], query: str, k: int) -> tuple[list[SearchHit], list[str]]:
-            _ = (index_dirs, query, k)
-            return [], ["presearch warning"]
+def test_ask_agent_run_multi_never_presearches(tmp_path: Path) -> None:
+    class _NoPresearchAllowed:
+        def search_multi(self, **kwargs):
+            pytest.fail("Directory mode searched before the model selected a tool")
 
     agent = _build_agent(tmp_path)
-    agent.search_service = _NoHitSearchService()
+    agent.search_service = _NoPresearchAllowed()
     first = tmp_path / "a" / ".mana/index"
     second = tmp_path / "b" / ".mana/index"
     captured: dict[str, object] = {}
@@ -1366,9 +1366,7 @@ def test_ask_agent_run_multi_continues_when_presearch_has_no_hits(tmp_path: Path
 
     result = agent.run_multi("Create a NestJS project", [first, second], 3, max_steps=2, timeout_seconds=2)
     assert result.answer == "Created project scaffold."
-    assert any("No indexed hits found across indexes; continuing with tool loop." in w for w in result.warnings)
-    assert "presearch warning" in result.warnings
-    assert "agent warning" in result.warnings
+    assert result.warnings == ["agent warning"]
     assert captured["question"] == "Create a NestJS project"
     assert captured["index_dir"] == first.resolve()
     assert captured["index_dirs"] == [first.resolve(), second.resolve()]
@@ -1714,3 +1712,51 @@ def test_ask_agent_api_workflow_limits_continuations(tmp_path: Path) -> None:
         tool_policy={"allowed_tools": ["api_workflow_decide", "api_operations_search"]},
     )
     assert result.answer == "Final prose answer after max continuations"
+
+
+def test_chat_sudo_request_searches_only_selected_files(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "project"
+    paths = {
+        "runtime/command.py": "def run_command():\n    authorize()\n",
+        "runtime/approval.py": "def authorize():\n    return True\n",
+        "tests/test_command.py": "def test_authorize():\n    assert authorize()\n",
+        "connectors/email.py": "# authorize and run_command\n",
+    }
+    for relative, content in paths.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    agent = _build_agent(root)
+
+    def unexpected_index_search(**kwargs):
+        pytest.fail("A model-scoped repository tool searched the compatibility index")
+
+    monkeypatch.setattr(agent.search_service, "search", unexpected_index_search)
+    opened = []
+    original_open = Path.open
+
+    def track(path, *args, **kwargs):
+        if path.is_relative_to(root) and path.relative_to(root).as_posix() in paths:
+            opened.append(path.relative_to(root).as_posix())
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", track)
+    agent.llm = _FakeLLM([
+        _FakeAssistantMessage("", tool_calls=[{
+            "id": "command", "name": "repo_search",
+            "args": {"query": "run_command", "paths": ["runtime/command.py"]},
+        }]),
+        _FakeAssistantMessage("", tool_calls=[{
+            "id": "approval", "name": "repo_search",
+            "args": {"query": "authorize", "paths": ["runtime/approval.py"]},
+        }]),
+        _FakeAssistantMessage("", tool_calls=[{
+            "id": "test", "name": "repo_search",
+            "args": {"query": "authorize", "paths": ["tests/test_command.py"]},
+        }]),
+        _FakeAssistantMessage("The relevant code is command execution, approvals, and their tests.", tool_calls=[]),
+    ])
+    result = agent.run("Add sudo support to command execution.", root / ".mana/index", 5, max_steps=5, timeout_seconds=2)
+    assert {source.relative_path for source in result.sources} == set(paths) - {"connectors/email.py"}
+    assert set(opened) == set(paths) - {"connectors/email.py"}
+    assert not any("Duplicate tool call blocked" in str(w) for w in result.warnings)

@@ -23,7 +23,6 @@ from mana_agent.analysis.models import AskResponseWithTrace, SearchHit, ToolInvo
 from mana_agent.multi_agent.runtime.prompts import ASK_AGENT_SYSTEM_PROMPT
 from mana_agent.spirit.adapter import apply_spirit_instruction
 from mana_agent.analysis.chunker import CodeChunker
-from mana_agent.services.structure_service import StructureService
 from mana_agent.multi_agent.runtime.run_logger import LlmRunLogger
 from mana_agent.config.settings import default_index_dir
 from mana_agent.memory import CodingMemoryService, EvidenceMemory
@@ -39,15 +38,13 @@ from mana_agent.context_cost.estimator import estimate_tool_schema_tokens, estim
 from mana_agent.context_cost.models import ContextSegment, GovernorMode
 from mana_agent.tools.repository import (
     apply_patch_batch as repo_apply_patch_batch,
-    call_graph as repo_call_graph,
+    DISCOVERY_DESCRIPTION,
     dumps_tool_result,
-    find_symbols as repo_find_symbols,
+    execute_repository_discovery,
     git_diff as repo_git_diff,
     git_status as repo_git_status,
+    list_repository_directories,
     repo_batch_read as repo_batch_read_files,
-    repo_batch_search as repo_batch_text_search,
-    list_files as repo_list_files,
-    repo_search as repo_text_search,
     verify_project as repo_verify_project,
 )
 from mana_agent.skills.manager import SkillManager
@@ -306,9 +303,14 @@ class _ListToolsInput(BaseModel):
 class _LsInput(BaseModel):
     pass
 
-class _RepoSearchInput(BaseModel):
-    query: str
+class _DiscoveryInput(BaseModel):
+    paths: list[str] = Field(default_factory=list)
     glob: str = "**/*"
+    repository_reason: str = ""
+
+
+class _RepoSearchInput(_DiscoveryInput):
+    query: str
     regex: bool = False
     limit: int = 100
 
@@ -328,15 +330,14 @@ class _ApplyPatchBatchInput(BaseModel):
 class _ReadSkillInput(BaseModel):
     skill_name: str
 
-class _ListFilesInput(BaseModel):
-    glob: str = "**/*"
+class _ListFilesInput(_DiscoveryInput):
     limit: int = 200
 
-class _FindSymbolsInput(BaseModel):
+class _FindSymbolsInput(_DiscoveryInput):
     query: str = ""
     limit: int = 100
 
-class _CallGraphInput(BaseModel):
+class _CallGraphInput(_DiscoveryInput):
     query: str = ""
     limit: int = 100
 
@@ -698,6 +699,8 @@ class AskAgent:
         different searches that merely share a query term are not collapsed.
         """
         args = args or {}
+        if tool_name == "repo_batch_search":
+            return cls.tool_signature(tool_name, args)
         raw = args.get("query")
         if raw is None or str(raw).strip() == "":
             raw = args.get("glob", "")
@@ -705,12 +708,16 @@ class AskAgent:
             "search_tool": tool_name,
             "q": cls._canonical_search_query(raw),
         }
-        if tool_name == "repo_search":
-            glob = str(args.get("glob", "") or "").strip().lower()
-            if glob and glob != "**/*":
-                payload["glob"] = glob
-            if bool(args.get("regex", False)):
-                payload["regex"] = True
+        glob = str(args.get("glob", "") or "").strip()
+        if glob and glob != "**/*":
+            payload["glob"] = glob
+        if paths := args.get("paths"):
+            payload["paths"] = sorted({str(path) for path in paths})
+        if args.get("repository_reason"):
+            payload["repository_wide_selected"] = True
+        if bool(args.get("regex", False)):
+            payload["regex"] = True
+            payload["q"] = raw
         return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
     @classmethod
@@ -1335,6 +1342,7 @@ class AskAgent:
         required_mcp_server: str | None = None,
         enable_run_evidence: bool = True,
         skill_root: str | Path | None = None,
+        repository_search_allowed: bool = True,
     ) -> tuple[list[ToolBinding], list[ToolInvocationTrace], list[SearchHit], list[str]]:
         traces: list[ToolInvocationTrace] = []
         sources: list[SearchHit] = []
@@ -1347,11 +1355,6 @@ class AskAgent:
             if enable_run_evidence
             else None
         )
-        resolved_indexes = list(getattr(self, "_resolved_indexes", []) or [])
-        if not resolved_indexes:
-            fallback_index = Path(getattr(self, "_resolved_index", default_index_dir(self.project_root))).resolve()
-            resolved_indexes = [fallback_index]
-            self._resolved_indexes = resolved_indexes
 
         def read_file(path: str, mode: str = "line", start_line: int = 1, end_line: int = 200) -> str:
             started = perf_counter()
@@ -1879,54 +1882,45 @@ class AskAgent:
             return json.dumps({"tools": names})
 
         def ls() -> str:
-            dirs = StructureService._list_directories(self.project_root)
-            return json.dumps({"directories": dirs})
+            return dumps_tool_result(list_repository_directories(self.project_root))
 
-        def repo_search(query: str, glob: str = "**/*", regex: bool = False, limit: int = 100, k: int | None = None) -> str:
+        def discover(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+            return execute_repository_discovery(
+                self.project_root, tool, args, repository_search_allowed=repository_search_allowed,
+            )
+
+        def record_matches(result: dict[str, Any]) -> None:
+            for match in result.get("matches", []):
+                path, line = match["file"], match["line"]
+                sources.append(SearchHit(
+                    score=1.0, file_path=str(self.project_root / path), start_line=line, end_line=line,
+                    symbol_name="", snippet=match["text"], relative_path=path,
+                    repository_name=self.project_root.name, qualified_path=f"{self.project_root.name}::{path}",
+                ))
+
+        def repo_search(query: str, glob: str = "**/*", regex: bool = False, limit: int = 100,
+                        paths: list[str] | None = None, repository_reason: str = "") -> str:
             started = perf_counter()
-            status = "ok"
-            output_preview = ""
-            effective_limit = k or limit
-            args_summary = f"query={query!r} glob={glob!r} limit={effective_limit}"
-            try:
-                hits_found: list[SearchHit] = []
-                if getattr(self, "search_service", None) is not None and hasattr(self.search_service, "search"):
-                    for index_dir in resolved_indexes:
-                        try:
-                            hits = self.search_service.search(index_dir=index_dir, query=query, k=effective_limit)
-                            hits_found.extend(hits)
-                        except Exception:
-                            pass
-                    if hits_found:
-                        sources.extend(hits_found)
-                        encoded = json.dumps([item.to_dict() for item in hits_found])
-                        output_preview = encoded
-                        return encoded
-                result = dumps_tool_result(
-                    repo_text_search(self.project_root, query=query, glob=glob, regex=regex, limit=effective_limit)
-                )
-                output_preview = str(result)[:400]
-                return result
-            except Exception as exc:
-                status = "error"
-                output_preview = str(exc)
-                return json.dumps({"error": str(exc)})
-            finally:
-                traces.append(
-                    ToolInvocationTrace(
-                        tool_name="repo_search",
-                        args_summary=args_summary,
-                        duration_ms=(perf_counter() - started) * 1000,
-                        status=status,
-                        output_preview=output_preview,
-                    )
-                )
+            args = {"query": query, "glob": glob, "regex": regex, "limit": limit,
+                    "paths": paths, "repository_reason": repository_reason}
+            result = discover("repo_search", args)
+            record_matches(result)
+            encoded = dumps_tool_result(result)
+            traces.append(ToolInvocationTrace(
+                tool_name="repo_search", args_summary=f"query={query!r} glob={glob!r} paths={paths!r}",
+                duration_ms=(perf_counter() - started) * 1000,
+                status="ok" if result.get("ok") else "error", output_preview=encoded[:400],
+            ))
+            return encoded
 
         def repo_batch_read(files: list[str]) -> str:
             return dumps_tool_result(repo_batch_read_files(self.project_root, files=files))
 
         def repo_batch_search(patterns: list[dict[str, Any]]) -> str:
-            return dumps_tool_result(repo_batch_text_search(self.project_root, patterns=patterns))
+            result = discover("repo_batch_search", {"patterns": patterns})
+            for row in result.get("results", []):
+                record_matches(row)
+            return dumps_tool_result(result)
 
         def run_script_once(script: str, cwd: str | None = None, expected_outputs: list[str] | None = None, action_approval_id: str = "") -> str:
             return run_command(script, cwd=cwd, expected_outputs=expected_outputs, action_approval_id=action_approval_id)
@@ -1943,14 +1937,23 @@ class AskAgent:
                 loaded_skill_names.add(str(skill_name).strip().lower().replace("_", "-"))
             return content
 
-        def list_files(glob: str = "**/*", limit: int = 200) -> str:
-            return dumps_tool_result(repo_list_files(self.project_root, glob=glob, limit=limit))
+        def list_files(glob: str = "**/*", limit: int = 200, paths: list[str] | None = None,
+                       repository_reason: str = "") -> str:
+            return dumps_tool_result(discover("list_files", {
+                "glob": glob, "limit": limit, "paths": paths, "repository_reason": repository_reason,
+            }))
 
-        def find_symbols(query: str = "", limit: int = 100) -> str:
-            return dumps_tool_result(repo_find_symbols(self.project_root, query=query, limit=limit))
+        def find_symbols(query: str = "", limit: int = 100, glob: str = "**/*",
+                         paths: list[str] | None = None, repository_reason: str = "") -> str:
+            return dumps_tool_result(discover("find_symbols", {
+                "query": query, "glob": glob, "limit": limit, "paths": paths, "repository_reason": repository_reason,
+            }))
 
-        def call_graph(query: str = "", limit: int = 100) -> str:
-            return dumps_tool_result(repo_call_graph(self.project_root, query=query, limit=limit))
+        def call_graph(query: str = "", limit: int = 100, glob: str = "**/*",
+                       paths: list[str] | None = None, repository_reason: str = "") -> str:
+            return dumps_tool_result(discover("call_graph", {
+                "query": query, "glob": glob, "limit": limit, "paths": paths, "repository_reason": repository_reason,
+            }))
 
         def git_status() -> str:
             return dumps_tool_result(repo_git_status(self.project_root))
@@ -2102,13 +2105,13 @@ class AskAgent:
             ToolBinding.from_callable(
                 func=ls,
                 name="ls",
-                description="List project directories relative to the root.",
+                description="List immediate project directories without descending into them.",
                 input_model=_LsInput,
             ),
             ToolBinding.from_callable(
                 func=repo_search,
                 name="repo_search",
-                description="Search repository text with regex or literal matching. Read-only.",
+                description="Search repository text with regex or literal matching. Read-only. " + DISCOVERY_DESCRIPTION,
                 input_model=_RepoSearchInput,
             ),
             ToolBinding.from_callable(
@@ -2120,7 +2123,7 @@ class AskAgent:
             ToolBinding.from_callable(
                 func=repo_batch_search,
                 name="repo_batch_search",
-                description="Run multiple repository text searches in one call and return grouped JSON results.",
+                description="Each pattern supplies its own scope. " + DISCOVERY_DESCRIPTION,
                 input_model=_RepoBatchSearchInput,
             ),
             ToolBinding.from_callable(
@@ -2144,19 +2147,19 @@ class AskAgent:
             ToolBinding.from_callable(
                 func=list_files,
                 name="list_files",
-                description="List repository files relative to the project root. Read-only.",
+                description="List repository files relative to the project root. Read-only. " + DISCOVERY_DESCRIPTION,
                 input_model=_ListFilesInput,
             ),
             ToolBinding.from_callable(
                 func=find_symbols,
                 name="find_symbols",
-                description="Find Python classes/functions/methods using AST. Read-only.",
+                description="Find Python classes/functions/methods using AST. Read-only. " + DISCOVERY_DESCRIPTION,
                 input_model=_FindSymbolsInput,
             ),
             ToolBinding.from_callable(
                 func=call_graph,
                 name="call_graph",
-                description="Inspect Python AST call edges by caller, callee, or file path. Read-only.",
+                description="Inspect Python AST call edges by caller, callee, or file path. Read-only. " + DISCOVERY_DESCRIPTION,
                 input_model=_CallGraphInput,
             ),
             ToolBinding.from_callable(
@@ -2562,6 +2565,7 @@ class AskAgent:
             required_mcp_server=required_mcp_server,
             enable_run_evidence=use_run_evidence,
             skill_root=policy.get("skill_root"),
+            repository_search_allowed=bool(policy.get("repository_search_allowed", True)),
         )
         pending_external_traces = list(getattr(self, "_pending_external_search_traces", []) or [])
         if pending_external_traces:
@@ -2574,6 +2578,7 @@ class AskAgent:
         delegated_task_id = str(getattr(execution_context, "task_id", "") or transactional_parent_task_id or flow_id or run_id or "")
         tool_gate = ToolCallGate(root=Path(self.project_root), tools=tool_map, task_id=delegated_task_id,
             transport=getattr(self, "_operation_transport", None),
+            repository_search_allowed=bool(policy.get("repository_search_allowed", True)),
             repository_read_only=bool(getattr(self, "_repository_read_only", False)))
         # Preserve explicitly model-selected registered tools that are not part
         # of the repository alias registry (for example browser_* connectors).
@@ -3019,7 +3024,7 @@ class AskAgent:
                     content = json.dumps({"error": f"tool blocked by policy: {name}"})
                     persist_tool_call(name, args if isinstance(args, dict) else {}, content, "blocked")
                 elif name != "read_file" and (
-                    exact_signature in seen_tool_calls
+                    (search_signature is None and exact_signature in seen_tool_calls)
                     or (search_signature is not None and search_signature in seen_search_intents)
                 ):
                     # Exact-duplicate or semantically-equivalent search already run.
@@ -3051,8 +3056,9 @@ class AskAgent:
                     # recognized as a duplicate (read_file is intentionally
                     # exempt: re-reads are idempotent and cache-backed).
                     if name != "read_file":
-                        seen_tool_calls.add(exact_signature)
-                        if search_signature is not None:
+                        if search_signature is None:
+                            seen_tool_calls.add(exact_signature)
+                        else:
                             seen_search_intents.add(search_signature)
                     if name == "read_file":
                         read_args = args if isinstance(args, dict) else {}
@@ -3459,6 +3465,7 @@ class AskAgent:
                         content=content,
                     )
                     if changed_paths:
+                        seen_search_intents.clear()
                         if evidence_memory is not None:
                             evidence_memory.invalidate_many(set(changed_paths))
                         mutation_succeeded = True
@@ -3733,133 +3740,14 @@ class AskAgent:
         run_id: str | None = None,
         **kwargs: Any,
     ):
-        """
-        Dir-mode entrypoint.
-
-        This implementation:
-        1) Searches across multiple indexes (SearchService.search_multi).
-        2) Chooses the best single index to run the agent loop against (highest top-hit score).
-        3) Calls self.run(...) using that chosen index_dir.
-        4) Returns the agent result, but keeps the multi-index sources + warnings.
-        """
-        if getattr(self, "search_service", None) is None:
-            raise RuntimeError("AskAgent.search_service is required for run_multi()")
-        tool_policy = kwargs.pop("tool_policy", None)
-        required_mcp_server = kwargs.pop("required_mcp_server", None)
-
-        resolved_indexes = [Path(p).resolve() for p in index_dirs]
-        if not resolved_indexes:
+        """Run the tool loop in its assigned workspace without presearching indexes."""
+        resolved = sorted({Path(path).resolve() for path in index_dirs})
+        if not resolved:
             raise RuntimeError("run_multi(): index_dirs is empty")
-
-        if not hasattr(self.search_service, "search_multi"):
-            return self.run(
-                question=question,
-                index_dir=resolved_indexes[0],
-                k=k,
-                max_steps=max_steps,
-                timeout_seconds=timeout_seconds,
-                index_dirs=resolved_indexes,
-                callbacks=callbacks,
-                tool_policy=tool_policy,
-                flow_id=flow_id,
-                run_id=run_id,
-                required_mcp_server=required_mcp_server,
-                **kwargs,
-            )
-
-        # 1) Retrieve across all indexes
-        sources, warnings = self.search_service.search_multi(  # type: ignore[attr-defined]
-            index_dirs=resolved_indexes,
-            query=question,
-            k=k,
+        # Index identity is compatibility metadata for the run. The admitted
+        # project_root remains the only source scope for these tool bindings.
+        return self.run(
+            question=question, index_dir=resolved[0], index_dirs=resolved,
+            k=k, max_steps=max_steps, timeout_seconds=timeout_seconds,
+            callbacks=callbacks, flow_id=flow_id, run_id=run_id, **kwargs,
         )
-        presearch_warnings = list(warnings or [])
-        if not sources:
-            # Do not short-circuit on empty retrieval: greenfield/bootstrap requests
-            # can still be satisfied via tool calls (run_command/write_file/apply_patch).
-            presearch_warnings.append(
-                "No indexed hits found across indexes; continuing with tool loop."
-            )
-
-        # 2) Choose best index based on highest top-hit score per index bucket
-        # We infer which index a hit belongs to by matching hit.file_path under index_dir.parent
-        best_index = resolved_indexes[0]
-        best_score = float("-inf")
-
-        # score_by_index: index_dir -> max_score
-        score_by_index: dict[Path, float] = defaultdict(lambda: float("-inf"))
-        for hit in sources:
-            try:
-                hit_path = Path(hit.file_path).resolve()
-            except Exception:
-                continue
-
-            for idx in resolved_indexes:
-                subproject_root = idx.parent
-                if hit_path == subproject_root or subproject_root in hit_path.parents:
-                    try:
-                        score = float(getattr(hit, "score", 0.0))
-                    except Exception:
-                        score = 0.0
-                    if score > score_by_index[idx]:
-                        score_by_index[idx] = score
-
-        for idx, sc in score_by_index.items():
-            if sc > best_score:
-                best_score = sc
-                best_index = idx
-
-        # 3) Run the normal agent loop against the chosen index
-        result = self.run(
-            question=question,
-            index_dir=best_index,
-            k=k,
-            max_steps=max_steps,
-            timeout_seconds=timeout_seconds,
-            index_dirs=resolved_indexes,
-            callbacks=callbacks,
-            tool_policy=tool_policy,
-            flow_id=flow_id,
-            run_id=run_id,
-            required_mcp_server=required_mcp_server,
-            **kwargs,
-        )
-
-        # 4) Attach multi-index sources + warnings so CLI can show them consistently
-        # (works for AskResponseWithTrace dataclass-like objects)
-        try:
-            if hasattr(result, "sources"):
-                existing_sources = list(getattr(result, "sources", []) or [])
-                merged_sources = sorted(
-                    {
-                        (
-                            item.file_path,
-                            item.start_line,
-                            item.end_line,
-                            item.symbol_name,
-                        ): item
-                        for item in [*existing_sources, *list(sources)]
-                    }.values(),
-                    key=lambda item: (
-                        -float(getattr(item, "score", 0.0)),
-                        item.file_path,
-                        item.start_line,
-                        item.end_line,
-                        item.symbol_name,
-                    ),
-                )
-                result.sources = merged_sources
-            if hasattr(result, "warnings"):
-                result.warnings = list(getattr(result, "warnings", []) or [])
-                if presearch_warnings:
-                    result.warnings.extend(presearch_warnings)
-            if hasattr(result, "mode") and getattr(result, "mode", None):
-                # keep existing mode
-                pass
-            elif hasattr(result, "mode"):
-                result.mode = "agent-tools-dir"
-        except Exception:
-            # If it's a string/dict/etc, just return as-is
-            pass
-
-        return result
