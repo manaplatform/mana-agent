@@ -202,10 +202,16 @@ def test_new_conversation_during_hanging_codex_interrupt_bounds_latency(
 
 
 def _scoped_codex_workflow(gateway, monkeypatch):
-    from mana_agent.agent.plan_service import DraftDecision, PlanService, ScopeReview
+    from repository_investigation_fixture import FileInvestigator
+    from mana_agent.agent.plan_service import DraftDecision, InvestigateDecision, PlanService, ScopeReview
     from mana_agent.approval.models import ApprovalMode
     from mana_agent.approval.policy import set_approval_mode
     from mana_agent.gateway.entry_routing import EntryRoutingDecision
+
+    class _EntryModel(FileInvestigator):
+        investigation_path = "README.md"
+
+    gateway._entry_router.llm = _EntryModel()
 
     def route(*, user_prompt, context):
         return EntryRoutingDecision(
@@ -221,14 +227,8 @@ def _scoped_codex_workflow(gateway, monkeypatch):
 
     def decide(_service, mode, state, **kwargs):
         if not state["evidence"]:
-            state["evidence"].append({
-                "id": "evidence-1",
-                "tool": "read_file",
-                "level": 1,
-                "paths": ["README.md"],
-                "fingerprint": "fp-1",
-                "result": {"content": "existing"},
-            })
+            return InvestigateDecision(action="investigate", reason="Read the current content",
+                                       objective="Read the current content", scope="README.md")
         return DraftDecision.model_validate({
             "action": "draft", "reason": "The requested update is scoped",
             "draft": {"objectives": ["Update the README"], "findings": "Read the existing file",

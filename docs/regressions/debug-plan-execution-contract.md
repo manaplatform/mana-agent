@@ -103,6 +103,16 @@ Native inference had also emitted the failure activity before classifying the HT
 
 Run `venv/bin/python -m pytest -q tests/llm/test_providers.py::test_openrouter_claude_mode_schema_preserves_local_constraints tests/llm/test_engine.py::test_mode_decision_reports_provider_http_failure_without_replaying`. The fixtures cover the OpenRouter wire schema, rejection of an overlong decision, buffered and streaming HTTP failures, redaction, and request count. These checks were not run by the agent. To verify live provider compatibility, restart Mana-Agent and use the same model for a read-only DEBUG request such as explaining the return value of a local function.
 
+## Direct Anthropic decisions
+
+A DEBUG turn still received HTTP 400 with `openrouter/anthropic/claude-haiku-5.5` after the OpenRouter schema change. The local model settings selected OpenRouter explicitly. To send decisions to Anthropic's own Messages API, select **Anthropic** and the upstream model `claude-haiku-5-5` in Mana's provider configuration. That model is stored as `anthropic/claude-haiku-5-5` in the primary model setting. A new turn can use that assignment after restarting Mana-Agent. Existing workflow tasks retain their saved provider and model on resume.
+
+The native Messages adapter previously forwarded the original application schema verbatim. It included string and array bounds Claude documents as unsupported. The adapter now uses the same compatible schema encoding as OpenRouter's Claude request path. It sends the format in `output_config.format`, retains the action-specific required fields and discriminators, and decodes and validates the response against the original schema before dispatch. The stored plan and approval formats require no migration. [Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations)
+
+**Do not reintroduce** a raw application schema in the native Messages request or a provider switch after a failed decision.
+
+Run `venv/bin/python -m pytest -q tests/llm/test_engine.py::test_anthropic_mode_decision_uses_messages_and_preserves_validation tests/llm/test_providers.py`. The direct transport fixture checks the upstream model ID, the native Claude request format, and one same-provider correction when a response exceeds the original length bound. Tests and live provider acceptance were not run by the agent.
+
 ## Action payload regression
 
 Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.

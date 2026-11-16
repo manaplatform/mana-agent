@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from mana_agent.llm.errors import InvalidResponseError
 from mana_agent.llm.messages import ToolCall
-from mana_agent.llm.providers.openai import plain
+from mana_agent.llm.providers.openai import decode_structured, plain, strict_schema
 from mana_agent.llm.types import ContinuationState, InferenceRequest, ModelResponse, StreamEvent, Usage
 from mana_agent.utils.text import _strip_thinking_tags
 
@@ -104,7 +104,17 @@ class AnthropicProvider:
             else:
                 body["tool_choice"] = {"type": "tool", "name": choice.get("name") or choice.get("function", {}).get("name")}
         if request.response_schema:
-            body["extra_body"] = {**body.get("extra_body", {}), "output_config": {**body.get("extra_body", {}).get("output_config", {}), "format": {"type": "json_schema", "schema": request.response_schema}}}
+            extra = body.get("extra_body", {})
+            body["extra_body"] = {
+                **extra,
+                "output_config": {
+                    **extra.get("output_config", {}),
+                    "format": {
+                        "type": "json_schema",
+                        "schema": strict_schema(request.response_schema, claude_compatible=True),
+                    },
+                },
+            }
         return body
 
     def normalize(self, raw: Any, request: InferenceRequest) -> ModelResponse:
@@ -124,6 +134,7 @@ class AnthropicProvider:
                 has_private_thinking = True
             else:
                 raise InvalidResponseError(f"Unsupported Anthropic output block: {block['type']}")
+        content = decode_structured("".join(text), request.response_schema or None)
         continuation = None
         if (calls and has_private_thinking) or opaque or request.continuation:
             # Signed thinking is necessary for this provider's tool continuation. Keep
@@ -145,7 +156,7 @@ class AnthropicProvider:
         outgoing = counts.get("output_tokens", 0) or 0
         usage = Usage(input_tokens=incoming, output_tokens=outgoing, total_tokens=incoming + outgoing,
             cached_input_tokens=cached)
-        return ModelResponse(id=data.get("id", ""), provider=request.provider, model=request.model, content="".join(text),
+        return ModelResponse(id=data.get("id", ""), provider=request.provider, model=request.model, content=content,
             tool_calls=calls, usage=usage, finish_reason=data.get("stop_reason") or "stop",
             continuation=continuation,
             configuration_observation={"reasoning_effort": (data.get("output_config") or {}).get("effort")})

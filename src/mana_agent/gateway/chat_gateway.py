@@ -10292,12 +10292,20 @@ class AgentChatGateway:
         # The lane task owns ordinary route output; integration owns a distinct
         # coordinator-created wiring child.
         child_task_id = lane_task_id
+        policy = TaskExecutionPolicy.model_validate(options.get("execution_policy") or decision.execution_policy.model_dump(mode="json"))
+        if (policy.required and decision.response_kind != "task"
+                and decision.route not in {"conversation", "unsupported", "capability_error"}):
+            raise RuntimeError("Immediate Batch status and clarification replies require the conversation route")
+        if policy.required and decision.route == "command" and decision.response_kind == "task":
+            raise RuntimeError("The selected command route has no deferred OpenAI Batch contract; use a supported native tool route")
+        if (policy.required and decision.route == "coding"
+                and any(source != "repository" for source in decision.required_sources)):
+            raise RuntimeError("Batch coding requires repository sources; the selected additional sources have no native coding binding")
         if decision.route == "coding" and (decision.clarification_question or decision.response_kind != "task"):
             raise EntryRoutingError("A coding workflow must route as a task and decide clarification during the workflow")
         if decision.clarification_question:
             return ChatTurnResult(answer=decision.clarification_question, mode="route-clarification",
                                   payload={"status": "waiting", "goal_satisfied": False, "entry_route": "conversation"})
-        policy = TaskExecutionPolicy.model_validate(options.get("execution_policy") or decision.execution_policy.model_dump(mode="json"))
         legacy_core = False
         if decision.route == "coding" and options.get("_validated_legacy_core_checkpoint"):
             workflow = validate_coding_workflow(decision.route, decision.coding_workflow, decision.source_message_ids, context)
@@ -10347,14 +10355,6 @@ class AgentChatGateway:
             and str(decision.media_request.get("operation") or "")
             != "generation.status"
         )
-        if (policy.required and decision.response_kind != "task"
-                and decision.route not in {"conversation", "unsupported", "capability_error"}):
-            raise RuntimeError("Immediate Batch status and clarification replies require the conversation route")
-        if policy.required and decision.route == "command" and decision.response_kind == "task":
-            raise RuntimeError("The selected command route has no deferred OpenAI Batch contract; use a supported native tool route")
-        if (policy.required and decision.route == "coding"
-                and any(source != "repository" for source in decision.required_sources)):
-            raise RuntimeError("Batch coding requires repository sources; the selected additional sources have no native coding binding")
         if bool(options.get("protocol_read_only")) and (
             decision.route
             in {"coding", "automation", "gmail", "calendar", "computer", "canvas"}

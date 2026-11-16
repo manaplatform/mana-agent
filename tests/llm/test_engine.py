@@ -294,3 +294,55 @@ def test_mode_decision_reports_provider_http_failure_without_replaying(
     assert failed["metadata"]["reason_code"] == reason_code
     assert protected not in str(exc.value)
     assert protected not in str(activity)
+
+
+def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path, native_profile, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.engine import create_model
+
+    requests = []
+
+    class Client:
+        def __init__(self, **options):
+            assert options["base_url"] == "https://api.anthropic.com"
+            assert options["api_key"] == "fixture-anthropic-key"
+            self.messages = SimpleNamespace(create=self.create)
+
+        async def create(self, **body):
+            requests.append(body)
+            objective = "x" * 2001 if len(requests) == 1 else "Trace the return value"
+            decision = {"action": "investigate", "reason": "Read the caller",
+                        "objective": objective, "scope": "app.py", "initial_repository_scope": ""}
+            return {"stop_reason": "end_turn", "content": [
+                {"type": "text", "text": json.dumps({"decision": decision})},
+            ]}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("anthropic.AsyncAnthropic", Client)
+    model = create_model(provider="anthropic", model="anthropic/claude-haiku-5-5",
+                         api_key="fixture-anthropic-key", base_url="https://api.anthropic.com")
+    monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
+    service = PlanService(tmp_path, llm=model)
+
+    decision = service.next_decision("debug", {"request": "Explain app.py"})
+
+    assert model.endpoint == "anthropic_messages"
+    assert decision.objective == "Trace the return value"
+    assert len(requests) == 2
+    for body in requests:
+        assert body["model"] == "claude-haiku-5-5"
+        assert body["system"]
+        assert "response_format" not in body
+        output_format = body["extra_body"]["output_config"]["format"]
+        assert output_format["type"] == "json_schema"
+        investigate = output_format["schema"]["$defs"]["InvestigateDecision"]
+        assert investigate["properties"]["action"]["const"] == "investigate"
+        objective = investigate["properties"]["objective"]
+        assert "maxLength" not in objective
+        assert "maxLength: 2000" in objective["description"]
+    assert requests[0]["extra_body"] == requests[1]["extra_body"]

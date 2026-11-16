@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Direct Anthropic mode decisions use a Claude-compatible strict schema in the native Messages API. Mana enforces the original constraints when decoding the decision. See [direct Anthropic decisions](docs/regressions/debug-plan-execution-contract.md#direct-anthropic-decisions).
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py::test_anthropic_mode_decision_uses_messages_and_preserves_validation tests/llm/test_providers.py`.
 - Mode decisions sent to Claude through OpenRouter now express unsupported schema bounds in field descriptions and enforce the original bounds locally. Provider HTTP rejections give the status in the mode result and activity. See [OpenRouter Claude decision rejection](docs/regressions/debug-plan-execution-contract.md#openrouter-claude-decision-rejection).
 - User verification: `venv/bin/python -m pytest -q tests/llm/test_providers.py::test_openrouter_claude_mode_schema_preserves_local_constraints tests/llm/test_engine.py::test_mode_decision_reports_provider_http_failure_without_replaying`.
 - AUTO, DEBUG, and PLAN read the original request before deciding whether to ask for clarification. Only a validated workflow decision opens a clarification for information that requires user input. See [clarification regression](docs/regressions/debug-plan-execution-contract.md#clarifications-caused-by-a-shortened-request).

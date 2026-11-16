@@ -22,13 +22,20 @@ class SelectionResult:
     candidate_files: tuple[str, ...] = ()
 
 
-def select_mode(request: str, *, explicit_mode: str | None = None) -> AutoChatMode:
+def select_mode(
+    request: str,
+    *,
+    explicit_mode: str | None = None,
+    candidate_files: tuple[str, ...] = (),
+) -> AutoChatMode:
     """Render an explicitly selected mode for the prompt; do not route the request."""
     if explicit_mode:
         normalized = str(explicit_mode).strip().lower().replace("-", "_")
         for mode in AutoChatMode:
             if normalized in {mode.value, mode.name.lower()}:
                 return mode
+    if candidate_files:
+        return AutoChatMode.EDIT
     return AutoChatMode.ANSWER_ONLY
 
 
@@ -49,7 +56,7 @@ def select_task(
     files_read: tuple[str, ...] = (),
 ) -> SelectionResult:
     return SelectionResult(
-        mode=select_mode(request, explicit_mode=explicit_mode),
+        mode=select_mode(request, explicit_mode=explicit_mode, candidate_files=candidate_files),
         phase=select_initial_phase(candidate_files=candidate_files, files_read=files_read),
         candidate_files=tuple(candidate_files),
     )
