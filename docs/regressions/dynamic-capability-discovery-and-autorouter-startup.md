@@ -99,3 +99,15 @@ Additional targeted suites:
 ```bash
 python -m pytest tests/test_model_routing.py tests/llm/test_contracts.py tests/test_model_capabilities.py -q
 ```
+
+## Entry routing reason regression
+
+On 2026-11-16, OpenRouter completed an entry routing call for `deepseek/deepseek-v4.1-flash`. Mana then stopped the turn with `routing reason is required`. The saved activity establishes the validation failure. It does not contain the returned field value.
+
+`EntryRoutingOutput` declared `reason` as a required string and accepted empty or whitespace-only values. The gateway trimmed the field and rejected the result after decoding, and its correction guidance omitted this validation error. A complete routing decision requires a brief top-level reason on every route.
+
+The [gateway router](../../src/mana_agent/gateway/entry_routing.py) now advertises a nonempty string and strips whitespace before native decision validation. The native engine can ask for one correction using the selected model and response format. An unstructured router adapter can use the gateway's existing correction to supply a missing or blank reason. A decision with a persistently invalid reason stops the turn before dispatch. The change affects model output validation and requires no migration of saved decisions.
+
+**Do not reintroduce** an unconstrained routing reason or a synthesized explanation that lets an incomplete model decision dispatch.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/llm/test_engine.py -k entry_route_reason` to check missing and blank reasons, correction through each native response strategy, and terminal failure after one correction. Then restart Mana and resend the original request with the same routing model. The agent did not run the tests or replay the live request.

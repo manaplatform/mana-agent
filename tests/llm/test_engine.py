@@ -39,6 +39,64 @@ def test_invalid_native_structured_output_never_retries_as_text(native_profile, 
         value.decide_sync("hello", Decision)
     assert adapter.calls == 1
 
+
+@pytest.mark.parametrize("strategy", ["native", "tool", "text"])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_entry_route_reason_correction_stays_on_selected_strategy(
+    native_profile, monkeypatch, strategy, corrected,
+):
+    import json
+
+    from mana_agent.gateway.entry_routing import (
+        EntryRouteContext,
+        EntryRouteRegistry,
+        EntryRouter,
+        EntryRoutingError,
+        RouteAvailability,
+        RouteRegistration,
+    )
+    from mana_agent.llm.messages import ToolCall
+
+    if strategy != "native":
+        native_profile.facts.pop("native_structured_output")
+    if strategy == "text":
+        native_profile.facts.pop("tool_calling")
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            reason = "  Answer the greeting.  " if corrected and len(requests) > 1 else " \t\n"
+            decision = {
+                "route": "conversation", "confidence": 0.9,
+                "required_sources": ["none"], "reason": reason,
+            }
+            assert bool(request.response_schema) == (strategy == "native")
+            if strategy == "tool":
+                assert [tool["name"] for tool in request.tools] == ["record_decision"]
+                return ModelResponse(tool_calls=[
+                    ToolCall(id="routing-decision", name="record_decision", args=decision),
+                ])
+            assert not request.tools
+            return ModelResponse(content=json.dumps(decision))
+
+    registry = EntryRouteRegistry()
+    registry.register(RouteRegistration(
+        "conversation", "Direct reply", lambda: RouteAvailability(available=True),
+    ))
+    router = EntryRouter(llm=engine(native_profile, monkeypatch, Adapter()), registry=registry)
+    context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t")
+
+    if corrected:
+        assert router.route(user_prompt="Hello", context=context).reason == "Answer the greeting."
+    else:
+        with pytest.raises(EntryRoutingError, match=r"Decision still invalid after one correction.*reason"):
+            router.route(user_prompt="Hello", context=context)
+
+    assert len(requests) == 2
+    assert "reason: string too short" in requests[1].messages[-1].content
+
+
 def test_timeout_cancels_selected_request_without_other_backend(native_profile, monkeypatch):
     class Adapter:
         cancelled = False
@@ -348,30 +406,32 @@ def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path
     assert requests[0]["extra_body"] == requests[1]["extra_body"]
 
 
-@pytest.mark.parametrize(("status", "error"), [
-    (200, None),
-    (400, "ModeDecision model decision failed.*HTTP 400"),
-])
-def test_openrouter_claude_mode_decision_uses_messages(tmp_path, native_profile, monkeypatch, status, error):
+@pytest.mark.parametrize("status", [200, 400])
+@pytest.mark.parametrize("entry_route", [False, True])
+def test_openrouter_claude_uses_messages_decision_tool(tmp_path, native_profile, monkeypatch, status, entry_route):
     import json
 
     import httpx
     from anthropic import AsyncAnthropic
 
     from mana_agent.agent.plan_service import PlanService
+    from mana_agent.gateway.entry_routing import _invoke_routing_model
     from mana_agent.llm.engine import create_model
 
     requests = []
+    payload = (
+        {"route": "conversation", "confidence": 0.95, "reason": "Answer directly.", "required_sources": ["none"]}
+        if entry_route else {"decision": {"action": "block", "reason": "The supplied facts are insufficient."}}
+    )
 
     def respond(request):
         requests.append(request)
         if status == 400:
             return httpx.Response(status, json={"error": {"message": "fixture rejection"}})
-        decision = {"action": "block", "reason": "The supplied facts are insufficient."}
         return httpx.Response(200, json={
             "id": "message-1", "type": "message", "role": "assistant",
-            "model": "anthropic/claude-haiku-5.5", "stop_reason": "end_turn", "stop_sequence": None,
-            "content": [{"type": "text", "text": json.dumps({"decision": decision})}],
+            "model": "anthropic/claude-sonnet-5.5", "stop_reason": "tool_use", "stop_sequence": None,
+            "content": [{"type": "tool_use", "id": "toolu-decision", "name": "record_decision", "input": payload}],
             "usage": {"input_tokens": 40, "output_tokens": 10},
         })
 
@@ -381,18 +441,22 @@ def test_openrouter_claude_mode_decision_uses_messages(tmp_path, native_profile,
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-unrelated-anthropic-key")
     monkeypatch.setattr("anthropic.AsyncAnthropic", sdk_client)
     monkeypatch.setattr("openai.AsyncOpenAI", lambda **options: pytest.fail("Expected the native Messages client"))
-    model = create_model(provider="openrouter", model="openrouter/anthropic/claude-haiku-5.5",
+    model = create_model(provider="openrouter", model="openrouter/anthropic/claude-sonnet-5.5",
                          api_key="fixture-openrouter-key", base_url="https://openrouter.ai/api/v1",
                          n=1, output_token_parameter="max_completion_tokens",
                          extra_body={"provider": {"order": ["Anthropic"]}})
     monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
-    service = PlanService(tmp_path, llm=model)
 
-    if error:
-        with pytest.raises(RuntimeError, match=error):
-            service.next_decision("debug", {"request": "Explain the handler's return value"})
+    def decide():
+        if entry_route:
+            return _invoke_routing_model(model, [UserMessage("Hello")])[1]["route"]
+        return PlanService(tmp_path, llm=model).next_decision("debug", {"request": "Explain app.py"}).action
+
+    if status == 400:
+        with pytest.raises(RuntimeError, match=r"openrouter rejected the request \(HTTP 400\)"):
+            decide()
     else:
-        assert service.next_decision("debug", {"request": "Explain the handler's return value"}).action == "block"
+        assert decide() == ("conversation" if entry_route else "block")
 
     assert model.provider == "openrouter"
     assert model.endpoint == "anthropic_messages"
@@ -402,15 +466,20 @@ def test_openrouter_claude_mode_decision_uses_messages(tmp_path, native_profile,
     assert request.headers["authorization"] == "Bearer fixture-openrouter-key"
     assert "x-api-key" not in request.headers
     body = json.loads(request.content)
-    assert body["model"] == "anthropic/claude-haiku-5.5"
-    assert body["provider"] == {"order": ["Anthropic"], "require_parameters": True}
+    assert body["model"] == "anthropic/claude-sonnet-5.5"
+    assert body["provider"] == {"order": ["Anthropic"]}
     assert body["max_tokens"] > 0
     assert "response_format" not in body
     assert "n" not in body
     assert "output_token_parameter" not in body
-    output_format = body["output_config"]["format"]
-    assert output_format["type"] == "json_schema"
-    assert "minLength" not in output_format["schema"]["$defs"]["BlockDecision"]["properties"]["reason"]
+    assert "output_config" not in body
+    tool, = body["tools"]
+    assert tool["name"] == "record_decision"
+    assert not tool.get("strict")
+    if entry_route:
+        assert tool["input_schema"]["properties"]["coding_workflow"]
+    else:
+        assert tool["input_schema"]["$defs"]["BlockDecision"]["properties"]["reason"]["minLength"] == 1
 
 
 @pytest.mark.parametrize(("model", "mode", "expected"), [

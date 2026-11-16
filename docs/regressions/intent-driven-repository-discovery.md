@@ -95,6 +95,38 @@ globs without advertising a broad default. Repository-wide discovery uses
 level 4 and a reason under the existing audit and evidence rules. Invalid
 selections name the rejected tool and stop before any call in that batch runs.
 
+## Relative paths in investigation listings
+
+`list_files` could stop an investigation with a canonical-path error before
+the discovery tool ran. The evidence model validated the spelling first, so
+it rejected forms such as `./src/` that the discovery tool already
+normalized. A root path such as `.` also failed. The reported error did not
+identify the rejected path or its position.
+
+The evidence model and discovery tools now use the same normalization for
+literal discovery paths. Validation errors identify the offending path index
+without printing its value. Normalized paths are used for execution and
+duplicate detection. An explicit `list_files` path of `.` lists immediate
+files and filters protected names and symlinks. Recursion requires a narrower
+directory, a targeted glob, or an authorized repository-wide selection.
+Absolute paths, parent traversal, and protected evidence targets fail
+validation before dispatch.
+
+## Default scope for file listings
+
+An investigator could still hit `Supply literal paths or a targeted glob`
+when calling `list_files` without paths or with an extension-only glob.
+The shared scope validator treated a shallow file listing like a recursive
+content search. The reported error did not include the tool arguments.
+
+`list_files` now defaults to the same shallow scope as an explicit `.`
+path when the selection has no paths, targeted glob, or repository-wide
+reason. A broad glob such as `**/*.py` filters top-level files within that
+scope. Both forms of the same shallow selection use the same evidence
+fingerprint. A level-4 listing with a reason can recurse when authorized by
+the existing scope checks. Text and symbol search still require a scoped
+selection or authorized expansion.
+
 ## Do not reintroduce
 
 - Never map the whole request to a source search or run a compatibility index
@@ -109,6 +141,10 @@ selections name the rejected tool and stop before any call in that batch runs.
   invent observations to satisfy an expansion gate.
 - Never present a recursive checkout glob as the default for a scoped search.
   Keep initial layout discovery shallow and explicitly selected by the model.
+- Never turn a dot path into a recursive checkout walk. Normalize discovery
+  arguments before checking their scope or comparing them for duplicates.
+- Never require repository-wide scope to list only top-level files. A broad
+  filter alone does not authorize recursive traversal.
 
 ## Verification
 
@@ -138,3 +174,12 @@ For an error report without a location, run
 The fixtures cover searching a directory selected from the listing, rejecting
 unscoped selections before any batch dispatch, and preserving authorized
 audits. These checks and live-provider behavior are unverified.
+
+For relative investigation paths, run
+
+    venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'investigation_list_files or investigation_batch_rejects or repository_audit or investigation_tool_schema'
+
+The fixtures cover explicit and default shallow listings, broad filters,
+normalized paths, duplicate aliases, invalid selections, and authorized
+recursive listings. Test execution and live provider verification remain
+pending.

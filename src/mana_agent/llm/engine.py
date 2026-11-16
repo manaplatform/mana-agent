@@ -409,17 +409,25 @@ class NativeLLMEngine:
 
     async def decide(
         self, messages: Any, schema: type[BaseModel] | dict[str, Any], *,
-        repair_decision: bool = False, validation_context: dict[str, Any] | None = None, **options: Any,
+        repair_decision: bool = False, validation_context: dict[str, Any] | None = None,
+        complex_schema: bool = False, **options: Any,
     ) -> BaseModel | dict[str, Any]:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
 
         prof = self.profile(options.get("parameters", {}))
-        if options.pop("require_native_structured_output", False):
+        require_native = options.pop("require_native_structured_output", False)
+        if require_native:
             prof.require("native_structured_output")
+        # Use Claude's ordinary client tool for composite workflow decisions.
+        # Local validation retains the full contract without compiling a provider grammar.
+        use_tool = (complex_schema and not require_native and self.provider == "openrouter"
+                    and self.endpoint == "anthropic_messages")
+        if use_tool:
+            prof.require("tool_calling")
         schema_dict = schema if isinstance(schema, dict) else schema.model_json_schema()
         decision_messages = messages_from_records(messages)
-        native = prof.supports("native_structured_output")
+        native = not use_tool and prof.supports("native_structured_output")
         tool_based = not native and prof.supports("tool_calling")
         model = self
         if tool_based:

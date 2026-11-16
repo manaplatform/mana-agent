@@ -861,7 +861,10 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="list_files",
-            description="List repository files with optional glob filtering. " + DISCOVERY_DESCRIPTION,
+            description=(
+                "List repository files with optional glob filtering. The default scope is top-level files. "
+                + DISCOVERY_DESCRIPTION
+            ),
             input_schema=_schema({**_DISCOVERY_PROPERTIES, "limit": {"type": "integer"}}),
             output_schema=_schema({"files": {"type": "array"}, "truncated": {"type": "boolean"}}),
             error_format=common_error,

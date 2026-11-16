@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Literal, Mapping, Sequence, get_args
+from typing import Annotated, Any, Callable, Literal, Mapping, Sequence, get_args
 
 from mana_agent.llm.messages import UserMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from mana_agent.agent.mode import CodingWorkflowDecision
 from mana_agent.context_cost.accounting import ModelContextLimitError
 from mana_agent.context_cost.models import ContextBudgetExceeded
@@ -259,7 +259,9 @@ class EntryRoutingOutput(_StrictRoutingOutput):
 
     route: str
     confidence: float
-    reason: str
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] = Field(
+        description="A brief, nonblank explanation of why this route fits the request."
+    )
     required_sources: list[str]
     target_urls: list[str] = Field(default_factory=list)
     requires_live_data: bool = False
@@ -538,6 +540,8 @@ canvas -> ["canvas"], media -> ["media"],
 memory -> ["memory"], and mcp -> ["mcp"]. capability_error must name the unavailable tool source. Do not use an
 empty array for a request that needs no external information.
 memory_task_id must be empty string "" for all routes except memory. Only populate memory_task_id when route="memory" and memory_capsules_enabled is true.
+Every decision requires a nonblank top-level reason explaining why the selected route fits the request.
+This includes conversation and coding, even when public_summary or coding_workflow.reason is present.
 
 Return JSON only:
 {
@@ -626,6 +630,9 @@ Examples:
 
 def _routing_correction(validation_error: str) -> str:
     """Return model-only correction guidance for a bounded invalid-decision retry."""
+    if "routing reason is required" in validation_error:
+        return ("Return a complete routing decision with a nonblank top-level reason explaining "
+                "why the selected route fits the request.")
     if "coding workflow" in validation_error:
         return ("Return a complete coding_workflow for a coding route and cite the current observed "
                 "user message ID and any earlier user authorization. Use null on non-coding routes. "
@@ -1088,8 +1095,8 @@ class EntryRouter:
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: confidence must be between 0 and 1."
             )
-        reason = str(payload.get("reason") or "").strip()
-        if not reason:
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
                 "Reason: routing reason is required."
@@ -1424,7 +1431,7 @@ class EntryRouter:
         return EntryRoutingDecision(
             route=route,  # type: ignore[arg-type]
             confidence=confidence,
-            reason=reason,
+            reason=reason.strip(),
             public_summary=str(payload.get("public_summary") or "")[:240],
             required_sources=sources,  # type: ignore[arg-type]
             target_urls=target_urls,
@@ -1500,6 +1507,11 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 def _invoke_routing_model(llm: Any, messages: list[Any]) -> tuple[Any, dict[str, Any]]:
+    from mana_agent.llm.engine import NativeLLMEngine
+
+    if isinstance(llm, NativeLLMEngine):
+        response = llm.decide_sync(messages, EntryRoutingOutput, complex_schema=True, repair_decision=True)
+        return response, response.model_dump()
     if callable(getattr(llm, "decide_sync", None)) and not type(llm).__name__.endswith("Mock"):
         try:
             response = llm.decide_sync(messages, EntryRoutingOutput)

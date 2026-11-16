@@ -260,6 +260,10 @@ def test_native_investigation_tool_schema_separates_file_reads_from_discovery():
     validate_arguments({"level": 4, "query": "target", "reason": "Audit the repository"}, discovery)
     assert "default" not in discovery["properties"]["glob"]
     assert "require level 4" in discovery["properties"]["glob"]["description"]
+    file_list = tools["list_files"]
+    validate_arguments({"level": 1, "reason": "List the top-level files"}, file_list)
+    assert "default" not in file_list["properties"]["glob"]
+    assert "top-level files only" in file_list["properties"]["glob"]["description"]
     listing = tools["ls"]
     assert set(listing["properties"]) == {"level", "reason"}
     validate_arguments({"level": 1, "reason": "Locate the owning directory"}, listing)

@@ -9,7 +9,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
-from pydantic import Field, GetJsonSchemaHandler, ValidationError, ValidationInfo, model_validator
+from pydantic import AfterValidator, Field, GetJsonSchemaHandler, ValidationError, ValidationInfo, model_validator
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, PydanticCustomError
 
@@ -30,16 +30,32 @@ from mana_agent.tools.repository import (
     DiscoveryScopeRequired,
     execute_repository_discovery,
     list_repository_directories,
+    normalize_discovery_path,
     validate_repository_discovery,
 )
 from mana_agent.utils.redaction import redact_secrets
 from mana_agent.workspaces.paths import repository_dir
 
 
+def _investigation_path(value: str, info: ValidationInfo) -> str:
+    tool = info.data.get("tool")
+    if tool in {"repo_search", "list_files", "find_symbols", "call_graph"}:
+        try:
+            value = normalize_discovery_path(value, allow_root_listing=tool == "list_files")
+        except ValueError as exc:
+            raise PydanticCustomError("mode_discovery_path", str(exc)) from None
+        if value == ".":
+            return value
+    return repository_relative_path(value)
+
+
+InvestigationPath = Annotated[str, AfterValidator(_investigation_path)]
+
+
 class EvidenceRequest(ModeContract):
     tool: Literal["read_file", "ls", "repo_search", "list_files", "find_symbols", "call_graph"]
     level: Literal[1, 2, 3, 4]
-    paths: tuple[str, ...] = ()
+    paths: tuple[InvestigationPath, ...] = ()
     query: str = ""
     glob: str = "**/*"
     start_line: int = Field(default=1, ge=1)
@@ -50,8 +66,6 @@ class EvidenceRequest(ModeContract):
 
     @model_validator(mode="after")
     def validate_target(self):
-        for path in self.paths:
-            repository_relative_path(path)
         if self.tool == "read_file" and (len(self.paths) != 1 or self.level == 4):
             raise PydanticCustomError("mode_read_target", "read_file requires exactly one path and a level below 4")
         if self.tool == "repo_search" and not self.query.strip():
@@ -64,9 +78,14 @@ class EvidenceRequest(ModeContract):
 
     @property
     def fingerprint(self) -> str:
-        return canonical_digest(self.model_dump(mode="json", exclude={
+        operation = self.model_dump(mode="json", exclude={
             "reason", "prior_evidence", "level", "initial_repository_scope",
-        }))
+        })
+        if self.tool == "list_files" and not self.paths:
+            scope = validate_repository_discovery(self.discovery_arguments(), tool=self.tool)
+            if scope is not None:
+                operation["paths"] = list(scope)
+        return canonical_digest(operation)
 
     def discovery_arguments(self) -> dict[str, Any]:
         return {
@@ -78,7 +97,7 @@ class EvidenceRequest(ModeContract):
 class FileReadEvidence(EvidenceRequest):
     tool: Literal["read_file"]
     level: Literal[1, 2, 3]
-    paths: tuple[str, ...] = Field(
+    paths: tuple[InvestigationPath, ...] = Field(
         min_length=1, max_length=1, description="Exactly one canonical repository-relative file path.",
     )
     initial_repository_scope: Literal[""] = ""
@@ -95,7 +114,7 @@ class RepositoryDiscoveryEvidence(EvidenceRequest):
         description="Use level 1 to start. Levels 2–4 require prior evidence, unless an initial audit is authorized. "
                     "Repository-wide discovery requires level 4.",
     )
-    paths: tuple[str, ...] = Field(
+    paths: tuple[InvestigationPath, ...] = Field(
         default=(), description="Literal repository-relative files or directories, such as [\"src/runtime\"].",
     )
     glob: str = Field(
@@ -111,8 +130,10 @@ class RepositoryDiscoveryEvidence(EvidenceRequest):
 
     @model_validator(mode="after")
     def validate_discovery_target(self):
+        if self.level == 4 and not self.reason.strip():
+            raise PydanticCustomError("mode_discovery_reason", "Provide a reason for the requested level-4 scope.")
         try:
-            validate_repository_discovery(self.discovery_arguments())
+            validate_repository_discovery(self.discovery_arguments(), tool=self.tool)
         except DiscoveryScopeRequired:
             raise PydanticCustomError(
                 "mode_discovery_selection",
@@ -122,6 +143,15 @@ class RepositoryDiscoveryEvidence(EvidenceRequest):
         except ValueError as exc:
             raise PydanticCustomError("mode_discovery_selection", str(exc)) from None
         return self
+
+
+class FileListEvidence(RepositoryDiscoveryEvidence):
+    tool: Literal["list_files"]
+    glob: str = Field(
+        default="**/*",
+        description="Optional file filter. At levels 1–3, a broad glob without paths filters top-level files only. "
+                    "Use a directory prefix such as src/runtime/**/*.py to list files in that directory.",
+    )
 
 
 @dataclass(frozen=True)
@@ -324,7 +354,8 @@ class PlanService:
         messages = [SystemMessage(instructions), UserMessage(json.dumps(data, ensure_ascii=False))]
         try:
             if isinstance(self.llm, NativeLLMEngine):
-                return decide(messages, schema, repair_decision=True, validation_context=validation_context)
+                return decide(messages, schema, repair_decision=True, validation_context=validation_context,
+                              complex_schema=schema is ModeDecision)
             value = decide(messages, schema.model_json_schema())
             return schema.model_validate(value, context=validation_context)
         except ValidationError as exc:

@@ -1507,6 +1507,34 @@ def test_router_rejects_missing_required_sources_instead_of_guessing(tmp_path: P
         raise AssertionError("invalid routing output must stop without selecting a source")
 
 
+@pytest.mark.parametrize("reason_fields", [{}, {"reason": ""}, {"reason": " \t\n"}])
+def test_entry_route_reason_repairs_unstructured_model_output(reason_fields: dict[str, str]) -> None:
+    calls = []
+
+    def invoke(messages):
+        calls.append(json.loads(messages[-1].content))
+        decision = {"route": "conversation", "confidence": 0.9, "required_sources": ["none"]}
+        decision.update(reason_fields if len(calls) == 1 else {"reason": "  Answer the greeting.  "})
+        return SimpleNamespace(content=json.dumps(decision))
+
+    router = EntryRouter(llm=SimpleNamespace(invoke=invoke), registry=_registry())
+    decision = router.route(
+        user_prompt="Hello",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert len(calls) == 2
+    assert "nonblank top-level reason" in calls[1]["correction"]
+    assert decision.reason == "Answer the greeting."
+
+
+def test_entry_route_reason_is_required_in_the_model_schema() -> None:
+    schema = EntryRoutingOutput.model_json_schema()
+
+    assert "reason" in schema["required"]
+    assert schema["properties"]["reason"]["minLength"] == 1
+
+
 def test_router_repairs_url_less_browser_discovery_with_a_new_model_decision() -> None:
     registry = _registry()
     payloads = iter(

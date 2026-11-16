@@ -4,8 +4,16 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Entry routing now requires a nonblank reason in its decision schema and allows one correction for an invalid reason on the selected model. See [entry routing reason regression](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md#entry-routing-reason-regression).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/llm/test_engine.py -k entry_route_reason`.
+- OpenRouter Claude entry and workflow decisions use the Messages client tool with local typed validation. Native entry routing stops on a provider rejection without replaying the request as plain text. See [OpenRouter Claude decision tools](docs/regressions/debug-plan-execution-contract.md#openrouter-claude-decision-tools).
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py tests/gateway/test_entry_routing.py`.
+- `list_files` defaults to top-level files when no path, targeted glob, or repository-wide reason is supplied. Broad globs filter that shallow listing. See [default file listing scope](docs/regressions/intent-driven-repository-discovery.md#default-scope-for-file-listings).
+- User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'investigation_list_files or investigation_batch_rejects or repository_audit or investigation_tool_schema'`.
+- Repository investigation normalizes relative discovery paths before validation. An explicit `list_files` path of `.` lists only top-level files, and invalid paths identify the affected argument. See [investigation path handling](docs/regressions/intent-driven-repository-discovery.md#relative-paths-in-investigation-listings).
+- User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'investigation_list_files or investigation_batch_rejects'`.
 - OpenRouter Claude models in automatic API mode use OpenRouter's native Messages endpoint with the existing model ID, credential, and provider preferences. See [OpenRouter Messages for Claude](docs/regressions/debug-plan-execution-contract.md#openrouter-messages-for-claude).
-- User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'openrouter_claude_mode_decision or openrouter_model_protocol'`.
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'openrouter_claude_uses_messages or openrouter_model_protocol'`.
 - AUTO, DEBUG, and PLAN investigators can list immediate repository directories before choosing a scoped search. The tool schema explains when a search needs paths, a targeted glob, or an authorized level-4 scope. See [discovery without a file path](docs/regressions/intent-driven-repository-discovery.md#starting-an-investigation-without-a-file-path).
 - User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'no_reported_location or investigation_batch_rejects or investigation_tool_schema or repository_audit'`.
 - Direct Anthropic mode decisions use a Claude-compatible strict schema in the native Messages API. Mana enforces the original constraints when decoding the decision. See [direct Anthropic decisions](docs/regressions/debug-plan-execution-contract.md#direct-anthropic-decisions).

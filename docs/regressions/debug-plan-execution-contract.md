@@ -121,7 +121,17 @@ Automatic protocol selection now sends OpenRouter's `anthropic/…` model IDs to
 
 **Do not reintroduce** provider-only protocol selection for OpenRouter Claude models in automatic mode or use direct Anthropic credentials on an OpenRouter request.
 
-Run `venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'openrouter_claude_mode_decision or openrouter_model_protocol'`. The fixtures use the SDK with an in-memory HTTP transport to check the exact URL, bearer authentication, response schema, and one request on HTTP 400. They also check capability lookup and explicit mode selection. These checks and a live provider request were not run by the agent.
+Run `venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'openrouter_claude_uses_messages or openrouter_model_protocol'`. The fixtures use the SDK with an in-memory HTTP transport to check the exact URL, bearer authentication, decision tool, and one request on HTTP 400. They also check capability lookup and explicit mode selection. These checks and a live provider request were not run by the agent.
+
+## OpenRouter Claude decision tools
+
+On 2026-11-16 the Sonnet 5.5 journal showed two HTTP 400 responses on `anthropic_messages`. The entry router's request with its structured schema failed, the subsequent request without a schema succeeded, and the first `ModeDecision` request failed before any repository tool ran. Both failed calls requested composite schemas. The trace lacked the HTTP response bodies needed to identify which upstream validation rule rejected them.
+
+OpenRouter's Messages path now uses a single ordinary `record_decision` client tool for `EntryRoutingOutput` and `ModeDecision`. Claude receives each original action schema as the tool input schema without compiling it as a constrained response grammar. Mana requires exactly one call, validates it against the original schema and Pydantic contract, then applies the usual routing, evidence, and authorization checks. The tool only returns data. A malformed response can get one same-format correction. Native routing propagates HTTP failures and skips the legacy plain-text replay. The selected provider, model, validated actions, and saved approvals retain their existing identities. [Claude strict tool use and grammar validation](https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use)
+
+**Do not reintroduce** the native response grammar for these two OpenRouter Claude contracts, or silently resend a failed native entry decision as plain text.
+
+Run `venv/bin/python -m pytest -q tests/llm/test_engine.py tests/gateway/test_entry_routing.py`. The SDK fixture covers both decision contracts with a valid tool response and an HTTP rejection. The fixture and live provider acceptance were not run by the agent.
 
 ## Action payload regression
 

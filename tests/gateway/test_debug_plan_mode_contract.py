@@ -527,6 +527,50 @@ def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeyp
     assert visited == [root.resolve() / "runtime"]
 
 
+@pytest.mark.parametrize(("root_args", "expected"), [
+    ({"paths": ["./"]}, ["app.py", "notes.txt"]),
+    ({}, ["app.py", "notes.txt"]),
+    ({"glob": "**/*.py"}, ["app.py"]),
+])
+def test_investigation_list_files_keeps_root_shallow(mode_gateway, monkeypatch, root_args, expected):
+    from mana_agent.tools import repository
+
+    gateway, workflow = mode_gateway
+    root = gateway.root
+    (root / "runtime").mkdir()
+    (root / "runtime" / "handler.py").write_text("pass\n")
+    (root / "notes.txt").write_text("fixture\n")
+    (root / ".env").write_text("EXAMPLE=fixture\n")
+    (root / "root-alias.py").symlink_to(root / "app.py")
+    visited = []
+    iter_files = repository._iter_files
+
+    def track(directory):
+        visited.append(directory)
+        yield from iter_files(directory)
+
+    monkeypatch.setattr(repository, "_iter_files", track)
+    model = Decisions(
+        investigation("Root and runtime file locations"),
+        {"action": "diagnose", "reason": "Compared the selected directories",
+         "uncertainty": "Source was not inspected"},
+        investigations=[[
+            [
+                evidence_call("root", "list_files", **root_args),
+                evidence_call("runtime", "list_files", paths=["./runtime//"]),
+            ],
+            [report_call("evidence-1", "evidence-2")],
+        ]],
+    )
+
+    result = workflow.start("session", "List files in the root and runtime", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    listings = [item["result"]["files"] for item in model.inputs[-1]["evidence"]]
+    assert listings == [expected, ["runtime/handler.py"]]
+    assert visited == [root.resolve() / "runtime"]
+
+
 def test_debug_mode_activity_keeps_the_frontend_turn(mode_gateway):
     from mana_agent.services.activity_context import ActivityContext, activity_scope, emit_activity
     from mana_agent.services.execution_event_hub import get_execution_event_hub
@@ -563,14 +607,20 @@ def test_debug_mode_activity_keeps_the_frontend_turn(mode_gateway):
     assert "fixture-protected-text" not in by_type["model.started"]["summary"]
 
 
-def test_debug_reads_a_known_file_after_a_repository_audit(mode_gateway):
-    _, workflow = mode_gateway
+@pytest.mark.parametrize(("tool", "arguments"), [
+    ("repo_search", {"query": "before"}),
+    ("list_files", {"glob": "**/*.py"}),
+])
+def test_debug_reads_a_known_file_after_a_repository_audit(mode_gateway, tool, arguments):
+    gateway, workflow = mode_gateway
+    (gateway.root / "runtime").mkdir()
+    (gateway.root / "runtime" / "handler.py").write_text("pass\n")
     model = Decisions(
         investigation("Audit the repository as requested", initial_repository_scope="explicit_audit"),
         {"action": "diagnose", "reason": "The file contains the unexpected value",
          "root_cause": "The handler returns the old value.", "cause_evidence": ["evidence-2"]},
         investigations=[[
-            [evidence_call("find", "repo_search", level=4, query="before")],
+            [evidence_call("find", tool, level=4, **arguments)],
             [evidence_call("match", paths=["app.py"], prior_evidence=["evidence-1"])],
             [report_call("evidence-1", "evidence-2")],
         ]],
@@ -581,11 +631,14 @@ def test_debug_reads_a_known_file_after_a_repository_audit(mode_gateway):
     assert result.status == "success", result.message
     assert [entry["investigation_available"] for entry in model.inputs] == [True, False]
     assert len(model.native_inputs) == 3
-    assert json.loads(model.native_inputs[1][-1].content)["result"]["matches"][0]["file"] == "app.py"
     assert model.native_inputs[1][-1].tool_call_id == "find"
     search, read = model.inputs[-1]["evidence"]
     assert search["level"] == 4
-    assert search["result"]["matches"][0]["file"] == "app.py"
+    assert json.loads(model.native_inputs[1][-1].content)["result"] == search["result"]
+    if tool == "list_files":
+        assert search["result"]["files"] == ["app.py", "runtime/handler.py"]
+    else:
+        assert search["result"]["matches"][0]["file"] == "app.py"
     assert read["level"] == 1
     assert read["result"]["content"] == "before\n"
 
@@ -684,6 +737,16 @@ def test_cancel_during_native_response_discards_late_tools(mode_gateway):
      "The next permitted level is 1"),
     (evidence_call("second", "list_files", paths=["tests/**/*.py"]), 2,
      "Discovery paths must name files or directories"),
+    (evidence_call("second", "list_files", paths=["/"]), 2,
+     "paths.0: Discovery paths must name files or directories"),
+    (evidence_call("second", "list_files", paths=["runtime/../docs"]), 2,
+     "paths.0: Discovery paths must name files or directories"),
+    (evidence_call("second", "list_files", paths=["./.env/"]), 2,
+     "paths.0: use an unprotected, canonical repository-relative path"),
+    (evidence_call("second", "list_files", level=4), 2, "The next permitted level is 1"),
+    (evidence_call("second", "list_files", level=4, reason=" "), 2, "Provide a reason for the requested level-4 scope"),
+    (evidence_call("second", "repo_search", paths=["."], query="before"), 2,
+     "Use list_files to list top-level files or select a narrower path."),
     (evidence_call("second", "repo_search", query="before"), 2, "Supply literal paths or a targeted glob"),
     (evidence_call("second", "repo_search", query="before", glob="**/*.py"), 2,
      "Repository-wide discovery requires an authorized level 4"),
@@ -708,6 +771,35 @@ def test_investigation_batch_rejects_all_reads_if_any_selection_is_invalid(
     assert result.data["phase"] == "blocked"
     assert detail in result.message
     assert not calls
+
+
+@pytest.mark.parametrize(("first", "second"), [
+    ({"paths": ["runtime"]}, {"paths": ["./runtime/"]}),
+    ({}, {"paths": ["."]}),
+])
+def test_investigation_list_files_deduplicates_aliases_before_dispatch(mode_gateway, monkeypatch, first, second):
+    _, workflow = mode_gateway
+    monkeypatch.setattr(PlanService, "inspect", lambda *_: pytest.fail("Duplicate scope must stop before dispatch"))
+    model = Decisions(investigation("List files"), investigations=[[
+        [
+            evidence_call("first", "list_files", **first),
+            evidence_call("second", "list_files", **second),
+        ],
+    ]])
+
+    result = workflow.start("session", "List the files", mode="debug", llm=model)
+
+    assert result.data["phase"] == "blocked"
+    assert "Choose distinct inspection operations" in result.message
+
+
+def test_investigation_list_files_distinguishes_audit_from_shallow_scope():
+    from mana_agent.agent.plan_service import FileListEvidence
+
+    shallow = FileListEvidence(tool="list_files", level=1, reason="List top-level files")
+    audit = FileListEvidence(tool="list_files", level=4, reason="Audit repository files")
+
+    assert shallow.fingerprint != audit.fingerprint
 
 
 def test_investigation_batch_resume_uses_completed_observations(mode_gateway, monkeypatch):
