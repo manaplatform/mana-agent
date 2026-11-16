@@ -40,6 +40,16 @@ The model-facing evidence schema now has separate file-read and discovery branch
 
 **Do not reintroduce** a shared evidence schema that allows level 4 or zero or multiple paths for a file read. Keep wider discovery and exact reads as separate model selections.
 
+## Decision activity and provider stops
+
+A Debug turn appeared to stall at “Task started” and eventually displayed `Invalid or unavailable ModeDecision model decision (InvalidResponseError)`. The conversation journal recorded two model requests and zero tool starts. The first model response arrived after about 33 seconds. The second request failed after about 108 seconds and used 26,214 output tokens, matching the configured output limit inferred from the recorded model and budget. The journal retained the error class and usage, and the provider's stop reason could not be recovered.
+
+The mode workflow used the frontend turn ID for the supervisor's lifecycle events, then switched the model and tool activity to the task ID when it established the attempt scope. The frontend consequently missed progress on the visible turn. Also, PlanService replaced invalid-response diagnostics with the exception type. Existing workflow fixtures advanced scripted decisions and did not assert that lifecycle, model, and tool events appeared together in the turn journal.
+
+The mode workflow now keeps the frontend turn ID and redaction context for activity within the same session. Background work can recover the originating turn ID from the supervisor record. Task ID, attempt generation, and lease checks continue to fence publication. Chat Completions token-limit and filter stops, plus explicit refusals and empty responses, can carry application-authored detail into the failed model event and the mode result. Unknown failures get a generic diagnostic. Provider stops still end the decision without selecting another action. There is no migration for existing tasks.
+
+**Do not reintroduce** substituting the task ID for an available frontend turn ID, publishing provider response text as failure detail, or automatically retrying a provider stop by increasing its budget or changing models.
+
 ## Verification
 
 Run `venv/bin/python -m pytest tests/test_execution_modes.py tests/test_chat_planning_mode.py tests/test_chat_command_dispatcher.py tests/test_cli_modes_skills.py tests/gateway/test_debug_plan_mode_contract.py tests/test_codex_integration.py -q`. The gateway tests use deterministic model responses and isolated inboxes. The Codex protocol test uses an app-server fixture. Live acceptance requires an authorized provider and a local Docker image with the target project's test dependencies.
@@ -49,3 +59,5 @@ To verify the validation repair, run `venv/bin/python -m pytest tests/llm/test_e
 Run `venv/bin/python -m pytest tests/llm/test_providers.py -k 'native_mode_decision or native_debug_report' -q` to exercise the real Responses and Chat Completions decoder against local fixtures. The tests verify that the schema rejects the old wire shape, accepts typed records, rejects duplicate paths, and preserves the approval digest. Live provider acceptance remains unverified.
 
 For file-read evidence, run `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'mode_evidence or mode_decision or repository_audit'`. These fixtures cover rejection of invalid file-read shapes, the same-format correction, and a narrow read after an explicit repository audit. The agent has not run these checks or exercised a live provider. Restart Mana-Agent from the updated checkout and use `/task resume <task-id>` to exercise the original blocked investigation.
+
+For the activity and provider-stop regression, run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py::test_debug_mode_activity_keeps_the_frontend_turn tests/llm/test_engine.py::test_mode_decision_reports_why_the_provider_stopped_correction`. The first fixture checks that task, model, and tool events share the originating turn and retain redaction. The second checks the provider stop diagnostic and the two-request limit. The agent did not run these checks. Live terminal acceptance can use a local fixture that asks Debug to inspect a reported file.

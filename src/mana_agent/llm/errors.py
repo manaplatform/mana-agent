@@ -12,7 +12,10 @@ class CapabilityError(InferenceError):
     pass
 
 class InvalidResponseError(InferenceError):
-    pass
+    def __init__(self, message: str, *, public_detail: str = ""):
+        super().__init__(message)
+        # Only application-authored descriptions belong in public activity.
+        self.public_detail = public_detail
 
 class StructuredOutputError(InvalidResponseError, ValueError):
     """A schema-constrained response failed validation. The message contains no input values."""

@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Plan and Debug now keep live model and tool activity on the originating turn. Chat Completions output-limit and filter stops surface safe diagnostics in the model activity and mode result. See [decision activity and provider stops](docs/regressions/debug-plan-execution-contract.md#decision-activity-and-provider-stops).
+- User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py::test_debug_mode_activity_keeps_the_frontend_turn tests/llm/test_engine.py::test_mode_decision_reports_why_the_provider_stopped_correction`.
 - Plan and Debug evidence schemas now require one path and levels 1–3 for file reads. The decision prompt directs known-file reads to level 1 even after repository-wide discovery. See [file-read evidence regression](docs/regressions/debug-plan-execution-contract.md#file-read-evidence-regression).
 - User verification: `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'mode_evidence or mode_decision or repository_audit'`.
 - Repository discovery: remove eager index and checkout scans from native Chat and Coding, scope repository tools to model-selected paths, and share the same search behavior with Plan and Debug. Explicit audits remain available, valid file evidence can be reused, and strictly read-only commands skip mutation snapshots. See [intent-driven discovery regression notes](docs/regressions/intent-driven-repository-discovery.md).

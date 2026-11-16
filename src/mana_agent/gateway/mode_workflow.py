@@ -27,7 +27,7 @@ from mana_agent.human_inbox.models import (
     ReviewerAssignment, ReviewerType, ResponseOperation, ResponseSubmission, canonical_digest,
 )
 from mana_agent.multi_agent.core.types import TaskStatus
-from mana_agent.services.activity_context import ActivityContext, activity_scope, emit_activity
+from mana_agent.services.activity_context import ActivityContext, activity_scope, current_activity_context, emit_activity
 from mana_agent.tools.apply_patch import extract_patch_operations, safe_apply_patch
 from mana_agent.utils.redaction import redact_secrets
 
@@ -133,11 +133,13 @@ class ModeWorkflow:
                 return self.describe(current)
         if not task_id:
             record = self.gateway._workspaces.store.get_session(session_id)
+            activity = current_activity_context()
             reservation = self.lane.reserve(
                 normalized_intent=f"{mode}: {goal}",
                 lane_id=LaneId.RESEARCH,
                 session_id=session_id, workspace_id=record.workspace_id,
                 repository_id=record.primary_repository_id,
+                trigger_turn_id=activity.execution_id if activity and activity.conversation_id == session_id else "",
             )
             task_id = reservation.execution.task_id
             if reservation.duplicate:
@@ -165,6 +167,10 @@ class ModeWorkflow:
         execution = self.lane.inspect_task(task_id)
         durable = supervisor.get_task(task_id)
         task = self.board.get_task(task_id)
+        activity = current_activity_context()
+        if activity and activity.conversation_id != task.session_id:
+            activity = None
+        turn_id = activity.execution_id if activity else ""
         governor = getattr(getattr(self.gateway, "_stack", None), "context_cost_governor", None)
         identity = governor.scoped_execution_identity(
             task_id=task_id, root_task_id=task.root_task_id, attempt_id=durable.attempt_id,
@@ -172,10 +178,14 @@ class ModeWorkflow:
             route=state["mode"], lane=execution.owning_lane.value, execution_kind="repository_mode",
         ) if governor else nullcontext()
         with identity, activity_scope(ActivityContext(
-            conversation_id=task.session_id, execution_id=task_id, task_id=task_id,
+            conversation_id=task.session_id,
+            execution_id=turn_id or durable.trigger_turn_id or task_id,
+            task_id=task_id,
             root_task_id=task.root_task_id, repository_id=task.primary_repository_id,
             attempt_id=execution.supervisor_attempt_id, lease_token=execution.supervisor_lease_token,
             attempt_generation=durable.attempt_generation, supervisor=supervisor,
+            protected_text=activity.protected_text if activity else (),
+            execution_lane=execution.owning_lane.value,
             taskboard=self.board, execution_mode="read_only" if read_only else "act",
         )):
             yield

@@ -162,6 +162,43 @@ def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion
     assert opened == ["app.py"]
 
 
+def test_debug_mode_activity_keeps_the_frontend_turn(mode_gateway):
+    from mana_agent.services.activity_context import ActivityContext, activity_scope, emit_activity
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+    gateway, workflow = mode_gateway
+    repository = gateway._workspaces.store.get_session("session").primary_repository_id
+
+    class ObservedDecisions(Decisions):
+        def decide_sync(self, messages, schema):
+            if not self.inputs:
+                emit_activity("model.started", title="Waiting for model", status="running",
+                              summary="fixture-protected-text", operation_id="fixture-decision")
+            return super().decide_sync(messages, schema)
+
+    model = ObservedDecisions(
+        {"action": "inspect", "reason": "Read the reported file", "evidence": {
+            "tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file"}},
+        {"action": "diagnose", "reason": "The file contains the old value", "root_cause": "Old handler value",
+         "cause_evidence": ["evidence-1"]},
+    )
+    context = ActivityContext(conversation_id="session", execution_id="turn-mode-activity",
+                              repository_id=repository, protected_text=("fixture-protected-text",))
+    with activity_scope(context):
+        result = workflow.start("session", "Inspect the old value", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    task_id = result.data["task_id"]
+    assert workflow.lane.execution_supervisor.get_task(task_id).trigger_turn_id == context.execution_id
+    events = get_execution_event_hub().history(conversation_id="session", repository_id=repository,
+                                               execution_id=context.execution_id)
+    by_type = {event["type"]: event for event in events if event.get("task_id") == task_id}
+    for kind in ("task.started", "model.started", "tool.started", "tool.completed", "task.completed"):
+        assert by_type[kind]["execution_id"] == context.execution_id
+    assert by_type["tool.started"]["tool_name"] == "read_file"
+    assert "fixture-protected-text" not in by_type["model.started"]["summary"]
+
+
 def test_debug_reads_a_known_file_after_a_repository_audit(mode_gateway):
     _, workflow = mode_gateway
     model = Decisions(

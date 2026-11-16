@@ -257,11 +257,13 @@ class NativeLLMEngine:
 
     def _complete(self, request: InferenceRequest, response: ModelResponse, reservation: str, started: float) -> None:
         if response.refusal:
-            error = InvalidResponseError("Selected provider refused the request")
+            detail = "Selected provider refused the request"
+            error = InvalidResponseError(detail, public_detail=detail)
             error.provider_usage, error.response_accepted = response.usage.model_dump(), True
             raise error
         if not response.content and not response.tool_calls and not response.protocol_pending:
-            error = InvalidResponseError("Empty inference output is not completion evidence")
+            error = InvalidResponseError("Empty inference output is not completion evidence",
+                                         public_detail="The provider returned an empty response.")
             error.provider_usage, error.response_accepted = response.usage.model_dump(), True
             raise error
         try:
@@ -308,6 +310,7 @@ class NativeLLMEngine:
             else:
                 self.context_cost_governor.release_reservation(reservation, reason=f"Inference failed: {type(exc).__name__}")
         _emit_inference_activity("model.failed", title="Model request failed", status="failed", operation_id=request.request_id,
+                      summary=exc.public_detail if isinstance(exc, InvalidResponseError) else "",
             metadata={"provider": request.provider, "model": request.model, "error_type": type(exc).__name__})
 
     async def _refresh_metadata(self) -> None:

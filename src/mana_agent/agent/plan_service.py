@@ -15,7 +15,12 @@ from mana_agent.agent.mode import DecisionEntries, ModeContract, PlanDraft, Plan
 from mana_agent.coding_research_contracts import CodingDebuggingReport
 from mana_agent.human_inbox.models import canonical_digest
 from mana_agent.llm.engine import NativeLLMEngine
-from mana_agent.llm.errors import StructuredOutputError, describe_decision_validation
+from mana_agent.llm.errors import (
+    InferenceTimeoutError,
+    InvalidResponseError,
+    StructuredOutputError,
+    describe_decision_validation,
+)
 from mana_agent.llm.messages import SystemMessage, UserMessage
 from mana_agent.prompting.repo_rules import render_repo_rules
 from mana_agent.tools.repository import execute_repository_discovery
@@ -152,6 +157,11 @@ class PlanService:
             raise RuntimeError(f"Invalid {schema.__name__} model decision. {detail}") from None
         except StructuredOutputError as exc:
             raise RuntimeError(f"Invalid {schema.__name__} model decision. {exc}") from None
+        except InvalidResponseError as exc:
+            detail = exc.public_detail or "The selected provider returned an unusable response."
+            raise RuntimeError(f"Invalid {schema.__name__} model decision. {detail}") from None
+        except InferenceTimeoutError:
+            raise RuntimeError(f"The selected provider timed out while producing a {schema.__name__} model decision.") from None
         except Exception as exc:
             raise RuntimeError(f"Invalid or unavailable {schema.__name__} model decision ({type(exc).__name__})") from None
 

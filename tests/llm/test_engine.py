@@ -208,3 +208,42 @@ def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path,
     assert "unknown-private-key" not in str(exc.value)
     assert "rejected-private-value" not in str(exc.value)
     assert "rejected-private-value" not in request_log[1].messages[-1].content
+
+
+@pytest.mark.parametrize(("finish_reason", "detail"), [
+    ("length", "The provider reached the output-token limit"),
+    ("content_filter", "The provider's content filter stopped the response."),
+])
+def test_mode_decision_reports_why_the_provider_stopped_correction(
+    tmp_path, native_profile, monkeypatch, finish_reason, detail,
+):
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.providers.openai import OpenAIProvider
+
+    provider = OpenAIProvider(provider="openrouter", api_key="test", base_url="https://example.org",
+                              endpoint="chat_completions")
+    requests, activity = [], []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            if len(requests) == 1:
+                return ModelResponse(content='{"action":"draft","reason":"Missing draft"}')
+            return provider.normalize({"choices": [{
+                "finish_reason": finish_reason, "message": {"content": "fixture-protected-response"},
+            }]}, request)
+
+    monkeypatch.setattr("mana_agent.llm.engine._emit_inference_activity",
+                        lambda event, **fields: activity.append((event, fields)))
+    service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
+    with pytest.raises(RuntimeError, match="Invalid ModeDecision model decision") as exc:
+        service.next_decision("plan", {"request": "Plan a fix for the handler"})
+
+    assert len(requests) == 2
+    assert requests[0].response_schema == requests[1].response_schema
+    assert detail in str(exc.value)
+    failed = next(fields for event, fields in activity if event == "model.failed")
+    assert detail in failed["summary"]
+    assert failed["operation_id"] == requests[-1].request_id
+    assert "fixture-protected-response" not in str(exc.value)
+    assert "fixture-protected-response" not in str(activity)
