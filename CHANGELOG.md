@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Plan and Debug evidence schemas now require one path and levels 1–3 for file reads. The decision prompt directs known-file reads to level 1 even after repository-wide discovery. See [file-read evidence regression](docs/regressions/debug-plan-execution-contract.md#file-read-evidence-regression).
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'mode_evidence or mode_decision or repository_audit'`.
 - Repository discovery: remove eager index and checkout scans from native Chat and Coding, scope repository tools to model-selected paths, and share the same search behavior with Plan and Debug. Explicit audits remain available, valid file evidence can be reused, and strictly read-only commands skip mutation snapshots. See [intent-driven discovery regression notes](docs/regressions/intent-driven-repository-discovery.md).
 - Verification to reproduce: `python -m pytest -q tests/test_intent_driven_discovery.py tests/test_ask_agent.py tests/test_ask_service.py tests/test_ask_entry_router.py tests/gateway/test_debug_plan_mode_contract.py`.
 - Debug and Plan modes now use scoped repository evidence and share the gateway across terminal entry points. Debug expands investigation only when earlier evidence warrants it. Plan retains clarification decisions, binds approval to one durable revision, and checks each step before applying a patch from either coding engine.

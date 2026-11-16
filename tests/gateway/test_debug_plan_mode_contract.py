@@ -162,6 +162,29 @@ def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion
     assert opened == ["app.py"]
 
 
+def test_debug_reads_a_known_file_after_a_repository_audit(mode_gateway):
+    _, workflow = mode_gateway
+    model = Decisions(
+        {"action": "inspect", "reason": "Explicit repository audit", "evidence": {
+            "tool": "repo_search", "level": 4, "query": "before", "reason": "Find uses of the unexpected value",
+            "initial_repository_scope": "explicit_audit"}},
+        {"action": "inspect", "reason": "Read the matching file", "evidence": {
+            "tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Inspect the search match",
+            "prior_evidence": ["evidence-1"]}},
+        {"action": "diagnose", "reason": "The file contains the unexpected value",
+         "root_cause": "The handler returns the old value.", "cause_evidence": ["evidence-2"]},
+    )
+
+    result = workflow.start("session", "Audit the repository for the old value", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    search, read = model.inputs[-1]["evidence"]
+    assert search["level"] == 4
+    assert search["result"]["matches"][0]["file"] == "app.py"
+    assert read["level"] == 1
+    assert read["result"]["content"] == "before\n"
+
+
 def test_exact_patch_operations_and_protected_paths(tmp_path):
     (tmp_path / "app.py").write_text("before\n")
     step = PlanStep(step_id="fix", instruction="Fix the handler", changes={"app.py": ["update"]},

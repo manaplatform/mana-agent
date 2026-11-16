@@ -158,6 +158,38 @@ def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
         decode_structured('{"arguments":"invalid JSON"}', schema)
 
 
+def test_mode_evidence_wire_schema_separates_file_reads_from_discovery():
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import decode_structured, strict_schema
+
+    schema = ModeDecision.model_json_schema()
+    wire = strict_schema(schema)
+    read_fields = wire["$defs"]["FileReadEvidence"]["properties"]
+    assert read_fields["level"]["enum"] == [1, 2, 3]
+    assert read_fields["paths"]["minItems"] == read_fields["paths"]["maxItems"] == 1
+
+    read = ModeDecision.model_validate({
+        "action": "inspect", "reason": "Read the reported location",
+        "evidence": {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file"},
+    })
+    search = ModeDecision.model_validate({
+        "action": "inspect", "reason": "Audit the requested repository",
+        "evidence": {"tool": "repo_search", "level": 4, "query": "target", "reason": "Explicit repository audit",
+                     "initial_repository_scope": "explicit_audit"},
+    })
+    for decision in (read, search):
+        encoded = decision.model_dump_json()
+        decoded = decode_structured(encoded, schema)
+        assert ModeDecision.model_validate_json(decoded, strict=True) == decision
+
+    for invalid in ({"level": 4}, {"paths": []}, {"paths": ["app.py", "other.py"]},
+                    {"initial_repository_scope": "explicit_audit"}):
+        payload = read.model_dump(mode="json")
+        payload["evidence"].update(invalid)
+        with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
+            decode_structured(json.dumps(payload), schema)
+
+
 @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
 def test_native_mode_decision_uses_typed_records_and_preserves_plan_digest(endpoint):
     from mana_agent.agent.mode import PlanRevision

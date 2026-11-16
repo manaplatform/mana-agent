@@ -56,6 +56,19 @@ class EvidenceRequest(ModeContract):
         }))
 
 
+class FileReadEvidence(EvidenceRequest):
+    tool: Literal["read_file"]
+    level: Literal[1, 2, 3]
+    paths: tuple[str, ...] = Field(
+        min_length=1, max_length=1, description="Exactly one canonical repository-relative file path.",
+    )
+    initial_repository_scope: Literal[""] = ""
+
+
+class RepositoryDiscoveryEvidence(EvidenceRequest):
+    tool: Literal["repo_search", "list_files", "find_symbols", "call_graph"]
+
+
 class Question(ModeContract):
     field_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     prompt: str = Field(min_length=1)
@@ -83,7 +96,7 @@ class ModeDebuggingReport(CodingDebuggingReport):
 class ModeDecision(ModeContract):
     action: Literal["inspect", "clarify", "draft", "diagnose", "repair", "research", "block"]
     reason: str = Field(min_length=1)
-    evidence: EvidenceRequest | None = None
+    evidence: FileReadEvidence | RepositoryDiscoveryEvidence | None = None
     questions: tuple[Question, ...] = ()
     draft: PlanDraft | None = None
     root_cause: str = ""
@@ -151,8 +164,11 @@ class PlanService:
             "If recommending a choice, use its exact value. "
             "Start with exact locations, failing commands, symbols, and direct evidence. Inspect with "
             "bounded repository paths or targeted filename globs and cite earlier observations before widening. "
-            "Use level 4 only for a documented gap after narrower investigation or for an explicit audit "
-            "or architecture-wide request (select initial_repository_scope). Avoid repeated reads. "
+            "Choose the level for the current operation. For read_file, put exactly one repository-relative "
+            "file in paths, leave initial_repository_scope empty, and use level 1 for a known file even after "
+            "a broader search. To read multiple files, select one per decision. "
+            "Use level 4 only with a discovery tool for a documented gap after narrower investigation or for "
+            "an explicit audit or architecture-wide request (select initial_repository_scope). Avoid repeated reads. "
             "Plan mode may inspect, clarify, draft or block. Populate only the payload for the chosen "
             "action. List each step's changes as records with a repository-relative path and a nonempty "
             "list of operations (add, update or delete). Use an empty changes list for verification-only "

@@ -147,6 +147,44 @@ def test_mode_decision_repairs_semantic_failure_on_selected_strategy(tmp_path, n
     assert "draft and repair need a draft" in request_log[1].messages[-1].content
 
 
+@pytest.mark.parametrize("strategy", ["native", "tool", "text"])
+@pytest.mark.parametrize("invalid_fields", [{"level": 4}, {"paths": []}, {"paths": ["app.py", "other.py"]}])
+def test_mode_decision_corrects_invalid_file_read(tmp_path, native_profile, monkeypatch, strategy, invalid_fields):
+    import json
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.messages import ToolCall
+
+    if strategy != "native":
+        native_profile.facts.pop("native_structured_output")
+    if strategy == "text":
+        native_profile.facts.pop("tool_calling")
+
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            evidence = {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file"}
+            if len(requests) == 1:
+                evidence.update(invalid_fields)
+            args = {"action": "inspect", "reason": "Read the reported location", "evidence": evidence}
+            if request.tools:
+                return ModelResponse(tool_calls=[ToolCall(id="read-decision", name="record_decision", args=args)])
+            return ModelResponse(content=json.dumps(args))
+
+    (tmp_path / "app.py").write_text("target\n", encoding="utf-8")
+    service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
+    decision = service.next_decision("debug", {"request": "Inspect app.py"})
+
+    assert len(requests) == 2
+    assert "put exactly one repository-relative file in paths" in requests[0].messages[0].content
+    assert "The decision was invalid." in requests[1].messages[-1].content
+    assert decision.evidence.paths == ("app.py",)
+    assert decision.evidence.level == 1
+    assert service.inspect(decision.evidence)["content"] == "target\n"
+
+
 def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path, native_profile, monkeypatch):
     import json
 
@@ -159,12 +197,12 @@ def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path,
             request_log.append(request)
             return ModelResponse(content=json.dumps({
                 "action": "inspect", "reason": "Inspect evidence",
-                "evidence": {"tool": "read_file", "level": 1, "paths": ["a.py", "b.py"], "reason": "Evidence",
+                "evidence": {"tool": "read_file", "level": 1, "paths": ["a.py"], "reason": "Evidence",
                              "unknown-private-key": "rejected-private-value"},
             }))
 
     model = engine(native_profile, monkeypatch, Adapter())
-    with pytest.raises(RuntimeError, match=r"ModeDecision.*evidence\.<key>.*extra forbidden") as exc:
+    with pytest.raises(RuntimeError, match=r"ModeDecision.*evidence\.<key>\.<key>.*extra forbidden") as exc:
         PlanService(tmp_path, llm=model).next_decision("plan", {"request": "Inspect the entry point"})
     assert len(request_log) == 2
     assert "unknown-private-key" not in str(exc.value)

@@ -32,6 +32,14 @@ Mode decision schemas now advertise lists of typed records. A file record requir
 
 **Do not reintroduce** JSON strings for typed Mode decision fields or silently collapse repeated file paths and choice values into one entry.
 
+## File-read evidence regression
+
+Plan and Debug could stop with `Invalid ModeDecision model decision` after both responses selected `read_file` with multiple paths, no paths, or level 4. The error grouped path count and level, so the reported failure alone does not identify which field was invalid. The schema exposed the same path list and levels for every tool. A decision could therefore satisfy the provider schema and still fail the application's file-read check. Earlier workflow fixtures supplied valid narrow reads and skipped this mismatch.
+
+The model-facing evidence schema now has separate file-read and discovery branches. A file read requires exactly one repository-relative path, a level from 1 to 3, and an empty initial repository scope. Level 4 remains available to discovery tools under the existing expansion and audit rules. The prompt tells the model to select a level-1 read for a known file, including after wider discovery, and to select each additional read in a separate decision. Path checks, bounded line reads, and the limit of one correction on the selected model and response format still apply. Saved evidence fingerprints and plan approval records use their existing formats.
+
+**Do not reintroduce** a shared evidence schema that allows level 4 or zero or multiple paths for a file read. Keep wider discovery and exact reads as separate model selections.
+
 ## Verification
 
 Run `venv/bin/python -m pytest tests/test_execution_modes.py tests/test_chat_planning_mode.py tests/test_chat_command_dispatcher.py tests/test_cli_modes_skills.py tests/gateway/test_debug_plan_mode_contract.py tests/test_codex_integration.py -q`. The gateway tests use deterministic model responses and isolated inboxes. The Codex protocol test uses an app-server fixture. Live acceptance requires an authorized provider and a local Docker image with the target project's test dependencies.
@@ -39,3 +47,5 @@ Run `venv/bin/python -m pytest tests/test_execution_modes.py tests/test_chat_pla
 To verify the validation repair, run `venv/bin/python -m pytest tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -q`. The inference tests exercise native, tool, and text responses with local fixtures and assert that no rejected values are surfaced.
 
 Run `venv/bin/python -m pytest tests/llm/test_providers.py -k 'native_mode_decision or native_debug_report' -q` to exercise the real Responses and Chat Completions decoder against local fixtures. The tests verify that the schema rejects the old wire shape, accepts typed records, rejects duplicate paths, and preserves the approval digest. Live provider acceptance remains unverified.
+
+For file-read evidence, run `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'mode_evidence or mode_decision or repository_audit'`. These fixtures cover rejection of invalid file-read shapes, the same-format correction, and a narrow read after an explicit repository audit. The agent has not run these checks or exercised a live provider. Restart Mana-Agent from the updated checkout and use `/task resume <task-id>` to exercise the original blocked investigation.
