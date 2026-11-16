@@ -145,8 +145,7 @@ def test_mode_decision_repairs_semantic_failure_on_selected_strategy(tmp_path, n
 
 
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])
-@pytest.mark.parametrize("invalid_fields", [{"level": 4}, {"paths": []}, {"paths": ["app.py", "other.py"]}])
-def test_mode_decision_corrects_invalid_file_read(tmp_path, native_profile, monkeypatch, strategy, invalid_fields):
+def test_mode_decision_corrects_a_repeated_investigation_handoff(tmp_path, native_profile, monkeypatch, strategy):
     import json
 
     from mana_agent.agent.plan_service import PlanService
@@ -162,106 +161,25 @@ def test_mode_decision_corrects_invalid_file_read(tmp_path, native_profile, monk
     class Adapter:
         async def generate(self, request):
             requests.append(request)
-            evidence = {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file"}
-            if len(requests) == 1:
-                evidence.update(invalid_fields)
-            args = {"decision": {"action": "inspect", "reason": "Read the reported location", "evidence": evidence}}
+            action = (
+                {"action": "investigate", "reason": "Check the source again", "objective": "Explain the old result",
+                 "scope": "app.py"}
+                if len(requests) == 1 else {"action": "block", "reason": "The existing observations are insufficient"}
+            )
+            args = {"decision": action}
             if request.tools:
-                return ModelResponse(tool_calls=[ToolCall(id="read-decision", name="record_decision", args=args)])
+                return ModelResponse(tool_calls=[ToolCall(id="mode-decision", name="record_decision", args=args)])
             return ModelResponse(content=json.dumps(args))
 
-    (tmp_path / "app.py").write_text("target\n", encoding="utf-8")
     service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
-    decision = service.next_decision("debug", {"request": "Inspect app.py"})
-
-    assert len(requests) == 2
-    assert "put exactly one repository-relative file in paths" in requests[0].messages[0].content
-    assert "The decision was invalid." in requests[1].messages[-1].content
-    assert decision.evidence.paths == ("app.py",)
-    assert decision.evidence.level == 1
-    assert service.inspect(decision.evidence)["content"] == "target\n"
-
-
-@pytest.mark.parametrize("invalid_fields,detail", [
-    ({"level": 3}, "The next permitted level is 2."),
-    ({"prior_evidence": []}, "Levels above 1 require prior_evidence IDs."),
-    ({"prior_evidence": ["fixture-rejected-id"]}, "Use only prior_evidence IDs from evidence_levels."),
-    ({"prior_evidence": ["evidence-2"]}, "cite at least one prior_evidence ID from level 1."),
-])
-def test_mode_decision_corrects_investigation_scope(tmp_path, native_profile, monkeypatch, invalid_fields, detail):
-    import json
-
-    from mana_agent.agent.plan_service import InvestigationScope, PlanService
-
-    requests = []
-
-    class Adapter:
-        async def generate(self, request):
-            requests.append(request)
-            evidence = {
-                "tool": "repo_search", "level": 2, "paths": ["app.py"], "query": "target",
-                "prior_evidence": ["evidence-1"], "reason": "Follow up on the earlier observation",
-            }
-            if len(requests) == 1:
-                evidence.update(invalid_fields)
-            return ModelResponse(content=json.dumps({"decision": {
-                "action": "inspect", "reason": "Inspect the local handler", "evidence": evidence,
-            }}))
-
-    service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
-    # An older result can fall outside the detailed history window while its ID still applies.
-    recent = [{"id": "evidence-2", "level": 0, "result": {}}]
-    scope = InvestigationScope({"evidence-1": 1, "evidence-2": 0})
-    decision = service.next_decision("debug", {"request": "Inspect app.py", "evidence": recent},
-                                     investigation_scope=scope)
+    decision = service.next_decision("debug", {"request": "Inspect app.py"}, investigation_available=False)
 
     assert len(requests) == 2
     assert requests[0].response_schema == requests[1].response_schema
+    assert not json.loads(requests[0].messages[1].content)["investigation_available"]
+    assert "Investigation is unavailable for this decision." in requests[1].messages[-1].content
     assert "validation_context" not in requests[0].parameters
-    data = json.loads(requests[0].messages[1].content)
-    assert data["evidence"] == recent
-    assert data["investigation_scope"] == {
-        "highest_observed_level": 1, "max_next_level": 2, "evidence_levels": scope.evidence_levels,
-    }
-    correction = requests[1].messages[-1].content
-    assert detail in correction
-    assert "fixture-rejected-id" not in correction
-    assert decision.evidence.level == 2
-    assert decision.evidence.prior_evidence == ("evidence-1",)
-
-
-def test_investigation_batch_corrects_glob_used_as_a_literal_path(tmp_path, native_profile, monkeypatch):
-    import json
-
-    from mana_agent.agent.plan_service import PlanService
-
-    requests = []
-
-    class Adapter:
-        async def generate(self, request):
-            requests.append(request)
-            search = {"tool": "list_files", "level": 1, "paths": ["tests"], "glob": "tests/**/*.py",
-                      "reason": "Locate the reported test"}
-            if len(requests) == 1:
-                search["paths"] = ["tests/**/*.py"]
-            return ModelResponse(content=json.dumps({"decision": {
-                "action": "inspect_batch", "reason": "Inspect the handler and locate its test",
-                "evidence": [
-                    {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Inspect the handler"},
-                    search,
-                ],
-            }}))
-
-    service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
-    decision = service.next_decision("debug", {"request": "Inspect the handler and locate its test"})
-
-    assert len(requests) == 2
-    assert requests[0].response_schema == requests[1].response_schema
-    correction = requests[1].messages[-1].content
-    assert "Discovery paths must name files or directories inside the repository" in correction
-    assert "tests/**/*.py" not in correction
-    assert decision.action == "inspect_batch"
-    assert decision.evidence[1].paths == ("tests",)
+    assert decision.action == "block"
 
 
 def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path, native_profile, monkeypatch):
@@ -275,13 +193,12 @@ def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path,
         async def generate(self, request):
             request_log.append(request)
             return ModelResponse(content=json.dumps({"decision": {
-                "action": "inspect", "reason": "Inspect evidence",
-                "evidence": {"tool": "read_file", "level": 1, "paths": ["a.py"], "reason": "Evidence",
-                             "unknown-private-key": "rejected-private-value"},
+                "action": "investigate", "reason": "Inspect evidence", "objective": "Explain the behavior",
+                "scope": "a.py", "unknown-private-key": "rejected-private-value",
             }}))
 
     model = engine(native_profile, monkeypatch, Adapter())
-    with pytest.raises(RuntimeError, match=r"ModeDecision.*decision\..*evidence\..*extra forbidden") as exc:
+    with pytest.raises(RuntimeError, match=r"ModeDecision.*decision\..*extra forbidden") as exc:
         PlanService(tmp_path, llm=model).next_decision("plan", {"request": "Inspect the entry point"})
     assert len(request_log) == 2
     assert "unknown-private-key" not in str(exc.value)

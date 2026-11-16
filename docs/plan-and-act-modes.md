@@ -4,6 +4,8 @@ Describe the repository change or problem in ordinary chat. The gateway model se
 
 When Mana needs your answers in any of these workflows, the task pauses at its saved checkpoint. The TUI opens an answer form and interactive console chat asks for each answer. After submission, Mana continues the same task with its existing evidence. Choose **Later** or press Enter at a console answer prompt to leave the task pending in chat. You can also submit the full set with `/inbox answer <item-id> '<JSON answers keyed by question ID>'`, or use `mana-agent inbox answer <item-id> --answer '<JSON answers keyed by question ID>'` from a separate terminal.
 
+When Mana needs repository evidence, the main agent delegates one focused question to a read-only coding session on the selected chat model. The model uses native tools for related searches and file reads. The main agent saves the observations on TaskBoard, then decides whether to diagnose, draft, ask a question, or stop. Each investigation has one bounded allowance and reports any gaps it could not resolve.
+
 ## Implement a change
 
 AUTO starts with scoped repository observations, records an internal plan and its verification requirements on TaskBoard, and executes the plan through the configured CodingAgent. The gateway projects the workflow on the same task through integration, testing, and review. Runtime capabilities require evidence from the existing feature integration coordinator before they are reported as complete. An internal plan has no separate PLAN approval step. Tool and action approvals still apply.

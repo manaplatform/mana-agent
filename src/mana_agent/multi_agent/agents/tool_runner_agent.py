@@ -57,6 +57,7 @@ class ToolExecutionAuthority:
     cancel: Callable[[], bool] = field(default=lambda: False, repr=False)
     authorize: Callable[[str], Any] | None = field(default=None, repr=False)
     taskboard: Any = field(default=None, repr=False, compare=False)
+    record_taskboard_evidence: bool = True
     registry: Any = field(default=None, repr=False, compare=False)
     externally_locked: bool = field(default=False, repr=False)
     scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -67,7 +68,8 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
                         policies: Mapping[str, OperationPolicy], schemas: Mapping[str, dict[str, Any]],
                         cancel: Callable[[], bool] = lambda: False,
                         authorize: Callable[[str], Any] | None = None, taskboard=None,
-                        worker_id: str = "", externally_locked: bool = False) -> ToolExecutionAuthority:
+                        worker_id: str = "", externally_locked: bool = False,
+                        record_taskboard_evidence: bool = True) -> ToolExecutionAuthority:
     """Host-only binding after lane admission, with exact registered identities."""
     node = registry.agents.get(actor_id)
     if node is None or node.state == AgentState.DONE or node.role in {AgentRole.MAIN, AgentRole.HEAD_DECISION, AgentRole.TOOL_WORKER}:
@@ -110,7 +112,7 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
     return ToolExecutionAuthority(task_id=task_id, actor_id=actor_id, actor_role=node.role, worker_id=worker.agent_id,
         workspace=workspace, policies=MappingProxyType(dict(policies)), schemas=MappingProxyType(dict(schemas)),
         activity=context, cancel=cancel, authorize=authorize, taskboard=taskboard, registry=registry,
-        externally_locked=externally_locked, seal=_SEAL)
+        externally_locked=externally_locked, record_taskboard_evidence=record_taskboard_evidence, seal=_SEAL)
 
 
 def current_operation() -> "RunningOperation | None":
@@ -277,7 +279,8 @@ class RunningOperation:
                 visibility="progress", semantic_kind="tool_execution", payload={**metadata, "status": status})
             if publish_coding_event(event) is False:
                 self.trace_complete = False
-            if self.authority.taskboard is not None and event_type in {"tool.completed", "tool.failed", "tool.interrupted", "tool.cancelled", "tool.waiting"}:
+            if (self.authority.taskboard is not None and self.authority.record_taskboard_evidence
+                    and event_type in {"tool.completed", "tool.failed", "tool.interrupted", "tool.cancelled", "tool.waiting"}):
                 try:
                     context = self.authority.activity
                     with context.publication() if context else nullcontext():

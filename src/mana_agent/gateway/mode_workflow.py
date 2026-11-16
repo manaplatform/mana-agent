@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict
+from copy import copy
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import getpass
 from hashlib import sha256
@@ -18,9 +19,14 @@ import time
 from typing import Any
 
 from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
-from mana_agent.agent.plan_service import EvidenceRequest, InvestigationScope, PlanService
+from mana_agent.agent.plan_service import InvestigateDecision, PlanService
+from mana_agent.agent.repository_investigation import (
+    InvestigationAllowance, MAX_MODEL_TURNS, MAX_TOOL_CALLS, compact_observation, investigation_scope,
+    read_tool_schemas, run_repository_investigation,
+)
 from mana_agent.batch.policy import BatchPending, TaskExecutionPolicy
 from mana_agent.chat_commands.models import CommandResult
+from mana_agent.execution_supervisor.errors import StaleLeaseError
 from mana_agent.execution_supervisor.models import ExecutionState
 from mana_agent.gateway.lane_coordinator import LaneReservation
 from mana_agent.gateway.lanes import LaneId, LaneTaskState
@@ -57,7 +63,8 @@ class VerificationFailed(RuntimeError):
 _TERMINAL = {Phase.COMPLETED, Phase.CANCELLED}
 _TRANSITIONS = {
     Phase.UNDERSTANDING: {Phase.INVESTIGATING, Phase.CLARIFICATION_REQUIRED, Phase.DRAFTING_PLAN, Phase.COMPLETED},
-    Phase.INVESTIGATING: {Phase.INVESTIGATING, Phase.CLARIFICATION_REQUIRED, Phase.DRAFTING_PLAN, Phase.COMPLETED},
+    Phase.INVESTIGATING: {Phase.UNDERSTANDING, Phase.INVESTIGATING, Phase.CLARIFICATION_REQUIRED,
+                          Phase.DRAFTING_PLAN, Phase.COMPLETED},
     Phase.CLARIFICATION_REQUIRED: {Phase.UNDERSTANDING},
     Phase.DRAFTING_PLAN: {Phase.AWAITING_APPROVAL, Phase.APPROVED, Phase.COMPLETED},
     Phase.AWAITING_APPROVAL: {Phase.APPROVED, Phase.UNDERSTANDING},
@@ -71,13 +78,7 @@ _TRANSITIONS = {
 
 
 def _investigation_context(evidence: list[dict]) -> list[dict]:
-    observations = []
-    for item in evidence:
-        result = item["result"]
-        if item["level"] > 0 and isinstance(result, dict):
-            result = {key: value for key, value in result.items() if key not in {"execution", "mutations"}}
-        observations.append({"id": item["id"], "level": item["level"], "result": result})
-    return observations
+    return [compact_observation(item) for item in evidence]
 
 
 class ModeWorkflow:
@@ -116,10 +117,19 @@ class ModeWorkflow:
 
     def _service(self, *, state=None, llm=None):
         from mana_agent.gateway.turn_engine import agent_decision_llm
+        from mana_agent.llm.engine import NativeLLMEngine
 
+        state = state or {}
         if llm is None:
             llm = getattr(self.gateway._entry_router, "llm", None) or agent_decision_llm(self.gateway.get_ask_service())
-        return PlanService(self._workspace_root(state or {}), llm=llm)
+        if isinstance(llm, NativeLLMEngine):
+            llm = copy(llm)
+            saved = state.get("investigation") or {}
+            model = state.get("model") or saved.get("model")
+            provider = state.get("provider") or saved.get("provider")
+            if model and provider and (llm.model, llm.provider) != (model, provider):
+                llm.update_model_assignment(provider, model, settings=self.gateway.settings)
+        return PlanService(self._workspace_root(state), llm=llm)
 
     def active(self, session_id: str, *, mode: str = "plan"):
         tasks = self.board.store.repository.list_tasks(session_id=session_id)
@@ -213,8 +223,9 @@ class ModeWorkflow:
             if existing.get("plan"):
                 return self._execute(task_id, existing, self._service(state=existing, llm=llm))
             if existing["phase"] == Phase.BLOCKED:
+                existing["investigation_epoch"] = existing.get("investigation_epoch", 0) + 1
                 self._transition(task_id, existing, Phase.UNDERSTANDING)
-            return self._drive(task_id, existing, service=self._service(state=existing, llm=llm))
+            return self._drive(task_id, existing, llm=llm)
         state = {
             "schema_version": 1, "mode": mode, "phase": Phase.UNDERSTANDING.value,
             "goal": goal, "revision": 1, "constraints": {}, "evidence": [],
@@ -277,7 +288,7 @@ class ModeWorkflow:
         if workflow:
             with self._activity(task_id, state, read_only=True):
                 self._transition(task_id, state, Phase.UNDERSTANDING, state["mode_reason"])
-        return self._drive(task_id, state, service=self._service(state=state, llm=llm))
+        return self._drive(task_id, state, llm=llm)
 
     @contextmanager
     def _activity(self, task_id: str, state: dict, *, read_only: bool):
@@ -322,38 +333,65 @@ class ModeWorkflow:
             raise TimeoutError("The mode task reached its execution deadline")
         return task
 
-    def _drive(self, task_id: str, state: dict, *, service: PlanService) -> CommandResult:
+    def _drive(self, task_id: str, state: dict, *, service: PlanService | None = None, llm=None) -> CommandResult:
+        activity = None
         try:
             with self._activity(task_id, state, read_only=True):
+                activity = current_activity_context()
+                with activity.publication():
+                    handoff = state.get("investigation", {})
+                    if handoff.get("status") == "running" and handoff["attempt_id"] != activity.attempt_id:
+                        # The prior attempt's reserved allowance remains charged. Its saved reads are reusable.
+                        handoff["status"] = "interrupted"
+                        self._persist(task_id, state)
+                if service is None:
+                    service = self._service(state=state, llm=llm)
                 return self.gateway._autonomous_controller.drive_repository_workflow(
                     advance=lambda: self._advance_investigation(task_id, state, service),
                     decisions_used=lambda: state.get("decision_count", 0),
                     check_attempt=lambda: self._check_live(task_id),
                 )
         except Exception as exc:
+            durable = self.lane.execution_supervisor.get_task(task_id)
+            if (isinstance(exc, StaleLeaseError) or durable.cancellation_status is not None
+                    or (activity is not None and durable.attempt_id != activity.attempt_id)):
+                return CommandResult(status="error", message="The repository workflow attempt is no longer active.",
+                                     data={"task_id": task_id, "phase": self.board.get_task(task_id).mode_workflow["phase"],
+                                           "mode": state["mode"], "goal_satisfied": False})
             return self._block(task_id, state, str(redact_secrets(str(exc))))
 
     def _advance_investigation(self, task_id, state, service) -> CommandResult | None:
         config = self.gateway._autonomous_controller.config
-        self._charge_model(task_id, state)
+        with current_activity_context().publication():
+            for field in ("model", "provider"):
+                selected = getattr(service.llm, field, None)
+                if not state.get(field) and isinstance(selected, str) and selected:
+                    state[field] = selected
+            self._charge_model(task_id, state)
         evidence = state["evidence"]
-        scope = InvestigationScope(
-            {item["id"]: item["level"] for item in evidence},
-            completed_fingerprints=frozenset(item["fingerprint"] for item in evidence),
-            remaining_tool_calls=max(0, config.max_tool_calls - state.get("tool_operations", len(evidence))),
-        )
+        scope = investigation_scope(evidence)
+        handoff = state.get("investigation", {})
+        remaining_tools = max(0, config.max_tool_calls - state.get("tool_operations", len(evidence)))
+        available = (remaining_tools > 0 and config.max_model_turns - state["decision_count"] >= 3
+                     and (handoff.get("revision"), handoff.get("epoch")) != self._investigation_boundary(state))
+        report = handoff.get("report") or {}
+        cites = set(report.get("evidence_ids", []))
+        latest = {row["id"] for row in evidence[-8:]}
+        observations = [row for row in evidence if row["id"] in cites | latest]
         decision = service.next_decision(state["mode"], {
             "task_id": task_id, "coding_workflow": state.get("coding_decision"),
             "runtime_capability_change": state.get("runtime_capability_change", False),
             "completed_step_ids": list(state["done_steps"]),
             "recheck_required": state.get("required_recheck"),
             "request": state["goal"], "constraints": state["constraints"], "skills": state["skills"],
-            "evidence": _investigation_context(evidence[-12:]),
+            "evidence": _investigation_context(observations),
+            "investigation_report": report,
             "revision_request": state.get("revision_request", ""),
             "repair_authorized": state["repair"],
-        }, investigation_scope=scope)
-        self._check_live(task_id)
-        allowed = {"inspect", "inspect_batch", "clarify", "block"}
+        }, investigation_available=available)
+        with current_activity_context().publication():
+            self._check_live(task_id)
+        allowed = {"investigate", "clarify", "block"}
         if state["mode"] in {"auto", "plan"}:
             allowed.add("draft")
         if state["mode"] == "debug":
@@ -362,15 +400,13 @@ class ModeWorkflow:
             allowed.add("switch_workflow")
         if decision.action not in allowed:
             raise ValueError("The model selected an action outside the active mode")
-        if decision.action in {"inspect", "inspect_batch"}:
-            if decision.action == "inspect":
-                requests, reason = (decision.evidence,), decision.evidence.reason
-            else:
-                requests, reason = decision.evidence, decision.reason
-            scope.validate_requests(requests)
-            self._transition(task_id, state, Phase.INVESTIGATING, str(redact_secrets(reason))[:240])
-            for request in requests:
-                self._inspect(task_id, state, service, request)
+        if decision.action == "investigate":
+            if not available:
+                raise PermissionError("Another investigation requires new evidence needs and enough remaining allowance.")
+            self._investigate(task_id, state, service, decision, InvestigationAllowance(
+                model_turns=min(MAX_MODEL_TURNS, config.max_model_turns - state["decision_count"] - 1),
+                tool_calls=min(MAX_TOOL_CALLS, remaining_tools),
+            ))
             return None
         if decision.action == "clarify":
             if set(q.field_id for q in decision.questions).intersection(state["constraints"]):
@@ -404,7 +440,7 @@ class ModeWorkflow:
                 return waiting
             return None
         if decision.action == "diagnose":
-            if decision.cause_evidence and not set(decision.cause_evidence).issubset({ob["id"] for ob in state["evidence"]}):
+            if not set(decision.cause_evidence).issubset(scope.evidence_levels):
                 raise ValueError("Diagnosis referenced unknown evidence")
             text = "\n\n".join(s for s in (decision.root_cause, decision.uncertainty) if s)
             if state.get("coding_decision") and state["repair"]:
@@ -413,7 +449,7 @@ class ModeWorkflow:
         if decision.action == "repair":
             if not state["repair"]:
                 raise PermissionError("This debugging request only authorizes diagnosis")
-            if not set(decision.cause_evidence).issubset({ob["id"] for ob in state["evidence"]}):
+            if not set(decision.cause_evidence).issubset(scope.evidence_levels):
                 raise ValueError("Repair referenced unknown evidence")
             if not any(step.changes for step in decision.draft.steps) or not any(
                 check.expected == "pass" for step in decision.draft.steps for check in step.verification
@@ -421,26 +457,117 @@ class ModeWorkflow:
                 raise ValueError("Repair requires a scoped fix and a regression check")
             state["root_cause"] = str(redact_secrets(decision.root_cause))
             state["uncertainty"] = str(redact_secrets(decision.uncertainty))
-        if state["mode"] == "auto" and not evidence:
+        if state["mode"] == "auto" and not scope.evidence_levels:
             raise ValueError("AUTO requires observed repository evidence before drafting")
         return self._draft(task_id, state, decision.draft, service)
 
-    def _inspect(self, task_id: str, state: dict, service: PlanService, request: EvidenceRequest) -> None:
-        from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
+    @staticmethod
+    def _investigation_boundary(state: dict) -> tuple[int, int]:
+        return state["revision"], state.get("investigation_epoch", 0)
 
-        self._check_live(task_id)
-        self._charge_tool(task_id, state)
-        args = ({"path": request.paths[0], "start_line": request.start_line, "end_line": request.end_line}
-                if request.tool == "read_file"
-                else {"query": request.query, "paths": list(request.paths), "glob": request.glob})
-        result = execute_host_operation(
-            root=service.repo_root, task_id=task_id, tool_name=request.tool,
-            arguments=args, effect="read_only", implementation=lambda _: service.inspect(request),
-        )
+    def _investigate(
+        self, task_id: str, state: dict, service: PlanService, decision: InvestigateDecision,
+        allowance: InvestigationAllowance,
+    ) -> None:
+        from mana_agent.chat.activity import safe_text
+        from mana_agent.coding.models import WorkspaceContext
+        from mana_agent.gateway.lanes import validate_tool_permission
+        from mana_agent.multi_agent.agents.tool_runner_agent import ToolRunnerAgent, bind_tool_authority
+        from mana_agent.multi_agent.core.types import AgentRole
+        from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
+        from mana_agent.multi_agent.tools.operation_policy import builtin_policy
+
+        activity = current_activity_context()
+        execution = self.lane.inspect_task(task_id)
+        registry = activity.execution_registry or AgentRegistry(default_main_agent_id="main")
+        actor = registry.find_by_role(AgentRole.CODING)
+        task = self.board.get_task(task_id)
+        schemas = {
+            name: schema for name, schema in read_tool_schemas().items()
+            if name not in task.forbidden_tools
+            and (not task.allowed_tools or name in task.allowed_tools)
+            and (not actor.allowed_tools or name in actor.allowed_tools)
+        }
+        if not schemas:
+            raise PermissionError("The task is not authorized to use repository investigation tools.")
+        policies = {name: builtin_policy(name) for name in schemas}
+        if any(policy is None or policy.effect != "read_only" or not policy.repository for policy in policies.values()):
+            raise PermissionError("An investigation tool has no registered repository read policy.")
+        for name in schemas:
+            validate_tool_permission(self.lane.contracts[execution.owning_lane], name,
+                                     task_capabilities=execution.capabilities)
+        revision, epoch = self._investigation_boundary(state)
+        decision_id = f"{task_id}:{activity.attempt_generation}:investigate:{state['decision_count']}"
         evidence = state["evidence"]
-        evidence.append({"id": f"evidence-{len(evidence) + 1}", "fingerprint": request.fingerprint,
-                         "level": request.level, "result": redact_secrets(result)})
-        self._persist(task_id, state)
+        handoff = {
+            "id": decision_id, "attempt_id": activity.attempt_id, "revision": revision, "epoch": epoch,
+            "selection": {key: safe_text(value, protected=activity.protected_text)
+                          for key, value in decision.model_dump().items()},
+            "status": "running", "model": getattr(service.llm, "model", ""),
+            "provider": getattr(service.llm, "provider", ""),
+            "model_turns_reserved": allowance.model_turns, "tools_reserved": allowance.tool_calls,
+        }
+        with activity.publication():
+            self._check_live(task_id)
+            if actor.agent_id not in self.board.get_task(task_id).assigned_agent_ids:
+                self.board.assign(task_id, actor.agent_id)
+            state["investigation"] = handoff
+            state["decision_count"] += allowance.model_turns
+            state["tool_operations"] = state.get("tool_operations", len(evidence)) + allowance.tool_calls
+            self._transition(task_id, state, Phase.INVESTIGATING, "Investigating the repository")
+            emit_activity("task.delegated", title="Coding agent investigating the repository", status="running",
+                          task_id=task_id, agent_id=actor.agent_id, parent_agent_id=actor.parent_agent_id,
+                          operation_id=decision_id, metadata={"execution_level": 2, "phase": "investigating"})
+
+        def check_live():
+            with activity.publication():
+                self._check_live(task_id)
+
+        def authorize(name):
+            check_live()
+            return validate_tool_permission(self.lane.contracts[execution.owning_lane], name,
+                                            task_capabilities=execution.capabilities)
+
+        def checkpoint(rows):
+            with activity.publication():
+                self._check_live(task_id)
+                evidence.extend(rows)
+                self.board.update_task(task_id, mode_workflow=state,
+                                       progress=f"Investigating the repository · {len(evidence)} observations saved")
+
+        report = None
+        try:
+            with activity_scope(replace(activity, agent_id=actor.agent_id, parent_agent_id=actor.parent_agent_id or "")):
+                authority = bind_tool_authority(
+                    registry=registry, actor_id=actor.agent_id, task_id=task_id,
+                    workspace=WorkspaceContext(repository_path=self.gateway.root, worktree_path=service.repo_root,
+                                               sandbox="readOnly"),
+                    policies=policies, schemas=schemas, taskboard=self.board, authorize=authorize,
+                    record_taskboard_evidence=False,
+                )
+                settings = getattr(self.gateway, "settings", None)
+                report = run_repository_investigation(
+                    service=service, decision=InvestigateDecision.model_validate(handoff["selection"]),
+                    decision_id=decision_id, runner=ToolRunnerAgent(authority), evidence=evidence,
+                    allowance=allowance, checkpoint=checkpoint, check_live=check_live,
+                    programmatic_enabled=getattr(settings, "mana_internal_programmatic_tool_calling", True),
+                    max_no_progress=self.gateway._autonomous_controller.config.max_no_progress_cycles,
+                )
+        finally:
+            with activity.publication():
+                self._check_live(task_id)
+                state["decision_count"] -= allowance.model_turns - allowance.turns_used
+                state["tool_operations"] -= allowance.tool_calls - allowance.tools_used
+                handoff.update(status="completed" if report is not None else "failed",
+                               model_turns=allowance.turns_used, tool_calls=allowance.tools_used)
+                if report is not None:
+                    handoff["report"] = {
+                        "findings": safe_text(report.findings, protected=activity.protected_text),
+                        "evidence_ids": list(report.evidence_ids),
+                        "gaps": safe_text(report.gaps, protected=activity.protected_text),
+                    }
+                progress = "Repository investigation finished" if report is not None else "Repository investigation stopped"
+                self.board.update_task(task_id, mode_workflow=state, progress=progress)
 
     def _charge_tool(self, task_id: str, state: dict) -> None:
         used = state.get("tool_operations", len(state["evidence"]))
@@ -495,6 +622,7 @@ class ModeWorkflow:
                for row in state["evidence"]):
             raise RuntimeError("External investigation produced no new evidence")
         state["evidence"].append(evidence)
+        state["investigation_epoch"] = state.get("investigation_epoch", 0) + 1
         self._persist(task_id, state)
         return None
 
@@ -617,7 +745,9 @@ class ModeWorkflow:
                 return self._describe_item(task.task_id, state, item)
         text = state.get("result") or f"{state['mode'].capitalize()} task {task.task_id} is {state['phase'].replace('_', ' ')}."
         if self._can_retry_investigation(state):
-            text += f"\n\nResume the investigation with `/task resume {task.task_id}`."
+            durable = self.lane.execution_supervisor.store.get_task_or_none(task.task_id)
+            if state["phase"] == Phase.BLOCKED or (durable and durable.state == ExecutionState.INTERRUPTED):
+                text += f"\n\nResume the investigation with `/task resume {task.task_id}`."
         if state.get("plan"):
             text += "\n\n" + PlanRevision.model_validate(state["plan"]).to_markdown()
         return CommandResult(status="success", message=text,
@@ -707,7 +837,7 @@ class ModeWorkflow:
             return self.describe(task)
         if state.get("in_flight_mutation") and not state["in_flight_mutation"].get("action_id"):
             return CommandResult(status="error", message="Reconcile the interrupted patch before resuming or revising this task.")
-        lane_task = self.lane.inspect_task(task_id)
+        lane_task = self.lane.ensure_recoverable_execution(task_id)
         if lane_task.state not in self.lane._RETRYABLE_LANE_STATES and state.get("phase") in {Phase.BLOCKED.value, Phase.BLOCKED}:
             self.lane.mark_blocked(task_id, reason=state.get("result") or "Operator requested mode task recovery")
         reservation = self.lane.retry_task(task_id, session_id=task.session_id, decision=RecoveryDecision(
@@ -720,8 +850,9 @@ class ModeWorkflow:
         if revision_request:
             result = self._restart_draft(task_id, state, revision_request)
         elif retry_investigation:
+            state["investigation_epoch"] = state.get("investigation_epoch", 0) + 1
             self._transition(task_id, state, Phase.UNDERSTANDING)
-            result = self._drive(task_id, state, service=self._service(state=state))
+            result = self._drive(task_id, state)
         else:
             result = self._execute(task_id, state, self._service(state=state))
         self._publish_result(task_id, result)
@@ -729,7 +860,7 @@ class ModeWorkflow:
 
     @staticmethod
     def _can_retry_investigation(state: dict) -> bool:
-        return state["phase"] == Phase.BLOCKED and not any(state.get(key) for key in (
+        return state["phase"] in {Phase.BLOCKED, Phase.UNDERSTANDING, Phase.INVESTIGATING} and not any(state.get(key) for key in (
             "plan", "inbox_id", "approval_id", "approved_digest", "done_steps", "in_flight_mutation",
         ))
 
@@ -747,11 +878,14 @@ class ModeWorkflow:
                     self.inbox.supersede_for_action(approval.action_intent_id)
             self.inbox.cancel_for_task(task_id, reason="Mode task cancelled")
             self._discard_patch_approval(state)
+            handoff = state.get("investigation", {})
+            if handoff.get("status") == "running":
+                handoff["status"] = "cancelled"
             self._transition(task_id, state, Phase.CANCELLED)
 
     def _restart_draft(self, task_id, state, instructions):
         self._revise(task_id, state, instructions)
-        return self._drive(task_id, state, service=self._service(state=state))
+        return self._drive(task_id, state)
 
     def resume(self, task_id, item, protected, claim_id):
         supervisor = self.lane.execution_supervisor
@@ -772,7 +906,7 @@ class ModeWorkflow:
             comment = item.response.comment
             if comment.startswith("Revise plan:\n"):
                 self._revise(task_id, state, comment.split("\n", 1)[1])
-                result = self._drive(task_id, state, service=self._service(state=state))
+                result = self._drive(task_id, state)
             else:
                 self._transition(task_id, state, Phase.CANCELLED, "User rejected the plan")
                 self.lane.cancel_tree(task_id)
@@ -781,8 +915,9 @@ class ModeWorkflow:
             answer = self.inbox.consume_for_agent(item.inbox_item_id, requesting_agent_id=_OWNER, task_id=task_id).answer
             state["constraints"].update(redact_secrets(answer))
             state["inbox_id"] = ""
+            state["investigation_epoch"] = state.get("investigation_epoch", 0) + 1
             self._transition(task_id, state, Phase.UNDERSTANDING)
-            result = self._drive(task_id, state, service=self._service(state=state))
+            result = self._drive(task_id, state)
         elif plan:
             state["approved_digest"] = plan.digest
             state["approval_id"] = item.inbox_item_id

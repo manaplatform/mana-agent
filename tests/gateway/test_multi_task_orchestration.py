@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from repository_investigation_fixture import FileInvestigator, investigation
+
 from mana_agent.gateway import (
     AgentChatGateway,
     EntryRouteRegistry,
@@ -805,7 +807,7 @@ def test_compound_debug_child_uses_the_parent_user_message_and_workflow(tmp_path
         final_acceptance_criteria=["Both results delivered"], reason="Two distinct results",
     )
 
-    class Model(_MultiTaskMemoryModel):
+    class Model(FileInvestigator, _MultiTaskMemoryModel):
         def generate_sync(self, messages, **kwargs):
             if messages[0].content == MULTI_TASK_DECOMPOSITION_PROMPT:
                 return super().generate_sync(messages, **kwargs)
@@ -832,9 +834,7 @@ def test_compound_debug_child_uses_the_parent_user_message_and_workflow(tmp_path
             if isinstance(schema, dict) and schema["title"] == "ModeDecision":
                 context = json.loads(messages[-1].content)
                 if not context["evidence"]:
-                    return {"decision": {"action": "inspect", "reason": "Read app.py", "evidence": {
-                        "tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file",
-                    }}}
+                    return {"decision": investigation("app.py")}
                 return {"decision": {"action": "diagnose", "reason": "Observed source",
                                      "root_cause": "The handler returns the old value",
                                      "cause_evidence": ["evidence-1"]}}

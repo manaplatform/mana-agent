@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+from repository_investigation_fixture import FileInvestigator, investigation
+
 from mana_agent.gateway import (
     AgentChatGateway,
     EntryRouteRegistry,
@@ -46,7 +48,7 @@ def coding_choice(objective, *, mode="auto", effect="write"):
     }
 
 
-class _RouteModel:
+class _RouteModel(FileInvestigator):
     def __init__(self, *routes: str) -> None:
         self.routes = list(routes)
         self.payloads: list[dict[str, Any]] = []
@@ -56,9 +58,7 @@ class _RouteModel:
             payload = json.loads(messages[-1].content)
             if schema["title"] == "ModeDecision":
                 if not payload["evidence"]:
-                    return {"decision": {"action": "inspect", "reason": "Inspect app.py",
-                                         "evidence": {"tool": "read_file", "level": 1,
-                                                      "paths": ["app.py"], "reason": "Known file"}}}
+                    return {"decision": investigation("app.py")}
                 return {"decision": {"action": "draft", "reason": "Observed the old behavior",
                                      "draft": {
                                          "objectives": ["Change the handler"], "findings": "Read app.py",

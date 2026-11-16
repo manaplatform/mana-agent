@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- AUTO, DEBUG, and PLAN delegate repository investigation only when they need evidence. The selected chat model uses native read tools in one bounded session, and the main agent saves progress and observations on TaskBoard. See [investigation latency](docs/regressions/debug-plan-execution-contract.md#investigation-latency).
+- User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py tests/llm/test_providers.py`.
 - Terminal clarification now stays open for explicit answers and resumes the original AUTO, DEBUG, or PLAN task with its saved evidence. Local replies use the assigned Mana reviewer when applicable, and follow-up questions are shown after a resumed task pauses again. See [clarification wait and resume](docs/regressions/debug-plan-execution-contract.md#clarification-wait-and-resume).
 - User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py::test_repository_clarification_resumes_exact_wait_and_preserves_evidence tests/test_cli_smoke.py::test_chat_planning_mode_requires_revision_approval_after_clarification tests/test_chat_planning_mode.py tests/human_inbox/test_durable_inbox.py`.
 - Coding workflows: the gateway selects AUTO or DEBUG through a validated model decision. TaskBoard persists the scope and internal plan, and the supervisor fences coding, integration, verification, and recovery. PLAN remains explicit and binds approval to one reviewed revision. See [workflow regression notes](docs/regressions/debug-plan-execution-contract.md#automatic-coding-workflows).

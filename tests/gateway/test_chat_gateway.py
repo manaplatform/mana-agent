@@ -18,6 +18,8 @@ from types import SimpleNamespace
 from typing import Any
 import pytest   
 
+from repository_investigation_fixture import FileInvestigator, investigation
+
 from mana_agent.config.settings import Settings
 from mana_agent.gateway import (
     AgentChatGateway,
@@ -74,9 +76,7 @@ def _mode_decision_fixture(messages, schema, path, *, operation="update"):
     if schema["title"] == "ScopeReview":
         return {"disposition": "in_scope", "reason": "Only the selected file changes"}
     if not payload["evidence"]:
-        return {"decision": {"action": "inspect", "reason": "Read the named file",
-                             "evidence": {"tool": "read_file", "level": 1, "paths": ["README.md"],
-                                          "reason": "Read the current behavior"}}}
+        return {"decision": investigation("README.md")}
     return {"decision": {"action": "draft", "reason": "The inspection supports a scoped change",
                          "draft": {"objectives": ["Implement the request"], "findings": "Read README.md",
                                    "scope": [path], "steps": [{
@@ -100,7 +100,9 @@ def _mock_verified_command(monkeypatch):
 class _DummyAskService:
     """Minimal stand-in so gateway construction tests do not require OPENAI_API_KEY."""
 
-    class _EntryModel:
+    class _EntryModel(FileInvestigator):
+        investigation_path = "README.md"
+
         def decide_sync(self, messages, schema, **kwargs):
             if isinstance(schema, dict):
                 return _mode_decision_fixture(messages, schema, "README.md")
@@ -2446,7 +2448,9 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
         def flow_summary(self, flow_id: str):
             return None
 
-    class _StructuredEntryModel:
+    class _StructuredEntryModel(FileInvestigator):
+        investigation_path = "README.md"
+
         def decide_sync(self, messages, schema, **kwargs):
             if isinstance(schema, dict):
                 return _mode_decision_fixture(messages, schema, "src/provider.py", operation="add")

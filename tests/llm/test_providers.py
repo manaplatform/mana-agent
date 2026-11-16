@@ -159,8 +159,7 @@ def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
 
 
 @pytest.mark.parametrize("action,fields", [
-    ("inspect", {"evidence"}),
-    ("inspect_batch", {"evidence"}),
+    ("investigate", {"objective", "scope", "initial_repository_scope"}),
     ("clarify", {"questions"}),
     ("draft", {"draft"}),
     ("diagnose", {"root_cause", "cause_evidence", "uncertainty"}),
@@ -183,7 +182,7 @@ def test_mode_decision_wire_schema_exposes_only_the_selected_action_fields(actio
 
 
 @pytest.mark.parametrize("payload", [
-    {"action": "inspect", "reason": "Inspect the file"},
+    {"action": "investigate", "reason": "Investigate the file"},
     {"action": "clarify", "reason": "Two choices", "questions": []},
     {"action": "draft", "reason": "Ready", "draft": None},
     {"action": "research", "reason": "Need documentation"},
@@ -202,62 +201,22 @@ def test_mode_decision_rejects_missing_and_unrelated_payloads(payload):
         ModeDecision.model_validate_json(content, strict=True)
 
 
-def test_mode_evidence_wire_schema_separates_file_reads_from_discovery():
-    from mana_agent.agent.plan_service import ModeDecision
-    from mana_agent.llm.providers.openai import decode_structured, strict_schema
+def test_native_investigation_tool_schema_separates_file_reads_from_discovery():
+    from mana_agent.agent.repository_investigation import read_tool_schemas
+    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
 
-    schema = ModeDecision.model_json_schema()
-    wire = strict_schema(schema)
-    read_fields = wire["$defs"]["FileReadEvidence"]["properties"]
-    assert read_fields["level"]["enum"] == [1, 2, 3]
-    assert read_fields["paths"]["minItems"] == read_fields["paths"]["maxItems"] == 1
-
-    read = ModeDecision.model_validate({"decision": {
-        "action": "inspect", "reason": "Read the reported location",
-        "evidence": {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file"},
-    }})
-    search = ModeDecision.model_validate({"decision": {
-        "action": "inspect", "reason": "Audit the requested repository",
-        "evidence": {"tool": "repo_search", "level": 4, "query": "target", "reason": "Explicit repository audit",
-                     "initial_repository_scope": "explicit_audit"},
-    }})
-    for decision in (read, search):
-        encoded = decision.model_dump_json()
-        decoded = decode_structured(encoded, schema)
-        assert ModeDecision.model_validate_json(decoded, strict=True) == decision
-
+    tools = read_tool_schemas()
+    read = tools["read_file"]
+    assert read["properties"]["level"]["enum"] == [1, 2, 3]
+    assert read["properties"]["paths"]["minItems"] == read["properties"]["paths"]["maxItems"] == 1
+    args = {"level": 1, "paths": ["app.py"], "reason": "Read the known file"}
+    validate_arguments(args, read)
     for invalid in ({"level": 4}, {"paths": []}, {"paths": ["app.py", "other.py"]},
                     {"initial_repository_scope": "explicit_audit"}):
-        payload = read.model_dump(mode="json")
-        payload["decision"]["evidence"].update(invalid)
-        with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
-            decode_structured(json.dumps(payload), schema)
-
-
-def test_investigation_batch_wire_schema_bounds_independent_operations():
-    from mana_agent.agent.plan_service import ModeDecision
-    from mana_agent.llm.providers.openai import decode_structured, strict_schema
-
-    schema = ModeDecision.model_json_schema()
-    evidence = strict_schema(schema)["$defs"]["InspectBatchDecision"]["properties"]["evidence"]
-    assert (evidence["minItems"], evidence["maxItems"]) == (2, 4)
-
-    decision = ModeDecision.model_validate({"decision": {
-        "action": "inspect_batch", "reason": "Read the known file and find a separate symbol",
-        "evidence": [
-            {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Inspect the handler"},
-            {"tool": "find_symbols", "level": 1, "paths": ["tests"], "query": "test_handler",
-             "reason": "Locate the reported test"},
-        ],
-    }})
-    decoded = decode_structured(decision.model_dump_json(), schema)
-    assert ModeDecision.model_validate_json(decoded, strict=True) == decision
-
-    payload = decision.model_dump(mode="json")
-    for count in (1, 5):
-        payload["decision"]["evidence"] = [decision.decision.evidence[0].model_dump(mode="json")] * count
-        with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
-            decode_structured(json.dumps(payload), schema)
+        with pytest.raises(ValueError):
+            validate_arguments({**args, **invalid}, read)
+    validate_arguments({"level": 4, "query": "target", "reason": "Audit the repository"}, tools["repo_search"])
+    assert all("initial_repository_scope" not in tool["properties"] for tool in tools.values())
 
 
 @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])

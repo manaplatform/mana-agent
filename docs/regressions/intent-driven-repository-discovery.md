@@ -71,13 +71,12 @@ citation rules only after inference. The prompt also showed detailed results
 for only the most recent 12 observations, so an older observation at the
 highest level could be absent.
 
-Each decision now gets the highest observed level, next permitted ordinary
-level, and IDs and levels of all stored observations. Detailed results still
-use the bounded history window. Native inference uses that same task-state
-snapshot to validate inspection decisions during its existing correction
-attempt. The correction distinguishes skipped levels, missing IDs, unknown
-IDs, and missing citations at the highest observed level. The gateway checks
-the scope again before executing the selected read-only operation.
+The native investigator starts with the highest observed level, the next
+permitted level, and the IDs and levels of saved observations. New tool
+results include an evidence ID and level. The tool session validates every
+batch against the evidence available before that response. Invalid selections
+stop before dispatch and identify skipped levels, missing or unknown IDs, or
+missing citations at the highest observed level.
 
 ## Do not reintroduce
 
@@ -105,10 +104,10 @@ did not walk the repository root. The replay does not implement sudo support
 or call a live model. For interactive acceptance, submit the example in a disposable checkout,
 inspect the execution trace, and stop before applying any proposed sudo change.
 
-For Plan and Debug scope correction, run
+For repository investigation scope, run
 
-    venv/bin/python -m pytest -q tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'investigation_scope or unjustified_expansion or repository_audit'
+    venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'investigation_batch or unjustified_expansion or repository_audit'
 
-The fixtures cover the four correction reasons, references to older
-observations, rejection before a broader tool runs, and the explicit audit
-path. The agent did not run these tests or make a live provider call.
+The fixtures cover rejection before a broader tool runs, resume with saved
+observations, and the explicit audit path. The agent did not run these tests
+or make a live provider call.
