@@ -446,7 +446,7 @@ class ManaChatApp(App):
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
         event_id = str(event.get("event_id") or event.get("id") or "").strip()
         if event_type == "mode.input_ready":
-            prompt = (event.get("metadata") or {}).get("next_prompt")
+            prompt = {"task_id": event.get("task_id"), "inbox_id": (event.get("metadata") or {}).get("inbox_id")}
             if self.is_running and threading.get_ident() != getattr(self, "_ui_thread_id", None):
                 self.call_from_thread(self._show_mode_prompt, prompt)
             elif self.is_running:
@@ -1619,15 +1619,15 @@ class ManaChatApp(App):
         self.update_status("API request completed")
 
     def _show_mode_prompt(self, prompt) -> None:
-        if not prompt or prompt.get("kind") not in {"mode.approval", "mode.clarification"}:
+        if not prompt or not prompt.get("task_id") or not prompt.get("inbox_id"):
             return
         from mana_agent.tui.mode_prompt import ModePrompt
 
         if isinstance(self.screen, ModePrompt):
             return
         workflow = self.gateway.mode_workflow
-        task = workflow.active(self._gateway_session_id) or workflow.active(self._gateway_session_id, mode="debug")
-        if task is None or task.mode_workflow.get("inbox_id") != prompt.get("inbox_id"):
+        prompt = workflow.pending_prompt(self._gateway_session_id, prompt["task_id"], prompt["inbox_id"])
+        if prompt is None:
             return
 
         def finish(result):
@@ -1652,6 +1652,8 @@ class ManaChatApp(App):
             self.history.add(AssistantMessageEvent(content=response.message))
         except (PermissionError, ValueError, RuntimeError) as exc:
             self.notify(str(exc), severity="error")
+            if action == "answer":
+                self._show_mode_prompt(prompt)
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""
@@ -2050,7 +2052,7 @@ class ManaChatApp(App):
                 self.update_status("Ready")
                 self._turn_in_progress = False
                 return
-            if plan_command and result is not None and result.status != "success":
+            if plan_command and result is not None and result.status == "error":
                 self._safe_post_activity(
                     {
                         "event_id": f"plan-preparation-{self._gateway_session_id}",
@@ -2084,7 +2086,8 @@ class ManaChatApp(App):
                 self._show_mode_prompt(result.next_prompt)
                 if self.input:
                     self.input.reset()
-                self.update_status("Ready")
+                waiting_for_answers = (result.next_prompt or {}).get("kind") == "mode.clarification"
+                self.update_status("Waiting for your answers" if waiting_for_answers else "Ready")
                 if approval_command:
                     self._turn_in_progress = False
                 return
@@ -2603,8 +2606,11 @@ class ManaChatApp(App):
                                 turn_id=turn_id,
                             )
                         )
-                    self._show_mode_prompt(result_payload.get("next_prompt"))
-                    if not route_mode:
+                    next_prompt = result_payload.get("next_prompt")
+                    self._show_mode_prompt(next_prompt)
+                    if (next_prompt or {}).get("kind") == "mode.clarification":
+                        self.update_status("Waiting for your answers")
+                    elif not route_mode:
                         self.update_status("Ready")
                     else:
                         self.update_status(f"Ready ({route_mode})")

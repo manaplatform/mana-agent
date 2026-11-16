@@ -109,6 +109,18 @@ On 2026-11-16, the Debug trace for `task_20261116_000021` recorded seven decisio
 
 **Do not reintroduce** one provider call per independent read or full tool execution receipts in the investigation prompt. Validate a whole batch before dispatch and charge each operation to the tool budget.
 
+## Clarification wait and resume
+
+On 2026-11-16, `task_20261116_000023` displayed a clarification with six questions and an inbox command. The supervisor recorded `waiting_for_clarification` with a checkpoint and inbox item; the inbox item was delivered and had no response or resume claim. The task had paused. A later `tui_quit` canceled the task and the unanswered request. The item was assigned to the local Mana user ID, while the terminal's answer handlers used the OS username. The trace does not show a rejected submission for this item, but that identity mismatch would reject a reply.
+
+The TUI also selected the latest Plan or Debug task to find the form, so an AUTO prompt or another task's prompt could be discarded. The Plan command reported waits as preparation failures. After a background resume, another clarification or plan review was published through the worker activity path even though waiting had already released the worker lease. Plain console chat printed the question list without collecting the answers. Finally, the inbox rejected custom answers for choice fields marked to allow free text.
+
+Terminal chat now opens the request linked to the exact session, task, and inbox item. The console collects explicit answers before waiting for the result, and a subsequent prompt is projected from the supervisor's persisted wait. Local answers use the local Mana identity when it matches the reviewer, preserving legacy OS reviewer assignments and checks on explicit actors. Inbox validation accepts custom replies only for choice fields that allow them. An accepted response uses the existing inbox claim and resumes the same task with its accumulated evidence and answers. No persisted data migration is needed.
+
+**Do not reintroduce** looking up a clarification by the newest task, using the OS username for a Mana-assigned reviewer, publishing a saved wait as worker activity after its lease expired, or treating question recommendations as answers.
+
+User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py::test_repository_clarification_resumes_exact_wait_and_preserves_evidence tests/test_cli_smoke.py::test_chat_planning_mode_requires_revision_approval_after_clarification tests/test_chat_planning_mode.py tests/human_inbox/test_durable_inbox.py`. For live acceptance, trigger several related questions in AUTO or DEBUG, submit them in the TUI or console, and confirm the same task resumes or presents the next question. Decline to answer once and verify that the saved inbox item remains pending. These checks were not run by the agent.
+
 ## Verification
 
 Run `venv/bin/python -m pytest tests/test_execution_modes.py tests/test_chat_planning_mode.py tests/test_chat_command_dispatcher.py tests/test_cli_modes_skills.py tests/gateway/test_debug_plan_mode_contract.py tests/test_codex_integration.py -q`. The gateway tests use deterministic model responses and isolated inboxes. The Codex protocol test uses an app-server fixture. Live acceptance requires an authorized provider and a local Docker image with the target project's test dependencies.

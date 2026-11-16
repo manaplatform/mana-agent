@@ -5883,7 +5883,7 @@ class AgentChatGateway:
             session = self._session(session_id)
             if plan_task or session.get("execution_mode") == "plan":
                 local = session.get("frontend") in {"cli", "tui"}
-                actor = str(options.get("authenticated_user_id") or (getpass.getuser() if local else ""))
+                actor = str(options.get("authenticated_user_id") or "") or (None if local else "")
                 rendered = self.mode_workflow.receive(session_id, text, task=plan_task,
                     read_only=bool(options.get("protocol_read_only")), actor_id=actor,
                     question_limit=options.get("planning_question_limit"))

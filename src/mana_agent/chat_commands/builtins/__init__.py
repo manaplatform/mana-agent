@@ -340,6 +340,7 @@ def _human_inbox(context: CommandContext, args: list[str]) -> CommandResult:
         ResponseSubmission,
         UNRESOLVED_STATUSES,
     )
+    from mana_agent.human_inbox.identity import local_reviewer_actor
 
     service = context.gateway.human_inbox_service
     actor = getpass.getuser()
@@ -385,10 +386,17 @@ def _human_inbox(context: CommandContext, args: list[str]) -> CommandResult:
             current_action_digest=item.action_digest,
         ))
     elif action == "answer" and len(args) == 3:
+        if context.frontend_data.get("protocol_read_only"):
+            raise PermissionError("This protocol session is read-only.")
         answer = json.loads(args[2])
         if not isinstance(answer, dict):
             raise ValueError("Clarification answer must be a JSON object.")
         item = service.repository.get(args[1])
+        authenticated = context.frontend_data.get("authenticated_user_id")
+        if authenticated:
+            actor = str(authenticated)
+        elif context.frontend in {"cli", "tui"}:
+            actor = local_reviewer_actor(item.assigned_reviewer_id, settings=getattr(context.gateway, "settings", None))
         resolved = service.respond(ResponseSubmission(
             inbox_item_id=item.inbox_item_id,
             operation=ResponseOperation.ANSWER,

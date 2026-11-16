@@ -118,6 +118,41 @@ def _is_interactive_terminal() -> bool:
         return False
 
 
+def _continue_console_clarifications(gateway, session_id: str, prompt: dict | None, console: Console) -> None:
+    """Collect explicit answers in chat, then show the result of the inbox resume."""
+    from mana_agent.human_inbox.models import ResponseOperation
+    from mana_agent.human_inbox.repository import InboxConcurrentUpdateError
+
+    while (prompt or {}).get("kind") == "mode.clarification" and _is_interactive_terminal():
+        answers = {}
+        try:
+            for question in prompt["questions"]:
+                field_id = question["field_id"]
+                while True:
+                    value = _read_chat_input(
+                        console, prompt=f"{field_id} (Enter to answer later): ",
+                        multiline_enabled=False, multiline_terminator="",
+                    ).strip()
+                    if not value:
+                        return
+                    if question["allow_free_form"] or value in question["choices"]:
+                        answers[field_id] = value
+                        break
+                    console.print("Enter one of the listed choices.")
+            workflow = gateway.mode_workflow
+            workflow.respond(session_id, prompt["inbox_id"], ResponseOperation.ANSWER,
+                             frontend="cli", answer=answers)
+            with console.status("Continuing task…"):
+                result = workflow.wait_for_response(prompt["task_id"], prompt["inbox_id"])
+        except (EOFError, KeyboardInterrupt):
+            return
+        except (InboxConcurrentUpdateError, PermissionError, ValueError) as exc:
+            console.print(str(exc), markup=False)
+            return
+        console.print(Markdown(result.message))
+        prompt = result.next_prompt
+
+
 def _planning_questions(max_questions: int) -> list[str]:
     questions = [
         "What is the concrete goal and the success criteria?",
@@ -2197,7 +2232,11 @@ def chat(
                 cmd_result = gateway.dispatch_command(question, session_id=chat_ui_state.session_id, frontend="cli")
                 if cmd_result:
                     console.print(Markdown(cmd_result.message))
-                    _finish_ui_turn(current_turn_id)
+                    if (cmd_result.next_prompt or {}).get("kind") == "mode.clarification":
+                        _finish_ui_turn(current_turn_id, message="Waiting for your answers.")
+                    else:
+                        _finish_ui_turn(current_turn_id)
+                    _continue_console_clarifications(gateway, chat_ui_state.session_id, cmd_result.next_prompt, console)
                     if single_shot_noninteractive and cmd_result.status == "error":
                         single_shot_exit_code = 1
                     continue
@@ -2490,7 +2529,14 @@ def chat(
             _log_chat_turn(run_logger, turn=turn_record, mode=mode_name, dir_mode=dir_mode,
                 coding_agent=response.used_coding_agent, flow_id=active_flow_id,
                 multiline_input=multiline_input, multiline_terminator=multiline_terminator)
-            _finish_ui_turn(current_turn_id, message="Waiting for background execution." if response.payload.get("status") == "waiting" else "Response rendered.")
+            next_prompt = response.payload.get("next_prompt")
+            finish_message = "Response rendered."
+            if (next_prompt or {}).get("kind") == "mode.clarification":
+                finish_message = "Waiting for your answers."
+            elif response.payload.get("status") == "waiting":
+                finish_message = "Waiting for background execution."
+            _finish_ui_turn(current_turn_id, message=finish_message)
+            _continue_console_clarifications(gateway, chat_ui_state.session_id, next_prompt, console)
             if single_shot_noninteractive and response.error:
                 single_shot_exit_code = 1
             continue

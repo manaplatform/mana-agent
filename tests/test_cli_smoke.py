@@ -1224,7 +1224,8 @@ def test_chat_redis_backend_falls_back_to_local_executor_when_unavailable(monkey
 
 
 @pytest.mark.parametrize("auto_execute", ["--auto-execute-plan", "--no-auto-execute-plan"])
-def test_chat_planning_mode_requires_revision_approval_after_clarification(monkeypatch, tmp_path, auto_execute):
+@pytest.mark.parametrize("interactive", [False, True])
+def test_chat_planning_mode_requires_revision_approval_after_clarification(monkeypatch, tmp_path, auto_execute, interactive):
     from mana_agent.agent.plan_service import ClarifyDecision, DraftDecision, PlanService
 
     repository = tmp_path / "repo"
@@ -1256,15 +1257,18 @@ def test_chat_planning_mode_requires_revision_approval_after_clarification(monke
         pytest.fail("A CLI flag must not authorize the plan revision")
 
     monkeypatch.setattr("mana_agent.commands.chat_cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.chat_cli._is_interactive_terminal", lambda: interactive)
     monkeypatch.setattr("mana_agent.commands.chat_cli.build_ask_service", lambda *a, **k: FakeAskService())
     monkeypatch.setattr(PlanService, "next_decision", decide)
     monkeypatch.setattr("mana_agent.integrations.codex.coding_agent_shim.CodexCodingAgentShim.generate", unexpected_execution)
     result = runner.invoke(
-        app, ["chat", "--root-dir", str(repository), "--planning-mode", auto_execute],
+        app, ["chat", "--no-tui", "--root-dir", str(repository), "--planning-mode", auto_execute],
         input="plan auth module\ntokens\nquit\n",
     )
     assert result.exit_code == 0
     assert "Which auth method?" in result.stdout
+    if interactive:
+        assert "method (Enter to answer later)" in result.stdout
     assert "Add token authentication" in result.stdout
     assert "/approve" in result.stdout, result.stdout
     assert original.read_text() == "initial\n"

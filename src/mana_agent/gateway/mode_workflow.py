@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import getpass
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,16 +24,19 @@ from mana_agent.chat_commands.models import CommandResult
 from mana_agent.execution_supervisor.models import ExecutionState
 from mana_agent.gateway.lane_coordinator import LaneReservation
 from mana_agent.gateway.lanes import LaneId, LaneTaskState
+from mana_agent.human_inbox.identity import local_reviewer_actor
 from mana_agent.human_inbox.models import (
     ClarificationField, ExpectedResponseType, InboxRequest, InboxRequestType, InboxStatus,
     ReviewerAssignment, ReviewerType, ResponseOperation, ResponseSubmission, canonical_digest,
 )
+from mana_agent.human_inbox.repository import InboxConcurrentUpdateError
 from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.services.activity_context import ActivityContext, activity_scope, current_activity_context, emit_activity
 from mana_agent.tools.apply_patch import extract_patch_operations, safe_apply_patch
 from mana_agent.utils.redaction import redact_secrets
 
 _OWNER = "autonomous_loop"
+logger = logging.getLogger(__name__)
 
 
 class ScopeRevisionNeeded(RuntimeError):
@@ -579,7 +583,7 @@ class ModeWorkflow:
             return CommandResult(status="input_required", message=text, data=context,
                                  next_prompt={"kind": "mode.approval", "preview": item.summary, **context})
         questions = item.minimal_context["questions"]
-        lines = []
+        lines = ["Waiting for your answers. This task will continue when you submit them."]
         for question in questions:
             lines.append(f"**{question['field_id']}** · {question['prompt']}")
             for key, explanation in question["choices"].items():
@@ -590,6 +594,19 @@ class ModeWorkflow:
         lines.append(f"`/inbox answer {item.inbox_item_id} '<JSON object keyed by question ID>'`")
         return CommandResult(status="input_required", message="\n\n".join(lines), data=context,
                              next_prompt={"kind": "mode.clarification", "questions": questions, **context})
+
+    def pending_prompt(self, session_id: str, task_id: str, inbox_id: str) -> dict | None:
+        task = self.board.store.repository.get_task_or_none(task_id)
+        if task is None or task.session_id != session_id or not inbox_id:
+            return None
+        state = task.mode_workflow
+        if (state.get("inbox_id") != inbox_id
+                or state.get("phase") not in {Phase.CLARIFICATION_REQUIRED, Phase.AWAITING_APPROVAL}):
+            return None
+        item = self.inbox.repository.get_or_none(inbox_id)
+        if item and item.task_id == task_id and item.status in {InboxStatus.PENDING, InboxStatus.DELIVERED}:
+            return self._describe_item(task_id, state, item).next_prompt
+        return None
 
     def describe(self, task):
         state = task.mode_workflow
@@ -625,7 +642,7 @@ class ModeWorkflow:
                 try:
                     return self.respond(session_id, item.inbox_item_id, ResponseOperation.ANSWER,
                                         frontend="chat", answer=answer, actor_id=actor_id)
-                except (PermissionError, ValueError) as exc:
+                except (InboxConcurrentUpdateError, PermissionError, ValueError) as exc:
                     return CommandResult(status="error", message=str(redact_secrets(str(exc))))
         return self.describe(task)
 
@@ -637,8 +654,12 @@ class ModeWorkflow:
             raise PermissionError("This response does not refer to the current mode revision")
         if operation == ResponseOperation.APPROVE and state["phase"] != Phase.AWAITING_APPROVAL:
             raise PermissionError("The current mode task is not awaiting approval")
+        if operation == ResponseOperation.ANSWER and state["phase"] != Phase.CLARIFICATION_REQUIRED:
+            raise PermissionError("The current mode task is not awaiting clarification")
+        if actor_id is None:
+            actor_id = local_reviewer_actor(item.assigned_reviewer_id, settings=getattr(self.gateway, "settings", None))
         result = self.inbox.respond(ResponseSubmission(
-            inbox_item_id=item_id, operation=operation, actor_id=getpass.getuser() if actor_id is None else actor_id, channel=frontend,
+            inbox_item_id=item_id, operation=operation, actor_id=actor_id, channel=frontend,
             expected_version=item.version, current_action_digest=item.action_digest,
             answer=answer or {}, comment=comment,
         ))
@@ -661,7 +682,7 @@ class ModeWorkflow:
             if state["phase"] in {*_TERMINAL, Phase.BLOCKED}:
                 return self.describe(task)
             time.sleep(0.15)
-        return CommandResult(status="success", message=f"Mode task {task_id} is still pending.", data={"task_id": task_id})
+        return CommandResult(status="input_required", message=f"Mode task {task_id} is still pending.", data={"task_id": task_id})
 
     def recover_queued_responses(self):
         for execution in self.lane.list_tasks():
@@ -781,10 +802,21 @@ class ModeWorkflow:
         turn_id = durable.trigger_turn_id or f"mode-{task_id}-{task.mode_workflow['revision']}-{task.mode_workflow['phase']}"
         self.gateway._append_session_message(task.session_id, role="assistant", content=result.message, turn_id=turn_id)
         get_history().add(AssistantMessageEvent(content=result.message, turn_id=turn_id))
-        if result.next_prompt:
-            emit_activity("mode.input_ready", title="Plan review or clarification available", task_id=task_id,
-                          conversation_id=task.session_id, operation_id=result.data["inbox_id"],
-                          metadata={"next_prompt": result.next_prompt})
+        inbox_id = result.data.get("inbox_id")
+        if (result.next_prompt and inbox_id and durable.state == ExecutionState.WAITING
+                and durable.waiting_inbox_item_id == inbox_id):
+            # This is a projection of a saved wait. Its worker lease has already ended.
+            from mana_agent.services.execution_event_hub import get_execution_event_hub
+
+            try:
+                get_execution_event_hub().publish({
+                    "type": "mode.input_ready", "title": "Plan review or clarification available",
+                    "status": "waiting", "task_id": task_id, "operation_id": inbox_id,
+                    "metadata": {"inbox_id": inbox_id},
+                }, conversation_id=task.session_id, execution_id=turn_id,
+                   repository_id=task.primary_repository_id, authoritative=True)
+            except Exception:
+                logger.warning("Mode inbox wait activity unavailable", exc_info=True)
         if callable(self.gateway._event_sink):
             self.gateway._event_sink("mode.updated", result.message, status=result.status,
                                      metadata={"task_id": task_id, **result.data})

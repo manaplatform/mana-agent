@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -13,10 +14,11 @@ from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase, PlanRevisio
 from mana_agent.agent.plan_service import EvidenceRequest, PlanService
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
 from mana_agent.execution.autonomous_controller import AutonomousExecutionController
+from mana_agent.execution_supervisor.models import ExecutionState
 from mana_agent.gateway.lane_coordinator import LaneCoordinator
 from mana_agent.gateway.mode_workflow import ModeWorkflow, validate_step_patch
 from mana_agent.human_inbox import default_human_inbox_service
-from mana_agent.human_inbox.models import ResponseOperation
+from mana_agent.human_inbox.models import InboxStatus, ResponseOperation
 
 
 def draft(path="app.py"):
@@ -299,6 +301,87 @@ def test_clarification_is_structured_and_kept_in_revision(mode_gateway):
     assert decisions.inputs[-1]["constraints"] == {"behavior": "reject"}
     plan = PlanRevision.model_validate(workflow.active("session").mode_workflow["plan"])
     assert plan.constraints == {"behavior": "reject"}
+
+
+@pytest.mark.parametrize("mode", ["auto", "debug"])
+def test_repository_clarification_resumes_exact_wait_and_preserves_evidence(mode_gateway, monkeypatch, mode):
+    from mana_agent.chat_commands import CommandContext, CommandDispatcher, build_default_registry
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+    from mana_agent.tui.app import ManaChatApp
+
+    gateway, workflow = mode_gateway
+    reviewer = "user_fixture_mode_reviewer"
+    monkeypatch.setattr("mana_agent.config.user_config.resolve_local_user_id", lambda _settings=None: reviewer)
+    published = Event()
+    gateway._event_sink = lambda *args, **kwargs: published.set()
+    gateway._entry_router.llm = model = Decisions(
+        {"action": "inspect", "reason": "Read the reported file", "evidence": file_evidence("app.py")},
+        {"action": "clarify", "reason": "Separate trigger from behavior", "questions": [
+            {"field_id": "trigger", "prompt": "Which input triggers it?", "reason": "Identify the trigger",
+             "choices": {"blank": "Blank input", "missing": "Missing input"}, "allow_free_form": False},
+            {"field_id": "behavior", "prompt": "What should happen?", "reason": "Identify the contract",
+             "choices": {"reject": "Reject it", "keep": "Keep it"}, "allow_free_form": True},
+        ]},
+        {"action": "clarify", "reason": "The custom behavior needs a limit", "questions": [
+            {"field_id": "limit", "prompt": "What is the limit?", "reason": "Completes the contract"},
+        ]},
+        {"action": "diagnose", "reason": "The file and answers explain the failure",
+         "root_cause": "The handler still returns the old value.", "cause_evidence": ["evidence-1"]}
+        if mode == "debug" else draft(),
+    )
+    waiting = workflow.start("session", "Investigate the handler", mode=mode, save=False, read_only=True,
+                             workflow=workflow_choice(mode=mode, effect="read"), reviewer_id=reviewer)
+    assert waiting.status == "input_required", waiting.message
+    task_id, inbox_id = waiting.data["task_id"], waiting.data["inbox_id"]
+    supervisor = workflow.lane.execution_supervisor
+    suspended = supervisor.get_task(task_id)
+    assert suspended.state == ExecutionState.WAITING
+    assert suspended.waiting_inbox_item_id == inbox_id
+    assert workflow.pending_prompt("session", task_id, inbox_id) == waiting.next_prompt
+    assert workflow.pending_prompt("other-session", task_id, inbox_id) is None
+    screens = []
+    tui = SimpleNamespace(gateway=SimpleNamespace(mode_workflow=workflow), _gateway_session_id="session",
+                          screen=object(), push_screen=lambda screen, _finish: screens.append(screen))
+    ManaChatApp._show_mode_prompt(tui, waiting.next_prompt)
+    assert [screen.prompt for screen in screens] == [waiting.next_prompt]
+    answers = {"trigger": "blank", "behavior": "Use the caller's default"}
+    with pytest.raises(PermissionError):
+        workflow.respond("session", inbox_id, ResponseOperation.ANSWER, frontend="tui",
+                         actor_id="another-user", answer=answers)
+    with pytest.raises(ValueError, match="outside its choices"):
+        workflow.respond("session", inbox_id, ResponseOperation.ANSWER, frontend="tui",
+                         answer={**answers, "trigger": "unlisted"})
+    assert len(model.inputs) == 2
+    workflow.respond("session", inbox_id, ResponseOperation.ANSWER, frontend="tui", answer=answers)
+
+    assert published.wait(8)
+    second_wait = workflow.wait_for_response(task_id, inbox_id, timeout=0.5)
+    second_id = second_wait.data["inbox_id"]
+    assert second_id != inbox_id
+    assert second_wait.next_prompt["questions"][0]["field_id"] == "limit"
+    assert workflow.pending_prompt("session", task_id, inbox_id) is None
+    assert workflow.pending_prompt("session", task_id, second_id) == second_wait.next_prompt
+    assert workflow.inbox.repository.get(inbox_id).response_actor_id == reviewer
+    events = get_execution_event_hub().history(
+        conversation_id="session",
+        repository_id=workflow.board.get_task(task_id).primary_repository_id,
+    )
+    notice = next(event for event in events if event["type"] == "mode.input_ready" and event["task_id"] == task_id)
+    assert notice["status"] == "waiting"
+    assert notice["metadata"]["inbox_id"] == second_id
+
+    dispatcher = CommandDispatcher(build_default_registry())
+    context = CommandContext(frontend="cli", session_id="session", capabilities={"gateway"}, gateway=gateway)
+    command = dispatcher.dispatch(f"""/inbox answer {second_id} '{{"limit":"one"}}'""", context)
+    assert command.status == "success", command.message
+    final = workflow.wait_for_response(task_id, second_id, timeout=8)
+    assert final.data["phase"] == "completed", final.message
+    assert {decision["task_id"] for decision in model.inputs} == {task_id}
+    assert model.inputs[2]["constraints"] == answers
+    assert model.inputs[-1]["constraints"] == {**answers, "limit": "one"}
+    assert model.inputs[-1]["evidence"] == model.inputs[1]["evidence"]
+    assert workflow.inbox.repository.get(second_id).status == InboxStatus.ANSWERED
+    assert (gateway.root / "app.py").read_text() == "before\n"
 
 
 def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion(mode_gateway, monkeypatch):
