@@ -154,6 +154,10 @@ DISCOVERY_DESCRIPTION = (
 )
 
 
+class DiscoveryScopeRequired(ValueError):
+    """A discovery selection has no targeted scope or repository-wide reason."""
+
+
 def _selected_discovery_scope(args: dict[str, Any], *, repository_search_allowed: bool = True) -> tuple[str, ...] | None:
     paths = args.get("paths") or []
     if not isinstance(paths, (list, tuple)):
@@ -185,7 +189,7 @@ def _selected_discovery_scope(args: dict[str, Any], *, repository_search_allowed
         if not repository_search_allowed:
             raise ValueError("Repository-wide search is outside the parent task's discovery scope")
         return None
-    raise ValueError(DISCOVERY_DESCRIPTION)
+    raise DiscoveryScopeRequired(DISCOVERY_DESCRIPTION)
 
 
 def validate_repository_discovery(args: dict[str, Any]) -> None:

@@ -729,6 +729,7 @@ def test_chat_root_dir_changes_default_index_dir_in_classic_mode(monkeypatch, tm
         input="tell me about this code\nquit\n",
     )
     assert result.exit_code == 0
+    print("RESULT_OUTPUT:\n", result.output)
     assert _FakeCodingAgent.seen_index_dir == str(
         (repository_dir(repository_id_for_path(tmp_path)) / "index").resolve()
     )

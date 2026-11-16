@@ -550,7 +550,7 @@ def create_model(*, api_key: str, model: str, base_url: str | None = None, provi
                  default_headers: dict[str, str] | None = None, default_query: dict[str, str] | None = None,
                  model_configuration: dict[str, Any] | None = None,
                  **options: Any) -> NativeLLMEngine:
-    from mana_agent.config.provider_registry import PROVIDERS, model_id_for_provider
+    from mana_agent.config.provider_registry import PROVIDERS, inference_protocol_for_model, model_id_for_provider
     from mana_agent.config.user_config import get_setting
     from mana_agent.config.inference_provider import resolve_inference_connection
     from mana_agent.config.settings import Settings
@@ -566,9 +566,7 @@ def create_model(*, api_key: str, model: str, base_url: str | None = None, provi
         raise ValueError("Configure an HTTP(S) provider base URL without credentials, query fields, or a fragment")
     bare_model = model_id_for_provider(definition.id, model)
     mode = str(get_setting("MANA_LLM_API_MODE", "auto") or "auto")
-    endpoint = definition.inference_protocol if mode == "auto" else mode
-    if definition.inference_protocol == "anthropic_messages":
-        endpoint = "anthropic_messages"
+    endpoint = inference_protocol_for_model(definition.id, bare_model, mode=mode)
     timeout = float(options.pop("timeout", options.pop("request_timeout", 600)))
     attempts = int(options.pop("max_retries", 1)) + 1
     from mana_agent.model_routing.models import provider_request_overrides_from_configuration

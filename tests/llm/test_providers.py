@@ -256,7 +256,15 @@ def test_native_investigation_tool_schema_separates_file_reads_from_discovery():
                     {"initial_repository_scope": "explicit_audit"}):
         with pytest.raises(ValueError):
             validate_arguments({**args, **invalid}, read)
-    validate_arguments({"level": 4, "query": "target", "reason": "Audit the repository"}, tools["repo_search"])
+    discovery = tools["repo_search"]
+    validate_arguments({"level": 4, "query": "target", "reason": "Audit the repository"}, discovery)
+    assert "default" not in discovery["properties"]["glob"]
+    assert "require level 4" in discovery["properties"]["glob"]["description"]
+    listing = tools["ls"]
+    assert set(listing["properties"]) == {"level", "reason"}
+    validate_arguments({"level": 1, "reason": "Locate the owning directory"}, listing)
+    with pytest.raises(ValueError):
+        validate_arguments({"level": 4, "reason": "Audit the repository"}, listing)
     assert all("initial_repository_scope" not in tool["properties"] for tool in tools.values())
 
 

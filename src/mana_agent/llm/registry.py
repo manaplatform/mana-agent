@@ -157,7 +157,7 @@ GLOBAL_CAPABILITY_REGISTRY = ModelCapabilityRegistry()
 def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_version: str = "", transport: str = "",
                     configuration: dict[str, Any] | None = None, credential_revision: str = "",
                     catalog_records: Any = None) -> ModelProfile:
-    from mana_agent.config.provider_registry import PROVIDERS, model_id_for_provider
+    from mana_agent.config.provider_registry import PROVIDERS, inference_protocol_for_model, model_id_for_provider
     from mana_agent.config.user_config import get_setting, load_model_cache
     try:
         definition = PROVIDERS.get(provider)
@@ -172,7 +172,7 @@ def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_versio
     credential_revision = credential_revision or hashlib.sha256(connection.api_key.encode()).hexdigest()
     api_version = api_version or connection.headers.get("anthropic-version", "") or connection.query_params.get("api-version", "")
     mode = str(get_setting("MANA_LLM_API_MODE", "auto") or "auto")
-    transport = transport or (definition.inference_protocol if mode == "auto" or definition.inference_protocol == "anthropic_messages" else mode)
+    transport = transport or inference_protocol_for_model(provider, model, mode=mode)
     if configuration is None:
         effort = get_setting("MANA_LLM_REASONING_EFFORT", "")
         configuration = {"reasoning_effort": effort} if effort else {}

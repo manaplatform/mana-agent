@@ -2624,6 +2624,22 @@ class ManaChatApp(App):
                     self.update_status("Gateway routing failed")
                     return
 
+            if not answer and self.coding_agent is not None:
+                try:
+                    idx = self.index_dir or str(self.repo_root)
+                    payload = await asyncio.to_thread(
+                        self.coding_agent.generate,
+                        question,
+                        index_dir=idx,
+                        k=self.resolved_k,
+                        max_steps=self.coding_agent_max_steps,
+                        timeout_seconds=min(max(self.agent_timeout_seconds, 60), 600),
+                    )
+                    answer = self._extract_answer(payload) or str(payload)
+                    used_full_flow = True
+                except Exception:
+                    pass
+
             if not answer and self.tools_orchestrator is not None:
                 try:
                     if hasattr(self.tools_orchestrator, "run"):

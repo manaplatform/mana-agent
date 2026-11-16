@@ -26,13 +26,18 @@ from mana_agent.llm.errors import (
 )
 from mana_agent.llm.messages import SystemMessage, UserMessage
 from mana_agent.prompting.repo_rules import render_repo_rules
-from mana_agent.tools.repository import execute_repository_discovery, validate_repository_discovery
+from mana_agent.tools.repository import (
+    DiscoveryScopeRequired,
+    execute_repository_discovery,
+    list_repository_directories,
+    validate_repository_discovery,
+)
 from mana_agent.utils.redaction import redact_secrets
 from mana_agent.workspaces.paths import repository_dir
 
 
 class EvidenceRequest(ModeContract):
-    tool: Literal["read_file", "repo_search", "list_files", "find_symbols", "call_graph"]
+    tool: Literal["read_file", "ls", "repo_search", "list_files", "find_symbols", "call_graph"]
     level: Literal[1, 2, 3, 4]
     paths: tuple[str, ...] = ()
     query: str = ""
@@ -79,15 +84,41 @@ class FileReadEvidence(EvidenceRequest):
     initial_repository_scope: Literal[""] = ""
 
 
+class DirectoryListEvidence(EvidenceRequest):
+    tool: Literal["ls"]
+    level: Literal[1]
+
+
 class RepositoryDiscoveryEvidence(EvidenceRequest):
     tool: Literal["repo_search", "list_files", "find_symbols", "call_graph"]
-    paths: tuple[str, ...] = Field(default=(), description="Literal repository-relative files or directories.")
-    glob: str = Field(default="**/*", description="One repository-relative glob pattern.")
+    level: Literal[1, 2, 3, 4] = Field(
+        description="Use level 1 to start. Levels 2–4 require prior evidence, unless an initial audit is authorized. "
+                    "Repository-wide discovery requires level 4.",
+    )
+    paths: tuple[str, ...] = Field(
+        default=(), description="Literal repository-relative files or directories, such as [\"src/runtime\"].",
+    )
+    glob: str = Field(
+        default="**/*",
+        description="Targeted glob such as src/runtime/**/*.py or **/*executor.py. "
+                    "With no paths, broad patterns such as **/* and **/*.py require level 4.",
+    )
+    reason: str = Field(
+        min_length=1,
+        description="Why this scope is needed. For repository-wide discovery, identify the authorized audit "
+                    "or what the cited narrower evidence failed to resolve.",
+    )
 
     @model_validator(mode="after")
     def validate_discovery_target(self):
         try:
             validate_repository_discovery(self.discovery_arguments())
+        except DiscoveryScopeRequired:
+            raise PydanticCustomError(
+                "mode_discovery_selection",
+                "Supply literal paths or a targeted glob such as src/runtime/**/*.py or **/*executor.py. "
+                "Repository-wide discovery requires an authorized level 4 and a reason.",
+            ) from None
         except ValueError as exc:
             raise PydanticCustomError("mode_discovery_selection", str(exc)) from None
         return self
@@ -321,8 +352,9 @@ class PlanService:
             "references within the user's authorized scope. The routing objective is a summary. "
             "Use explicit requirements, saved answers, and available evidence without asking for confirmation. "
             "If repository evidence is needed and investigation_available is true, delegate it in one investigate "
-            "action with the question to resolve and the narrowest scope that can answer it. Include relevant locations "
-            "from the request, but do not select individual repository operations. Set initial_repository_scope only "
+            "action with the question to resolve and the narrowest scope that can answer it. Preserve relevant locations, "
+            "symbol names, and diagnostic text from the request in that handoff. The investigator chooses individual "
+            "repository operations. Set initial_repository_scope only "
             "when the user explicitly requests an audit or architecture-wide investigation. Use the saved evidence and "
             "investigation report to decide the next workflow action. The report is a suggestion; verify its cited "
             "observations. Do not delegate when the evidence is sufficient or a user decision is needed first. "
@@ -372,7 +404,9 @@ class PlanService:
     def inspect(self, request: EvidenceRequest) -> dict[str, Any]:
         root = self.repo_root
         self.validate_inspection_target(request)
-        if request.tool != "read_file":
+        if request.tool == "ls":
+            result = list_repository_directories(root)
+        elif request.tool != "read_file":
             result = execute_repository_discovery(root, request.tool, request.discovery_arguments())
         else:
             relative = request.paths[0]

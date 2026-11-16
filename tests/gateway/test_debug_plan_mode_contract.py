@@ -486,6 +486,47 @@ def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion
     assert opened == ["app.py"]
 
 
+def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeypatch):
+    from mana_agent.tools import repository
+
+    gateway, workflow = mode_gateway
+    root = gateway.root
+    for directory in ("runtime", "docs", ".private", ".venv"):
+        (root / directory).mkdir(exist_ok=True)
+    (root / "runtime" / "handler.py").write_text("raise ValueError('Unknown handler value')\n")
+    (root / "docs" / "example.py").write_text("# Unknown handler value\n")
+    visited = []
+    iter_files = repository._iter_files
+
+    def track(directory):
+        visited.append(directory)
+        yield from iter_files(directory)
+
+    monkeypatch.setattr(repository, "_iter_files", track)
+    model = Decisions(
+        investigation("Repository code that raises Unknown handler value"),
+        {"action": "diagnose", "reason": "The error is raised in the handler",
+         "root_cause": "The handler raises a ValueError.", "cause_evidence": ["evidence-2"]},
+        investigations=[[
+            [evidence_call("layout", "ls", reason="Locate the owning directory")],
+            [evidence_call("locate", "repo_search", glob="runtime/**/*.py", query="Unknown handler value")],
+            [report_call("evidence-2")],
+        ]],
+    )
+
+    result = workflow.start("session", "Why do I get Unknown handler value?", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    assert "choose ls at level 1" in model.native_inputs[0][0].content
+    assert "Unknown handler value" in json.loads(model.native_inputs[0][-1].content)["scope"]
+    layout, search = model.inputs[-1]["evidence"]
+    assert layout["level"] == 1
+    assert layout["result"]["directories"] == ["docs", "runtime"]
+    assert json.loads(model.native_inputs[1][-1].content)["result"] == layout["result"]
+    assert [match["file"] for match in search["result"]["matches"]] == ["runtime/handler.py"]
+    assert visited == [root.resolve() / "runtime"]
+
+
 def test_debug_mode_activity_keeps_the_frontend_turn(mode_gateway):
     from mana_agent.services.activity_context import ActivityContext, activity_scope, emit_activity
     from mana_agent.services.execution_event_hub import get_execution_event_hub
@@ -643,6 +684,10 @@ def test_cancel_during_native_response_discards_late_tools(mode_gateway):
      "The next permitted level is 1"),
     (evidence_call("second", "list_files", paths=["tests/**/*.py"]), 2,
      "Discovery paths must name files or directories"),
+    (evidence_call("second", "repo_search", query="before"), 2, "Supply literal paths or a targeted glob"),
+    (evidence_call("second", "repo_search", query="before", glob="**/*.py"), 2,
+     "Repository-wide discovery requires an authorized level 4"),
+    (evidence_call("second", "ls", paths=["docs"]), 2, "arguments did not match the registered schema"),
     (evidence_call("second", "repo_search", level=4, query="before", initial_repository_scope="explicit_audit"), 2,
      "arguments did not match the registered schema"),
     (evidence_call("second", paths=[".env"]), 2, "unprotected, canonical repository-relative path"),
