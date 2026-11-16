@@ -421,6 +421,8 @@ class ModeWorkflow:
             if item.status in {InboxStatus.PENDING, InboxStatus.DELIVERED}:
                 return self._describe_item(task.task_id, state, item)
         text = state.get("result") or f"{state['mode'].capitalize()} task {task.task_id} is {state['phase'].replace('_', ' ')}."
+        if self._can_retry_investigation(state):
+            text += f"\n\nResume the investigation with `/task resume {task.task_id}`."
         if state.get("plan"):
             text += "\n\n" + PlanRevision.model_validate(state["plan"]).to_markdown()
         return CommandResult(status="success", message=text,
@@ -500,7 +502,9 @@ class ModeWorkflow:
 
         task = self.board.get_task(task_id)
         state = task.mode_workflow
-        if state.get("inbox_id") or (state["mode"] == "plan" and not state.get("approved_digest") and not revision_request):
+        retry_investigation = self._can_retry_investigation(state)
+        if state.get("inbox_id") or (state["mode"] == "plan" and not state.get("approved_digest")
+                                    and not (revision_request or retry_investigation)):
             return self.describe(task)
         if state.get("in_flight_mutation") and not state["in_flight_mutation"].get("action_id"):
             return CommandResult(status="error", message="Reconcile the interrupted patch before resuming or revising this task.")
@@ -511,9 +515,21 @@ class ModeWorkflow:
         ))
         self.lane.start(reservation)
         state = self.board.get_task(task_id).mode_workflow
-        result = self._execute(task_id, state, self._service()) if not revision_request else self._restart_draft(task_id, state, revision_request)
+        if revision_request:
+            result = self._restart_draft(task_id, state, revision_request)
+        elif retry_investigation:
+            self._transition(task_id, state, Phase.UNDERSTANDING)
+            result = self._drive(task_id, state, service=self._service())
+        else:
+            result = self._execute(task_id, state, self._service())
         self._publish_result(task_id, result)
         return result
+
+    @staticmethod
+    def _can_retry_investigation(state: dict) -> bool:
+        return state["phase"] == Phase.BLOCKED and not any(state.get(key) for key in (
+            "plan", "inbox_id", "approval_id", "approved_digest", "done_steps", "in_flight_mutation",
+        ))
 
     def revise_blocked(self, task, instructions):
         return self.retry(task.task_id, revision_request=instructions)

@@ -100,3 +100,73 @@ def test_model_response_rejects_unregistered_and_invalid_tool_calls(native_profi
     ])
     with pytest.raises(InvalidResponseError, match="registered schema"):
         model.generate_sync("hello")
+
+
+@pytest.mark.parametrize("strategy", ["native", "tool", "text"])
+def test_mode_decision_repairs_semantic_failure_on_selected_strategy(tmp_path, native_profile, monkeypatch, strategy):
+    import json
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.messages import ToolCall
+
+    if strategy != "native":
+        native_profile.facts.pop("native_structured_output")
+    if strategy == "text":
+        native_profile.facts.pop("tool_calling")
+
+    request_log = []
+
+    class Adapter:
+        async def generate(self, request):
+            request_log.append(request)
+            # The first payload satisfies the JSON Schema but fails the mode
+            # contract: a draft must include structured steps.
+            args = {"action": "draft", "reason": "Ready"}
+            if len(request_log) == 2:
+                args = {
+                    "action": "clarify", "reason": "This changes the public contract",
+                    "questions": [{"field_id": "compat", "prompt": "Which behavior?", "reason": "Required decision",
+                                   "choices": [{"value": "keep", "description": "Retain current behavior"},
+                                               {"value": "change", "description": "Use new behavior"}],
+                                   "recommended_choice": "keep"}],
+                }
+            if strategy == "tool":
+                assert [tool["name"] for tool in request.tools] == ["record_decision"]
+                assert request.tool_choice is None  # Named choice was not advertised.
+                return ModelResponse(tool_calls=[ToolCall(id=f"call-{len(request_log)}", name="record_decision", args=args)])
+            assert bool(request.response_schema) == (strategy == "native")
+            assert not request.tools
+            return ModelResponse(content=json.dumps(args))
+
+    model = engine(native_profile, monkeypatch, Adapter())
+    result = PlanService(tmp_path, llm=model).next_decision("plan", {"request": "Change the handler"})
+    assert result.action == "clarify"
+    assert result.questions[0].recommended_choice == "keep"
+    assert result.questions[0].choices["keep"] == "Retain current behavior"
+    assert len(request_log) == 2
+    assert "draft and repair need a draft" in request_log[1].messages[-1].content
+
+
+def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path, native_profile, monkeypatch):
+    import json
+
+    from mana_agent.agent.plan_service import PlanService
+
+    request_log = []
+
+    class Adapter:
+        async def generate(self, request):
+            request_log.append(request)
+            return ModelResponse(content=json.dumps({
+                "action": "inspect", "reason": "Inspect evidence",
+                "evidence": {"tool": "read_file", "level": 1, "paths": ["a.py", "b.py"], "reason": "Evidence",
+                             "unknown-private-key": "rejected-private-value"},
+            }))
+
+    model = engine(native_profile, monkeypatch, Adapter())
+    with pytest.raises(RuntimeError, match=r"ModeDecision.*evidence\.<key>.*extra forbidden") as exc:
+        PlanService(tmp_path, llm=model).next_decision("plan", {"request": "Inspect the entry point"})
+    assert len(request_log) == 2
+    assert "unknown-private-key" not in str(exc.value)
+    assert "rejected-private-value" not in str(exc.value)
+    assert "rejected-private-value" not in request_log[1].messages[-1].content

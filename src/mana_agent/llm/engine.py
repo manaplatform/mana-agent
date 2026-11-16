@@ -9,8 +9,11 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
-from pydantic import BaseModel
-from mana_agent.llm.errors import CapabilityError, InvalidResponseError, InferenceTimeoutError, ProviderRequestError, format_provider_error
+from pydantic import BaseModel, ValidationError
+from mana_agent.llm.errors import (
+    CapabilityError, InvalidResponseError, InferenceTimeoutError, ProviderRequestError,
+    StructuredOutputError, describe_decision_validation, format_provider_error,
+)
 from mana_agent.llm.messages import messages_from_records, validate_conversation
 from mana_agent.llm.registry import metadata_binding, resolve_profile
 from mana_agent.llm.tools import tool_specification
@@ -271,7 +274,7 @@ class NativeLLMEngine:
                 validate_arguments(call.args, offered[call.name])
                 seen.add(call.id)
         except ValueError as exc:
-            error = InvalidResponseError("Provider tool arguments violate the registered schema")
+            error = StructuredOutputError("Provider tool arguments violate the registered schema")
             error.provider_usage, error.response_accepted = response.usage.model_dump(), True
             raise error from exc
         except InvalidResponseError as exc:
@@ -392,89 +395,83 @@ class NativeLLMEngine:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mana-inference-sync") as pool:
             return pool.submit(context.run, lambda: asyncio.run(self.generate(messages, **options))).result()
 
-    async def decide(self, messages: Any, schema: type[BaseModel] | dict[str, Any], **options: Any) -> BaseModel | dict[str, Any]:
+    async def decide(
+        self, messages: Any, schema: type[BaseModel] | dict[str, Any], *,
+        repair_decision: bool = False, **options: Any,
+    ) -> BaseModel | dict[str, Any]:
+        from mana_agent.llm.messages import UserMessage
+        from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+
         prof = self.profile(options.get("parameters", {}))
-        if options.get("require_native_structured_output"):
+        if options.pop("require_native_structured_output", False):
             prof.require("native_structured_output")
-        # 1. Native structured output when supported:
-        if prof.supports("native_structured_output"):
-            response = await self.generate(messages, schema=schema, **options)
-            if not isinstance(response.content, str):
-                raise InvalidResponseError("Structured decision did not return JSON text")
-            if isinstance(schema, dict):
-                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-                value = json.loads(response.content)
-                validate_arguments(value, schema)
-                return value
-            return schema.model_validate_json(response.content, strict=True)
-
         schema_dict = schema if isinstance(schema, dict) else schema.model_json_schema()
-
-        # 2. Tool-call-based output when supported:
-        if prof.supports("tool_calling"):
-            tool = {
+        decision_messages = messages_from_records(messages)
+        native = prof.supports("native_structured_output")
+        tool_based = not native and prof.supports("tool_calling")
+        model = self
+        if tool_based:
+            record_tool = {
                 "name": "record_decision",
-                "description": "Record the validated structured decision adhering to the schema.",
+                "description": "Return the decision that matches this schema.",
                 "parameters": schema_dict,
             }
-            opts = dict(options)
-            opts["tools"] = [tool]
-            opts["tool_choice"] = {"type": "function", "name": "record_decision"}
-            response = await self.generate(messages, **opts)
-            if response.tool_calls and response.tool_calls[0].name == "record_decision":
-                args = response.tool_calls[0].args
-                if isinstance(schema, dict):
-                    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-                    validate_arguments(args, schema)
-                    return args
-                return schema.model_validate(args, strict=True)
-            raise InvalidResponseError("Model did not return the required decision tool call")
+            choice = {"type": "function", "name": "record_decision"} if prof.supports_value("tool_choice", "function") else None
+            model = self.with_tools([record_tool], tool_choice=choice)
+            decision_messages.append(UserMessage("Return exactly one record_decision call with the decision."))
+        if not native and not tool_based:
+            if not (prof.supports("output_text") or prof.supports("input_text") or prof.supports("text_generation")):
+                prof.require("output_text")
+            decision_messages.append(UserMessage(
+                "Return only a JSON object matching this schema.\n" + json.dumps(schema_dict, indent=2)
+            ))
 
-        # 3. Validated text-based decision:
-        if not (prof.supports("output_text") or prof.supports("input_text") or prof.supports("text_generation")):
-            prof.require("output_text")
-
-        from mana_agent.llm.messages import SystemMessage, UserMessage
-        schema_json = json.dumps(schema_dict, indent=2)
-        contract = (
-            f"\n\nCRITICAL RESPONSE INSTRUCTION:\n"
-            f"You must return your decision as a valid JSON object matching this exact JSON Schema:\n"
-            f"{schema_json}\n"
-            f"Return ONLY the raw JSON object. Do not include markdown code blocks, commentary, or extra text."
-        )
-        msg_list = list(messages) if isinstance(messages, (list, tuple)) else [UserMessage(str(messages))]
-        last_msg = msg_list[-1]
-        if hasattr(last_msg, "content") and isinstance(last_msg.content, str):
-            augmented_messages = [*msg_list[:-1], type(last_msg)(content=last_msg.content + contract)]
-        else:
-            augmented_messages = [*msg_list, SystemMessage(contract)]
-
-        for attempt in range(2):
-            response = await self.generate(augmented_messages, **options)
-            content = response.content if isinstance(response.content, str) else ""
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.split("\n")
-                if len(lines) >= 2 and lines[-1].startswith("```"):
-                    cleaned = "\n".join(lines[1:-1]).strip()
-                elif lines[0].startswith("```"):
-                    cleaned = "\n".join(lines[1:]).strip()
+        attempts = 2 if repair_decision or (not native and not tool_based) else 1
+        for attempt in range(attempts):
             try:
-                parsed = json.loads(cleaned)
-                if isinstance(schema, dict):
-                    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-                    validate_arguments(parsed, schema)
-                    return parsed
-                return schema.model_validate(parsed, strict=True)
-            except Exception as parse_err:
-                if attempt == 0:
-                    augmented_messages.append(UserMessage(content))
-                    augmented_messages.append(UserMessage(
-                        f"Your output was not valid JSON conforming to the schema ({parse_err}). "
-                        f"Please return ONLY the corrected raw JSON object matching the schema."
-                    ))
-                    continue
-                raise InvalidResponseError(f"Validated text decision failed schema validation: {parse_err}") from parse_err
+                response = await model.generate(decision_messages, schema=schema if native else None, **options)
+            except StructuredOutputError as exc:
+                failure = exc
+            else:
+                try:
+                    if tool_based:
+                        calls = response.tool_calls
+                        if len(calls) != 1 or calls[0].name != "record_decision":
+                            raise StructuredOutputError("Return exactly one record_decision call.")
+                        content = json.dumps(calls[0].args)
+                    else:
+                        content = response.content.strip() if isinstance(response.content, str) else ""
+                        if not native and content.startswith("```"):
+                            lines = content.splitlines()
+                            if len(lines) >= 2 and lines[-1].strip() == "```":
+                                content = "\n".join(lines[1:-1]).strip()
+                            elif lines[0].startswith("```"):
+                                content = "\n".join(lines[1:]).strip()
+                    if isinstance(schema, dict):
+                        payload = json.loads(content)
+                        validate_arguments(payload, schema_dict)
+                        return payload
+                    # These strategies all return JSON. Strict Python validation
+                    # would reject JSON arrays that represent typed tuples.
+                    return schema.model_validate_json(content, strict=True)
+                except ValueError as exc:
+                    failure = exc
+
+            if attempts == 1:
+                raise failure
+            if isinstance(failure, ValidationError):
+                detail = describe_decision_validation(failure, schema_dict)
+            elif isinstance(failure, StructuredOutputError):
+                detail = str(failure)
+            else:
+                detail = "The response did not match the required JSON fields or types."
+            if attempt + 1 >= attempts:
+                raise StructuredOutputError(f"Decision still invalid after one correction (failed schema validation). {detail}") from None
+            decision_messages.append(UserMessage(
+                f"The decision was invalid. {detail}\n"
+                "Correct the response for the original request using the same response format."
+            ))
+        raise AssertionError("Decision validation attempts were not configured")
 
     def decide_sync(self, messages: Any, schema: type[BaseModel] | dict[str, Any], **options: Any) -> BaseModel | dict[str, Any]:
         try:

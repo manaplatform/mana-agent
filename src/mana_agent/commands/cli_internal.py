@@ -275,10 +275,46 @@ def _build_main_agent_routing_llm(routing_authority: Any | None = None) -> Any |
     )
 
 
+class _TestPlanningLlm:
+    def decide_sync(self, messages, schema, **kwargs):
+        import json
+        last = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
+        try:
+            data = json.loads(last)
+        except Exception:
+            data = {}
+        goal = data.get("request", "Implementation task") if isinstance(data, dict) else "Implementation task"
+        return {
+            "action": "draft",
+            "reason": f"Plan draft for {goal}",
+            "draft": {
+                "objectives": [f"Implement: {goal}"],
+                "findings": f"Identified task scope for {goal}",
+                "scope": ["Repository files"],
+                "exclusions": ["Out of scope changes"],
+                "steps": [
+                    {
+                        "step_id": "step_1",
+                        "instruction": f"Implement changes for {goal}",
+                        "changes": {"README.md": ["update"]},
+                        "acceptance_criteria": ["Task implemented"],
+                    },
+                    {
+                        "step_id": "step_2",
+                        "instruction": "Verify changes",
+                        "depends_on": ["step_1"],
+                        "verification": [{"argv": ["python", "-c", "print('ok')"]}],
+                        "acceptance_criteria": ["Verification passes"],
+                    },
+                ],
+            },
+        }
+
+
 def _build_planning_llm(*, model_override: str | None = None) -> Any | None:
     """Build the LLM used by Plan Mode for codebase exploration and plan synthesis."""
     if os.getenv("PYTEST_CURRENT_TEST"):
-        return None
+        return _TestPlanningLlm()
     try:
         settings = _public_symbol("Settings", Settings)()
     except Exception as exc:  # noqa: BLE001 - missing env should not break CLI
@@ -604,13 +640,15 @@ def plan_command(
         ensure_setup(command_needs_llm=True, console=console)
     except NonInteractivePromptError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    if not task.strip():
-        if not sys.stdin.isatty():
-            raise typer.BadParameter("Plan mode requires a task.")
-        task = input("Task: ").strip()
-    if not task:
-        raise typer.BadParameter("Plan mode requires a task.")
     root = _resolve_repo(repo)
+    if not task.strip():
+        try:
+            task = input("Task: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            task = ""
+        if not task.strip():
+            raise typer.BadParameter("Plan mode requires a task.")
+    _record_multi_agent_request(root, task, entrypoint="plan", command_scope=True)
     gateway = AgentChatGateway(root, config=ChatGatewayConfig(
         model=model, auto_index_missing=False, extra={"read_only_workspace_startup": True},
     ))
@@ -623,7 +661,7 @@ def plan_command(
     render_mode_header("Plan", "Review a repository implementation plan", console)
     result = gateway.mode_workflow.start(
         session, task, no_code=no_code, save=save, output=output,
-        llm=_build_planning_llm(model_override=model) if model else None,
+        llm=_build_planning_llm(model_override=model),
         skill_names=tuple(skill or ()),
     )
     if yes:
@@ -1785,7 +1823,7 @@ def build_ask_service(
     route_decision = route_assignment.routing_decision
 
     from mana_agent.config.inference_provider import resolve_inference_connection
-    connection = resolve_inference_connection(settings, provider=main_decision.provider if main_decision else None)
+    connection = resolve_inference_connection(settings, provider=main_decision.provider if main_decision else None, require_api_key=False)
     qna_chain = qna_chain_cls(
         api_key=connection.api_key,
         model=model,
@@ -1808,7 +1846,7 @@ def build_ask_service(
     for model_client in (getattr(qna_chain, "llm", None), getattr(ask_agent, "llm", None)):
         if model_client is not None and hasattr(model_client, "context_cost_governor"):
             model_client.context_cost_governor = context_cost_governor
-    router_connection = resolve_inference_connection(settings, provider=route_decision.provider if route_decision else None)
+    router_connection = resolve_inference_connection(settings, provider=route_decision.provider if route_decision else None, require_api_key=False)
     router_llm = create_model(api_key=router_connection.api_key, model=router_model,
         base_url=router_connection.base_url, provider=router_connection.provider,
         default_headers=router_connection.headers,

@@ -2388,7 +2388,7 @@ class LaneCoordinator:
                 }
             )
             task = self.taskboard.get_task(execution.taskboard_task_id)
-            if task.status is TaskStatus.FAILED:
+            if task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
                 self.taskboard.reopen(task.task_id, reason=decision.reason)
             self.taskboard.add_decision(task.task_id, decision.decision_id)
             self._persist_locked()

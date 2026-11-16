@@ -856,6 +856,8 @@ def coding_tool_contracts() -> list[ToolContract]:
             input_schema=_schema({}),
             output_schema=_schema({"directories": {"type": "array"}}),
             error_format=common_error,
+            safety_rules=["Read-only. Lists only immediate top-level directories."],
+            examples=[{"input": {}}],
         ),
         ToolContract(
             name="list_files",

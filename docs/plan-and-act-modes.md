@@ -10,6 +10,10 @@ Use **Plan** when you want to review the proposed changes before work begins. In
 - Review the exact requirements, boundaries, dependencies, file operations, and checks. Use the TUI approval controls or `/approve <item-id>` (`/accept` and `/act` are aliases in that context). In a standalone invocation, use the displayed review prompt or run `mana-agent inbox approve <item-id>`. A bare `--yes` or a Full Access session does not approve a generated revision.
 - Use `/revise <change>` to update the plan. To correct a stored clarification answer, supply a JSON object keyed by its question ID. A new revision requires a new approval. Use `/reject` or the existing cancellation controls to stop the task.
 
+If a model response fails validation, Mana requests one correction using the same model and response format. If the correction fails, Mana shows the failed field or check. Run `/plan` to see the blocked task, then use the displayed `/task resume <task-id>` command to retry planning.
+
+The model returns typed records for file operations and clarification choices. Mana validates those records before using them. Saved revisions and their approval digests use the existing plan format.
+
 TaskBoard records step progress. The Execution Supervisor owns the active attempt and lease. The human inbox records the reviewer, timestamp, and digest of the approved revision. Ordinary mode switches and free text cannot substitute for an inbox response. Completed steps are kept when their scope and evidence still match. A patch with an uncertain outcome requires reconciliation before retry.
 
 Each coding proposal is read-only. The internal engine uses registered read tools, and external Codex uses a read-only app-server turn with networking disabled. Mana checks the exact step, current scope, file operations, checkout state, and patch content before the existing Tool Runner and action policy apply a mutation. Scope changes from live steering return the task to review. Git publishing and mutations to external services keep their existing approval flows.

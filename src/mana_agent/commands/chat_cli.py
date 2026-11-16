@@ -118,6 +118,76 @@ def _is_interactive_terminal() -> bool:
         return False
 
 
+def _planning_questions(max_questions: int) -> list[str]:
+    questions = [
+        "What is the concrete goal and the success criteria?",
+        "What should be in scope and out of scope?",
+        "What constraints, risks, or preferences should shape the implementation?",
+        "What acceptance tests or verification steps should be included?",
+        "Are there rollout, migration, or compatibility requirements?",
+        "What output format should the final plan use?",
+    ]
+    limit = max(1, min(int(max_questions or 3), len(questions)))
+    return questions[:limit]
+
+
+def _generate_planning_question_llm(
+    *,
+    ask_service,
+    planning_request: str,
+    prior_questions: list[str],
+    prior_answers: list[str],
+    asked_count: int,
+    max_questions: int,
+) -> str:
+    qna_chain = getattr(ask_service, "qna_chain", None)
+    llm = getattr(qna_chain, "llm", None)
+    if llm is None or not hasattr(llm, "generate_sync"):
+        raise RuntimeError("planning question LLM is unavailable")
+    prompt = (
+        "Generate exactly one concise clarification question for a coding plan.\n"
+        f"Request: {planning_request}\n"
+        f"Question number: {asked_count + 1} of {max_questions}\n"
+        "Prior Q&A:\n"
+    )
+    for idx, (prior_q, prior_a) in enumerate(zip(prior_questions, prior_answers), start=1):
+        prompt += f"Q{idx}: {prior_q}\nA{idx}: {prior_a}\n"
+    prompt += "Ask only for information that materially changes the implementation plan."
+    response = llm.generate_sync(prompt)
+    content = str(getattr(response, "content", response) or "").strip()
+    if not content:
+        raise RuntimeError("planning question LLM returned an empty question")
+    return content
+
+
+def _is_planning_question_auth_failure(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in ("error code: 401", "status code: 401", "incorrect api key", "unauthorized"))
+
+
+def _build_planning_instruction(
+    planning_request: str,
+    planning_answers: list[str],
+    max_questions: int,
+    *,
+    questions: list[str] | None = None,
+) -> str:
+    lines = [
+        "You are in planning mode.",
+        "Produce a decision-complete implementation plan. Do not edit files.",
+        "",
+        f"Original request: {planning_request}",
+        "",
+        "Clarifications:",
+    ]
+    effective_questions = questions or _planning_questions(max_questions)
+    for idx, answer in enumerate(planning_answers, start=1):
+        question = effective_questions[idx - 1] if idx - 1 < len(effective_questions) else f"Question {idx}"
+        lines.append(f"Q{idx}: {question}")
+        lines.append(f"A{idx}: {answer}")
+    return "\n".join(lines)
+
+
 def _agent_decision_llm(ask_service):
     ask_agent = getattr(ask_service, "ask_agent", None)
     if ask_agent is not None and hasattr(ask_agent, "llm"):
@@ -1059,6 +1129,13 @@ def chat(
         if str(welcome or "compact").strip().lower() == "full":
             console.print(render_status(chat_ui_state, full=True))
 
+        planning_request: str | None = None
+        planning_answers: list[str] = []
+        planning_questions: list[str] = []
+        planning_question_source: str = "none"
+        planning_questions_asked_count: int = 0
+        planning_question_llm_disabled = False
+        planning_question_failure_logged = False
         active_flow_id: str | None = _ca_flow if isinstance(_ca_flow, str) and _ca_flow.strip() else None
         pending_ui_selection: dict[str, Any] | None = None
         pending_prechecklist: dict[str, Any] | None = None
@@ -2124,11 +2201,14 @@ def chat(
                     if single_shot_noninteractive and cmd_result.status == "error":
                         single_shot_exit_code = 1
                     continue
-            if gateway.get_session_execution_mode(chat_ui_state.session_id) in {"plan", "debug"}:
+            active_mode_task = (
+                gateway.mode_workflow.active(chat_ui_state.session_id)
+                or gateway.mode_workflow.active(chat_ui_state.session_id, mode="debug")
+            )
+            if active_mode_task is not None:
                 mode_result = gateway.mode_workflow.receive(
                     chat_ui_state.session_id, question,
-                    task=(gateway.mode_workflow.active(chat_ui_state.session_id)
-                          or gateway.mode_workflow.active(chat_ui_state.session_id, mode="debug")),
+                    task=active_mode_task,
                     question_limit=planning_question_limit if planning_mode else None,
                 )
                 console.print(Markdown(mode_result.message))
@@ -2323,6 +2403,60 @@ def chat(
                 )
                 continue
 
+            if planning_mode or planning_request is not None:
+                if planning_request is None:
+                    planning_request = question
+                    planning_answers, planning_questions = [], []
+                else:
+                    planning_answers.append(question)
+                if len(planning_answers) < planning_question_limit:
+                    try:
+                        if planning_question_llm_disabled:
+                            raise RuntimeError("Planning question model is unavailable; correct its configuration or credentials")
+                        next_question = _generate_planning_question_llm(
+                            ask_service=ask_service, planning_request=planning_request,
+                            prior_questions=planning_questions, prior_answers=planning_answers,
+                            asked_count=len(planning_answers), max_questions=planning_question_limit,
+                        )
+                    except Exception as exc:
+                        if _is_planning_question_auth_failure(exc):
+                            planning_question_llm_disabled = True
+                        from mana_agent.utils.redaction import redact_secrets
+                        answer = f"Planning question generation failed: {redact_secrets(str(exc))}"
+                        console.print(f"[red]{answer}[/red]")
+                        gateway._append_session_message(chat_ui_state.session_id, role="user", content=question, turn_id=current_turn_id)
+                        gateway._append_session_message(chat_ui_state.session_id, role="assistant", content=answer, turn_id=current_turn_id)
+                        planning_request = None
+                        planning_answers, planning_questions = [], []
+                        _finish_ui_turn(current_turn_id, message="Planning requires a valid model response.")
+                        continue
+                    planning_questions.append(next_question)
+                    planning_questions_asked_count = len(planning_answers)
+                    console.print(f"[cyan]Planning request:[/cyan] {planning_request}\n"
+                        f"[bold]Planning question {len(planning_answers) + 1}/{planning_question_limit}[/bold]\n{next_question}")
+                    gateway._append_session_message(chat_ui_state.session_id, role="user", content=question, turn_id=current_turn_id)
+                    gateway._append_session_message(chat_ui_state.session_id, role="assistant", content=next_question, turn_id=current_turn_id)
+                    _finish_ui_turn(current_turn_id, message="Waiting for planning input.")
+                    continue
+                question = _build_planning_instruction(planning_request, planning_answers,
+                    planning_question_limit, questions=planning_questions)
+                planning_questions_asked_count = len(planning_answers)
+                planning_request = None
+                planning_answers, planning_questions = [], []
+                if agent_tools and auto_execute_plan:
+                    auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
+                        question,
+                        auto_chat_mode=AutoChatMode.EDIT,
+                    )
+                    _emit_auto_execute_terminal(
+                        user_question=question,
+                        payload=auto_payload,
+                        debug_tail=auto_debug_tail,
+                        auto_chat_mode=AutoChatMode.EDIT,
+                    )
+                    continue
+                console.print("[cyan]Generating decision-complete plan...[/cyan]")
+
             flow_routing_context = ""
             if (
                 active_flow_id
@@ -2378,9 +2512,9 @@ def chat(
                     extra={"prior_flow_id": prior_flow_id, "question": question},
                 )
 
-            from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent
+            from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent, is_plan_execution_request
 
-            if agent_decision.intent == "plan" or agent_decision.coding_workflow:
+            if not planning_mode and (agent_decision.intent == "plan" or agent_decision.coding_workflow):
                 workflow = agent_decision.coding_workflow
                 mode_result = gateway.mode_workflow.start(
                     chat_ui_state.session_id, question, mode="debug" if workflow else "plan",
@@ -2395,14 +2529,15 @@ def chat(
             auto_chat_mode = _auto_chat_mode_from_agent_decision(
                 agent_decision, classify_auto_chat_intent(question)
             )
-            plan_trigger_request = auto_chat_mode == AutoChatMode.PLAN_ONLY
-            edit_request = auto_chat_mode == AutoChatMode.EDIT
+            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or is_plan_execution_request(question))
+            edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
             if (
                 coding_agent_instance is None
                 and agent_tools
                 and auto_execute_plan
                 and (
                     edit_request
+                    or is_plan_execution_request(question)
                     or execution_profile == "full-auto"
                 )
                 and plan_trigger_request

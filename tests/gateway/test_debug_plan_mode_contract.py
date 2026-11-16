@@ -454,3 +454,18 @@ def test_destructive_patch_resumes_the_exact_action_after_its_inbox_approval(mod
     assert final.status == "success", final.message
     assert not (gateway.root / "app.py").exists()
     assert len(proposals) == 1
+
+
+def test_invalid_mode_decision_can_resume_to_a_draft_without_execution(mode_gateway):
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions({"action": "draft", "reason": "Missing structured plan"}, draft())
+    result = workflow.start("session", "Fix the handler", save=False)
+    assert result.data["phase"] == "blocked"
+    assert "draft and repair need a draft" in result.message
+    task_id = result.data["task_id"]
+    assert f"/task resume {task_id}" in workflow.describe(workflow.active("session")).message
+
+    resumed = workflow.retry(task_id)
+    assert resumed.data["task_id"] == task_id
+    assert resumed.data["phase"] == "awaiting_approval", resumed.message
+    assert (gateway.root / "app.py").read_text() == "before\n"

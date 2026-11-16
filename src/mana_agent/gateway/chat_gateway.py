@@ -5924,7 +5924,7 @@ class AgentChatGateway:
         if not text.lstrip().startswith("/"):
             plan_task = self.mode_workflow.active(session_id)
             debug_task = self.mode_workflow.active(session_id, mode="debug")
-            if plan_task or debug_task or self._session(session_id).get("execution_mode") == "plan":
+            if plan_task or debug_task:
                 session = self._session(session_id)
                 local = session.get("frontend") in {"cli", "tui"}
                 actor = str(options.get("authenticated_user_id") or (getpass.getuser() if local else ""))

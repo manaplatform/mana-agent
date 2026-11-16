@@ -134,7 +134,7 @@ def main(
             args = ["--repo", str(root)]
             if model:
                 args += ["--model", model]
-            _invoke("plan", args)
+            _invoke_with_multi_agent_route(ctx, "plan", args, root=root, request="root --plan", entrypoint="root")
             return
         if act_mode:
             args = ["--root-dir", str(root), "--act", *extra_appr_args]

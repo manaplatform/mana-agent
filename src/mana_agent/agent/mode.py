@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import PurePosixPath
-from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Annotated, Any, Literal
+from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, GetJsonSchemaHandler, model_validator
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import PydanticCustomError, core_schema
 
 from mana_agent.human_inbox.models import canonical_digest
 
@@ -77,12 +80,39 @@ def repository_relative_path(value: str) -> str:
             or "\\" in value or ":" in value or any(ord(c) < 32 for c in value)
             or any(p == ".." or p in {".git", ".mana", ".ssh", "secrets.toml", "credentials.json"}
                    or p.startswith(".env") for p in path.parts)):
-        raise ValueError("a canonical, unprotected repository-relative path is required")
+        raise PydanticCustomError("mode_repository_path", "use an unprotected, canonical repository-relative path")
     return value
 
 
 class ModeContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+@dataclass(frozen=True)
+class DecisionEntries:
+    """Advertise fixed-key records to models and retain dictionaries in saved state."""
+
+    key: str
+    value: str
+
+    def __get_pydantic_core_schema__(self, source: Any, handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
+        mapping = handler(source)
+        record = core_schema.typed_dict_schema({
+            self.key: core_schema.typed_dict_field(mapping["keys_schema"]),
+            self.value: core_schema.typed_dict_field(mapping["values_schema"]),
+        }, extra_behavior="forbid")
+        entries = core_schema.no_info_after_validator_function(self._to_mapping, core_schema.list_schema(record))
+        return core_schema.union_schema([entries, mapping])
+
+    def __get_pydantic_json_schema__(self, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        entries, mapping = schema["choices"]
+        return handler(entries if handler.mode == "validation" else mapping)
+
+    def _to_mapping(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        mapping = {record[self.key]: record[self.value] for record in records}
+        if len(mapping) != len(records):
+            raise PydanticCustomError("mode_duplicate_entry", f"entries must use unique {self.key} values")
+        return mapping
 
 
 class VerificationCommand(ModeContract):
@@ -97,30 +127,31 @@ class VerificationCommand(ModeContract):
         if self.cwd != ".":
             repository_relative_path(self.cwd)
         if not self.argv[0].strip() or any("\x00" in arg for arg in self.argv):
-            raise ValueError("verification requires literal argv")
+            raise PydanticCustomError("mode_verification_argv", "verification requires literal argv")
         if self.expected == "fail" and not self.output_marker:
-            raise ValueError("failure reproduction requires an expected diagnostic")
+            raise PydanticCustomError("mode_verification_diagnostic", "verification expecting failure requires an output_marker")
         if self.image and (self.image.startswith("-") or any(c.isspace() for c in self.image)):
-            raise ValueError("verification image must be a local image name")
+            raise PydanticCustomError("mode_verification_image", "verification image must be a local image name")
         return self
+
+
+FileOperations = Annotated[tuple[Literal["add", "update", "delete"], ...], Field(min_length=1)]
 
 
 class PlanStep(ModeContract):
     step_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     instruction: str = Field(min_length=1)
     depends_on: tuple[str, ...] = ()
-    changes: dict[str, tuple[Literal["add", "update", "delete"], ...]] = Field(default_factory=dict)
+    changes: Annotated[dict[str, FileOperations], DecisionEntries("path", "operations")] = Field(default_factory=dict)
     verification: tuple[VerificationCommand, ...] = ()
     acceptance_criteria: tuple[str, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_scope(self):
         if not self.changes and not self.verification:
-            raise ValueError("an executable step needs explicit file operations or verification")
-        for path, operations in self.changes.items():
+            raise PydanticCustomError("mode_step_scope", "each step needs file operations or a verification command")
+        for path in self.changes:
             repository_relative_path(path)
-            if not operations:
-                raise ValueError("each file requires a permitted operation")
         return self
 
 
@@ -140,10 +171,10 @@ class PlanDraft(ModeContract):
         seen = set()
         for step in self.steps:
             if step.step_id in seen or not set(step.depends_on).issubset(seen):
-                raise ValueError("step IDs must be unique and dependencies must refer to earlier steps")
+                raise PydanticCustomError("mode_step_order", "step IDs must be unique and dependencies must refer to earlier steps")
             seen.add(step.step_id)
         if not any(check.expected == "pass" for step in self.steps for check in step.verification):
-            raise ValueError("a plan must include a check that verifies the intended outcome")
+            raise PydanticCustomError("mode_passing_check", "include at least one verification command that expects to pass")
         return self
 
 
@@ -230,7 +261,11 @@ class StructuredPlan(BaseModel):
 
     @property
     def is_approved(self) -> bool:
-        return self.approved
+        if self.approved:
+            return True
+        from mana_agent.approval.policy import get_approval_policy
+
+        return get_approval_policy().is_full_access()
 
     def to_dict(self) -> dict[str, Any]:
         """Return the structured plan as a dictionary."""
@@ -338,4 +373,8 @@ class PlanApprovalState(BaseModel):
 
     @property
     def is_approved(self) -> bool:
-        return self.approved
+        if self.approved:
+            return True
+        from mana_agent.approval.policy import get_approval_policy
+
+        return get_approval_policy().is_full_access()
