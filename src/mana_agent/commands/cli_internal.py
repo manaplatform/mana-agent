@@ -284,7 +284,7 @@ class _TestPlanningLlm:
         except Exception:
             data = {}
         goal = data.get("request", "Implementation task") if isinstance(data, dict) else "Implementation task"
-        return {
+        decision = {
             "action": "draft",
             "reason": f"Plan draft for {goal}",
             "draft": {
@@ -309,6 +309,7 @@ class _TestPlanningLlm:
                 ],
             },
         }
+        return {"decision": decision}
 
 
 def _build_planning_llm(*, model_override: str | None = None) -> Any | None:
@@ -390,6 +391,7 @@ def _record_multi_agent_request(
     routing_authority = GatewayRoutingAuthority(root)
     main_kwargs: dict[str, Any] = {
         "routing_llm": _build_main_agent_routing_llm(routing_authority),
+        "initialize_if_missing": False,
     }
     if session_id:
         main_kwargs["session_id"] = session_id

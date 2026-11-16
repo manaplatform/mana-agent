@@ -41,7 +41,8 @@ class Decisions:
 
     def decide_sync(self, messages, schema):
         self.inputs.append(json.loads(messages[-1].content))
-        return next(self.decisions)
+        payload = next(self.decisions)
+        return {"decision": payload} if schema["title"] == "ModeDecision" else payload
 
 
 @pytest.fixture
@@ -521,7 +522,7 @@ def test_invalid_mode_decision_can_resume_to_a_draft_without_execution(mode_gate
     gateway._entry_router.llm = Decisions({"action": "draft", "reason": "Missing structured plan"}, draft())
     result = workflow.start("session", "Fix the handler", save=False)
     assert result.data["phase"] == "blocked"
-    assert "draft and repair need a draft" in result.message
+    assert "draft: missing" in result.message
     task_id = result.data["task_id"]
     assert f"/task resume {task_id}" in workflow.describe(workflow.active("session")).message
 

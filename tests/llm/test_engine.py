@@ -119,17 +119,14 @@ def test_mode_decision_repairs_semantic_failure_on_selected_strategy(tmp_path, n
     class Adapter:
         async def generate(self, request):
             request_log.append(request)
-            # The first payload satisfies the JSON Schema but fails the mode
-            # contract: a draft must include structured steps.
-            args = {"action": "draft", "reason": "Ready"}
-            if len(request_log) == 2:
-                args = {
-                    "action": "clarify", "reason": "This changes the public contract",
-                    "questions": [{"field_id": "compat", "prompt": "Which behavior?", "reason": "Required decision",
-                                   "choices": [{"value": "keep", "description": "Retain current behavior"},
-                                               {"value": "change", "description": "Use new behavior"}],
-                                   "recommended_choice": "keep"}],
-                }
+            # The first payload is structurally valid but recommends a missing choice.
+            args = {"decision": {
+                "action": "clarify", "reason": "This changes the public contract",
+                "questions": [{"field_id": "compat", "prompt": "Which behavior?", "reason": "Required decision",
+                               "choices": [{"value": "keep", "description": "Retain current behavior"},
+                                           {"value": "change", "description": "Use new behavior"}],
+                               "recommended_choice": "missing" if len(request_log) == 1 else "keep"}],
+            }}
             if strategy == "tool":
                 assert [tool["name"] for tool in request.tools] == ["record_decision"]
                 assert request.tool_choice is None  # Named choice was not advertised.
@@ -144,7 +141,7 @@ def test_mode_decision_repairs_semantic_failure_on_selected_strategy(tmp_path, n
     assert result.questions[0].recommended_choice == "keep"
     assert result.questions[0].choices["keep"] == "Retain current behavior"
     assert len(request_log) == 2
-    assert "draft and repair need a draft" in request_log[1].messages[-1].content
+    assert "recommended_choice must be an exact key in choices" in request_log[1].messages[-1].content
 
 
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])
@@ -168,7 +165,7 @@ def test_mode_decision_corrects_invalid_file_read(tmp_path, native_profile, monk
             evidence = {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file"}
             if len(requests) == 1:
                 evidence.update(invalid_fields)
-            args = {"action": "inspect", "reason": "Read the reported location", "evidence": evidence}
+            args = {"decision": {"action": "inspect", "reason": "Read the reported location", "evidence": evidence}}
             if request.tools:
                 return ModelResponse(tool_calls=[ToolCall(id="read-decision", name="record_decision", args=args)])
             return ModelResponse(content=json.dumps(args))
@@ -195,14 +192,14 @@ def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path,
     class Adapter:
         async def generate(self, request):
             request_log.append(request)
-            return ModelResponse(content=json.dumps({
+            return ModelResponse(content=json.dumps({"decision": {
                 "action": "inspect", "reason": "Inspect evidence",
                 "evidence": {"tool": "read_file", "level": 1, "paths": ["a.py"], "reason": "Evidence",
                              "unknown-private-key": "rejected-private-value"},
-            }))
+            }}))
 
     model = engine(native_profile, monkeypatch, Adapter())
-    with pytest.raises(RuntimeError, match=r"ModeDecision.*evidence\.<key>\.<key>.*extra forbidden") as exc:
+    with pytest.raises(RuntimeError, match=r"ModeDecision.*decision\..*evidence\..*extra forbidden") as exc:
         PlanService(tmp_path, llm=model).next_decision("plan", {"request": "Inspect the entry point"})
     assert len(request_log) == 2
     assert "unknown-private-key" not in str(exc.value)
@@ -228,7 +225,7 @@ def test_mode_decision_reports_why_the_provider_stopped_correction(
         async def generate(self, request):
             requests.append(request)
             if len(requests) == 1:
-                return ModelResponse(content='{"action":"draft","reason":"Missing draft"}')
+                return ModelResponse(content='{"decision":{"action":"draft","reason":"Missing draft"}}')
             return provider.normalize({"choices": [{
                 "finish_reason": finish_reason, "message": {"content": "fixture-protected-response"},
             }]}, request)

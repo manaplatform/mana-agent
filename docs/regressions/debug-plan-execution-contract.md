@@ -50,6 +50,16 @@ The mode workflow now keeps the frontend turn ID and redaction context for activ
 
 **Do not reintroduce** substituting the task ID for an available frontend turn ID, publishing provider response text as failure detail, or automatically retrying a provider stop by increasing its budget or changing models.
 
+## Action payload regression
+
+Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.
+
+The response object now contains one `decision` with a schema branch selected by its `action`. The `inspect` branch requires evidence, `clarify` requires one or more questions, `draft` and `repair` require a plan draft, and `research` requires a debugging report. Fields from other branches are rejected. The wire schema uses `anyOf` inside a root object for the supported structured-output transports. Local validation selects the branch by its action tag and still enforces semantic checks within the existing one-attempt correction. The gateway continues to validate the active mode, observed evidence references, and approval before execution.
+
+Only transient model decisions use the new response shape. Saved revisions, evidence, and approval digests use their existing formats.
+
+**Do not reintroduce** independent nullable action payloads in the model-facing schema or infer a missing action or payload from the rest of the response.
+
 ## Verification
 
 Run `venv/bin/python -m pytest tests/test_execution_modes.py tests/test_chat_planning_mode.py tests/test_chat_command_dispatcher.py tests/test_cli_modes_skills.py tests/gateway/test_debug_plan_mode_contract.py tests/test_codex_integration.py -q`. The gateway tests use deterministic model responses and isolated inboxes. The Codex protocol test uses an app-server fixture. Live acceptance requires an authorized provider and a local Docker image with the target project's test dependencies.
@@ -61,3 +71,5 @@ Run `venv/bin/python -m pytest tests/llm/test_providers.py -k 'native_mode_decis
 For file-read evidence, run `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'mode_evidence or mode_decision or repository_audit'`. These fixtures cover rejection of invalid file-read shapes, the same-format correction, and a narrow read after an explicit repository audit. The agent has not run these checks or exercised a live provider. Restart Mana-Agent from the updated checkout and use `/task resume <task-id>` to exercise the original blocked investigation.
 
 For the activity and provider-stop regression, run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py::test_debug_mode_activity_keeps_the_frontend_turn tests/llm/test_engine.py::test_mode_decision_reports_why_the_provider_stopped_correction`. The first fixture checks that task, model, and tool events share the originating turn and retain redaction. The second checks the provider stop diagnostic and the two-request limit. The agent did not run these checks. Live terminal acceptance can use a local fixture that asks Debug to inspect a reported file.
+
+For action payloads, run `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py tests/test_execution_modes.py`. The fixtures check the provider schema for each action, reject missing or unrelated payloads, exercise semantic correction using all three response strategies, and confirm a resumed draft still waits for approval. These checks and live provider acceptance remain pending.

@@ -27,6 +27,7 @@ from mana_agent.multi_agent.memory.task_memory import TaskMemory
 from mana_agent.memory import MultiAgentMemoryService
 from mana_agent.workspaces.routing import RepositoryScopeDecisionEngine, ScopeDecisionError
 from mana_agent.workspaces.service import WorkspaceService
+from mana_agent.workspaces.preparation import RepositoryValidationError
 from mana_agent.multi_agent.worktrees import (
     WorkspaceError,
     WorkspaceManager,
@@ -89,6 +90,7 @@ class MainAgent:
         session_id: str | None = None,
         workspace_id: str | None = None,
         execution_supervisor: ExecutionSupervisor | None = None,
+        initialize_if_missing: bool = True,
     ) -> None:
         requested_root = Path(root).resolve()
         self.routing_llm = routing_llm
@@ -102,18 +104,24 @@ class MainAgent:
             if self.workspace_context is not None
             else requested_root
         )
-        prepared = self.workspace_service.prepare_repository(
-            preparation_path,
-            allow_create=self.workspace_context is None,
-            initialize_if_missing=True,
-            expected_workspace_id=(
-                self.workspace_context.workspace.workspace_id
-                if self.workspace_context is not None
-                else workspace_id
-            ),
-            entry_point="multi-agent-main",
-        )
-        self.root = prepared.working_directory
+        prepared = None
+        try:
+            prepared = self.workspace_service.prepare_repository(
+                preparation_path,
+                allow_create=self.workspace_context is None,
+                initialize_if_missing=initialize_if_missing,
+                expected_workspace_id=(
+                    self.workspace_context.workspace.workspace_id
+                    if self.workspace_context is not None
+                    else workspace_id
+                ),
+                entry_point="multi-agent-main",
+            )
+            self.root = prepared.working_directory
+        except RepositoryValidationError:
+            if initialize_if_missing:
+                raise
+            self.root = preparation_path
         if self.workspace_context is None:
             session = (
                 self.workspace_service.create_session(
@@ -165,15 +173,20 @@ class MainAgent:
         settings = Settings()
         self.managed_worktrees_enabled = bool(
             getattr(settings, "mana_managed_worktrees_enabled", True)
+            and prepared is not None
             and prepared.repository.head_sha
         )
         try:
-            self.workspace_manager = WorkspaceManager(
-                prepared.repository_root,
-                repository_id=self.workspace_context.session.primary_repository_id,
-                enabled=self.managed_worktrees_enabled,
+            self.workspace_manager = (
+                WorkspaceManager(
+                    prepared.repository_root,
+                    repository_id=self.workspace_context.session.primary_repository_id,
+                    enabled=self.managed_worktrees_enabled,
+                )
+                if prepared is not None
+                else None
             )
-            if self.managed_worktrees_enabled:
+            if self.managed_worktrees_enabled and self.workspace_manager is not None:
                 self.workspace_manager.reconcile()
         except WorkspaceError:
             self.workspace_manager = None  # type: ignore[assignment]
