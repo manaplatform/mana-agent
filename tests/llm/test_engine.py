@@ -203,7 +203,7 @@ def test_mode_decision_repairs_semantic_failure_on_selected_strategy(tmp_path, n
 
 
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])
-def test_mode_decision_corrects_a_repeated_investigation_handoff(tmp_path, native_profile, monkeypatch, strategy):
+def test_mode_decision_corrects_an_unavailable_coding_inspection(tmp_path, native_profile, monkeypatch, strategy):
     import json
 
     from mana_agent.agent.plan_service import PlanService
@@ -220,8 +220,9 @@ def test_mode_decision_corrects_a_repeated_investigation_handoff(tmp_path, nativ
         async def generate(self, request):
             requests.append(request)
             action = (
-                {"action": "investigate", "reason": "Check the source again", "objective": "Explain the old result",
-                 "scope": "app.py"}
+                {"action": "inspect", "reason": "Check the source again", "requests": [
+                    {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Explain the result"},
+                ]}
                 if len(requests) == 1 else {"action": "block", "reason": "The existing observations are insufficient"}
             )
             args = {"decision": action}
@@ -230,12 +231,12 @@ def test_mode_decision_corrects_a_repeated_investigation_handoff(tmp_path, nativ
             return ModelResponse(content=json.dumps(args))
 
     service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
-    decision = service.next_decision("debug", {"request": "Inspect app.py"}, investigation_available=False)
+    decision = service.next_decision("debug", {"request": "Inspect app.py"}, inspection_available=False)
 
     assert len(requests) == 2
     assert requests[0].response_schema == requests[1].response_schema
-    assert not json.loads(requests[0].messages[1].content)["investigation_available"]
-    assert "Investigation is unavailable for this decision." in requests[1].messages[-1].content
+    assert not json.loads(requests[0].messages[1].content)["inspection_available"]
+    assert "Use the saved observations for the next decision." in requests[1].messages[-1].content
     assert "validation_context" not in requests[0].parameters
     assert decision.action == "block"
 
@@ -387,7 +388,7 @@ def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path
     monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
     service = PlanService(tmp_path, llm=model)
 
-    decision = service.next_decision("debug", {"request": "Explain app.py"})
+    decision = service.next_decision("plan", {"request": "Explain app.py"})
 
     assert model.endpoint == "anthropic_messages"
     assert decision.objective == "Trace the return value"

@@ -1,8 +1,7 @@
-"""A bounded native tool session for a single read-only coding handoff."""
+"""Repository read contracts and the explicit PLAN native evidence session."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 from typing import Callable, Mapping
 
@@ -11,8 +10,9 @@ from pydantic import Field, ValidationError
 from mana_agent.agent.mode import ModeContract
 from mana_agent.agent.plan_service import (
     DirectoryListEvidence, EvidenceRequest, FileListEvidence, FileReadEvidence, InvestigateDecision, InvestigationScope,
-    PlanService, RepositoryDiscoveryEvidence,
+    MAX_INSPECTION_BATCH, PlanService, RepositoryDiscoveryEvidence,
 )
+from mana_agent.human_inbox.models import canonical_digest
 from mana_agent.llm.errors import InvalidResponseError, StructuredOutputError, describe_decision_validation
 from mana_agent.llm.messages import SystemMessage, ToolCall, ToolResultMessage, UserMessage
 from mana_agent.multi_agent.agents.tool_runner_agent import ToolRunnerAgent
@@ -28,23 +28,12 @@ READ_TOOLS = {
     "call_graph": ("Find callers in the selected repository scope.", RepositoryDiscoveryEvidence),
 }
 REPORT_TOOL = "report_investigation"
-MAX_MODEL_TURNS = 8
-MAX_TOOL_CALLS = 24
-MAX_BATCH_CALLS = 4
 
 
 class InvestigationReport(ModeContract):
     findings: str = Field(max_length=2000, description="Findings supported by the cited evidence, or empty if none.")
     evidence_ids: tuple[str, ...] = Field(max_length=12)
     gaps: str = Field(max_length=1000, description="Remaining uncertainty, or empty if none.")
-
-
-@dataclass
-class InvestigationAllowance:
-    model_turns: int
-    tool_calls: int
-    turns_used: int = 0
-    tools_used: int = 0
 
 
 def _read_schema(model: type[EvidenceRequest]) -> dict:
@@ -68,6 +57,21 @@ def read_tool_schemas() -> dict[str, dict]:
 
 def _observed(row: dict) -> bool:
     return not isinstance(row["result"], dict) or row["result"].get("ok") is not False
+
+
+def observation_fingerprint(row: dict) -> str | None:
+    """Identify useful evidence independent of its execution receipt."""
+    result = row["result"]
+    if not _observed(row):
+        return None
+    if not isinstance(result, dict):
+        return canonical_digest(result) if result else None
+    payload = {key: value for key, value in result.items()
+               if key not in {"ok", "execution", "mutations", "limit", "truncated"}}
+    # Empty results remain available as negative evidence but do not justify more rounds.
+    if not any(payload.get(key) for key in ("content", "files", "directories", "matches", "symbols", "edges", "nodes")):
+        return None
+    return canonical_digest(payload)
 
 
 def investigation_scope(evidence: list[dict], remaining: int | None = None) -> InvestigationScope:
@@ -95,7 +99,10 @@ def run_repository_investigation(
     decision_id: str,
     runner: ToolRunnerAgent,
     evidence: list[dict],
-    allowance: InvestigationAllowance,
+    remaining_model_turns: Callable[[], int],
+    remaining_tool_calls: Callable[[], int],
+    charge_model: Callable[[], None],
+    charge_tool: Callable[[], None],
     checkpoint: Callable[[list[dict]], None],
     check_live: Callable[[], None],
     programmatic_enabled: bool,
@@ -151,14 +158,15 @@ def run_repository_investigation(
             "evidence": [compact_observation(row) for row in evidence[-8:]],
             "evidence_levels": scope.evidence_levels,
             "max_next_level": scope.max_next_level,
-            "tool_limit": allowance.tool_calls,
+            "tool_limit": remaining_tool_calls(),
         }, ensure_ascii=False)),
     ]
     continuation = None
     no_progress = 0
-    for _ in range(allowance.model_turns):
+    observed = {observation_fingerprint(row) for row in evidence}
+    while remaining_model_turns() > 0 and remaining_tool_calls() > 0:
         check_live()
-        allowance.turns_used += 1
+        charge_model()
         try:
             response = model.generate_sync(messages, continuation=continuation)
         except StructuredOutputError:
@@ -180,12 +188,14 @@ def run_repository_investigation(
         messages.append(response.message)
         rows = []
         try:
-            requests = _validate_batch(service, decision, calls, evidence, allowance, schemas)
+            requests = _validate_batch(service, decision, calls, evidence, schemas)
+            if len(requests) > remaining_tool_calls():
+                return _partial_report(evidence, "The requested batch exceeds the remaining shared tool budget.")
             for call, request in zip(calls, requests, strict=True):
                 check_live()
-                allowance.tools_used += 1
                 arguments = request.model_dump(mode="json", include=set(schemas[call.name]["properties"]))
                 selected = runner.request(call.name, arguments, call_id=f"{decision_id}:{call.id}", decision_id=decision_id)
+                charge_tool()
                 result = runner.execute(selected, lambda _: service.inspect(request)).result
                 check_live()
                 row = {"id": f"evidence-{len(evidence) + len(rows) + 1}", "level": request.level,
@@ -198,23 +208,29 @@ def run_repository_investigation(
         finally:
             if rows:
                 checkpoint(rows)
-        no_progress = 0 if any(_observed(row) for row in rows) else no_progress + 1
+        useful = {observation_fingerprint(row) for row in rows} - observed - {None}
+        observed.update(useful)
+        no_progress = 0 if useful else no_progress + 1
         if no_progress >= max_no_progress:
-            raise RuntimeError("The investigation stopped without new repository evidence.")
-    raise RuntimeError("The native investigation reached its model turn limit before reporting findings.")
+            return _partial_report(evidence, "Repository reads stopped yielding new evidence.")
+    return _partial_report(evidence, "The shared workflow budget leaves no further repository reads.")
+
+
+def _partial_report(evidence: list[dict], reason: str) -> InvestigationReport:
+    return InvestigationReport(
+        findings="", evidence_ids=tuple(investigation_scope(evidence).evidence_levels)[-12:], gaps=reason,
+    )
 
 
 def _validate_batch(
     service: PlanService, decision: InvestigateDecision, calls: list[ToolCall], evidence: list[dict],
-    allowance: InvestigationAllowance, schemas: Mapping[str, dict],
+    schemas: Mapping[str, dict],
 ) -> tuple[EvidenceRequest, ...]:
-    if len(calls) > MAX_BATCH_CALLS:
+    if len(calls) > MAX_INSPECTION_BATCH:
         raise ValueError("Select at most four independent repository operations per native response.")
-    if allowance.turns_used == allowance.model_turns and calls:
-        raise RuntimeError("The native investigation reached its model turn limit before reporting findings.")
     if any(call.name not in schemas for call in calls):
         raise PermissionError("The investigator selected a tool outside the registered read-only set.")
-    scope = investigation_scope(evidence, allowance.tool_calls - allowance.tools_used)
+    scope = investigation_scope(evidence)
     requests: list[EvidenceRequest] = []
     for call in calls:
         try:

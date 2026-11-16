@@ -284,7 +284,8 @@ class NativeLLMEngine:
             raise
         if reservation:
             self.context_cost_governor.record_model_call(reservation, usage=response.usage.model_dump(),
-                provider=request.provider, model=request.model, estimated_input=[m.content for m in request.messages])
+                provider=request.provider, model=request.model, task_id=request.task_id,
+                estimated_input=[m.content for m in request.messages])
         if response.continuation is not None:
             # Output-budget defaults are not caller configuration changes.
             response.continuation.configuration_fingerprint = request.configuration_fingerprint
@@ -306,7 +307,8 @@ class NativeLLMEngine:
         if reservation:
             if getattr(exc, "response_accepted", False):
                 self.context_cost_governor.record_model_call(reservation, usage=getattr(exc, "provider_usage", None),
-                    provider=request.provider, model=request.model, estimated_input=[message.content for message in request.messages])
+                    provider=request.provider, model=request.model, task_id=request.task_id,
+                    estimated_input=[message.content for message in request.messages])
             else:
                 self.context_cost_governor.release_reservation(reservation, reason=f"Inference failed: {type(exc).__name__}")
         request_error = None

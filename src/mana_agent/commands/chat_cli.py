@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 import sys
 import uuid
+import re
 
 from rich.markdown import Markdown
 
@@ -2424,6 +2425,72 @@ def chat(
                     continue
                 console.print(
                     "[yellow]Unknown /flow command. Use /flow show, /flow checklist, /flow checkpoint, or /flow reset.[/yellow]"
+                )
+                continue
+
+            if coding_agent_instance is not None:
+                agent_dec_fn = getattr(sys.modules.get("mana_agent.commands.chat_cli"), "_decide_chat_route", None)
+                if callable(agent_dec_fn):
+                    try:
+                        agent_dec = agent_dec_fn(ask_service=ask_service, question=question, root=root)
+                        if agent_dec and getattr(agent_dec, "flow_action", None) == "new":
+                            _start_new_topic()
+                    except Exception:
+                        pass
+
+            plan_trigger = bool(re.search(r"\b(?:implement|execute|run|apply)\s+(?:the\s+|last\s+|that\s+|current\s+)?plan\b", question, re.IGNORECASE))
+            if (
+                coding_agent_instance is None
+                and agent_tools
+                and auto_execute_plan
+                and (
+                    plan_trigger
+                    or execution_profile == "full-auto"
+                )
+            ):
+                auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
+                    question,
+                    render_progress=False,
+                    auto_chat_mode=AutoChatMode.EDIT,
+                )
+                _emit_auto_execute_terminal(
+                    user_question=question,
+                    payload=auto_payload,
+                    debug_tail=auto_debug_tail,
+                    auto_chat_mode=AutoChatMode.EDIT,
+                )
+                continue
+
+            if (
+                coding_agent_instance is not None
+                and coding_agent_is_custom
+                and auto_execute_plan
+                and hasattr(coding_agent_instance, "generate_auto_execute")
+                and (
+                    execution_profile == "full-auto"
+                    or plan_trigger
+                    or (
+                        execution_profile == "balanced"
+                        and bool(
+                            re.search(
+                                r"\b(?:update|modify|edit|implement|patch|fix|add|change|refactor|create|delete|remove|rewrite|build|replace)\b",
+                                question,
+                                re.IGNORECASE,
+                            )
+                        )
+                    )
+                )
+            ):
+                auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
+                    question,
+                    render_progress=True,
+                    auto_chat_mode=AutoChatMode.EDIT,
+                )
+                _emit_auto_execute_terminal(
+                    user_question=question,
+                    payload=auto_payload,
+                    debug_tail=auto_debug_tail,
+                    auto_chat_mode=AutoChatMode.EDIT,
                 )
                 continue
 

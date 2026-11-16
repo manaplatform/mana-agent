@@ -49,7 +49,7 @@ To reproduce the old behavior, use `/plan` for an ambiguous repository change, t
 
 ## Invariants
 
-- A main model decision selects a repository investigation, clarification, plan draft, or debug repair. The investigation model selects observations through native read tools. Mana asks for one correction on an invalid main decision using the same model and response format. Debug starts with reported evidence and must cite a narrower observation before widening the investigation.
+- A main model decision selects a scoped repository read, clarification, plan draft, or debug repair. Explicit PLAN can use a native read-only session. Mana asks for one correction on an invalid main decision using the same model and response format. Debug starts with reported evidence and must cite a narrower observation before widening the scope.
 - A reviewable plan has ordered steps, exact path operations, explicit verification, and a revision digest. Only the human inbox can authorize that digest. Actor, task, revision, workspace, and supervisor lease must match before mutation.
 - A coding engine proposes a patch in read-only mode. Mana reviews the patch for scope, applies it through the existing action policy, and records the observed result. The device's general approval mode cannot supply plan approval.
 - Cancellation or a material revision invalidates the authority to start another patch. An incomplete mutation receipt prevents replay. A retry of a failed check may reuse a previously verified patch without repeating it.
@@ -147,11 +147,15 @@ Only transient model decisions use the new response shape. Saved revisions, evid
 
 On 2026-11-16, the Debug trace for `task_20261116_000021` recorded 18 completed model requests taking 794 seconds in total. The 18 repository operations took under one second total. Three consecutive reads of known files required three provider round trips. Batching independent reads helped, but each dependent read still required the main model to select another typed action. Earlier prompts also repeated execution receipts alongside the observations.
 
-AUTO, DEBUG, and PLAN use one `investigate` decision when the main agent needs more evidence. The selected chat model takes a read-only coding role and uses native tools. The same session can choose a later read from a search result. The ToolRunner validates read authority and records the operation on the originating turn. The main agent saves completed batches on TaskBoard and uses the report and observed evidence for its next decision. Malformed and out of scope batches stop before dispatch.
+The native investigator then introduced its own eight-turn and 24-operation allowance. When the model asked for a read on its final allowed turn, the gateway rejected the batch and blocked the workflow with “The native investigation reached its model turn limit before reporting findings.” The configured workflow budget could still have room for coding. Earlier tests asserted the block instead of checking that Coding could use the evidence already collected.
 
-The main agent reserves up to eight native model turns and 24 repository calls within the task's remaining limits. The investigator counts usage locally and the main agent settles the allowance once. A crashed attempt retains its reserved allowance and its saved observations. Resume keeps the same TaskBoard task and fences late responses from the previous attempt. Saved evidence and approved plans require no migration.
+AUTO and DEBUG now select scoped read batches as ordinary Coding decisions. Each batch is validated against prior evidence before dispatch. Each tool charge and observation is saved on the active task. Repeated or empty results do not reset the no-progress guard. The next decision can draft or repair as soon as the current evidence supports the scope. The selected coding backend can read additional files within that scope while proposing the patch. A task blocked by a real limit returns its saved evidence and any known gaps.
 
-**Do not reintroduce** main model decisions for individual repository reads, investigation budget renewal, or execution receipts in the model prompt. Validate all selections in a native response against the evidence available before that response.
+The supervisor persists that the Coding task coordinates the workflow. Its implementation and verification steps still hold their own locks. A synchronous step reuses the parent's worker slot, so two running Coding tasks can both start their steps at lane capacity. Explicit PLAN retains native tools and revision approvals. Its native calls also use the shared budget and return a partial report at a shared boundary. Existing tasks retain their evidence and counters, including allowance already charged for an interrupted legacy attempt.
+
+**Do not reintroduce** a separate investigation quota, a report as a prerequisite to coding, or a coordinator lock or worker reservation that blocks its own step. Keep batching independent requests and exclude execution receipts from prompts.
+
+User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/gateway/test_lane_coordinator.py tests/gateway/test_entry_routing.py tests/gateway/test_turn_budget_accounting.py tests/gateway/test_multi_task_orchestration.py tests/llm/test_engine.py`. These checks were not run by the agent.
 
 ## Clarification wait and resume
 

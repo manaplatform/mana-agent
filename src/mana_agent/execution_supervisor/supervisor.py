@@ -378,6 +378,7 @@ class ExecutionSupervisor:
         task_id: str | None = None,
         parent_task_id: str | None = None,
         task_type: str = "task",
+        workflow_coordinator: bool = False,
         assigned_agent: str = "",
         assigned_model: str = "",
         runtime_provider: str = "",
@@ -469,6 +470,7 @@ class ExecutionSupervisor:
             if (
                 existing.parent_task_id != parent_task_id
                 or existing.task_type != task_type
+                or existing.workflow_coordinator != workflow_coordinator
                 or existing.assigned_model != assigned_model
                 or existing.runtime_provider != runtime_provider
                 or existing.routing_decision_id != routing_decision_id
@@ -578,6 +580,7 @@ class ExecutionSupervisor:
             parent_task_id=parent_task_id,
             root_task_id=parent.root_task_id if parent else identifier,
             task_type=task_type,
+            workflow_coordinator=workflow_coordinator,
             assigned_agent=assigned_agent,
             assigned_model=assigned_model,
             runtime_provider=runtime_provider,

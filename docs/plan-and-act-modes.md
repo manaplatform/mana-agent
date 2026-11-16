@@ -6,7 +6,7 @@ Mana reads the original request, relevant conversation context for follow-ups, a
 
 When the workflow requests an answer, it pauses at its saved checkpoint. The TUI opens an answer form and interactive console chat asks for each answer. After submission, Mana continues the same task with its existing evidence. Choose **Later** or press Enter at a console answer prompt to leave the task pending in chat. You can also submit the full set with `/inbox answer <item-id> '<JSON answers keyed by question ID>'`, or use `mana-agent inbox answer <item-id> --answer '<JSON answers keyed by question ID>'` from a separate terminal.
 
-When Mana needs repository evidence, the main agent delegates one focused question to a read-only coding session on the selected chat model. The model uses native tools for related searches and file reads. The main agent saves the observations on TaskBoard, then decides whether to diagnose, draft, ask a question, or stop. Each investigation has one bounded allowance and reports any gaps it could not resolve.
+In AUTO and DEBUG, repository reads are Coding actions. Mana batches independent reads when the next decision needs evidence and saves each observation on the same task. Once it has enough evidence to scope a change, the coding backend can read more while preparing the patch. A diagnosis can use the evidence already supplied. Reads and model decisions share the workflow budget and repeated results stop further inspection. The task result includes findings, verification, and any material gaps.
 
 ## Implement a change
 
@@ -17,6 +17,8 @@ When Codex worktree isolation is enabled, AUTO and DEBUG repairs inspect, patch,
 DEBUG and AUTO can switch when the model cites new observed evidence on the same task. Scope, completed steps, and execution permissions carry forward. When a required verification command runs and fails, an automatic workflow can revise its plan once within the accepted file operations and rerun that command. Other failures and unavailable verification environments produce a blocked result with the task's evidence preserved.
 
 ## Plan a change
+
+Explicit PLAN can still collect evidence with a native read-only session. Its reads and model calls draw from the shared workflow budget. If the session reaches that budget or stops finding new evidence, planning continues from the saved observations.
 
 - In chat or the TUI, use `/plan <request>`. Use `/plan` by itself to inspect the active task or start planning your next message. `/mode plan` and `mana-agent chat --planning-mode` enter the same workflow. Use `/mode auto` to return to ordinary routing after resolving an active plan. A proposal requested in prose is a read-only response.
 - From a terminal, use `mana-agent plan 'Upgrade the connection pool'`. Use `--no-code` for a draft with no execution approval. `--no-save` skips the Markdown export. For `--output`, select a path outside the target checkout. The default export resides under Mana's repository state directory.

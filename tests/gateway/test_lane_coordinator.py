@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -633,6 +634,45 @@ def test_lane_capacity_waits_in_queue_until_capacity_is_released(tmp_path: Path,
 
     assert not worker.is_alive()
     assert result and result[0].execution.state == LaneTaskState.QUEUED
+
+
+def test_coding_coordinators_at_capacity_can_start_their_scoped_steps(coordinator):
+    coordinator.global_worker_limit = 2
+    coordinator.contracts[LaneId.CODING] = replace(coordinator.contracts[LaneId.CODING], timeout_seconds=1)
+    scope = {"session_id": "session-1", "workspace_id": coordinator.taskboard.store.workspace_id,
+             "repository_id": coordinator.taskboard.store.repository_id}
+    parents = []
+    for name in ("first", "second"):
+        parent = coordinator.start(coordinator.reserve(normalized_intent=name, lane_id=LaneId.CODING,
+                                                       workflow_coordinator=True, **scope))
+        parents.append(parent.task_id)
+        assert coordinator.store.get_task(parent.task_id).workflow_coordinator
+        assert not any(lock.task_id == parent.task_id for lock in coordinator._locks.values())
+        with pytest.raises(PermissionError):
+            coordinator.authorize_tool(parent.task_id, "apply_patch")
+
+    first_step, second_step = [
+        coordinator.taskboard.create_child_task(parent_id, title=name, user_request=name,
+                                                owner_agent_id="coding_agent")
+        for parent_id, name in zip(parents, ("first step", "second step"), strict=True)
+    ]
+    with coordinator.workflow_step_capacity(parents[0], first_step.task_id):
+        first = coordinator.start(coordinator.reserve(
+            normalized_intent="first step", lane_id=LaneId.CODING, parent_task_id=parents[0],
+            taskboard_task_id=first_step.task_id, target_files=("first.py",), **scope,
+        ))
+        with coordinator.workflow_step_capacity(parents[1], second_step.task_id):
+            second = coordinator.start(coordinator.reserve(
+                normalized_intent="second step", lane_id=LaneId.CODING, parent_task_id=parents[1],
+                taskboard_task_id=second_step.task_id, target_files=("second.py",), **scope,
+            ))
+            active = coordinator._active_capacity_executions()
+            assert {execution.task_id for execution in active} == {first.task_id, second.task_id}
+            assert {lock.task_id for lock in coordinator._locks.values()} == {first.task_id, second.task_id}
+            coordinator.finish(second.task_id)
+        coordinator.finish(first.task_id)
+    for task_id in parents:
+        coordinator.finish(task_id)
 
 
 def test_scheduler_diagnostics_explain_capacity_wait_before_lane_execution(

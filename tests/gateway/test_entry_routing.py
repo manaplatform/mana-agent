@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from repository_investigation_fixture import FileInvestigator, investigation
+from repository_investigation_fixture import FileInvestigator, inspection
 
 from mana_agent.gateway import (
     AgentChatGateway,
@@ -58,7 +58,7 @@ class _RouteModel(FileInvestigator):
             payload = json.loads(messages[-1].content)
             if schema["title"] == "ModeDecision":
                 if not payload["evidence"]:
-                    return {"decision": investigation("app.py")}
+                    return {"decision": inspection("app.py")}
                 return {"decision": {"action": "draft", "reason": "Observed the old behavior",
                                      "draft": {
                                          "objectives": ["Change the handler"], "findings": "Read app.py",
@@ -1030,7 +1030,7 @@ def test_conversation_and_coding_use_their_selected_routes(tmp_path: Path, monke
     assert conversation.payload["lane_id"] == "research"
     assert len(chat.conversation_calls) == 1
     assert coding_result.used_coding_agent is True
-    assert coding_result.payload["lane_id"] == "research"
+    assert coding_result.payload["lane_id"] == "coding"
     assert coding_result.payload["mode"] == "auto"
     assert coding.calls
     assert coding.session_id == session_id

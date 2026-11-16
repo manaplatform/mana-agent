@@ -6727,9 +6727,8 @@ class AgentChatGateway:
                 )
                 route_tools = self._entry_route_registry.get(entry_decision.route).tools
                 model_lane = options.pop("lane_id", None)
-                # The workflow parent coordinates read, write and verification children.
-                # It must not hold a repository write lock while a child needs that lock.
-                lane_id = LaneId.RESEARCH if entry_decision.route == "coding" else select_lane(
+                workflow_coordinator = entry_decision.route == "coding" and not self._coding_agent_is_custom
+                lane_id = LaneId.CODING if workflow_coordinator else select_lane(
                     entry_route=entry_decision.route, model_lane=model_lane,
                 )
                 execution_decision = self.routing_authority.route(
@@ -6842,7 +6841,7 @@ class AgentChatGateway:
                             },
                         )
                         raise _RoutePreflightComplete(result)
-                    lane_id = LaneId.RESEARCH if entry_decision.route == "coding" else self._lane_coordinator.select_lane(
+                    lane_id = LaneId.CODING if workflow_coordinator else self._lane_coordinator.select_lane(
                         entry_route=entry_decision.route, model_lane=model_lane,
                     )
                     target_files = [
@@ -7525,6 +7524,7 @@ class AgentChatGateway:
                             reservation = self._lane_coordinator.reserve(
                                 normalized_intent=text,
                                 lane_id=lane_id,
+                                workflow_coordinator=workflow_coordinator,
                                 session_id=session_id,
                                 workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                                 repository_id=self._lane_coordinator.taskboard.store.repository_id,
@@ -7564,6 +7564,7 @@ class AgentChatGateway:
                             reservation = self._lane_coordinator.reserve(
                                 normalized_intent=text,
                                 lane_id=lane_id,
+                                workflow_coordinator=workflow_coordinator,
                                 session_id=session_id,
                                 workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                                 repository_id=self._lane_coordinator.taskboard.store.repository_id,
@@ -7591,6 +7592,7 @@ class AgentChatGateway:
                         reservation = self._lane_coordinator.reserve(
                             normalized_intent=text,
                             lane_id=lane_id,
+                            workflow_coordinator=workflow_coordinator,
                             session_id=session_id,
                             workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                             repository_id=self._lane_coordinator.taskboard.store.repository_id,
@@ -9291,7 +9293,8 @@ class AgentChatGateway:
             "canvas": "tool",
         }.get(decision.route, "main")
         route_tools = registration.tools
-        lane_id = LaneId.RESEARCH if decision.route == "coding" else select_lane(entry_route=decision.route)
+        workflow_coordinator = decision.route == "coding" and not self._coding_agent_is_custom
+        lane_id = LaneId.CODING if workflow_coordinator else select_lane(entry_route=decision.route)
         execution_decision = self.routing_authority.route(
             RoutingRequest(
                 role=execution_role,
@@ -9333,7 +9336,7 @@ class AgentChatGateway:
         self._apply_selected_model(
             getattr(ask_service, "ask_agent", None), execution_decision.selected_model, execution_decision.provider, execution_decision.model_configuration
         )
-        lane_id = LaneId.RESEARCH if decision.route == "coding" else self._lane_coordinator.select_lane(entry_route=decision.route)
+        lane_id = LaneId.CODING if workflow_coordinator else self._lane_coordinator.select_lane(entry_route=decision.route)
         capabilities = {
             "coding": (),
             "shell": (
@@ -9385,6 +9388,7 @@ class AgentChatGateway:
             reservation = self._lane_coordinator.reserve(
                 normalized_intent=item.request,
                 lane_id=lane_id,
+                workflow_coordinator=workflow_coordinator,
                 session_id=context.session_id,
                 workspace_id=self._lane_coordinator.taskboard.store.workspace_id,
                 repository_id=self._lane_coordinator.taskboard.store.repository_id,
@@ -10244,7 +10248,8 @@ class AgentChatGateway:
         if context.repository_root and Path(context.repository_root).resolve() != self.root.resolve():
             raise PermissionError("The coding workflow belongs to another checkout")
 
-        if self._lane_coordinator.inspect_task(task_id).owning_lane == LaneId.CODING:
+        execution = self._lane_coordinator.inspect_task(task_id)
+        if execution.owning_lane == LaneId.CODING and not execution.workflow_coordinator:
             message = "Reconcile the legacy coding attempt before starting a staged workflow."
             self._lane_coordinator.mark_blocked(task_id, reason=message)
             return ChatTurnResult(
@@ -10320,7 +10325,7 @@ class AgentChatGateway:
                 and isinstance(checkpoint.get("core_result"), dict)
                 and checkpoint["core_result"].get("status") in {"completed", "success"}
             )
-        if decision.route == "coding" and not legacy_core:
+        if decision.route == "coding" and not self._coding_agent_is_custom and not legacy_core:
             return self._execute_coding_workflow(decision, context, text, ask_service, options, lane_task_id, policy)
         text = options.get("_canonical_execution_text") or decision.resolved_request or text
         execution_text = text

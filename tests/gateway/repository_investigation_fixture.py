@@ -15,6 +15,13 @@ def evidence_call(identity, tool="read_file", **arguments):
     return ToolCall(id=identity, name=tool, args={"level": 1, "reason": "Observe the named target", **arguments})
 
 
+def inspection(path=None, *calls):
+    if path is not None:
+        calls = (evidence_call("read", paths=[path]), *calls)
+    return {"action": "inspect", "reason": "Read evidence needed for the next decision",
+            "requests": [{"tool": call.name, **call.args} for call in calls]}
+
+
 def report_call(*references):
     return ToolCall(id="report-1", name="report_investigation", args={
         "findings": "Observed the current repository behavior", "evidence_ids": list(references), "gaps": "",

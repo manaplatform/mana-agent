@@ -94,6 +94,7 @@ class LaneExecution:
     routing_decision_id: str = ""
     accounting_reservation_ids: list[str] = field(default_factory=list)
     task_type: str = "single"
+    workflow_coordinator: bool = False
     capabilities: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     verification_state: dict[str, Any] = field(default_factory=dict)

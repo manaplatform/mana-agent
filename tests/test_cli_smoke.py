@@ -15,6 +15,21 @@ from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 runner = CliRunner()
 
 
+def _cli_coding_route(user_prompt: str, context: object):
+    from mana_agent.gateway.entry_routing import EntryRoutingDecision
+
+    return EntryRoutingDecision(
+        route="coding", confidence=1.0, reason="Repository write selected",
+        required_sources=("repository",), source_message_ids=(getattr(context, "user_message_id", "msg_test"),),
+        coding_workflow={
+            "mode": "auto", "requested_effect": "write", "objective": user_prompt,
+            "reason": "Implement the requested update", "investigation_scope": "app.py",
+            "expected_result": "Updated app behavior", "risk_and_uncertainty": "Check the updated behavior",
+            "verification_requirements": ["Run the focused check"],
+        },
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_mana_home(tmp_path: Path, monkeypatch) -> None:
     """Keep persistent state and model routing isolated between CLI tests."""
@@ -25,12 +40,20 @@ def _isolated_mana_home(tmp_path: Path, monkeypatch) -> None:
     )
     from mana_agent.gateway.entry_routing import EntryRoutingDecision
 
-    monkeypatch.setattr(
-        "mana_agent.gateway.entry_routing.EntryRouter.route",
-        lambda _router, *, user_prompt, context: EntryRoutingDecision(
+    def _smoke_route(user_prompt: str, context: object) -> EntryRoutingDecision:
+        from mana_agent.integrations.codex.coding_agent_shim import CodexCodingAgentShim
+        import mana_agent.commands.cli as cli_mod
+        current_coding = getattr(cli_mod, "CodingAgent", None)
+        if current_coding is not None and current_coding is not CodexCodingAgentShim:
+            return _cli_coding_route(user_prompt, context)
+        return EntryRoutingDecision(
             route="conversation", confidence=1.0, reason="Test conversation",
             required_sources=("none",),
-        ),
+        )
+
+    monkeypatch.setattr(
+        "mana_agent.gateway.entry_routing.EntryRouter.route",
+        lambda _router, *, user_prompt, context: _smoke_route(user_prompt, context),
     )
 
 
@@ -414,21 +437,6 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
         assert result_retired.exit_code != 0
 
 
-def _cli_coding_route(user_prompt, context):
-    from mana_agent.gateway.entry_routing import EntryRoutingDecision
-
-    return EntryRoutingDecision(
-        route="coding", confidence=1.0, reason="Repository write selected",
-        required_sources=("repository",), source_message_ids=(context.user_message_id,),
-        coding_workflow={
-            "mode": "auto", "requested_effect": "write", "objective": user_prompt,
-            "reason": "Implement the requested update", "investigation_scope": "app.py",
-            "expected_result": "Updated app behavior", "risk_and_uncertainty": "Check the updated behavior",
-            "verification_requirements": ["Run the focused check"],
-        },
-    )
-
-
 def test_chat_blocks_edit_requests_without_coding_agent(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
     monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda *a, **k: FakeAskService())
@@ -729,7 +737,6 @@ def test_chat_root_dir_changes_default_index_dir_in_classic_mode(monkeypatch, tm
         input="tell me about this code\nquit\n",
     )
     assert result.exit_code == 0
-    print("RESULT_OUTPUT:\n", result.output)
     assert _FakeCodingAgent.seen_index_dir == str(
         (repository_dir(repository_id_for_path(tmp_path)) / "index").resolve()
     )

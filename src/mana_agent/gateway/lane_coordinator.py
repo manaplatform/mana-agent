@@ -336,6 +336,7 @@ class LaneCoordinator:
         self._waiters: list[dict[str, Any]] = []
         self._wait_sequence = 0
         self._claiming_waiters: dict[str, tuple[LaneId, float]] = {}
+        self._synchronous_steps: dict[str, str] = {}
         supervisor_config = ExecutionSupervisorConfig.from_settings(Settings())
         self.execution_supervisor = execution_supervisor or ExecutionSupervisor(
             supervisor_config,
@@ -614,6 +615,7 @@ class LaneCoordinator:
         compensation_strategy: str = "",
         important_constraints: Sequence[str] = (),
         execution_workspace: Path | None = None,
+        workflow_coordinator: bool = False,
     ) -> LaneReservation:
         assigned_root = execution_workspace.resolve() if execution_workspace is not None else self.root
         if assigned_root != self.root:
@@ -625,6 +627,8 @@ class LaneCoordinator:
                 "execution supervisor is disabled; no gateway task was created"
             )
         contract = self.contracts[lane_id]
+        if workflow_coordinator and (lane_id != LaneId.CODING or capabilities):
+            raise LaneCoordinatorError("A coding workflow coordinator cannot reserve tool capabilities directly")
         if contract.requires_repository and not repository_id:
             raise LaneCoordinatorError(f"Lane {lane_id.value} requires a repository identity")
         if contract.allowed_models and model not in contract.allowed_models:
@@ -635,6 +639,7 @@ class LaneCoordinator:
             "workspace_id": workspace_id, "target_files": files,
             "lane": lane_id.value, "parent_task_id": parent_task_id,
             "relation_type": relation_type,
+            "workflow_coordinator": workflow_coordinator,
         })
         # ``lane_id`` is itself a validated structured routing decision. Older
         # callers did not persist a separate decision ID, so derive a stable
@@ -642,6 +647,8 @@ class LaneCoordinator:
         effective_routing_decision_id = routing_decision_id or f"lane-selection:{fingerprint}"
         selected_priority = priority or contract.default_priority
         with self._condition:
+            reuses_parent = bool(parent_task_id and taskboard_task_id
+                                 and self._synchronous_steps.get(parent_task_id) == taskboard_task_id)
             self._wait_sequence += 1
             waiter = {
                 "waiter_id": f"wait_{uuid.uuid4().hex}",
@@ -668,6 +675,7 @@ class LaneCoordinator:
                             "target_files": active.target_files, "lane": active.owning_lane.value,
                             "parent_task_id": active.parent_task_id,
                             "relation_type": active.relation_type,
+                            "workflow_coordinator": active.workflow_coordinator,
                         })
                         explicit_identity_matches = (
                             not taskboard_task_id
@@ -682,11 +690,11 @@ class LaneCoordinator:
                             return LaneReservation(active, duplicate=True)
                     capacity_available = True
                     try:
-                        self._assert_capacity(contract, model)
+                        self._assert_capacity(contract, model, exclude_task_id=parent_task_id if reuses_parent else "")
                     except LaneCapacityError:
                         capacity_available = False
-                    if capacity_available and self._next_waiter_id() == waiter["waiter_id"]:
-                        if waiter_persisted:
+                    if capacity_available and (reuses_parent or self._next_waiter_id() == waiter["waiter_id"]):
+                        if waiter_persisted and not reuses_parent:
                             self._claiming_waiters[waiter["waiter_id"]] = (contract.lane_id, time.monotonic())
                         break
                     remaining = deadline - time.monotonic()
@@ -781,6 +789,8 @@ class LaneCoordinator:
                 and set(capabilities).issubset({"repository_read"})
                 else SideEffectClassification.UNKNOWN
             )
+            if workflow_coordinator and side_effect_classification is None:
+                side_effect = SideEffectClassification.READ_ONLY
             initial_contract = list(completion_contract) or [
                 CompletionContract(
                     contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
@@ -795,6 +805,7 @@ class LaneCoordinator:
                 task_id=task_id,
                 parent_task_id=parent_task_id,
                 task_type=task_type,
+                workflow_coordinator=workflow_coordinator,
                 assigned_agent=f"lane:{lane_id.value}",
                 assigned_model=model,
                 runtime_provider=provider,
@@ -850,6 +861,7 @@ class LaneCoordinator:
                 target_files=files, priority=selected_priority, budget=budget,
                 taskboard_task_id=task.task_id, model=model, capabilities=list(capabilities),
                 routing_decision_id=effective_routing_decision_id, provider=provider, task_type=task_type,
+                workflow_coordinator=workflow_coordinator,
                 trigger_turn_id=trigger_turn_id, relation_type=relation_type, previous_task_id=previous_task_id,
                 user_message_id=user_message_id,
                 waiter_id=waiter["waiter_id"],
@@ -866,6 +878,8 @@ class LaneCoordinator:
                     tb_task.scheduled_at = datetime.fromisoformat(scheduled_at_iso.replace("Z", "+00:00"))
             self.taskboard.update_status(task_id, TaskStatus.ROUTED)
             self.taskboard.update_status(task_id, TaskStatus.QUEUED)
+            if workflow_coordinator:
+                self.taskboard.update_orchestration(task_id, owning_lane=lane_id.value)
             self._persist_locked()
             self.emit("lane.queued", task_id=task_id, lane_id=lane_id)
             self.emit("task.created", task_id=task_id, lane_id=lane_id, parent_task_id=parent_task_id)
@@ -878,7 +892,7 @@ class LaneCoordinator:
         if reservation.duplicate:
             return execution
         contract = self.contracts[execution.owning_lane]
-        mode = contract.lock_policy
+        mode = LockMode.NONE if execution.workflow_coordinator else contract.lock_policy
         paths = execution.target_files
         if mode == LockMode.NONE and "repository_write" in execution.capabilities:
             mode = LockMode.FILE_WRITE
@@ -2223,6 +2237,7 @@ class LaneCoordinator:
             provider=str(durable.runtime_provider or ""),
             routing_decision_id=str(durable.routing_decision_id or ""),
             task_type=str(durable.task_type or "single"),
+            workflow_coordinator=durable.workflow_coordinator,
             checkpoint_id=str(durable.checkpoint_id or ""),
             error=str(durable.failure_reason or ""),
             trigger_turn_id=str(durable.trigger_turn_id or ""),
@@ -2579,6 +2594,8 @@ class LaneCoordinator:
     def handoff(self, handoff: LaneHandoff) -> LaneExecution:
         with self._condition:
             execution = self._executions[handoff.task_id]
+            if execution.workflow_coordinator:
+                raise LaneHandoffError("A coding workflow stays in its owning lane")
             if execution.owning_lane != handoff.source_lane:
                 raise LaneHandoffError("handoff source does not own the task")
             source_contract = self.contracts[handoff.source_lane]
@@ -2610,6 +2627,8 @@ class LaneCoordinator:
         execution = self._executions[task_id]
         if execution.state != LaneTaskState.RUNNING:
             raise LaneCoordinatorError(f"Task {task_id} is not running")
+        if execution.workflow_coordinator:
+            raise PermissionError("The workflow coordinator uses scoped repository tools and supervised steps.")
         try:
             capabilities = validate_tool_permission(
                 self.contracts[execution.owning_lane], tool_name,
@@ -2702,22 +2721,22 @@ class LaneCoordinator:
                 )
                 expired = heartbeat + timedelta(seconds=self.contracts[execution.owning_lane].timeout_seconds + 30) < _now()
                 if worker_missing or expired:
-                    contract = self.contracts[execution.owning_lane]
+                    requires_write = self.contracts[execution.owning_lane].requires_write_access and not execution.workflow_coordinator
                     execution.state = (
                         LaneTaskState.INTERRUPTED
-                        if contract.requires_write_access
+                        if requires_write
                         else LaneTaskState.QUEUED
                     )
                     execution.worker_id = ""
                     execution.error = (
                         "worker interrupted; repository mutations require revalidation"
-                        if contract.requires_write_access
+                        if requires_write
                         else "read-only work requeued after worker interruption"
                     )
                     execution.updated_at = _iso()
                     interrupted_task_ids.append(execution.task_id)
                     self.emit(
-                        "lane.failed" if contract.requires_write_access else "lane.queued",
+                        "lane.failed" if requires_write else "lane.queued",
                         task_id=execution.task_id,
                         lane_id=execution.owning_lane,
                         reason="worker_interrupted",
@@ -2757,7 +2776,7 @@ class LaneCoordinator:
 
     def _active_capacity_executions(self, *, exclude_task_id: str = "") -> list[LaneExecution]:
         """Return the executions that currently consume scheduler capacity."""
-        return [
+        active = [
             item
             for item in self._executions.values()
             if item.task_id != exclude_task_id
@@ -2772,6 +2791,29 @@ class LaneCoordinator:
             # must not occupy a worker, lane, or provider execution slot.
             and item.state != LaneTaskState.VERIFYING
         ]
+        active_ids = {item.task_id for item in active}
+        suspended = {parent for parent, child in self._synchronous_steps.items() if child in active_ids}
+        return [item for item in active if item.task_id not in suspended]
+
+    @contextmanager
+    def workflow_step_capacity(self, task_id: str, child_id: str) -> Iterator[None]:
+        """A synchronous mode step runs on its parent's gateway worker."""
+        parent = self.inspect_task(task_id)
+        if not parent.workflow_coordinator:
+            yield
+            return
+        with self._condition:
+            child = self.taskboard.get_task(child_id)
+            if (parent.state != LaneTaskState.RUNNING or child.parent_task_id != task_id
+                    or task_id in self._synchronous_steps):
+                raise LaneCapacityError("Only a running coordinator can lend its worker to its current step")
+            self._synchronous_steps[task_id] = child_id
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._synchronous_steps.pop(task_id, None)
+                self._condition.notify_all()
 
     def _ordered_waiters_locked(self) -> list[dict[str, Any]]:
         now = _now()
@@ -2866,6 +2908,9 @@ class LaneCoordinator:
     def _load(self) -> None:
         for execution in self.repository.list_executions():
             execution.supervisor_lease_token = ""
+            if execution.owning_lane == LaneId.CODING:
+                durable = self.execution_supervisor.store.get_task_or_none(execution.task_id)
+                execution.workflow_coordinator = bool(durable and durable.workflow_coordinator)
             self._executions[execution.task_id] = execution
         self._waiters = [dict(item) for item in self.repository.list_waiters()]
         self._wait_sequence = max((int(item.get("sequence", 0)) for item in self._waiters), default=0)
@@ -2898,6 +2943,7 @@ class LaneCoordinator:
                     task_id=execution.task_id,
                     parent_task_id=execution.parent_task_id,
                     task_type=execution.task_type,
+                    workflow_coordinator=execution.workflow_coordinator,
                     assigned_agent=f"lane:{execution.owning_lane.value}",
                     assigned_model=execution.model,
                     runtime_provider=execution.provider,

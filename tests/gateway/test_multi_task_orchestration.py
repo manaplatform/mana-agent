@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from repository_investigation_fixture import FileInvestigator, investigation
+from repository_investigation_fixture import FileInvestigator, inspection
 
 from mana_agent.gateway import (
     AgentChatGateway,
@@ -834,7 +834,7 @@ def test_compound_debug_child_uses_the_parent_user_message_and_workflow(tmp_path
             if isinstance(schema, dict) and schema["title"] == "ModeDecision":
                 context = json.loads(messages[-1].content)
                 if not context["evidence"]:
-                    return {"decision": investigation("app.py")}
+                    return {"decision": inspection("app.py")}
                 return {"decision": {"action": "diagnose", "reason": "Observed source",
                                      "root_cause": "The handler returns the old value",
                                      "cause_evidence": ["evidence-1"]}}
@@ -849,6 +849,7 @@ def test_compound_debug_child_uses_the_parent_user_message_and_workflow(tmp_path
     diagnosis = next(task for task in children if task.mode_workflow.get("mode") == "debug")
     assert diagnosis.mode_workflow["source_message_ids"] == ["user-1"]
     assert diagnosis.mode_workflow["phase"] == "completed"
+    assert diagnosis.owning_lane == "coding"
 
 
 def test_multi_task_child_inherits_authorized_memory_routing_context(

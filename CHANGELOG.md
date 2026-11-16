@@ -4,6 +4,12 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- CLI chat auto-execution and custom coding agent orchestration: in CLI chat, auto-execution pipelines now properly preserve flow resets, custom coding agent dispatch (`generate` and `generate_auto_execute`), and balanced execution profiles for edit requests without bypassing Codex gateway entry routing for standard single-shot commands.
+- User verification: `venv/bin/pytest -q tests/test_cli_smoke.py tests/gateway/test_codex_session_lifecycle.py tests/test_openai_batch_runtime.py tests/test_prompting_builder.py tests/test_tui_live_tools_scroll.py`.
+
+- AUTO and DEBUG collect repository evidence as part of the Coding task and proceed as soon as the next step is scoped. Reads and model decisions use the shared workflow budget. Explicit PLAN also drops the separate investigation caps and preserves a partial report when it reaches a shared limit. See [investigation latency](docs/regressions/debug-plan-execution-contract.md#investigation-latency).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/gateway/test_lane_coordinator.py tests/gateway/test_entry_routing.py tests/gateway/test_turn_budget_accounting.py tests/gateway/test_multi_task_orchestration.py tests/llm/test_engine.py`.
+
 - Entry routing now requires a nonblank reason in its decision schema and allows one correction for an invalid reason on the selected model. See [entry routing reason regression](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md#entry-routing-reason-regression).
 - User verification is `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/llm/test_engine.py -k entry_route_reason`.
 - OpenRouter Claude entry and workflow decisions use the Messages client tool with local typed validation. Native entry routing stops on a provider rejection without replaying the request as plain text. See [OpenRouter Claude decision tools](docs/regressions/debug-plan-execution-contract.md#openrouter-claude-decision-tools).

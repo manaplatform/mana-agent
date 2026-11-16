@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 import pytest   
 
-from repository_investigation_fixture import FileInvestigator, investigation
+from repository_investigation_fixture import FileInvestigator, inspection
 
 from mana_agent.config.settings import Settings
 from mana_agent.gateway import (
@@ -76,7 +76,7 @@ def _mode_decision_fixture(messages, schema, path, *, operation="update"):
     if schema["title"] == "ScopeReview":
         return {"disposition": "in_scope", "reason": "Only the selected file changes"}
     if not payload["evidence"]:
-        return {"decision": investigation("README.md")}
+        return {"decision": inspection("README.md")}
     return {"decision": {"action": "draft", "reason": "The inspection supports a scoped change",
                          "draft": {"objectives": ["Implement the request"], "findings": "Read README.md",
                                    "scope": [path], "steps": [{
