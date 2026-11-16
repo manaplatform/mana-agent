@@ -1,9 +1,10 @@
-"""Gateway integration for supervised Plan and Debug tasks."""
+"""Gateway operations for supervised AUTO, DEBUG, and PLAN tasks."""
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager, nullcontext
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import getpass
 from hashlib import sha256
@@ -15,9 +16,9 @@ from tempfile import TemporaryDirectory
 import time
 from typing import Any
 
-from mana_agent.agent.mode import ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
+from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
 from mana_agent.agent.plan_service import EvidenceRequest, InvestigationScope, PlanService
-from mana_agent.batch.policy import TaskExecutionPolicy
+from mana_agent.batch.policy import BatchPending, TaskExecutionPolicy
 from mana_agent.chat_commands.models import CommandResult
 from mana_agent.execution_supervisor.models import ExecutionState
 from mana_agent.gateway.lane_coordinator import LaneReservation
@@ -42,6 +43,13 @@ class ModeBatchWaiting(RuntimeError):
     pass
 
 
+class VerificationFailed(RuntimeError):
+    def __init__(self, command: VerificationCommand, outcome: dict):
+        super().__init__(f"Verification failed for {command.argv!r}: {outcome['output']}")
+        self.command = command
+        self.outcome = outcome
+
+
 _TERMINAL = {Phase.COMPLETED, Phase.CANCELLED}
 _TRANSITIONS = {
     Phase.UNDERSTANDING: {Phase.INVESTIGATING, Phase.CLARIFICATION_REQUIRED, Phase.DRAFTING_PLAN, Phase.COMPLETED},
@@ -50,8 +58,10 @@ _TRANSITIONS = {
     Phase.DRAFTING_PLAN: {Phase.AWAITING_APPROVAL, Phase.APPROVED, Phase.COMPLETED},
     Phase.AWAITING_APPROVAL: {Phase.APPROVED, Phase.UNDERSTANDING},
     Phase.APPROVED: {Phase.EXECUTING, Phase.UNDERSTANDING},
-    Phase.EXECUTING: {Phase.EXECUTING, Phase.VERIFYING, Phase.UNDERSTANDING, Phase.COMPLETED},
-    Phase.VERIFYING: {Phase.EXECUTING, Phase.COMPLETED, Phase.UNDERSTANDING},
+    Phase.EXECUTING: {Phase.EXECUTING, Phase.INTEGRATING, Phase.VERIFYING, Phase.REVIEWING, Phase.UNDERSTANDING, Phase.COMPLETED},
+    Phase.INTEGRATING: {Phase.EXECUTING, Phase.REVIEWING},
+    Phase.VERIFYING: {Phase.EXECUTING, Phase.INTEGRATING, Phase.REVIEWING, Phase.COMPLETED, Phase.UNDERSTANDING},
+    Phase.REVIEWING: {Phase.EXECUTING, Phase.COMPLETED},
     Phase.BLOCKED: {Phase.UNDERSTANDING, Phase.EXECUTING},
 }
 
@@ -82,12 +92,30 @@ class ModeWorkflow:
     def inbox(self):
         return self.gateway.human_inbox_service
 
-    def _service(self, *, llm=None):
+    def _workspace_root(self, state: dict) -> Path:
+        if not state.get("isolated_workspace"):
+            if state.get("worktree_required"):
+                raise PermissionError("The required task worktree must be reconciled before resuming")
+            return self.gateway.root
+        from mana_agent.multi_agent.worktrees import WorkspaceManager
+
+        binding = state["isolated_workspace"]
+        manager = WorkspaceManager(self.gateway.root, repository_id=binding["repository_id"])
+        workspace = manager.get_for_task(binding["task_id"])
+        root = Path(workspace.worktree_path)
+        if (workspace.workspace_id != binding["workspace_id"]
+                or workspace.worktree_path != binding["path"]
+                or Path(workspace.source_repo_root).resolve() != self.gateway.root.resolve()
+                or not root.is_dir() or root.resolve() != root):
+            raise PermissionError("The task's assigned worktree is unavailable or has changed")
+        return root
+
+    def _service(self, *, state=None, llm=None):
         from mana_agent.gateway.turn_engine import agent_decision_llm
 
         if llm is None:
             llm = getattr(self.gateway._entry_router, "llm", None) or agent_decision_llm(self.gateway.get_ask_service())
-        return PlanService(self.gateway.root, llm=llm)
+        return PlanService(self._workspace_root(state or {}), llm=llm)
 
     def active(self, session_id: str, *, mode: str = "plan"):
         tasks = self.board.store.repository.list_tasks(session_id=session_id)
@@ -114,13 +142,15 @@ class ModeWorkflow:
         event_type = "agent.planning" if state["mode"] == "plan" and target not in {
             Phase.EXECUTING, Phase.VERIFYING, Phase.COMPLETED
         } else "coding.progress"
-        description = summary or target.value.replace("_", " ").capitalize()
+        stage = target.value.replace("_", " ").capitalize()
+        description = summary or stage
         task = self.board.get_task(task_id)
-        emit_activity(event_type, title=description, task_id=task_id,
+        emit_activity(event_type, title=f"{state['mode'].upper()} · {stage}", summary=description, task_id=task_id,
                       conversation_id=task.session_id,
                       status="failed" if target == Phase.BLOCKED else "success",
                       operation_id=f"{task_id}:{target.value}",
                       metadata={"phase": target.value, "mode": state["mode"],
+                                "mode_reason": state.get("mode_reason", ""),
                                 "revision": state["revision"], "step_id": state.get("step_id", "")})
 
     def start(
@@ -130,9 +160,20 @@ class ModeWorkflow:
         skill_names: tuple[str, ...] = (), read_only: bool = False,
         execution_policy: dict | None = None,
         reviewer_id: str = "",
+        workflow: CodingWorkflowDecision | None = None,
+        runtime_capability_change: bool = False,
+        source_message_ids: tuple[str, ...] = (),
+        related_task_id: str = "",
+        model: str = "",
+        provider: str = "",
     ) -> CommandResult:
         goal = str(redact_secrets(goal)).strip()
         policy = TaskExecutionPolicy.model_validate(execution_policy or {})
+        if mode == "auto" and workflow is None:
+            return CommandResult(status="error", message="AUTO requires a validated coding workflow decision.")
+        if workflow and (mode != workflow.mode or mode == "plan"
+                         or (repair and workflow.requested_effect != "write")):
+            return CommandResult(status="error", message="Coding workflow authority does not match the requested action.")
         if not goal:
             return CommandResult(status="input_required", message="What would you like to plan?")
         if output and Path(output).expanduser().resolve().is_relative_to(self.gateway.root):
@@ -159,6 +200,17 @@ class ModeWorkflow:
                     task.execution_policy = policy
                 self.lane.execution_supervisor.store.update_task(task_id, bind_policy)
             self.lane.start(reservation)
+        existing = self.board.get_task(task_id).mode_workflow
+        if existing:
+            if existing.get("mode") not in {"auto", "debug"} or not workflow:
+                return self.describe(self.board.get_task(task_id))
+            if existing.get("inbox_id") or existing.get("phase") in _TERMINAL:
+                return self.describe(self.board.get_task(task_id))
+            if existing.get("plan"):
+                return self._execute(task_id, existing, self._service(state=existing, llm=llm))
+            if existing["phase"] == Phase.BLOCKED:
+                self._transition(task_id, existing, Phase.UNDERSTANDING)
+            return self._drive(task_id, existing, service=self._service(state=existing, llm=llm))
         state = {
             "schema_version": 1, "mode": mode, "phase": Phase.UNDERSTANDING.value,
             "goal": goal, "revision": 1, "constraints": {}, "evidence": [],
@@ -168,8 +220,60 @@ class ModeWorkflow:
             "execution_policy": policy.model_dump(mode="json"),
             "reviewer_id": reviewer_id or getpass.getuser(),
         }
+        if workflow:
+            state.update({
+                "coding_decision": redact_secrets(workflow.model_dump(mode="json")),
+                "mode_reason": str(redact_secrets(workflow.reason)),
+                "routing_decision_id": self._check_live(task_id).routing_decision_id,
+                "source_message_ids": list(source_message_ids),
+                "related_task_id": related_task_id,
+                "runtime_capability_change": runtime_capability_change,
+                "model": model, "provider": provider,
+            })
         self._persist(task_id, state)
-        return self._drive(task_id, state, service=self._service(llm=llm))
+        if workflow and state["repair"] and not policy.required:
+            coding = self.gateway._coding_agent
+            settings = getattr(coding, "codex_settings", None)
+            if getattr(coding, "active_engine_mode", "external") == "external" and getattr(settings, "worktree_isolation", False):
+                try:
+                    from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
+
+                    task = self.board.get_task(task_id)
+                    manager = WorkspaceManager(self.gateway.root, repository_id=task.primary_repository_id)
+                    state["worktree_required"] = True
+                    self._persist(task_id, state)
+                    workspace = manager.create_for_task(task_id, title=goal, session_id=session_id,
+                                                        assigned_agent_id="coding_agent")
+                    manager.transition(task_id, WorkspaceStatus.RUNNING)
+                    state["isolated_workspace"] = {
+                        "workspace_id": workspace.workspace_id, "repository_id": workspace.repository_id,
+                        "task_id": task_id, "path": workspace.worktree_path,
+                    }
+                    self._persist(task_id, state)
+                    execution = self.lane.inspect_task(task_id)
+                    supervisor = self.lane.execution_supervisor
+
+                    def bind_workspace(record):
+                        supervisor._validate_lease(record, attempt_id=execution.supervisor_attempt_id,
+                                                   lease_token=execution.supervisor_lease_token)
+                        record.workspace_path = workspace.worktree_path
+
+                    supervisor.store.update_task(task_id, bind_workspace)
+                except Exception as exc:
+                    return self._block(task_id, state, f"Could not prepare the required isolated worktree: {exc}")
+        if workflow and workflow.clarification.strip():
+            with self._activity(task_id, state, read_only=True):
+                self._transition(task_id, state, Phase.CLARIFICATION_REQUIRED)
+                prompt = str(redact_secrets(workflow.clarification))
+                state["questions_asked"] = 1
+                item = self._wait(task_id, state, questions=(
+                    {"field_id": "objective_detail", "prompt": prompt, "choices": {}, "allow_free_form": True},
+                ))
+                return self._describe_item(task_id, state, item)
+        if workflow:
+            with self._activity(task_id, state, read_only=True):
+                self._transition(task_id, state, Phase.UNDERSTANDING, state["mode_reason"])
+        return self._drive(task_id, state, service=self._service(state=state, llm=llm))
 
     @contextmanager
     def _activity(self, task_id: str, state: dict, *, read_only: bool):
@@ -195,7 +299,9 @@ class ModeWorkflow:
             attempt_id=execution.supervisor_attempt_id, lease_token=execution.supervisor_lease_token,
             attempt_generation=durable.attempt_generation, supervisor=supervisor,
             protected_text=activity.protected_text if activity else (),
+            execution_registry=getattr(self.gateway, "_execution_registry", None),
             execution_lane=execution.owning_lane.value,
+            parent_task_id=task.parent_task_id or "",
             taskboard=self.board, execution_mode="read_only" if read_only else "act",
         )):
             yield
@@ -215,96 +321,135 @@ class ModeWorkflow:
     def _drive(self, task_id: str, state: dict, *, service: PlanService) -> CommandResult:
         try:
             with self._activity(task_id, state, read_only=True):
-                return self._plan_or_investigate(task_id, state, service)
+                return self.gateway._autonomous_controller.drive_repository_workflow(
+                    advance=lambda: self._advance_investigation(task_id, state, service),
+                    decisions_used=lambda: state.get("decision_count", 0),
+                    check_attempt=lambda: self._check_live(task_id),
+                )
         except Exception as exc:
             return self._block(task_id, state, str(redact_secrets(str(exc))))
 
-    def _plan_or_investigate(self, task_id, state, service):
+    def _advance_investigation(self, task_id, state, service) -> CommandResult | None:
         config = self.gateway._autonomous_controller.config
-        for _ in range(config.max_model_turns):
-            self._check_live(task_id)
-            if state.get("decision_count", 0) >= config.max_model_turns:
-                break
-            state["decision_count"] = state.get("decision_count", 0) + 1
-            self._persist(task_id, state)
-            evidence = state["evidence"]
-            scope = InvestigationScope(
-                {item["id"]: item["level"] for item in evidence},
-                completed_fingerprints=frozenset(item["fingerprint"] for item in evidence),
-                remaining_tool_calls=max(0, config.max_tool_calls - len(evidence)),
-            )
-            decision = service.next_decision(state["mode"], {
-                "request": state["goal"], "constraints": state["constraints"], "skills": state["skills"],
-                "evidence": _investigation_context(evidence[-12:]),
-                "revision_request": state.get("revision_request", ""),
-                "repair_authorized": state["repair"],
-            }, investigation_scope=scope)
-            self._check_live(task_id)
-            allowed = ({"inspect", "inspect_batch", "clarify", "draft", "block"} if state["mode"] == "plan"
-                       else {"inspect", "inspect_batch", "clarify", "diagnose", "repair", "research", "block"})
-            if decision.action not in allowed:
-                raise ValueError("The model selected an action outside the active mode")
-            if decision.action in {"inspect", "inspect_batch"}:
-                if decision.action == "inspect":
-                    requests, reason = (decision.evidence,), decision.evidence.reason
-                else:
-                    requests, reason = decision.evidence, decision.reason
-                scope.validate_requests(requests)
-                self._transition(task_id, state, Phase.INVESTIGATING, str(redact_secrets(reason))[:240])
-                for request in requests:
-                    self._inspect(task_id, state, service, request)
-                continue
-            if decision.action == "clarify":
-                if set(q.field_id for q in decision.questions).intersection(state["constraints"]):
-                    raise ValueError("The model asked for an already resolved decision")
-                question_total = state["questions_asked"] + len(decision.questions)
-                if state["question_limit"] is not None and question_total > state["question_limit"]:
-                    raise RuntimeError("The clarification limit was reached with material decisions unresolved")
-                state["questions_asked"] = question_total
-                questions = [redact_secrets(q.model_dump(mode="json")) for q in decision.questions]
-                self._transition(task_id, state, Phase.CLARIFICATION_REQUIRED)
-                item = self._wait(task_id, state, questions=questions)
-                return self._describe_item(task_id, state, item)
-            if decision.action == "block":
-                return self._block(task_id, state, decision.reason)
-            if decision.action == "research":
-                waiting = self._research(task_id, state, decision.debugging_report)
-                if waiting:
-                    return waiting
-                continue
-            if decision.action == "diagnose":
-                if decision.cause_evidence and not set(decision.cause_evidence).issubset({ob["id"] for ob in state["evidence"]}):
-                    raise ValueError("Diagnosis referenced unknown evidence")
-                text = "\n\n".join(s for s in (decision.root_cause, decision.uncertainty) if s)
-                return self._complete(task_id, state, text)
-            if decision.action == "repair":
-                if not state["repair"]:
-                    raise PermissionError("This debugging request only authorizes diagnosis")
-                if not set(decision.cause_evidence).issubset({ob["id"] for ob in state["evidence"]}):
-                    raise ValueError("Repair referenced unknown evidence")
-                if not any(step.changes for step in decision.draft.steps) or not any(
-                    check.expected == "pass" for step in decision.draft.steps for check in step.verification
-                ):
-                    raise ValueError("Repair requires a scoped fix and a regression check")
-                state["root_cause"] = str(redact_secrets(decision.root_cause))
-                state["uncertainty"] = str(redact_secrets(decision.uncertainty))
-            return self._draft(task_id, state, decision.draft, service)
-        return self._block(task_id, state, "The configured model decision budget was exhausted.")
+        self._charge_model(task_id, state)
+        evidence = state["evidence"]
+        scope = InvestigationScope(
+            {item["id"]: item["level"] for item in evidence},
+            completed_fingerprints=frozenset(item["fingerprint"] for item in evidence),
+            remaining_tool_calls=max(0, config.max_tool_calls - state.get("tool_operations", len(evidence))),
+        )
+        decision = service.next_decision(state["mode"], {
+            "task_id": task_id, "coding_workflow": state.get("coding_decision"),
+            "runtime_capability_change": state.get("runtime_capability_change", False),
+            "completed_step_ids": list(state["done_steps"]),
+            "recheck_required": state.get("required_recheck"),
+            "request": state["goal"], "constraints": state["constraints"], "skills": state["skills"],
+            "evidence": _investigation_context(evidence[-12:]),
+            "revision_request": state.get("revision_request", ""),
+            "repair_authorized": state["repair"],
+        }, investigation_scope=scope)
+        self._check_live(task_id)
+        allowed = {"inspect", "inspect_batch", "clarify", "block"}
+        if state["mode"] in {"auto", "plan"}:
+            allowed.add("draft")
+        if state["mode"] == "debug":
+            allowed.update({"diagnose", "repair", "research"})
+        if state.get("coding_decision"):
+            allowed.add("switch_workflow")
+        if decision.action not in allowed:
+            raise ValueError("The model selected an action outside the active mode")
+        if decision.action in {"inspect", "inspect_batch"}:
+            if decision.action == "inspect":
+                requests, reason = (decision.evidence,), decision.evidence.reason
+            else:
+                requests, reason = decision.evidence, decision.reason
+            scope.validate_requests(requests)
+            self._transition(task_id, state, Phase.INVESTIGATING, str(redact_secrets(reason))[:240])
+            for request in requests:
+                self._inspect(task_id, state, service, request)
+            return None
+        if decision.action == "clarify":
+            if set(q.field_id for q in decision.questions).intersection(state["constraints"]):
+                raise ValueError("The model asked for an already resolved decision")
+            question_total = state["questions_asked"] + len(decision.questions)
+            if state["question_limit"] is not None and question_total > state["question_limit"]:
+                raise RuntimeError("The clarification limit was reached with material decisions unresolved")
+            state["questions_asked"] = question_total
+            questions = [redact_secrets(q.model_dump(mode="json")) for q in decision.questions]
+            self._transition(task_id, state, Phase.CLARIFICATION_REQUIRED)
+            item = self._wait(task_id, state, questions=questions)
+            return self._describe_item(task_id, state, item)
+        if decision.action == "block":
+            return self._block(task_id, state, decision.reason)
+        if decision.action == "switch_workflow":
+            cited = set(decision.evidence_ids)
+            if (decision.task_id != task_id or decision.mode == state["mode"]
+                    or not cited.issubset(scope.evidence_levels)
+                    or cited.issubset(state.get("last_switch_evidence", []))
+                    or (decision.mode == "auto" and not state["repair"])):
+                raise PermissionError("Workflow transition requires new observed evidence and the original task authority")
+            state["mode"] = decision.mode
+            state["mode_reason"] = str(redact_secrets(decision.reason))
+            state["last_switch_evidence"] = list(scope.evidence_levels)
+            state.setdefault("mode_transitions", []).append(redact_secrets(decision.model_dump(mode="json")))
+            self._transition(task_id, state, Phase.INVESTIGATING, state["mode_reason"])
+            return None
+        if decision.action == "research":
+            waiting = self._research(task_id, state, decision.debugging_report)
+            if waiting:
+                return waiting
+            return None
+        if decision.action == "diagnose":
+            if decision.cause_evidence and not set(decision.cause_evidence).issubset({ob["id"] for ob in state["evidence"]}):
+                raise ValueError("Diagnosis referenced unknown evidence")
+            text = "\n\n".join(s for s in (decision.root_cause, decision.uncertainty) if s)
+            if state.get("coding_decision") and state["repair"]:
+                return self._block(task_id, state, f"{text}\n\nThe requested repair remains incomplete.")
+            return self._complete(task_id, state, text)
+        if decision.action == "repair":
+            if not state["repair"]:
+                raise PermissionError("This debugging request only authorizes diagnosis")
+            if not set(decision.cause_evidence).issubset({ob["id"] for ob in state["evidence"]}):
+                raise ValueError("Repair referenced unknown evidence")
+            if not any(step.changes for step in decision.draft.steps) or not any(
+                check.expected == "pass" for step in decision.draft.steps for check in step.verification
+            ):
+                raise ValueError("Repair requires a scoped fix and a regression check")
+            state["root_cause"] = str(redact_secrets(decision.root_cause))
+            state["uncertainty"] = str(redact_secrets(decision.uncertainty))
+        if state["mode"] == "auto" and not evidence:
+            raise ValueError("AUTO requires observed repository evidence before drafting")
+        return self._draft(task_id, state, decision.draft, service)
 
     def _inspect(self, task_id: str, state: dict, service: PlanService, request: EvidenceRequest) -> None:
         from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
 
         self._check_live(task_id)
+        self._charge_tool(task_id, state)
         args = ({"path": request.paths[0], "start_line": request.start_line, "end_line": request.end_line}
                 if request.tool == "read_file"
                 else {"query": request.query, "paths": list(request.paths), "glob": request.glob})
         result = execute_host_operation(
-            root=self.gateway.root, task_id=task_id, tool_name=request.tool,
+            root=service.repo_root, task_id=task_id, tool_name=request.tool,
             arguments=args, effect="read_only", implementation=lambda _: service.inspect(request),
         )
         evidence = state["evidence"]
         evidence.append({"id": f"evidence-{len(evidence) + 1}", "fingerprint": request.fingerprint,
                          "level": request.level, "result": redact_secrets(result)})
+        self._persist(task_id, state)
+
+    def _charge_tool(self, task_id: str, state: dict) -> None:
+        used = state.get("tool_operations", len(state["evidence"]))
+        if used >= self.gateway._autonomous_controller.config.max_tool_calls:
+            raise RuntimeError("The configured workflow tool budget was exhausted.")
+        state["tool_operations"] = used + 1
+        self._persist(task_id, state)
+
+    def _charge_model(self, task_id: str, state: dict) -> None:
+        used = state.get("decision_count", 0)
+        if used >= self.gateway._autonomous_controller.config.max_model_turns:
+            raise RuntimeError("The configured workflow model decision budget was exhausted.")
+        state["decision_count"] = used + 1
         self._persist(task_id, state)
 
     def _research(self, task_id, state, report):
@@ -313,6 +458,8 @@ class ModeWorkflow:
 
         if not state["evidence"]:
             raise ValueError("Research requires a local observation about the dependency")
+        self._charge_tool(task_id, state)
+        self._charge_model(task_id, state)
         settings = self.gateway.settings
         if not settings.mana_coding_research_enabled:
             raise PermissionError("External coding research is disabled")
@@ -325,7 +472,7 @@ class ModeWorkflow:
                                             task_capabilities=execution.capabilities)
 
         runtime = self.gateway._autonomous_controller.coding_research_runtime(
-            task_id=task_id, root=self.gateway.root, attempt_id=execution.supervisor_attempt_id,
+            task_id=task_id, root=self._workspace_root(state), attempt_id=execution.supervisor_attempt_id,
             lease_token=execution.supervisor_lease_token, authorize=authorize,
             evaluator=self.gateway._continuation_evaluator, settings=settings,
         )
@@ -348,9 +495,17 @@ class ModeWorkflow:
         return None
 
     def _draft(self, task_id, state, draft, service):
+        limits = state.get("repair_limits")
+        if limits is not None:
+            if any(operation not in limits.get(path, []) for step in draft.steps
+                   for path, operations in step.changes.items() for operation in operations):
+                raise PermissionError("The verification repair extends beyond the accepted file scope")
+            if not any(check.model_dump(mode="json") == state["required_recheck"]
+                       for step in draft.steps for check in step.verification):
+                raise ValueError("The revised plan must rerun the failed verification command")
         self._transition(task_id, state, Phase.DRAFTING_PLAN)
         task = self.board.get_task(task_id)
-        root = self.gateway.root
+        root = self._workspace_root(state)
         policy = TaskExecutionPolicy.model_validate(state["execution_policy"])
         backend = "internal" if policy.required else getattr(self.gateway._coding_agent, "active_engine_mode", "")
         plan = PlanRevision(
@@ -372,8 +527,10 @@ class ModeWorkflow:
             state["artifact"] = str(service.save_plan(plan, state["output"]))
         if state["no_code"]:
             return self._complete(task_id, state, plan.to_markdown())
-        if state["mode"] == "debug":
-            self._transition(task_id, state, Phase.APPROVED, "Evidence-supported repair is ready")
+        if state["mode"] in {"auto", "debug"}:
+            if not state["repair"]:
+                raise PermissionError("The task does not authorize repository changes")
+            self._transition(task_id, state, Phase.APPROVED, "Internal plan recorded")
             return self._execute(task_id, state, service)
         self._transition(task_id, state, Phase.AWAITING_APPROVAL)
         item = self._wait(task_id, state, plan=plan)
@@ -414,7 +571,8 @@ class ModeWorkflow:
         return item
 
     def _describe_item(self, task_id, state, item):
-        context = {"task_id": task_id, "phase": state["phase"], "inbox_id": item.inbox_item_id,
+        context = {"task_id": task_id, "phase": state["phase"], "mode": state["mode"],
+                   "mode_reason": state.get("mode_reason", ""), "inbox_id": item.inbox_item_id,
                    "revision": state["revision"], "digest": item.action_digest}
         if item.request_type == InboxRequestType.APPROVAL:
             text = f"{item.summary}\nApprove revision {state['revision']} with `/approve {item.inbox_item_id}`, or use `/revise <changes>` or `/reject`."
@@ -542,9 +700,9 @@ class ModeWorkflow:
             result = self._restart_draft(task_id, state, revision_request)
         elif retry_investigation:
             self._transition(task_id, state, Phase.UNDERSTANDING)
-            result = self._drive(task_id, state, service=self._service())
+            result = self._drive(task_id, state, service=self._service(state=state))
         else:
-            result = self._execute(task_id, state, self._service())
+            result = self._execute(task_id, state, self._service(state=state))
         self._publish_result(task_id, result)
         return result
 
@@ -572,7 +730,7 @@ class ModeWorkflow:
 
     def _restart_draft(self, task_id, state, instructions):
         self._revise(task_id, state, instructions)
-        return self._drive(task_id, state, service=self._service())
+        return self._drive(task_id, state, service=self._service(state=state))
 
     def resume(self, task_id, item, protected, claim_id):
         supervisor = self.lane.execution_supervisor
@@ -593,7 +751,7 @@ class ModeWorkflow:
             comment = item.response.comment
             if comment.startswith("Revise plan:\n"):
                 self._revise(task_id, state, comment.split("\n", 1)[1])
-                result = self._drive(task_id, state, service=self._service())
+                result = self._drive(task_id, state, service=self._service(state=state))
             else:
                 self._transition(task_id, state, Phase.CANCELLED, "User rejected the plan")
                 self.lane.cancel_tree(task_id)
@@ -603,13 +761,13 @@ class ModeWorkflow:
             state["constraints"].update(redact_secrets(answer))
             state["inbox_id"] = ""
             self._transition(task_id, state, Phase.UNDERSTANDING)
-            result = self._drive(task_id, state, service=self._service())
+            result = self._drive(task_id, state, service=self._service(state=state))
         elif plan:
             state["approved_digest"] = plan.digest
             state["approval_id"] = item.inbox_item_id
             state["inbox_id"] = ""
             self._transition(task_id, state, Phase.APPROVED, f"Revision {plan.revision} approved")
-            result = self._execute(task_id, state, self._service())
+            result = self._execute(task_id, state, self._service(state=state))
         else:
             return
         self._publish_result(task_id, result)
@@ -619,7 +777,8 @@ class ModeWorkflow:
         from mana_agent.chat.history import get_history
 
         task = self.board.get_task(task_id)
-        turn_id = f"mode-{task_id}-{task.mode_workflow['revision']}-{task.mode_workflow['phase']}"
+        durable = self.lane.execution_supervisor.get_task(task_id)
+        turn_id = durable.trigger_turn_id or f"mode-{task_id}-{task.mode_workflow['revision']}-{task.mode_workflow['phase']}"
         self.gateway._append_session_message(task.session_id, role="assistant", content=result.message, turn_id=turn_id)
         get_history().add(AssistantMessageEvent(content=result.message, turn_id=turn_id))
         if result.next_prompt:
@@ -683,18 +842,18 @@ class ModeWorkflow:
         saved = current.mode_workflow
         if (saved["revision"] != plan.revision or current.session_id != plan.session_id or
                 current.workspace_id != plan.workspace_id or current.primary_repository_id != plan.repository_id or
-                str(self.gateway.root) != plan.repository_root or PlanRevision.model_validate(saved["plan"]).digest != plan.digest):
+                str(self._workspace_root(saved)) != plan.repository_root or PlanRevision.model_validate(saved["plan"]).digest != plan.digest):
             raise PermissionError("The task, revision, or workspace changed")
         if saved["execution_policy"] != plan.execution_policy:
             raise PermissionError("The approved execution policy changed")
-        if self._checkout_identity(self.gateway.root) != plan.base_checkout:
+        if self._checkout_identity(Path(plan.repository_root)) != plan.base_checkout:
             raise PermissionError("The repository branch or base commit changed. Revise and approve the plan again.")
         session = self.gateway._workspaces.store.get_session(plan.session_id)
         if session.workspace_id != plan.workspace_id or session.primary_repository_id != plan.repository_id:
             raise PermissionError("The session workspace no longer matches the reviewed checkout")
         if state["mode"] != "plan":
             if not state["repair"]:
-                raise PermissionError("Debug repair was not authorized")
+                raise PermissionError("Repository changes were not authorized")
             return durable
         if saved["approved_digest"] != plan.digest:
             raise PermissionError("The active revision has no exact approval")
@@ -714,8 +873,36 @@ class ModeWorkflow:
             if state["mode"] == "plan":
                 return self._restart_draft(task_id, state, str(exc))
             return self._block(task_id, state, str(exc))
+        except VerificationFailed as exc:
+            if state.get("coding_decision") and state["repair"] and "repair_limits" not in state:
+                return self._replan_failed_check(task_id, state, service, exc)
+            return self._block(task_id, state, str(exc))
         except Exception as exc:
             return self._block(task_id, state, str(redact_secrets(str(exc))))
+
+    def _replan_failed_check(self, task_id, state, service, failure: VerificationFailed):
+        try:
+            plan = PlanRevision.model_validate(state["plan"])
+            self._validate_approval(task_id, state, plan)
+            pending = state.get("in_flight_mutation")
+            if pending:
+                self._reconcile_patch(Path(plan.repository_root), pending)
+                state.setdefault("earlier_patches", []).append(pending)
+                state.pop("in_flight_mutation")
+            limits: dict[str, list[str]] = {}
+            for step in plan.draft.steps:
+                for path, operations in step.changes.items():
+                    limits.setdefault(path, []).extend(operations)
+                    if "add" in operations and path in state["files_changed"]:
+                        limits[path].append("update")
+            state.update(repair_limits=limits, required_recheck=failure.command.model_dump(mode="json"))
+            observation = {"command": state["required_recheck"], "result": failure.outcome}
+            state["evidence"].append({"id": f"evidence-{len(state['evidence']) + 1}", "level": 0,
+                                      "fingerprint": canonical_digest(observation), "result": observation})
+            self._revise(task_id, state, "Repair the failed verification within the accepted scope and rerun it.")
+            return self._drive(task_id, state, service=service)
+        except Exception as exc:
+            return self._block(task_id, state, str(exc))
 
     def _execute_steps(self, task_id, state, service):
         plan = PlanRevision.model_validate(state["plan"])
@@ -728,11 +915,16 @@ class ModeWorkflow:
                                                        "constraints": plan.constraints}) for step in plan.draft.steps}
         completed = {step_id: receipt for step_id, receipt in state["done_steps"].items()
                      if receipt.get("signature") == signatures.get(step_id)}
+        patches = state.setdefault("patch_steps", {}) if state.get("coding_decision") else None
+        root = Path(plan.repository_root)
         latest_digests = {}
         for step in plan.draft.steps:
             latest_digests.update(completed.get(step.step_id, {}).get("files", {}))
+            saved_patch = (patches or {}).get(step.step_id, {})
+            if saved_patch.get("signature") == signatures[step.step_id]:
+                latest_digests.update(saved_patch["files"])
         latest_digests.update(state.get("in_flight_mutation", {}).get("files", {}))
-        if any(self._file_digest(self.gateway.root, path) != digest for path, digest in latest_digests.items()):
+        if any(self._file_digest(root, path) != digest for path, digest in latest_digests.items()):
             raise PermissionError("Files from a verified step changed. Review the workspace before resuming.")
         done: set[str] = set()
         for step in plan.draft.steps:
@@ -750,33 +942,38 @@ class ModeWorkflow:
             if revision_reason:
                 self._revise(task_id, state, revision_reason)
                 return self._drive(task_id, state, service=service)
-            child = self._step_task(task_id, step, plan)
-            self._start_step(task_id, child.task_id, plan, step, state)
-            try:
-                with self._activity(child.task_id, state, read_only=not step.changes):
-                    self._execute_step(task_id, child.task_id, state, plan, step, service, expected_files)
-                self._validate_approval(task_id, state, plan)
-                written = list(state.get("in_flight_mutation", {}).get("files", {})) if step.changes else []
-                finished = self.lane.finish(child.task_id, changed_files=written,
-                    verification_state={"goal_satisfied": True, "mode_step": step.step_id,
-                                        "verification": state.get("verification", [])})
-                if finished.state != LaneTaskState.COMPLETED:
-                    raise RuntimeError(finished.error or "The supervisor has not verified this step")
-                state["done_steps"][step.step_id] = {"signature": signature,
-                    "files": {path: expected_files[path] for path in step.changes}}
+            prior_patch = (patches or {}).get(step.step_id, {})
+            if prior_patch.get("signature") == signature:
+                expected_files.update(prior_patch["files"])
+            elif step.changes or patches is None:
+                child = self._step_task(task_id, step, plan)
+                written = self._run_step_child(
+                    task_id, child.task_id, state, plan, step, service, expected_files, verify=patches is None,
+                )
+                if patches is not None:
+                    patches[step.step_id] = {"signature": signature, "files": written}
                 state.pop("in_flight_mutation", None)
                 self._persist(task_id, state)
-            except ModeBatchWaiting:
-                raise
-            except Exception as exc:
-                lane_child = self.lane.inspect_task(child.task_id)
-                if lane_child.state in {LaneTaskState.RUNNING, LaneTaskState.VERIFYING}:
-                    self.lane.mark_blocked(child.task_id, reason=str(redact_secrets(str(exc))))
-                raise
+            if patches is not None and step.verification:
+                self._verify_step(task_id, task_id, state, plan, step)
+            state["done_steps"][step.step_id] = {"signature": signature,
+                "files": {path: expected_files[path] for path in step.changes}}
+            self._persist(task_id, state)
             done.add(step.step_id)
             revision_reason = self._steering(task_id, state, plan, step, service)
             if revision_reason:
                 return self._restart_draft(task_id, state, revision_reason)
+        if state.get("runtime_capability_change") and state["repair"]:
+            self._integrate(task_id, state)
+        if state.get("coding_decision"):
+            self._transition(task_id, state, Phase.REVIEWING, "Reviewing the verified changes")
+            self._validate_approval(task_id, state, plan)
+            for relative, digest in expected_files.items():
+                if self._file_digest(root, relative) != digest:
+                    raise PermissionError("The reviewed checkout changed before finalization")
+            if not any(check["passed"] and check["exit_code"] == 0
+                       for check in state.get("verification", [])):
+                raise RuntimeError("A passing verification command is required before completion")
         passed = sum(bool(check["passed"]) for check in state.get("verification", []))
         message = f"Revision {plan.revision} completed. Verified {passed} command(s)."
         if state["mode"] == "debug":
@@ -785,7 +982,79 @@ class ModeWorkflow:
                 message += "\n\nRemaining uncertainty: " + state["uncertainty"]
         if state["files_changed"]:
             message += "\n\nChanged files: " + ", ".join(state["files_changed"])
+        if state.get("isolated_workspace"):
+            message += f"\n\nVerified worktree: {plan.repository_root}"
         return self._complete(task_id, state, message)
+
+    def _run_step_child(self, task_id, child_id, state, plan, step, service, expected_files, *, verify):
+        root = Path(plan.repository_root)
+        supervisor = self.lane.execution_supervisor
+        saved = supervisor.store.get_task_or_none(child_id)
+        if saved and saved.state == ExecutionState.COMPLETED:
+            escrow = supervisor.get_verified_execution_result(child_id)
+            if not escrow.is_verified:
+                raise PermissionError("The completed child has no verified receipt")
+            receipt = state.get("in_flight_mutation", {})
+            if step.changes:
+                if receipt.get("step") != step.step_id:
+                    raise PermissionError("The completed patch has no receipt for this step")
+                self._reconcile_patch(root, receipt)
+                expected_files.update(receipt["files"])
+            return dict(receipt.get("files", {})) if step.changes else {}
+
+        self._start_step(task_id, child_id, plan, step, state)
+        try:
+            with self._activity(child_id, state, read_only=not step.changes):
+                self._execute_step(task_id, child_id, state, plan, step, service, expected_files, verify=verify)
+            self._validate_approval(task_id, state, plan)
+            written = state.get("in_flight_mutation", {}).get("files", {}) if step.changes else {}
+            finished = self.lane.finish(child_id, changed_files=[str(root / path) for path in written],
+                verification_state={"goal_satisfied": True, "mode_step": step.step_id,
+                                    "verification": state.get("verification", [])})
+            if finished.state != LaneTaskState.COMPLETED:
+                raise RuntimeError(finished.error or "The supervisor has not verified this step")
+            return dict(written)
+        except ModeBatchWaiting:
+            raise
+        except Exception as exc:
+            if self.lane.inspect_task(child_id).state == LaneTaskState.RUNNING:
+                self.lane.mark_blocked(child_id, reason=str(redact_secrets(str(exc))))
+            raise
+
+    def _integrate(self, task_id: str, state: dict) -> None:
+        from mana_agent.gateway.feature_integration import FeatureIntegrationCoordinator, IntegrationAuthority
+
+        self._transition(task_id, state, Phase.INTEGRATING, "Checking production integration")
+        authority = IntegrationAuthority.from_taskboard(self.board, task_id)
+        if authority and authority.is_complete():
+            state["integration"] = redact_secrets(asdict(authority))
+            self._persist(task_id, state)
+            return
+        task = self._check_live(task_id)
+        self._charge_tool(task_id, state)
+        self._charge_model(task_id, state)
+        provider = self.gateway._feature_integration_decision_provider(
+            task_id=task_id,
+            options={"execution_policy": state["execution_policy"], "_selected_model": state.get("model"),
+                     "_selected_provider": state.get("provider")},
+        )
+        try:
+            result = FeatureIntegrationCoordinator().run(
+                coding_agent=self.gateway._coding_agent,
+                core_result={"status": "completed", "changed_files": state["files_changed"]},
+                request=state["goal"], gateway_task_id=task_id, flow_id=None,
+                runtime_capability_change=True,
+                taskboard=self.board, taskboard_parent_task_id=task_id,
+                execution_supervisor=self.lane.execution_supervisor,
+                trigger_turn_id=task.trigger_turn_id, workspace_root=self._workspace_root(state),
+                integration_decision_provider=provider,
+            )
+        except BatchPending as pending:
+            self._suspend_batch_integration(task_id, state, pending.operation.model_dump(mode="json"))
+        if not result.passed:
+            raise RuntimeError(f"Production integration is incomplete: {result.error_code}")
+        state["integration"] = redact_secrets(result.result.get("integration_authority"))
+        self._persist(task_id, state)
 
     def _start_step(self, task_id, child_id, plan, step, state):
         supervisor = self.lane.execution_supervisor
@@ -807,7 +1076,9 @@ class ModeWorkflow:
                 normalized_intent=f"{task_id}:r{plan.revision}:{step.step_id}",
                 lane_id=LaneId.CODING if step.changes else LaneId.VERIFY,
                 session_id=plan.session_id, workspace_id=plan.workspace_id, repository_id=plan.repository_id,
-                parent_task_id=task_id, taskboard_task_id=child_id, target_files=list(step.changes),
+                parent_task_id=task_id, taskboard_task_id=child_id,
+                target_files=[str(Path(plan.repository_root) / path) for path in step.changes],
+                execution_workspace=Path(plan.repository_root),
             )
         if step.changes:
             policy = TaskExecutionPolicy.model_validate(state["execution_policy"])
@@ -817,24 +1088,31 @@ class ModeWorkflow:
                 supervisor.store.update_task(child_id, bind_policy)
         self.lane.start(reservation)
 
-    def _execute_step(self, task_id, child_id, state, plan, step, service, expected_files):
+    def _execute_step(self, task_id, child_id, state, plan, step, service, expected_files, *, verify=True):
         applied = state.get("in_flight_mutation", {})
         if applied.get("step") == step.step_id and applied.get("action_id"):
-            from mana_agent.transactional_actions.runtime import default_action_gateway
-            action = default_action_gateway(self.gateway.root).store.get_action(applied["action_id"])
-            if (action is None or action.state.value != "committed" or any(
-                self._file_digest(self.gateway.root, path) != digest for path, digest in applied["files"].items()
-            )):
-                raise PermissionError("The applied patch could not be reconciled")
+            self._reconcile_patch(Path(plan.repository_root), applied)
             expected_files.update(applied["files"])
         elif step.changes:
             self._apply_step(task_id, child_id, state, plan, step, service, expected_files)
-        if step.verification:
-            self._transition(task_id, state, Phase.VERIFYING, f"Verifying {step.step_id}")
-            for command in step.verification:
-                self._validate_approval(task_id, state, plan)
-                self._check_live(child_id)
-                self._verify(task_id, command, state)
+        if verify and step.verification:
+            self._verify_step(task_id, child_id, state, plan, step)
+
+    def _verify_step(self, task_id, owner_id, state, plan, step):
+        self._transition(task_id, state, Phase.VERIFYING, f"Verifying {step.step_id}")
+        for command in step.verification:
+            self._validate_approval(task_id, state, plan)
+            self._check_live(owner_id)
+            self._verify(task_id, command, state)
+
+    def _reconcile_patch(self, root: Path, receipt: dict) -> None:
+        from mana_agent.transactional_actions.runtime import default_action_gateway
+
+        action = default_action_gateway(root).store.get_action(receipt.get("action_id", ""))
+        if (action is None or action.state.value != "committed" or any(
+            self._file_digest(root, path) != digest for path, digest in receipt["files"].items()
+        )):
+            raise PermissionError("The applied patch could not be reconciled")
 
     def _step_task(self, task_id, step, plan):
         existing = self.board.store.repository.list_tasks(session_id=plan.session_id)
@@ -853,7 +1131,7 @@ class ModeWorkflow:
         return self.board.update_task(child.task_id, mode_workflow=identity)
 
     def _apply_step(self, task_id, child_id, state, plan, step, service, expected_files):
-        root = self.gateway.root
+        root = self._workspace_root(state)
         for relative in step.changes:
             if self._file_digest(root, relative) != expected_files[relative]:
                 raise PermissionError(f"{relative} changed after review. Revise the plan or restore the reviewed workspace.")
@@ -868,13 +1146,17 @@ class ModeWorkflow:
         if pending:
             if pending["step"] != step.step_id or pending["revision"] != plan.digest:
                 raise PermissionError("Patch approval belongs to a different revision or step")
-            patch, approval_id = self._approved_patch(pending)
+            patch, approval_id = self._approved_patch(root, pending)
         else:
             patch = self._propose_patch(task_id, child_id, state, plan, step, service)
         self._commit_patch(task_id, child_id, state, plan, step, service, expected_files, patch, approval_id)
 
     def _propose_patch(self, task_id, child_id, state, plan, step, service):
-        root = self.gateway.root
+        self._charge_tool(task_id, state)
+        self._charge_model(task_id, state)
+        state["used_coding_agent"] = True
+        self._persist(task_id, state)
+        root = self._workspace_root(state)
         prompt = (
             "Propose the minimal repository patch for the given step. Your turn is read-only. "
             "Return exactly a JSON object with a single patch string using the *** Begin Patch format. "
@@ -883,7 +1165,7 @@ class ModeWorkflow:
             "If scope is insufficient, return an empty patch string and stop.\n\n"
             + json.dumps({"step": step.model_dump(mode="json"), "scope": plan.draft.scope,
                           "exclusions": plan.draft.exclusions, "user_decisions": plan.constraints,
-                          "evidence": _investigation_context(state["evidence"][-8:]) if state["mode"] == "debug" else [],
+                          "evidence": _investigation_context(state["evidence"][-8:]) if state["mode"] != "plan" else [],
                           "steering": state.get("guidance", []),
                           "root_cause": state.get("root_cause", "")}, ensure_ascii=False)
         )
@@ -891,7 +1173,8 @@ class ModeWorkflow:
             prompt, execution_mode="read_only", gateway_task_id=child_id,
             turn_id=f"{task_id}:r{plan.revision}:{step.step_id}", dispatch_source="mode_workflow",
             coding_mode_proposal=True, coding_mode_files=list(step.changes),
-            coding_mode_root=str(root),
+            coding_mode_root=str(root), coding_mode_workspace_task_id=task_id,
+            coding_mode_repository_id=plan.repository_id,
             execution_policy=state.get("execution_policy", {}),
             **self._batch_arguments(child_id, plan, state),
         )
@@ -908,10 +1191,10 @@ class ModeWorkflow:
             raise ScopeRevisionNeeded(revision_reason)
         return parse_proposal(proposal.get("output") or proposal.get("answer"))
 
-    def _approved_patch(self, pending):
+    def _approved_patch(self, root, pending):
         from mana_agent.transactional_actions.runtime import default_action_gateway
 
-        gateway = default_action_gateway(self.gateway.root)
+        gateway = default_action_gateway(root)
         action = gateway.store.get_action(pending["action_id"])
         if not action or not action.preview or action.state.value != "awaiting_approval":
             raise PermissionError("The patch approval is unavailable or expired. Review the step before retrying.")
@@ -924,12 +1207,17 @@ class ModeWorkflow:
         return patch, grant.approval_id
 
     def _commit_patch(self, task_id, child_id, state, plan, step, service, expected_files, patch, approval_id):
+        from mana_agent.gateway.lanes import validate_tool_permission
         from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
 
-        root = self.gateway.root
+        root = self._workspace_root(state)
+        child = self.lane.inspect_task(child_id)
+        validate_tool_permission(self.lane.contracts[child.owning_lane], "apply_patch",
+                                 task_capabilities=tuple(child.capabilities))
         if redact_secrets(patch) != patch:
             raise ValueError("Coding proposal contains protected material")
         operations = validate_step_patch(root, step, patch)
+        self._charge_model(task_id, state)
         review = service.review(patch=patch, step=step.model_dump(mode="json"),
                                 context={"scope": plan.draft.scope, "exclusions": plan.draft.exclusions,
                                          "constraints": plan.constraints, "goal": plan.goal,
@@ -959,6 +1247,7 @@ class ModeWorkflow:
                         raise PermissionError(f"{relative} changed after the patch was reviewed")
                 yield
 
+        self._charge_tool(task_id, state)
         state["in_flight_mutation"] = {"step": step.step_id, "patch_digest": sha256(patch.encode()).hexdigest()}
         self._persist(task_id, state)
         result = execute_host_operation(
@@ -1040,11 +1329,41 @@ class ModeWorkflow:
         ensure_batch_watcher(self.gateway.root, self.gateway.background_processes)
         raise ModeBatchWaiting(f"Plan revision {plan.revision} is waiting for the coding proposal for step {state['step_id']}.")
 
+    def _suspend_batch_integration(self, task_id, state, operation):
+        from mana_agent.batch.operations import BatchOperationStore
+        from mana_agent.batch.watcher import ensure_batch_watcher
+
+        if (not TaskExecutionPolicy.model_validate(state["execution_policy"]).required
+                or operation["task_id"] != task_id):
+            raise PermissionError("The integration decision does not belong to this Batch task")
+        plan = PlanRevision.model_validate(state["plan"])
+        manager = self.gateway._autonomous_controller.batch_manager
+        operations = BatchOperationStore(manager.store)
+        run = operations.load_run(task_id) or {
+            "task_id": task_id, "root": str(self.gateway.root), "model": state["model"],
+            "step": 0, "model_turns": 0, "accounted_operations": [],
+            "limits": self.gateway._autonomous_controller.config.model_dump(mode="json"),
+        }
+        run.update(status="waiting", gateway_pending_operation=operation,
+                   resume={"mode_task_id": task_id, "session_id": plan.session_id, "digest": plan.digest})
+        operations.save_run(task_id, run)
+        job = manager.store.get_job(operation["batch_id"])
+        expiry = (datetime.fromtimestamp(job.expires_at, timezone.utc) if job and job.expires_at
+                  else datetime.now(timezone.utc) + timedelta(hours=24))
+        state["batch_child"] = task_id
+        self._persist(task_id, state)
+        self.lane.checkpoint(task_id, boundary="mode.integration_batch_wait", resume_payload={
+            "mode_task_id": task_id, "digest": plan.digest, "batch_child": task_id,
+        }, completed_steps=list(state["done_steps"]))
+        self.lane.suspend_for_batch(task_id, operation_id=operation["operation_id"], expires_at=expiry)
+        ensure_batch_watcher(self.gateway.root, self.gateway.background_processes)
+        raise ModeBatchWaiting("The workflow is waiting for its production integration decision.")
+
     def resume_batch(self, task_id, child_id, operation_id, run):
         supervisor = self.lane.execution_supervisor
         state = self.board.get_task(task_id).mode_workflow
         plan = PlanRevision.model_validate(state["plan"])
-        operation = run.get("pending_operation") or {}
+        operation = run.get("gateway_pending_operation") or run.get("pending_operation") or {}
         if (state.get("batch_child") != child_id or operation.get("operation_id") != operation_id
                 or run["resume"].get("digest") != plan.digest):
             raise PermissionError("Batch wake does not match the approved plan step")
@@ -1052,25 +1371,36 @@ class ModeWorkflow:
         job = manager.store.get_job(operation["batch_id"])
         completed_at = datetime.fromtimestamp(job.completed_at, timezone.utc) if job and job.completed_at else None
         self.lane.ensure_recoverable_execution(task_id)
-        self.lane.ensure_recoverable_execution(child_id)
+        if child_id != task_id:
+            self.lane.ensure_recoverable_execution(child_id)
         with supervisor.store.locked():
             parent = supervisor.get_task(task_id)
             if parent.state != ExecutionState.WAITING or parent.wake_up_reference != operation_id:
                 return
             supervisor.resume_from_batch(task_id, operation_id=operation_id, provider_completed_at=completed_at)
-            supervisor.resume_from_batch(child_id, operation_id=operation_id, provider_completed_at=completed_at)
+            if child_id != task_id:
+                supervisor.resume_from_batch(child_id, operation_id=operation_id, provider_completed_at=completed_at)
         self.gateway._bind_runtime_session(plan.session_id)
         lane = self.lane.inspect_task(task_id)
         lane.supervisor_attempt_id = lane.supervisor_lease_token = ""
         self.lane.start(LaneReservation(lane))
-        self._publish_result(task_id, self._execute(task_id, state, self._service()))
+        result = self._execute(task_id, state, self._service(state=state))
+        if child_id == task_id and result.status != "input_required":
+            from mana_agent.batch.operations import BatchOperationStore
+            operations = BatchOperationStore(manager.store)
+            current = operations.load_run(task_id)
+            current.pop("gateway_pending_operation", None)
+            current["status"] = "completed" if result.status == "success" else "failed"
+            operations.save_run(task_id, current)
+        self._publish_result(task_id, result)
 
     def _verify(self, task_id: str, command: VerificationCommand, state: dict):
+        self._charge_tool(task_id, state)
         operation_id = f"{task_id}:verify:{len(state.get('verification', [])) + 1}"
         emit_activity("coding.progress", task_id=task_id, title="Running verification command",
                       summary=f"{command.argv!r} in {command.cwd}",
                       status="running", operation_id=operation_id)
-        outcome = asyncio.run(run_isolated_verification(self.gateway.root, command, task_id=task_id))
+        outcome = asyncio.run(run_isolated_verification(self._workspace_root(state), command, task_id=task_id))
         state.setdefault("verification", []).append(outcome)
         self._persist(task_id, state)
         emit_activity("coding.progress", task_id=task_id, title="Verification command",
@@ -1078,7 +1408,7 @@ class ModeWorkflow:
                       status="success" if outcome["passed"] else "failed",
                       operation_id=operation_id)
         if not outcome["passed"]:
-            raise RuntimeError(f"Verification failed for {command.argv!r}: {outcome['output']}")
+            raise VerificationFailed(command, outcome)
 
     def _steering(self, task_id, state, plan, step, service):
         # The supervisor owns admission and delivery. The mode workflow decides
@@ -1114,15 +1444,27 @@ class ModeWorkflow:
 
     def _complete(self, task_id, state, message):
         message = str(redact_secrets(message))
-        finished = self.lane.finish(task_id, changed_files=state["files_changed"],
+        root = self._workspace_root(state)
+        finished = self.lane.finish(task_id, changed_files=[str(root / path) for path in state["files_changed"]],
                          verification_state={"goal_satisfied": True, "answer": message,
-                                             "verification": state.get("verification", [])})
+                                             "verification": state.get("verification", []),
+                                             "integration": state.get("integration", {})})
         if finished.state != LaneTaskState.COMPLETED:
             return self._block(task_id, state, finished.error or "Supervisor verification remains incomplete")
+        if state.get("isolated_workspace"):
+            from mana_agent.multi_agent.worktrees import WorkspaceManager, WorkspaceStatus
+
+            manager = WorkspaceManager(self.gateway.root, repository_id=state["isolated_workspace"]["repository_id"])
+            manager.transition(task_id, WorkspaceStatus.MERGE_CANDIDATE)
         state["result"] = message
         self._transition(task_id, state, Phase.COMPLETED)
         return CommandResult(status="success", message=message,
-                             data={"task_id": task_id, "phase": state["phase"], "changed_files": state["files_changed"]})
+                             data={"task_id": task_id, "phase": state["phase"], "mode": state["mode"],
+                                   "mode_reason": state.get("mode_reason", ""),
+                                   "changed_files": state["files_changed"], "goal_satisfied": True,
+                                   "used_coding_agent": state.get("used_coding_agent", False),
+                                   "verification": state.get("verification", []),
+                                   "integration": state.get("integration", {})})
 
     def _block(self, task_id, state, message):
         message = str(redact_secrets(message))
@@ -1130,11 +1472,15 @@ class ModeWorkflow:
         durable = self.lane.execution_supervisor.get_task(task_id)
         if durable.cancellation_status is None and durable.state not in {ExecutionState.COMPLETED, ExecutionState.CANCELLED}:
             execution = self.lane.inspect_task(task_id)
-            if execution.state in {LaneTaskState.RUNNING, LaneTaskState.VERIFYING, LaneTaskState.QUEUED, LaneTaskState.WAITING}:
+            if execution.state in {LaneTaskState.RUNNING, LaneTaskState.QUEUED, LaneTaskState.WAITING}:
                 self.lane.mark_blocked(task_id, reason=message)
             self._transition(task_id, state, Phase.BLOCKED)
         return CommandResult(status="error", message=message,
-                             data={"task_id": task_id, "phase": state["phase"]})
+                             data={"task_id": task_id, "phase": state["phase"], "mode": state["mode"],
+                                   "mode_reason": state.get("mode_reason", ""),
+                                   "changed_files": state["files_changed"], "goal_satisfied": False,
+                                   "used_coding_agent": state.get("used_coding_agent", False),
+                                   "verification": state.get("verification", [])})
 
 
 def parse_proposal(raw: Any) -> str:

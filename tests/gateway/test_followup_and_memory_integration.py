@@ -138,6 +138,17 @@ class _RouteModel:
                     "error_code": "",
                     "reuse_active_route": len(self.payloads) > 1,
                     "runtime_capability_change": False,
+                    "coding_workflow": ({
+                        "mode": "auto", "requested_effect": "write",
+                        "objective": self.payloads[-1]["user_prompt"],
+                        "reason": "This extends an earlier coding task",
+                        "investigation_scope": "Follow the earlier repository task",
+                        "expected_result": "Related task is implemented",
+                        "risk_and_uncertainty": "Confirm the exact target first",
+                        "verification_requirements": ["Check the relevant behavior"],
+                        "clarification": "Which file should receive this change?",
+                    } if route == "coding" else None),
+                    "source_message_ids": [self.payloads[-1]["context"]["user_message_id"]] if route == "coding" else [],
                 }
             )
         )

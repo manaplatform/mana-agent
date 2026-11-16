@@ -55,6 +55,8 @@ from mana_agent.gateway.entry_routing import (
     RouteAvailability,
     RouteRegistration,
     gmail_route_availability,
+    is_explicit_plan_control,
+    validate_coding_workflow,
 )
 from mana_agent.gateway.stack import ChatStack, build_chat_stack
 from mana_agent.gateway.lane_coordinator import (
@@ -3748,9 +3750,9 @@ class AgentChatGateway:
             ),
             RouteRegistration(
                 "coding",
-                "Codex coding workflow for repository file changes, verification, and implementation.",
+                "AUTO implementation or DEBUG diagnosis and repair. Writes require a configured coding engine.",
                 lambda: self._available(
-                    self._coding_agent is not None, "Coding agent is not configured."
+                    True, details={"write_available": self._coding_agent is not None},
                 ),
                 (
                     "run_script_once",
@@ -4241,11 +4243,14 @@ class AgentChatGateway:
 
     @staticmethod
     def _mode_turn_result(rendered):
+        status = {"success": "completed", "error": "blocked"}.get(rendered.status, "waiting")
         return ChatTurnResult(
             answer=rendered.message, error="mode_blocked" if rendered.status == "error" else None,
             mode="repository-workflow", changed_files=rendered.data.get("changed_files", []),
+            used_coding_agent=bool(rendered.data.get("used_coding_agent")),
             payload={**rendered.data, "next_prompt": rendered.next_prompt,
-                     "status": "waiting" if rendered.status == "input_required" else rendered.status},
+                     "status": status, "goal_satisfied": status == "completed",
+                     "pending_required_work": status == "waiting"},
         )
 
     def _session(self, session_id: str) -> dict[str, Any]:
@@ -4869,7 +4874,7 @@ class AgentChatGateway:
             )
 
     def send(self, session_id: str, text: str) -> str:
-        """Synchronous send — full process_turn when stack is rich, else ask."""
+        """Synchronous entry to the shared gateway."""
         return asyncio.run(self.send_async(session_id, text))
 
     async def send_async(self, session_id: str, text: str) -> str:
@@ -4877,73 +4882,10 @@ class AgentChatGateway:
         command = self.dispatch_command(text, session_id=session_id, frontend="api")
         if command is not None:
             return command.message
-        self._active.add(session_id)
-        try:
-            # Prefer full turn engine when coding stack or agent tools are active
-            if (self._coding_agent is not None or bool(self.config.agent_tools)
-                    or self.get_session_execution_mode(session_id) in {"plan", "debug"}):
-                result = await asyncio.to_thread(self.process_turn, session_id, text)
-                if result.error and not result.answer:
-                    return f"(Gateway error: {result.error})"
-                return result.answer or "(No response from agent)"
-
-            # Minimal ChatService-only path
-            state = self._session(session_id)
-            turn_id = f"turn_{uuid.uuid4().hex[:20]}"
-            minimal_decision = self.routing_authority.route(
-                RoutingRequest(
-                    role="main",
-                    task_description=text,
-                    task_type="routine",
-                    complexity=Complexity.LOW,
-                    risk=RiskLevel.LOW,
-                    latency_requirement=LatencyClass.INTERACTIVE,
-                    budgets=routing_budgets_from_settings(self.settings),
-                    task_id=turn_id,
-                    session_id=session_id,
-                    workspace_id=str(self._stack.workspace_id or ""),
-                    repository_id=str(self._stack.repository_id or ""),
-                    execution_lane="conversation",
-                )
-            )
-            minimal_ask = getattr(self._chat_service, "_ask_service", None) or getattr(
-                self._chat_service, "ask_service", None
-            )
-            self._apply_selected_model(
-                getattr(minimal_ask, "qna_chain", None), minimal_decision.selected_model, minimal_decision.provider, minimal_decision.model_configuration
-            )
-            self._apply_selected_model(
-                getattr(minimal_ask, "ask_agent", None), minimal_decision.selected_model, minimal_decision.provider, minimal_decision.model_configuration
-            )
-            state["latest_routing_decision"] = minimal_decision.concise()
-            self._append_session_message(
-                session_id, role="user", content=text, turn_id=turn_id
-            )
-            question = text
-            try:
-                resp = self._chat_service.ask(
-                    question, k=getattr(self._chat_service, "_k", 6)
-                )
-            except Exception as exc:
-                self._append_session_message(
-                    session_id,
-                    role="system",
-                    content=f"Turn failed: {exc}",
-                    turn_id=turn_id,
-                    metadata={"state": "failed", "error_type": type(exc).__name__},
-                )
-                raise
-            answer = getattr(resp, "answer", resp)
-            if not isinstance(answer, str):
-                answer = str(answer or "").strip()
-            result = (answer or "").strip() or "(No response from agent)"
-            state.setdefault("history", []).append((text, result))
-            self._append_session_message(
-                session_id, role="assistant", content=result, turn_id=turn_id
-            )
-            return result
-        finally:
-            self._active.discard(session_id)
+        result = await asyncio.to_thread(self.process_turn, session_id, text)
+        if result.error and not result.answer:
+            return f"(Gateway error: {result.error})"
+        return result.answer or "(No response from agent)"
 
     def dispatch_command(
         self,
@@ -5136,6 +5078,9 @@ class AgentChatGateway:
                 "approval_request_ids": list(task.approval_request_ids),
                 "aggregate_progress": task.aggregate_progress,
                 "child_task_ids": list(task.child_task_ids),
+                "workflow_mode": task.mode_workflow.get("mode", ""),
+                "workflow_phase": task.mode_workflow.get("phase", ""),
+                "workflow_reason": task.mode_workflow.get("mode_reason", ""),
             }
         )
         return payload
@@ -5921,15 +5866,32 @@ class AgentChatGateway:
                     "is_resumable": False,
                 },
             )
+        parts = text.lstrip().split(maxsplit=1)
+        explicit_plan = bool(parts and (parts[0].lower() == "/plan"
+                              or (parts[0].lower() == "/mode" and len(parts) > 1
+                                  and parts[1].strip().lower() == "plan")))
+        if explicit_plan:
+            session = self._session(session_id)
+            command = self.dispatch_command(text, session_id=session_id,
+                frontend=str(session.get("frontend") or "api"),
+                frontend_data={"protocol_read_only": bool(options.get("protocol_read_only")),
+                               "authenticated_user_id": options.get("authenticated_user_id")})
+            if command is not None:
+                return self._mode_turn_result(command)
         if not text.lstrip().startswith("/"):
             plan_task = self.mode_workflow.active(session_id)
-            debug_task = self.mode_workflow.active(session_id, mode="debug")
-            if plan_task or debug_task:
-                session = self._session(session_id)
+            session = self._session(session_id)
+            if plan_task or session.get("execution_mode") == "plan":
                 local = session.get("frontend") in {"cli", "tui"}
                 actor = str(options.get("authenticated_user_id") or (getpass.getuser() if local else ""))
-                rendered = self.mode_workflow.receive(session_id, text, task=plan_task or debug_task,
-                    read_only=bool(options.get("protocol_read_only")), actor_id=actor)
+                rendered = self.mode_workflow.receive(session_id, text, task=plan_task,
+                    read_only=bool(options.get("protocol_read_only")), actor_id=actor,
+                    question_limit=options.get("planning_question_limit"))
+                if (options.get("wait_for_mode_response") and rendered.status == "success"
+                        and rendered.data.get("inbox_id") and rendered.data.get("task_id")):
+                    rendered = self.mode_workflow.wait_for_response(
+                        rendered.data["task_id"], rendered.data["inbox_id"],
+                    )
                 turn_id = str(options.get("turn_id") or f"turn_{uuid.uuid4().hex[:20]}")
                 self._append_session_message(session_id, role="user", content=text, turn_id=turn_id)
                 self._append_session_message(session_id, role="assistant", content=rendered.message, turn_id=turn_id)
@@ -6472,21 +6434,6 @@ class AgentChatGateway:
                     {"decision": entry_decision.to_dict(), "turn_id": turn_id},
                 )
                 state["active_route"] = entry_decision.route
-                if entry_decision.coding_workflow:
-                    workflow = entry_decision.coding_workflow
-                    rendered = self.mode_workflow.start(
-                        session_id, entry_decision.resolved_request or text,
-                        mode="plan" if workflow == "plan" else "debug",
-                        repair=workflow == "debug_repair",
-                        read_only=bool(options.get("protocol_read_only")),
-                        execution_policy=entry_decision.execution_policy.model_dump(mode="json"),
-                        reviewer_id=route_context.authenticated_user_id,
-                    )
-                    return self._finalize_turn_result(
-                        result=self._mode_turn_result(rendered), session_id=session_id,
-                        conversation_id=conversation_id, turn_id=turn_id, text=text,
-                        state=state, memory_warning=memory_warning,
-                    )
                 if entry_decision.memory_task_id:
                     offered_task_ids = {
                         str(item.get("task_id") or "").strip()
@@ -6518,7 +6465,7 @@ class AgentChatGateway:
                                 },
                             )
                 if entry_decision.route == "command":
-                    if entry_decision.command_name in {"approve", "accept", "act", "reject", "revise", "inbox"}:
+                    if is_explicit_plan_control(entry_decision.command_name, entry_decision.command_arguments):
                         return self._finalize_turn_result(
                             result=ChatTurnResult(answer="Use an explicit command or the inbox to respond to a plan.",
                                                   mode="plan-control-required"),
@@ -6780,9 +6727,10 @@ class AgentChatGateway:
                 )
                 route_tools = self._entry_route_registry.get(entry_decision.route).tools
                 model_lane = options.pop("lane_id", None)
-                lane_id = select_lane(
-                    entry_route=entry_decision.route,
-                    model_lane=model_lane,
+                # The workflow parent coordinates read, write and verification children.
+                # It must not hold a repository write lock while a child needs that lock.
+                lane_id = LaneId.RESEARCH if entry_decision.route == "coding" else select_lane(
+                    entry_route=entry_decision.route, model_lane=model_lane,
                 )
                 execution_decision = self.routing_authority.route(
                     RoutingRequest(
@@ -6894,9 +6842,8 @@ class AgentChatGateway:
                             },
                         )
                         raise _RoutePreflightComplete(result)
-                    lane_id = self._lane_coordinator.select_lane(
-                        entry_route=entry_decision.route,
-                        model_lane=model_lane,
+                    lane_id = LaneId.RESEARCH if entry_decision.route == "coding" else self._lane_coordinator.select_lane(
+                        entry_route=entry_decision.route, model_lane=model_lane,
                     )
                     target_files = [
                         str(item) for item in options.pop("target_files", [])
@@ -6916,15 +6863,7 @@ class AgentChatGateway:
                         )
                     )
                     route_capabilities = {
-                        "coding": (
-                            "repository_read",
-                            "repository_write",
-                            "shell_read",
-                            "shell_write",
-                            "git_read",
-                            "test_execution",
-                            *(("web_search", "browser") if getattr(self.settings, "mana_coding_research_enabled", False) else ()),
-                        ),
+                        "coding": (),
                         "shell": (
                             "shell_read",
                             "shell_write",
@@ -7546,6 +7485,7 @@ class AgentChatGateway:
                             state["feature_integration_checkpoint"] = dict(
                                 checkpoint.resume_payload
                             )
+                            options["_validated_legacy_core_checkpoint"] = checkpoint.checkpoint_id
                         options["_resume_checkpoint_context"] = redact_secrets(
                             {
                                 "task_id": resume_decision.task_id,
@@ -7883,7 +7823,10 @@ class AgentChatGateway:
                         else:
                             result.payload.setdefault("goal_satisfied", True)
 
-                        if result.payload.get("pending_operation"):
+                        if result.payload.get("repository_workflow"):
+                            # ModeWorkflow already projected the supervised result or wait.
+                            pass
+                        elif result.payload.get("pending_operation"):
                             result.payload["goal_satisfied"] = False
                             result.payload["pending_required_work"] = True
                         elif result.mode == "remote-awaiting-permission":
@@ -9080,6 +9023,7 @@ class AgentChatGateway:
                 session_id=context.session_id,
                 conversation_id=context.conversation_id,
                 turn_id=f"{context.turn_id}:{item.local_id}",
+                user_message_id=context.user_message_id,
                 previous_route="",
                 conversation_summary="",
                 artifact_evidence=child_envelope.artifact_metadata,
@@ -9347,7 +9291,7 @@ class AgentChatGateway:
             "canvas": "tool",
         }.get(decision.route, "main")
         route_tools = registration.tools
-        lane_id = select_lane(entry_route=decision.route)
+        lane_id = LaneId.RESEARCH if decision.route == "coding" else select_lane(entry_route=decision.route)
         execution_decision = self.routing_authority.route(
             RoutingRequest(
                 role=execution_role,
@@ -9389,17 +9333,9 @@ class AgentChatGateway:
         self._apply_selected_model(
             getattr(ask_service, "ask_agent", None), execution_decision.selected_model, execution_decision.provider, execution_decision.model_configuration
         )
-        lane_id = self._lane_coordinator.select_lane(entry_route=decision.route)
+        lane_id = LaneId.RESEARCH if decision.route == "coding" else self._lane_coordinator.select_lane(entry_route=decision.route)
         capabilities = {
-            "coding": (
-                "repository_read",
-                "repository_write",
-                "shell_read",
-                "shell_write",
-                "git_read",
-                "test_execution",
-                *(("web_search", "browser") if getattr(self.settings, "mana_coding_research_enabled", False) else ()),
-            ),
+            "coding": (),
             "shell": (
                 "shell_read",
                 "shell_write",
@@ -9504,6 +9440,11 @@ class AgentChatGateway:
                     "availability": availability.to_dict(),
                 },
             )
+        elif decision.route == "command" and is_explicit_plan_control(decision.command_name, decision.command_arguments):
+            result = ChatTurnResult(
+                answer="Use an explicit command or the inbox to manage a plan.",
+                error="plan_control_required", mode="plan-control-required",
+            )
         elif decision.route == "command":
             import shlex
 
@@ -9513,7 +9454,7 @@ class AgentChatGateway:
                     shlex.quote(value) for value in decision.command_arguments
                 )
             command_result = self.dispatch_command(
-                command, session_id=context.session_id
+                command, session_id=context.session_id, frontend=str(state.get("frontend") or "api")
             )
             result = ChatTurnResult(
                 answer=command_result.message
@@ -9563,7 +9504,9 @@ class AgentChatGateway:
                 raise
         approval_ids = self._approval_request_ids(result.payload)
         awaiting = result.mode in {"remote-awaiting-permission"} or bool(approval_ids)
-        if awaiting:
+        if result.payload.get("repository_workflow"):
+            status = str(result.payload["status"])
+        elif awaiting:
             self._synchronize_lane_usage(reservation.execution.task_id)
             status = "awaiting_approval"
             job_id = str(result.payload.get("job_id") or "")
@@ -10271,6 +10214,62 @@ class AgentChatGateway:
             finally:
                 kwargs["state"].pop("_batch_coding_runtime", None)
 
+    def _execute_coding_workflow(
+        self, decision: EntryRoutingDecision, context: EntryRouteContext, ask_service: Any,
+        options: dict[str, Any], task_id: str, policy: TaskExecutionPolicy,
+    ) -> ChatTurnResult:
+        workflow = validate_coding_workflow(
+            decision.route, decision.coding_workflow, decision.source_message_ids, context,
+        )
+        if workflow is None or not task_id:
+            raise EntryRoutingError("A coding workflow requires a supervised task")
+        if decision.related_task_id and decision.related_task_id not in context.task_execution_policies:
+            raise EntryRoutingError("The coding workflow selected an unoffered task")
+        if tuple(decision.required_sources) != ("repository",):
+            raise EntryRoutingError("A coding workflow requires the repository route source")
+        write = workflow.requested_effect == "write"
+        if write and bool(options.get("protocol_read_only")):
+            return ChatTurnResult(
+                answer="This protocol session is read-only.", error="protocol_read_only_denied",
+                mode="route-policy-denied", payload={"route": "coding", "status": "blocked"},
+            )
+        if write and self._coding_agent is None:
+            return ChatTurnResult(
+                answer="A configured CodingAgent is required for repository changes.",
+                error="route_unavailable", mode="route-coding-unavailable", payload={"route": "coding"},
+            )
+        task = self._lane_coordinator.taskboard.get_task(task_id)
+        if task.session_id != context.session_id:
+            raise PermissionError("The coding workflow belongs to another session")
+        if context.repository_root and Path(context.repository_root).resolve() != self.root.resolve():
+            raise PermissionError("The coding workflow belongs to another checkout")
+
+        if self._lane_coordinator.inspect_task(task_id).owning_lane == LaneId.CODING:
+            message = "Reconcile the legacy coding attempt before starting a staged workflow."
+            self._lane_coordinator.mark_blocked(task_id, reason=message)
+            return ChatTurnResult(
+                answer=message, error="legacy_coding_reconciliation_required", mode="repository-workflow",
+                payload={"status": "blocked", "goal_satisfied": False, "repository_workflow": True},
+            )
+        existing = task.mode_workflow
+        if existing and existing.get("repair") and not write:
+            raise PermissionError("This request cannot resume repository writes")
+        rendered = self.mode_workflow.start(
+            context.session_id, workflow.objective, task_id=task_id, mode=workflow.mode,
+            repair=write, read_only=bool(options.get("protocol_read_only")),
+            workflow=workflow, source_message_ids=decision.source_message_ids,
+            related_task_id=decision.related_task_id,
+            runtime_capability_change=decision.runtime_capability_change,
+            execution_policy=policy.model_dump(mode="json"),
+            reviewer_id=context.authenticated_user_id,
+            model=str(options.get("_selected_model") or ""), provider=str(options.get("_selected_provider") or ""),
+            llm=agent_decision_llm(ask_service),
+        )
+        result = self._mode_turn_result(rendered)
+        result.decision = decision
+        result.payload.update(repository_workflow=True, route="coding", entry_route="coding")
+        return result
+
     def _execute_entry_route_bound(
         self,
         *,
@@ -10290,6 +10289,22 @@ class AgentChatGateway:
             return ChatTurnResult(answer=decision.clarification_question, mode="route-clarification",
                                   payload={"status": "waiting", "goal_satisfied": False, "entry_route": "conversation"})
         policy = TaskExecutionPolicy.model_validate(options.get("execution_policy") or decision.execution_policy.model_dump(mode="json"))
+        legacy_core = False
+        if decision.route == "coding" and options.get("_validated_legacy_core_checkpoint"):
+            workflow = validate_coding_workflow(decision.route, decision.coding_workflow, decision.source_message_ids, context)
+            checkpoint = state.get("feature_integration_checkpoint") or {}
+            execution = self._lane_coordinator.inspect_task(lane_task_id)
+            legacy_core = bool(
+                workflow and workflow.requested_effect == "write" and not workflow.clarification
+                and execution.checkpoint_id == options["_validated_legacy_core_checkpoint"]
+                and checkpoint.get("gateway_task_id") == lane_task_id
+                and checkpoint.get("boundary") == "after_core_implementation"
+                and checkpoint.get("runtime_capability_change")
+                and isinstance(checkpoint.get("core_result"), dict)
+                and checkpoint["core_result"].get("status") in {"completed", "success"}
+            )
+        if decision.route == "coding" and not legacy_core:
+            return self._execute_coding_workflow(decision, context, ask_service, options, lane_task_id, policy)
         text = options.get("_canonical_execution_text") or decision.resolved_request or text
         execution_text = text
         pending_steering_items = [
@@ -11138,7 +11153,7 @@ class AgentChatGateway:
                 ),
                 reasoning_summary=decision.reason,
                 verifier_passed=True,
-                runtime_capability_change=decision.runtime_capability_change,
+                runtime_capability_change=decision.runtime_capability_change or legacy_core,
             ),
             "repository": AgentDecision(
                 intent="repo_search",
@@ -11236,7 +11251,7 @@ class AgentChatGateway:
                 event_sink=sink,
                 callbacks=options.get("callbacks"),
                 agent_decision=mapped,
-                coding_workspace_preparer=None if (options.get("_batch_workspace_path") or options.get("_coding_research_workspace")) else self._prepare_coding_workspace,
+                coding_workspace_preparer=None if (legacy_core or options.get("_batch_workspace_path") or options.get("_coding_research_workspace")) else self._prepare_coding_workspace,
                 gateway_task_id=lane_task_id,
                 feature_integration_checkpoint=_save_feature_integration_checkpoint,
                 feature_integration_authority_provider=(

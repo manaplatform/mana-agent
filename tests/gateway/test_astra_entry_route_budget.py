@@ -70,6 +70,13 @@ class _MockAstraRoutingModel:
                 "artifact_family": "",
                 "automation_operation": "",
                 "runtime_capability_change": False,
+            "source_message_ids": ["user_request"] if self.route == "coding" else [],
+            "coding_workflow": {
+                "mode": "auto", "requested_effect": "write", "objective": "Implement the requested change",
+                "reason": "The user requested a feature", "investigation_scope": "Affected entry points",
+                "expected_result": "The feature is implemented", "risk_and_uncertainty": "Check callers",
+                "verification_requirements": ["Run the focused check"], "clarification": "",
+            } if self.route == "coding" else None,
             })
         )
 
@@ -252,6 +259,7 @@ def test_entry_router_executes_with_astra_model() -> None:
         session_id="session_1",
         conversation_id="session_1",
         turn_id="turn_1",
+        user_message_id="user_request",
         envelope=envelope,
     )
 

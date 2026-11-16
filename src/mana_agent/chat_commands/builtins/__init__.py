@@ -471,7 +471,14 @@ def _plan_command(context: CommandContext, args: list[str]) -> CommandResult:
     if not request:
         context.gateway.set_session_execution_mode(context.session_id, "plan")
         return CommandResult(status="input_required", message="What would you like to plan?")
-    return workflow.start(context.session_id, request)
+    options = context.frontend_data
+    if not (options.get("protocol_read_only") or options.get("authenticated_user_id")):
+        return workflow.start(context.session_id, request)
+    return workflow.start(
+        context.session_id, request,
+        read_only=bool(options.get("protocol_read_only")),
+        reviewer_id=str(options.get("authenticated_user_id") or ""),
+    )
 
 
 def _execution_mode_command(context: CommandContext, args: list[str]) -> CommandResult:

@@ -314,6 +314,18 @@ class CodexCodingAgentShim:
     def generate(self, request: str, **kwargs: Any) -> dict[str, Any]:
         mode = str(kwargs.get("execution_mode") or kwargs.get("auto_chat_mode") or "").strip().lower()
         requires_write = mode not in {"plan", "plan_only", "read_only"}
+        proposal_root = None
+        if kwargs.get("coding_mode_proposal") and kwargs.get("coding_mode_root"):
+            selected = Path(kwargs["coding_mode_root"]).resolve()
+            if selected != self.repo_root.resolve():
+                manager = WorkspaceManager(self.repo_root, repository_id=kwargs.get("coding_mode_repository_id"))
+                bound = manager.get_for_task(str(kwargs.get("coding_mode_workspace_task_id") or ""))
+                if (Path(bound.worktree_path).resolve() != selected
+                        or Path(bound.source_repo_root).resolve() != self.repo_root.resolve()
+                        or bound.session_id != self.session_id):
+                    raise PermissionError("The patch proposal is outside the assigned worktree")
+                validate_prepared_repository(selected, selected)
+                proposal_root = selected
         return self._execute_turn(
             request,
             requires_repository_write=requires_write,
@@ -324,6 +336,7 @@ class CodexCodingAgentShim:
             dispatch_source=kwargs.get("dispatch_source") or "generate",
             coding_continuation_id=kwargs.get("coding_continuation_id", ""),
             mode_proposal=tuple(kwargs.get("coding_mode_files") or ()) if kwargs.get("coding_mode_proposal") else (),
+            **({"proposal_root": proposal_root} if proposal_root is not None else {}),
         )
 
     def generate_dir_mode(self, request: str, **kwargs: Any) -> dict[str, Any]:
@@ -411,6 +424,7 @@ class CodexCodingAgentShim:
         _mutation_recovery: bool = False,
         coding_continuation_id: str = "",
         mode_proposal: tuple[str, ...] = (),
+        proposal_root: Path | None = None,
     ) -> dict[str, Any]:
         """Run a coding turn with bounded mutation recovery (explicit attempt loop).
 
@@ -542,6 +556,7 @@ class CodexCodingAgentShim:
                     is_recovery=is_recovery,
                     coding_continuation_id=coding_continuation_id,
                     **({"mode_proposal": mode_proposal} if mode_proposal else {}),
+                    **({"proposal_root": proposal_root} if proposal_root is not None else {}),
                 )
                 last_payload = payload
                 combined_warnings.extend(str(w) for w in (payload.get("warnings") or []) if str(w).strip())
@@ -642,6 +657,7 @@ class CodexCodingAgentShim:
         is_recovery: bool = False,
         coding_continuation_id: str = "",
         mode_proposal: tuple[str, ...] = (),
+        proposal_root: Path | None = None,
     ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
         # connector must not manufacture a second task identity after routing:
@@ -827,8 +843,8 @@ class CodexCodingAgentShim:
         else:
             workspace = WorkspaceContext(
                 repository_path=self.repo_root,
-                worktree_path=self.repo_root,
-                working_directory=self.working_directory,
+                worktree_path=proposal_root or self.repo_root,
+                working_directory=proposal_root or self.working_directory,
                 sandbox="readOnly",
                 approval_policy=self.codex_settings.approval_policy,
             )
@@ -957,7 +973,7 @@ class CodexCodingAgentShim:
             requires_repository_write=requires_repository_write,
         )
         if mode_proposal:
-            payload["output"] = result.summary
+            payload["output"] = result.patch_proposal
             return payload
         selected_flow_id = str(result.thread_id or flow_id or task_id).strip()
         payload["flow_id"] = selected_flow_id

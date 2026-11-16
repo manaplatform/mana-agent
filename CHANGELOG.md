@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Coding workflows: the gateway selects AUTO or DEBUG through a validated model decision. TaskBoard persists the scope and internal plan, and the supervisor fences coding, integration, verification, and recovery. PLAN remains explicit and binds approval to one reviewed revision. See [workflow regression notes](docs/regressions/debug-plan-execution-contract.md#automatic-coding-workflows).
+- User verification: `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/gateway/test_debug_plan_mode_contract.py tests/gateway/test_chat_gateway.py tests/gateway/test_codex_session_lifecycle.py tests/test_chat_planning_mode.py` and `node --test tests/dashboard/live_chat_reducer.test.mjs`.
 - Plan and Debug can inspect up to four independent repository targets per model decision, validate discovery arguments before dispatch, and pass observations to the model without execution receipts. See [investigation latency](docs/regressions/debug-plan-execution-contract.md#investigation-latency).
 - User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py tests/llm/test_providers.py -k 'investigation_batch or mode_decision_wire_schema'`.
 - Mode workflow retry & block synchronization: ensure tasks in `LaneTaskState.RUNNING`, `VERIFYING`, `QUEUED`, or `WAITING` are transitioned via `self.lane.mark_blocked` before the taskboard transitions to `Phase.BLOCKED`, preventing race conditions where rapid retries see an active lane state. Additionally, `retry()` validates that blocked tasks have their lane projection synchronized to `BLOCKED` before requesting a lane retry.

@@ -36,9 +36,6 @@ from mana_agent.multi_agent.runtime.agent_session import route_for_turn
 from mana_agent.multi_agent.runtime.auto_chat import (
     AutoChatMode,
     AutoChatSessionState,
-    classify_auto_chat_intent,
-    load_auto_chat_state,
-    resolve_auto_followup,
     save_auto_chat_state,
 )
 # Compatibility import for legacy embedders; this handler is never dispatched.
@@ -802,18 +799,7 @@ def process_chat_turn(
             except Exception:
                 pass
 
-    # Auto-chat follow-up resolution
-    auto_chat_state = session_state.get("auto_chat_state")
-    if not isinstance(auto_chat_state, AutoChatSessionState):
-        try:
-            auto_chat_state = load_auto_chat_state(root)
-        except BatchPending:
-            raise
-        except Exception:
-            auto_chat_state = AutoChatSessionState()
-        session_state["auto_chat_state"] = auto_chat_state
-
-    question = resolve_auto_followup(original_question, auto_chat_state)
+    question = original_question
     is_synthetic_selection = question.startswith('User selected ') or question.startswith('User provided free-text response ')
     model_question = question if (execution_context_included or is_synthetic_selection) else _conversation_prompt(session_state, question)
     active_flow_id = session_state.get("active_flow_id")
@@ -900,10 +886,7 @@ def process_chat_turn(
         active_flow_id = None
         session_state["active_flow_id"] = None
 
-    auto_chat_mode = auto_chat_mode_from_agent_decision(
-        agent_decision,
-        classify_auto_chat_intent(question),
-    )
+    auto_chat_mode = auto_chat_mode_from_agent_decision(agent_decision, AutoChatMode.ANSWER_ONLY)
 
     # External research tools selected by model
     selected = list(agent_decision.selected_tools or [])

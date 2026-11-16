@@ -754,6 +754,13 @@ def test_submit_steering_during_routing_queues_and_injects() -> None:
         "confidence": 0.95,
         "required_sources": ["repository"],
         "runtime_capability_change": False,
+        "source_message_ids": ["user_request"],
+        "coding_workflow": {
+            "mode": "auto", "requested_effect": "write", "objective": "Implement the requested change",
+            "reason": "The user requested a feature", "investigation_scope": "Affected entry points",
+            "expected_result": "The feature is implemented", "risk_and_uncertainty": "Check callers",
+            "verification_requirements": ["Run the focused check"], "clarification": "",
+        },
         "reason": "Followed user live steering guidance",
     }))
     router = EntryRouter(llm=mock_llm, registry=reg)
@@ -761,6 +768,7 @@ def test_submit_steering_during_routing_queues_and_injects() -> None:
         session_id="sess_steer",
         conversation_id="conv_steer",
         turn_id="turn_steer",
+        user_message_id="user_request",
         live_steering_guidance="Focus on backend auth only",
     )
     decision = router.route(user_prompt="Build authentication", context=ctx)

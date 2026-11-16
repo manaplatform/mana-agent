@@ -118,6 +118,14 @@ Use the execution supervisor's task ID, attempt ID, checkpoint, versioned contex
 
 ## IV. Coding engines and repository edits
 
+The gateway requires a validated AUTO or DEBUG decision for an ordinary
+repository coding turn. AUTO records its internal plan on TaskBoard before
+mutation. DEBUG starts from reported evidence and requires a causal finding
+before repair. Only explicit PLAN commands and their documented aliases enter
+the approval workflow. The Autonomous Execution Controller advances the
+workflow. Repository changes and completion still require the existing action,
+lease, scope, and verification checks. See [coding workflows](docs/plan-and-act-modes.md).
+
 ### Rule 31 — Preserve two selectable coding engines
 Support the established `external` and `internal` coding backends. External means OpenAI Codex through the app-server protocol; internal means Mana-Agent native coding orchestration with its registered tools and supported programmatic calling. Use the configured, validated selection rather than silently swapping engines.
 

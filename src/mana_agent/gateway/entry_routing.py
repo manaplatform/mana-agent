@@ -165,6 +165,13 @@ class EntryRoutingDecision:
     public_summary: str = ""
     context_request: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if isinstance(self.coding_workflow, dict):
+            object.__setattr__(self, "coding_workflow", CodingWorkflowDecision.model_validate(self.coding_workflow))
+        elif isinstance(self.coding_workflow, str):
+            # Legacy durable entries have no structured coding authority.
+            object.__setattr__(self, "coding_workflow", None)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             **asdict(self),
@@ -990,6 +997,10 @@ class EntryRouter:
                     repair_messages,
                 )
                 decision_payload = _coerce_routing_output(response)
+                if ("coding workflow" in str(validation_error)
+                        and repair_payload["previous_invalid_decision"].get("route") == "coding"
+                        and decision_payload.get("route") != "coding"):
+                    raise EntryRoutingError("The coding workflow correction did not return a coding decision")
                 decision = self._validate(decision_payload, context=context)
             record_current(
                 "model.decision",
@@ -1155,6 +1166,8 @@ class EntryRouter:
                     "Model decision failed: entry_route. No response was generated. "
                     "Reason: command route selected an unknown command."
                 )
+            if is_explicit_plan_control(command_name, raw_command_arguments):
+                raise EntryRoutingError("PLAN controls require an explicit command from the user")
         remote_request = payload.get("remote_request") or {}
         server_request = payload.get("server_request")
         mcp_request = payload.get("mcp_request")
@@ -1454,6 +1467,12 @@ def validate_coding_workflow(
     if not set(source_message_ids).issubset(user_ids):
         raise EntryRoutingError("A coding workflow may only cite observed user messages for authorization")
     return decision
+
+
+def is_explicit_plan_control(command: str, arguments: Sequence[str]) -> bool:
+    return command in {"plan", "approve", "accept", "act", "reject", "revise", "inbox"} or (
+        command == "mode" and bool(arguments) and str(arguments[0]).strip().lower() == "plan"
+    )
 
 
 def _extract_json(text: str) -> dict[str, Any]:

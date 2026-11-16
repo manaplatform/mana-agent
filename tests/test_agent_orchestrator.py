@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+
+import pytest
 from pathlib import Path
 
 from mana_agent.agent.orchestrator import AgentOrchestrator
@@ -18,9 +20,12 @@ from mana_agent.multi_agent.runtime.tools_executor import (
 def test_readme_project_layout_task_classifies_as_single_file_section(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# Demo\n\n## Project Layout\n\nOld\n", encoding="utf-8")
 
+    with pytest.raises(ValueError, match="explicit repository effect"):
+        classify_task("fix README.md", repo_root=tmp_path)
     decision = classify_task(
         "task:update readme.md ## Project Layout",
         repo_root=tmp_path,
+        requires_edit=True,
     )
 
     assert decision.task_type == "mutation_required"

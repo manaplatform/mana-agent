@@ -48,7 +48,7 @@ def test_approval_aliases_require_and_forward_the_exact_reviewed_item():
 
 
 def test_model_failure_remains_visible_at_the_entry_point():
-    def start(*_args):
+    def start(*_args, **_kwargs):
         raise RuntimeError("Invalid or unavailable ModeDecision model decision")
 
     dispatch = dispatcher_for(SimpleNamespace(active=lambda _: None, start=start))

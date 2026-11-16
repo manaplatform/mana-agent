@@ -2201,21 +2201,6 @@ def chat(
                     if single_shot_noninteractive and cmd_result.status == "error":
                         single_shot_exit_code = 1
                     continue
-            active_mode_task = (
-                gateway.mode_workflow.active(chat_ui_state.session_id)
-                or gateway.mode_workflow.active(chat_ui_state.session_id, mode="debug")
-            )
-            if active_mode_task is not None:
-                mode_result = gateway.mode_workflow.receive(
-                    chat_ui_state.session_id, question,
-                    task=active_mode_task,
-                    question_limit=planning_question_limit if planning_mode else None,
-                )
-                console.print(Markdown(mode_result.message))
-                _finish_ui_turn(current_turn_id)
-                if single_shot_noninteractive and mode_result.status == "error":
-                    single_shot_exit_code = 1
-                continue
             chat_ui_state.begin_conversation_turn(question, current_turn_id)
 
             # -----------------------------
@@ -2403,219 +2388,6 @@ def chat(
                 )
                 continue
 
-            if planning_mode or planning_request is not None:
-                if planning_request is None:
-                    planning_request = question
-                    planning_answers, planning_questions = [], []
-                else:
-                    planning_answers.append(question)
-                if len(planning_answers) < planning_question_limit:
-                    try:
-                        if planning_question_llm_disabled:
-                            raise RuntimeError("Planning question model is unavailable; correct its configuration or credentials")
-                        next_question = _generate_planning_question_llm(
-                            ask_service=ask_service, planning_request=planning_request,
-                            prior_questions=planning_questions, prior_answers=planning_answers,
-                            asked_count=len(planning_answers), max_questions=planning_question_limit,
-                        )
-                    except Exception as exc:
-                        if _is_planning_question_auth_failure(exc):
-                            planning_question_llm_disabled = True
-                        from mana_agent.utils.redaction import redact_secrets
-                        answer = f"Planning question generation failed: {redact_secrets(str(exc))}"
-                        console.print(f"[red]{answer}[/red]")
-                        gateway._append_session_message(chat_ui_state.session_id, role="user", content=question, turn_id=current_turn_id)
-                        gateway._append_session_message(chat_ui_state.session_id, role="assistant", content=answer, turn_id=current_turn_id)
-                        planning_request = None
-                        planning_answers, planning_questions = [], []
-                        _finish_ui_turn(current_turn_id, message="Planning requires a valid model response.")
-                        continue
-                    planning_questions.append(next_question)
-                    planning_questions_asked_count = len(planning_answers)
-                    console.print(f"[cyan]Planning request:[/cyan] {planning_request}\n"
-                        f"[bold]Planning question {len(planning_answers) + 1}/{planning_question_limit}[/bold]\n{next_question}")
-                    gateway._append_session_message(chat_ui_state.session_id, role="user", content=question, turn_id=current_turn_id)
-                    gateway._append_session_message(chat_ui_state.session_id, role="assistant", content=next_question, turn_id=current_turn_id)
-                    _finish_ui_turn(current_turn_id, message="Waiting for planning input.")
-                    continue
-                question = _build_planning_instruction(planning_request, planning_answers,
-                    planning_question_limit, questions=planning_questions)
-                planning_questions_asked_count = len(planning_answers)
-                planning_request = None
-                planning_answers, planning_questions = [], []
-                if agent_tools and auto_execute_plan:
-                    auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
-                        question,
-                        auto_chat_mode=AutoChatMode.EDIT,
-                    )
-                    _emit_auto_execute_terminal(
-                        user_question=question,
-                        payload=auto_payload,
-                        debug_tail=auto_debug_tail,
-                        auto_chat_mode=AutoChatMode.EDIT,
-                    )
-                    continue
-                console.print("[cyan]Generating decision-complete plan...[/cyan]")
-
-            flow_routing_context = ""
-            if (
-                active_flow_id
-                and coding_agent_instance is not None
-                and hasattr(coding_agent_instance, "flow_summary")
-            ):
-                flow_summary = coding_agent_instance.flow_summary(active_flow_id)
-                if flow_summary:
-                    flow_routing_context = (
-                        "Active coding flow (decide flow_action explicitly):\n"
-                        + json.dumps(flow_summary, ensure_ascii=False, sort_keys=True, default=str)[:4000]
-                    )
-            agent_decision = _run_chat_event_step(
-                "Decision routing...",
-                lambda: _decide_chat_route(
-                    ask_service=ask_service,
-                    question=question,
-                    root=root,
-                    memory_context=flow_routing_context,
-                ),
-                event_type="RoutingStarted",
-            )
-            if not agent_decision.verifier_passed:
-                console.print(
-                    "[red]Model decision failed: routing verification.[/red] "
-                    "No route or tool action was executed. Reason: "
-                    + agent_decision.verifier_summary
-                )
-                _finish_ui_turn(current_turn_id)
-                if single_shot_noninteractive:
-                    single_shot_exit_code = 1
-                continue
-
-            if (
-                active_flow_id
-                and (agent_decision.intent == "edit" or agent_decision.code_editing_needed)
-                and agent_decision.flow_action == "none"
-            ):
-                console.print(
-                    "[red]Model decision failed: flow_action.[/red] "
-                    "No repository action was executed. The active coding flow requires "
-                    "a validated continue or new decision."
-                )
-                _finish_ui_turn(current_turn_id)
-                if single_shot_noninteractive:
-                    single_shot_exit_code = 1
-                continue
-            if active_flow_id and agent_decision.flow_action == "new":
-                prior_flow_id = active_flow_id
-                _start_new_topic()
-                logger.info(
-                    "Model started a new coding flow for a distinct request",
-                    extra={"prior_flow_id": prior_flow_id, "question": question},
-                )
-
-            from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent, is_plan_execution_request
-
-            if not planning_mode and (agent_decision.intent == "plan" or agent_decision.coding_workflow):
-                workflow = agent_decision.coding_workflow
-                mode_result = gateway.mode_workflow.start(
-                    chat_ui_state.session_id, question, mode="debug" if workflow else "plan",
-                    repair=workflow == "debug_repair",
-                )
-                console.print(Markdown(mode_result.message))
-                _finish_ui_turn(current_turn_id)
-                if single_shot_noninteractive and mode_result.status == "error":
-                    single_shot_exit_code = 1
-                continue
-
-            auto_chat_mode = _auto_chat_mode_from_agent_decision(
-                agent_decision, classify_auto_chat_intent(question)
-            )
-            plan_trigger_request = bool(auto_chat_mode == AutoChatMode.PLAN_ONLY or is_plan_execution_request(question))
-            edit_request = bool(auto_chat_mode == AutoChatMode.EDIT)
-            if (
-                coding_agent_instance is None
-                and agent_tools
-                and auto_execute_plan
-                and (
-                    edit_request
-                    or is_plan_execution_request(question)
-                    or execution_profile == "full-auto"
-                )
-                and plan_trigger_request
-            ):
-                auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
-                    question,
-                    render_progress=False,
-                    auto_chat_mode=auto_chat_mode,
-                )
-                _emit_auto_execute_terminal(
-                    user_question=question,
-                    payload=auto_payload,
-                    debug_tail=auto_debug_tail,
-                    auto_chat_mode=auto_chat_mode,
-                )
-                continue
-
-            if (
-                coding_agent_instance is not None
-                and auto_execute_plan
-                and hasattr(coding_agent_instance, "generate_auto_execute")
-                and (
-                    execution_profile == "full-auto"
-                    or (plan_trigger_request and auto_chat_mode != AutoChatMode.PLAN_ONLY)
-                )
-            ):
-                auto_payload, auto_debug_tail = _run_auto_execute_pipeline_with_resume(
-                    question,
-                    render_progress=True,
-                    auto_chat_mode=auto_chat_mode,
-                )
-                _emit_auto_execute_terminal(
-                    user_question=question,
-                    payload=auto_payload,
-                    debug_tail=auto_debug_tail,
-                    auto_chat_mode=auto_chat_mode,
-                )
-                continue
-
-            if (
-                edit_request
-                and coding_agent_instance is None
-            ):
-                console.print(
-                    "[yellow]This chat session is read-only for file edits.[/yellow] "
-                    "Re-run with [bold]--agent-tools --coding-agent[/bold] to allow create_file/write_file/apply_patch/delete_file."
-                )
-                continue
-
-            use_coding_agent_turn = _should_use_coding_agent_turn(
-                coding_agent_available=coding_agent_instance is not None,
-                agent_tools=bool(agent_tools),
-                edit_request=edit_request,
-                plan_trigger_request=plan_trigger_request,
-                force_plan_only_response=bool(auto_chat_mode == AutoChatMode.PLAN_ONLY),
-                has_pending_prechecklist=False,
-                coding_agent_is_custom=coding_agent_is_custom,
-                general_coding_agent_turns=bool(coding_agent or coding_agent_is_custom),
-            )
-            from mana_agent.gateway.entry_routing import EntryRoutingDecision
-            if use_coding_agent_turn:
-                routed_name = "coding"
-            elif agent_decision.intent == "repo_search" or agent_decision.repo_context_needed:
-                routed_name = "repository"
-            elif any(t.startswith("shell") or t == "run_command" for t in agent_decision.selected_tools):
-                routed_name = "shell"
-            elif any(t.startswith("browser_") for t in agent_decision.selected_tools):
-                routed_name = "browser"
-            else:
-                routed_name = "conversation"
-
-            entry_decision = EntryRoutingDecision(
-                route=routed_name,
-                confidence=agent_decision.confidence,
-                reason=agent_decision.reasoning_summary or "Route from model decision",
-                required_sources=("repository",) if routed_name in {"coding", "repository"} else (),
-            )
-
             # Every ordinary console turn uses the same durable gateway as
             # TUI, dashboard and protocol clients. Keep frontend rendering here.
             gateway_activity = LiveToolActivity(spinner_text="Working...", show_all_logs=_cli_verbose_enabled())
@@ -2635,7 +2407,8 @@ def chat(
                         chat_ui_state.session_id, question, event_sink=console_gateway_event,
                         callbacks=callbacks, turn_id=current_turn_id,
                         index_dir=resolved_index_dir, index_dirs=dir_mode_index_dirs or None,
-                        entry_decision=entry_decision, agent_decision=agent_decision,
+                        planning_question_limit=planning_question_limit if planning_mode else None,
+                        wait_for_mode_response=True,
                         flow_id=active_flow_id,
                     ))
             except Exception as exc:
@@ -2659,10 +2432,14 @@ def chat(
                 warnings.append("ui_blocks_render_fallback: failed to process ui_blocks payload")
 
             _render_answer_header(console)
-            rendered_dynamic = _render_dynamic_blocks(console, ui_blocks, diagram_render_images=diagram_render_images,
-                diagram_output_dir=resolved_diagram_output_dir, diagram_format=diagram_format,
-                diagram_open_artifact=diagram_open, diagram_timeout_seconds=diagram_timeout_seconds,
-                project_root=root)
+            if response.mode == "repository-workflow":
+                console.print(Markdown(answer_raw))
+                rendered_dynamic = set()
+            else:
+                rendered_dynamic = _render_dynamic_blocks(console, ui_blocks, diagram_render_images=diagram_render_images,
+                    diagram_output_dir=resolved_diagram_output_dir, diagram_format=diagram_format,
+                    diagram_open_artifact=diagram_open, diagram_timeout_seconds=diagram_timeout_seconds,
+                    project_root=root)
             if response.used_coding_agent and isinstance(response.payload, dict):
                 render_mode = str(response.payload.get("render_mode", "")).strip().lower()
                 fallback_reason = str(response.payload.get("fallback_reason", "")).strip().lower()

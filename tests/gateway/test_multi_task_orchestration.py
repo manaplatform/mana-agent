@@ -792,6 +792,65 @@ def _build_memory_gateway(
     return gateway, memory_service
 
 
+def test_compound_debug_child_uses_the_parent_user_message_and_workflow(tmp_path):
+    plan = MultiTaskPlan(
+        goal="Diagnose the handler and report it",
+        tasks=[
+            MultiTaskItem(local_id="diagnosis", title="Diagnose handler", request="Diagnose app.py",
+                          acceptance_criteria=["Cause explained"], reason="Repository diagnosis"),
+            MultiTaskItem(local_id="report", title="Report status", request="Report the diagnosis",
+                          depends_on=["diagnosis"], acceptance_criteria=["Report delivered"],
+                          reason="Report the result"),
+        ],
+        final_acceptance_criteria=["Both results delivered"], reason="Two distinct results",
+    )
+
+    class Model(_MultiTaskMemoryModel):
+        def generate_sync(self, messages, **kwargs):
+            if messages[0].content == MULTI_TASK_DECOMPOSITION_PROMPT:
+                return super().generate_sync(messages, **kwargs)
+            payload = json.loads(messages[-1].content)
+            if not payload["routing_constraints"]["atomic_child"]:
+                return {"route": "multi_task", "reason": "Two requested results",
+                        "confidence": 0.99, "required_sources": ["none"]}
+            if payload["user_prompt"] != "Diagnose app.py":
+                return {"route": "conversation", "reason": "Report the diagnosis",
+                        "confidence": 0.99, "required_sources": ["none"]}
+            assert payload["context"]["user_message_id"] == "user-1"
+            return {
+                "route": "coding", "reason": "Investigate the reported behavior",
+                "confidence": 0.99, "required_sources": ["repository"],
+                "source_message_ids": ["user-1"], "runtime_capability_change": False,
+                "coding_workflow": {"mode": "debug", "objective": "Diagnose app.py",
+                                    "reason": "Inspect the failure", "investigation_scope": "app.py",
+                                    "requested_effect": "read", "expected_result": "Explain the cause",
+                                    "risk_and_uncertainty": "Cause not yet confirmed",
+                                    "verification_requirements": ["Read the handler"], "clarification": ""},
+            }
+
+        def decide_sync(self, messages, schema, **kwargs):
+            if isinstance(schema, dict) and schema["title"] == "ModeDecision":
+                context = json.loads(messages[-1].content)
+                if not context["evidence"]:
+                    return {"decision": {"action": "inspect", "reason": "Read app.py", "evidence": {
+                        "tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Reported file",
+                    }}}
+                return {"decision": {"action": "diagnose", "reason": "Observed source",
+                                     "root_cause": "The handler returns the old value",
+                                     "cause_evidence": ["evidence-1"]}}
+            return super().decide_sync(messages, schema, **kwargs)
+
+    (tmp_path / "app.py").write_text("return 'old value'\n")
+    gateway, _ = _build_memory_gateway(tmp_path, Model(plan))
+    session_id = gateway.create_session(frontend="test")
+    result = gateway.process_turn(session_id, "Diagnose app.py and report the result", user_message_id="user-1")
+    assert result.payload["overall_status"] == "done", result.answer
+    children = gateway._lane_coordinator.taskboard.store.repository.list_tasks(session_id=session_id)
+    diagnosis = next(task for task in children if task.mode_workflow.get("mode") == "debug")
+    assert diagnosis.mode_workflow["source_message_ids"] == ["user-1"]
+    assert diagnosis.mode_workflow["phase"] == "completed"
+
+
 def test_multi_task_child_inherits_authorized_memory_routing_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

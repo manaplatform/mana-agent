@@ -232,9 +232,16 @@ class BlockDecision(_ModeAction):
     action: Literal["block"]
 
 
+class SwitchWorkflowDecision(_ModeAction):
+    action: Literal["switch_workflow"]
+    mode: Literal["auto", "debug"]
+    task_id: str = Field(pattern=r"\S")
+    evidence_ids: tuple[str, ...] = Field(min_length=1)
+
+
 ModeAction = (
     InspectDecision | InspectBatchDecision | ClarifyDecision | DraftDecision | DiagnoseDecision
-    | RepairDecision | ResearchDecision | BlockDecision
+    | RepairDecision | ResearchDecision | BlockDecision | SwitchWorkflowDecision
 )
 
 
@@ -335,6 +342,13 @@ class PlanService:
             "steps. A draft needs explicit step IDs with dependencies on earlier steps and a "
             "passing verification check (argv is an array of individual command arguments). Each step "
             "must have file operations or a verification command and clear acceptance criteria. "
+            "Auto mode may inspect, inspect_batch, clarify, draft or block. Investigate before drafting. "
+            "The draft is an execution plan, so list production entry point changes and relevant checks "
+            "as concrete steps. If the goal already holds, use a verification-only draft and cite observed evidence. "
+            "If recheck_required is present, rerun that exact check after the repair. Use fresh step IDs "
+            "only for new work and do not repeat completed steps. "
+            "Auto and Debug may use switch_workflow only when new evidence changes the needed workflow "
+            "within the same authorized scope. Include the current task_id and observed evidence_ids. "
             "Debug mode may inspect, inspect_batch, clarify, diagnose, repair, research or block. "
             "A diagnostics-only request must use diagnose and remain read-only. Repair requires an "
             "evidence-backed hypothesis, the smallest fix, and goal-specific verification. If possible "

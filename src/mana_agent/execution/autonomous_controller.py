@@ -19,7 +19,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 from pydantic import Field
 
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 
 logger = logging.getLogger(__name__)
+
+StageResult = TypeVar("StageResult")
 
 
 class ExecutionStrategy(str, Enum):
@@ -338,6 +340,21 @@ class AutonomousExecutionController:
             attempt_id=attempt_id,
             lease_token=lease_token,
         )
+
+    def drive_repository_workflow(
+        self,
+        *,
+        advance: Callable[[], StageResult | None],
+        decisions_used: Callable[[], int],
+        check_attempt: Callable[[], Any],
+    ) -> StageResult:
+        """Run typed repository decisions to a terminal result or durable wait."""
+        while decisions_used() < self.config.max_model_turns:
+            check_attempt()
+            result = advance()
+            if result is not None:
+                return result
+        raise RuntimeError("The configured model decision budget was exhausted.")
 
     def advance_batch_task(self, **kwargs: Any) -> dict[str, Any]:
         """Advance the shared durable Batch loop under this controller's authority."""

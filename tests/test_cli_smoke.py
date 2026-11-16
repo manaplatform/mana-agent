@@ -23,18 +23,13 @@ def _isolated_mana_home(tmp_path: Path, monkeypatch) -> None:
         "mana_agent.commands.chat_cli._start_background_index",
         lambda **kwargs: SimpleNamespace(is_alive=lambda: False, join=lambda *a, **k: None),
     )
+    from mana_agent.gateway.entry_routing import EntryRoutingDecision
+
     monkeypatch.setattr(
-        "mana_agent.commands.chat_cli._decide_chat_route",
-        lambda **_kwargs: AgentDecision(
-            intent="answer",
-            confidence=1.0,
-            selected_tools=[],
-            requested_effect="none",
-            target_surface="conversation",
-            required_subagents=[],
-            reasoning_summary="Test fixture supplied a validated conversational route.",
-            verifier_passed=True,
-            verifier_summary="selected tools are consistent with the routed intent",
+        "mana_agent.gateway.entry_routing.EntryRouter.route",
+        lambda _router, *, user_prompt, context: EntryRoutingDecision(
+            route="conversation", confidence=1.0, reason="Test conversation",
+            required_sources=("none",),
         ),
     )
 
@@ -419,73 +414,47 @@ def test_cli_commands(monkeypatch, tmp_path: Path) -> None:
         assert result_retired.exit_code != 0
 
 
-def test_chat_blocks_edit_requests_without_coding_agent(monkeypatch, tmp_path: Path) -> None:
-    class _NoCallAskService(FakeAskService):
-        def ask(self, index_dir: str, question: str, k: int) -> AskResponse:  # pragma: no cover - must not run
-            raise AssertionError("chat_service.ask should not be called for blocked edit requests")
+def _cli_coding_route(user_prompt, context):
+    from mana_agent.gateway.entry_routing import EntryRoutingDecision
 
-        def ask_with_tools(  # pragma: no cover - must not run
-            self,
-            index_dir: str,
-            question: str,
-            k: int,
-            max_steps: int = 6,
-            timeout_seconds: int = 30,
-        ) -> AskResponse:
-            raise AssertionError("ask_with_tools should not be called for blocked edit requests")
-
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None, **_kwargs: _NoCallAskService())
-    monkeypatch.setattr(
-        "mana_agent.commands.chat_cli._decide_chat_route",
-        lambda **_kwargs: AgentDecision(
-            intent="edit",
-            confidence=1.0,
-            selected_tools=["apply_patch"],
-            code_editing_needed=True,
-            requested_effect="write",
-            target_surface="repository",
-            verifier_passed=True,
-            verifier_summary="valid repository edit route",
-        ),
+    return EntryRoutingDecision(
+        route="coding", confidence=1.0, reason="Repository write selected",
+        required_sources=("repository",), source_message_ids=(context.user_message_id,),
+        coding_workflow={
+            "mode": "auto", "requested_effect": "write", "objective": user_prompt,
+            "reason": "Implement the requested update", "investigation_scope": "app.py",
+            "expected_result": "Updated app behavior", "risk_and_uncertainty": "Check the updated behavior",
+            "verification_requirements": ["Run the focused check"], "clarification": "",
+        },
     )
 
+
+def test_chat_blocks_edit_requests_without_coding_agent(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
+    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda *a, **k: FakeAskService())
+    monkeypatch.setattr("mana_agent.gateway.entry_routing.EntryRouter.route",
+                        lambda _router, **kwargs: _cli_coding_route(**kwargs))
     result = runner.invoke(
-        app,
-        ["chat", "--agent-tools", "--no-coding-agent"],
+        app, ["chat", "--agent-tools", "--no-coding-agent", "--root-dir", str(tmp_path)],
         input="/act\nplease patch this file\nquit\n",
     )
     assert result.exit_code == 0
-    assert "read-only for file edits" in result.stdout
-    assert "--agent-tools" in result.stdout
-    assert "--coding-agent" in result.stdout
+    assert "configured CodingAgent is required" in result.stdout
+    assert not (tmp_path / "app.py").exists()
 
 
 def test_single_shot_chat_exits_nonzero_for_invalid_route(monkeypatch, tmp_path: Path) -> None:
+    from mana_agent.gateway.entry_routing import EntryRoutingError
+
+    def rejected(*args, **kwargs):
+        raise EntryRoutingError("A coding workflow requires a complete AUTO or DEBUG decision")
+
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr(
-        "mana_agent.commands.cli.build_ask_service",
-        lambda _settings, model_override=None, **_kwargs: FakeAskService(),
-    )
-    monkeypatch.setattr(
-        "mana_agent.commands.chat_cli._decide_chat_route",
-        lambda **_kwargs: AgentDecision(
-            intent="edit",
-            confidence=0.9,
-            selected_tools=[],
-            code_editing_needed=True,
-            requested_effect="write",
-            target_surface="repository",
-            verifier_passed=False,
-            verifier_summary="code_editing_needed=true but no mutation tool was selected",
-        ),
-    )
-
+    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda *a, **k: FakeAskService())
+    monkeypatch.setattr("mana_agent.gateway.entry_routing.EntryRouter.route", rejected)
     result = runner.invoke(app, ["chat", "fix this", "--root-dir", str(tmp_path), "--no-tui"])
-
     assert result.exit_code != 0
-    assert "routing verification" in result.stdout
-    assert "No route or tool action was" in result.stdout
+    assert "requires a complete AUTO or DEBUG decision" in result.stdout
 
 
 def test_chat_zero_tool_response_renders_only_answer(monkeypatch, tmp_path: Path) -> None:
@@ -1160,78 +1129,16 @@ def test_chat_plan_trigger_preview_fallback_hides_warning_panel_in_quiet_mode(mo
     assert "deterministic fallback checklist" not in result.stdout.lower()
 
 
-def test_chat_plan_trigger_auto_execute_without_coding_agent_hides_progress(monkeypatch, tmp_path: Path) -> None:
-    class _FakeWorkerClient:
-        def __init__(self, **_kwargs: object) -> None:
-            return None
-
-        def start(self) -> None:
-            return None
-
-        def health(self) -> dict[str, str]:
-            return {"status": "ok"}
-
-        def stop(self) -> None:
-            return None
-
-    class _FakeAutoResult:
-        def model_dump(self) -> dict:
-            return {
-                "answer": "auto execution complete",
-                "sources": [],
-                "trace": [],
-                "warnings": [],
-                "changed_files": [],
-                "plan": {"objective": "Implement plan", "steps": [{"id": "s1", "title": "Inspect"}]},
-                "passes": 1,
-                "terminal_reason": "manager_stop",
-                "toolsmanager_requests_count": 1,
-                "pass_logs": [
-                    {
-                        "pass_index": 1,
-                        "requests_count": 1,
-                        "request_fingerprints": ["abc123"],
-                        "tool_steps": 0,
-                        "warnings_delta": 0,
-                        "expected_progress": "inspection complete",
-                    }
-                ],
-            }
-
-    class _FakeOrchestrator:
-        def __init__(self, **_kwargs: object) -> None:
-            return None
-
-        def preview_plan(self, **_kwargs: object) -> dict:
-            return {
-                "prechecklist": {
-                    "objective": "Implement plan",
-                    "source": "planner",
-                    "steps": [{"id": "s1", "status": "in_progress", "title": "Inspect files"}],
-                },
-                "prechecklist_source": "planner",
-                "prechecklist_warning": "",
-                "warnings": [],
-            }
-
-        def run(self, **_kwargs: object):
-            return _FakeAutoResult()
-
+def test_chat_prose_does_not_execute_plan_without_coding_agent(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None, **_kwargs: FakeAskService())
-    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.cli.QueueManager", _FakeOrchestrator)
-
+    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda *a, **k: FakeAskService())
     result = runner.invoke(
-        app,
-        ["chat", "--agent-tools", "--no-coding-agent"],
+        app, ["chat", "--agent-tools", "--no-coding-agent", "--root-dir", str(tmp_path)],
         input="implement plan.\nquit\n",
     )
     assert result.exit_code == 0
     assert "Executing active flow plan..." not in result.stdout
-    assert "Auto-executing plan" not in result.stdout
-    assert "Auto-Execute" not in result.stdout
-    assert "auto execution complete" in result.stdout
+    assert not (tmp_path / "README.md").exists()
 
 
 def test_chat_redis_backend_falls_back_to_local_executor_when_unavailable(monkeypatch, tmp_path: Path) -> None:
@@ -1316,201 +1223,51 @@ def test_chat_redis_backend_falls_back_to_local_executor_when_unavailable(monkey
     assert _FakeOrchestrator.init_kwargs.get("executor").__class__.__name__ == "LocalToolsExecutor"
 
 
-def test_chat_planning_mode_auto_executes_after_clarifications(monkeypatch, tmp_path: Path) -> None:
-    codex_calls: list[str] = []
+@pytest.mark.parametrize("auto_execute", ["--auto-execute-plan", "--no-auto-execute-plan"])
+def test_chat_planning_mode_requires_revision_approval_after_clarification(monkeypatch, tmp_path, auto_execute):
+    from mana_agent.agent.plan_service import ClarifyDecision, DraftDecision, PlanService
 
-    class _PlanningLlm:
-        def __init__(self) -> None:
-            self.calls = 0
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    original = repository / "app.py"
+    original.write_text("initial\n")
 
-        def generate_sync(self, _messages, **_native_options):
-            self.calls += 1
-            return type("_Msg", (), {"content": f"Clarification question {self.calls}?"})()
+    def decide(_service, mode, state, **kwargs):
+        assert mode == "plan"
+        if not state["constraints"]:
+            return ClarifyDecision.model_validate({
+                "action": "clarify", "reason": "The auth method affects the change",
+                "questions": [{"field_id": "method", "prompt": "Which auth method?",
+                               "reason": "The choice affects the interface"}],
+            })
+        assert state["constraints"] == {"method": "tokens"}
+        return DraftDecision.model_validate({
+            "action": "draft", "reason": "The auth method is now clear",
+            "draft": {"objectives": ["Add token authentication"], "findings": "The auth method is tokens",
+                      "scope": ["app.py"], "steps": [
+                          {"step_id": "auth", "instruction": "Add token support",
+                           "changes": {"app.py": ["update"]},
+                           "verification": [{"argv": ["python", "-m", "pytest"]}],
+                           "acceptance_criteria": ["Token authentication passes"]},
+                      ]},
+        })
 
-        def decide_sync(self, messages, schema, **kwargs):
-            import json
-            raw = self.generate_sync(messages)
-            if isinstance(schema, dict):
-                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
-                validate_arguments(value, schema)
-                return value
-            if isinstance(raw, schema):
-                return raw
-            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
-
-    class _AskService(FakeAskService):
-        def __init__(self) -> None:
-            self.ask_agent = SimpleNamespace()
-            self.qna_chain = type("_Qna", (), {"llm": _PlanningLlm()})()
-
-    class _FakeWorkerClient:
-        def __init__(self, **_kwargs: object) -> None:
-            return None
-
-        def start(self) -> None:
-            return None
-
-        def health(self) -> dict[str, str]:
-            return {"status": "ok"}
-
-        def stop(self) -> None:
-            return None
-
-    class _FakeAutoResult:
-        def model_dump(self) -> dict:
-            return {
-                "answer": "auto execution complete",
-                "sources": [],
-                "trace": [],
-                "warnings": [],
-                "changed_files": [],
-                "plan": {"objective": "Implement plan", "steps": [{"id": "s1", "title": "Inspect"}]},
-                "passes": 1,
-                "terminal_reason": "manager_stop",
-                "toolsmanager_requests_count": 1,
-                "pass_logs": [
-                    {
-                        "pass_index": 1,
-                        "requests_count": 1,
-                        "request_fingerprints": ["abc123"],
-                        "tool_steps": 0,
-                        "warnings_delta": 0,
-                        "expected_progress": "inspection complete",
-                    }
-                ],
-            }
-
-    class _FakeOrchestrator:
-        calls: list[str] = []
-
-        def __init__(self, **_kwargs: object) -> None:
-            _FakeOrchestrator.calls = []
-
-        def run(self, **kwargs: object):
-            _FakeOrchestrator.calls.append(str(kwargs.get("request", "")))
-            return _FakeAutoResult()
+    def unexpected_execution(*args, **kwargs):
+        pytest.fail("A CLI flag must not authorize the plan revision")
 
     monkeypatch.setattr("mana_agent.commands.chat_cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.chat_cli.build_ask_service", lambda _s, model_override=None, **_kwargs: _AskService())
-    monkeypatch.setattr("mana_agent.commands.chat_cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.chat_cli.QueueManager", _FakeOrchestrator)
-    monkeypatch.setattr(
-        "mana_agent.integrations.codex.coding_agent_shim.CodexCodingAgentShim.generate_auto_execute",
-        lambda _self, request, **_kwargs: (
-            codex_calls.append(str(request))
-            or {
-                "answer": "Codex execution complete",
-                "sources": [],
-                "trace": [],
-                "warnings": [],
-                "changed_files": [],
-                "passes": 1,
-                "pass_logs": [],
-                "auto_execute_terminal_reason": "completed",
-            }
-        ),
-    )
-    monkeypatch.setattr(
-        "mana_agent.commands.chat_cli._generate_planning_question_llm",
-        lambda **kwargs: f"Clarification question {int(kwargs['asked_count']) + 1}?",
-    )
-
+    monkeypatch.setattr("mana_agent.commands.chat_cli.build_ask_service", lambda *a, **k: FakeAskService())
+    monkeypatch.setattr(PlanService, "next_decision", decide)
+    monkeypatch.setattr("mana_agent.integrations.codex.coding_agent_shim.CodexCodingAgentShim.generate", unexpected_execution)
     result = runner.invoke(
-        app,
-        ["chat", "--planning-mode", "--auto-execute-plan"],
-        input="plan auth module\nanswer one\nanswer two\nanswer three\nquit\n",
+        app, ["chat", "--root-dir", str(repository), "--planning-mode", auto_execute],
+        input="plan auth module\ntokens\nquit\n",
     )
     assert result.exit_code == 0
-    assert "Codex execution complete" in result.stdout
-    assert "Generating decision-complete plan..." not in result.stdout
-    assert codex_calls
-    assert not _FakeOrchestrator.calls
-
-
-def test_chat_planning_mode_no_auto_execute_keeps_plan_only_behavior(monkeypatch, tmp_path: Path) -> None:
-    class _PlanningLlm:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def generate_sync(self, _messages, **_native_options):
-            self.calls += 1
-            return type("_Msg", (), {"content": f"Clarification question {self.calls}?"})()
-
-        def decide_sync(self, messages, schema, **kwargs):
-            import json
-            raw = self.generate_sync(messages)
-            if isinstance(schema, dict):
-                from mana_agent.multi_agent.tools.operation_policy import validate_arguments
-                value = raw if isinstance(raw, dict) else json.loads(getattr(raw, "content", raw))
-                validate_arguments(value, schema)
-                return value
-            if isinstance(raw, schema):
-                return raw
-            return schema.model_validate(raw, strict=True) if isinstance(raw, dict) else schema.model_validate_json(getattr(raw, "content", raw), strict=True)
-
-    class _AskService(FakeAskService):
-        def __init__(self) -> None:
-            self.ask_agent = SimpleNamespace()
-            self.qna_chain = type("_Qna", (), {"llm": _PlanningLlm()})()
-
-    class _FakeWorkerClient:
-        def __init__(self, **_kwargs: object) -> None:
-            return None
-
-        def start(self) -> None:
-            return None
-
-        def health(self) -> dict[str, str]:
-            return {"status": "ok"}
-
-        def stop(self) -> None:
-            return None
-
-    class _FakeCodingAgent:
-        generate_calls: list[str] = []
-
-        def __init__(self, **_kwargs: object) -> None:
-            self.active = "flow-plan-only"
-
-        def set_tools_manager_orchestrator(self, _orchestrator: object) -> None:
-            return None
-
-        def get_active_flow_id(self) -> str | None:
-            return self.active
-
-        def is_conflicting_request(self, request: str, flow_id: str | None = None) -> bool:
-            _ = (request, flow_id)
-            return False
-
-        def generate(self, request: str, **_kwargs: object) -> dict:
-            _FakeCodingAgent.generate_calls.append(request)
-            return {
-                "answer": "Plan:\\n1. inspect\\n2. edit\\n3. verify",
-                "changed_files": [],
-                "warnings": [],
-                "diff": "",
-                "flow_id": self.active,
-                "actions_taken": [],
-            }
-
-        def generate_auto_execute(self, *_args: object, **_kwargs: object) -> dict:  # pragma: no cover
-            raise AssertionError("default planning requests should not auto-execute")
-
-    monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None, **_kwargs: _AskService())
-    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.cli.CodingAgent", _FakeCodingAgent)
-
-    result = runner.invoke(
-        app,
-        ["chat", "--planning-mode", "--no-auto-execute-plan"],
-        input="plan auth module\nanswer one\nanswer two\nanswer three\nquit\n",
-    )
-    assert result.exit_code == 0
-    assert "Generating decision-complete plan..." in result.stdout
-    assert "Auto-executing plan" not in result.stdout
-    assert _FakeCodingAgent.generate_calls
+    assert "Which auth method?" in result.stdout
+    assert "Add token authentication" in result.stdout
+    assert "/approve" in result.stdout, result.stdout
+    assert original.read_text() == "initial\n"
 
 
 def test_flow_checklist_cli_view_renders_codex_sections(monkeypatch, tmp_path: Path) -> None:
@@ -3758,124 +3515,18 @@ def test_chat_balanced_mode_auto_continues_pass_cap_by_default(monkeypatch, tmp_
     assert "Full-auto Checkpoint" not in result.stdout
 
 
-def test_chat_full_auto_tools_manager_path_auto_resumes_docs_update_pass_cap(monkeypatch, tmp_path: Path) -> None:
-    class _FakeWorkerClient:
-        def __init__(self, **_kwargs: object) -> None:
-            return None
-
-        def start(self) -> None:
-            return None
-
-        def health(self) -> dict[str, str]:
-            return {"status": "ok"}
-
-        def stop(self) -> None:
-            return None
-
-    class _FakeAutoResult:
-        def __init__(self, payload: dict[str, object]) -> None:
-            self.payload = payload
-
-        def model_dump(self) -> dict[str, object]:
-            return dict(self.payload)
-
-    class _FakeOrchestrator:
-        run_calls = 0
-        run_ids: list[object] = []
-
-        def __init__(self, **_kwargs: object) -> None:
-            return None
-
-        def preview_plan(self, **_kwargs: object) -> dict:
-            return {
-                "prechecklist": {
-                    "objective": "Find all models and update docs/models.md",
-                    "source": "planner",
-                    "steps": [{"id": "s1", "status": "in_progress", "title": "Find all models"}],
-                },
-                "prechecklist_source": "planner",
-                "prechecklist_warning": "",
-                "warnings": [],
-            }
-
-        def run(self, **_kwargs: object):
-            _FakeOrchestrator.run_calls += 1
-            _FakeOrchestrator.run_ids.append(_kwargs.get("run_id"))
-            if _FakeOrchestrator.run_calls == 1:
-                return _FakeAutoResult(
-                    {
-                        "answer": (
-                            "Auto-execute ended without a direct answer from tool runs.\n"
-                            "terminal_reason=pass_cap_reached\n"
-                            "passes=2\n"
-                            "toolsmanager_requests=1"
-                        ),
-                        "sources": [],
-                        "trace": [],
-                        "warnings": [],
-                        "changed_files": [],
-                        "plan": {
-                            "objective": "Find all models and update docs/models.md",
-                            "steps": [{"id": "s1", "title": "Find all models"}],
-                        },
-                        "passes": 2,
-                        "terminal_reason": "pass_cap_reached",
-                        "toolsmanager_requests_count": 1,
-                        "pass_logs": [
-                            {"pass_index": 1, "planner_decision": "continue", "planner_decision_reason": "pass one"},
-                            {"pass_index": 2, "planner_decision": "continue", "planner_decision_reason": "pass two"},
-                        ],
-                        "planner_decisions": [
-                            {"pass_index": 1, "decision": "decide-one", "decision_reason": "pass one"},
-                            {"pass_index": 2, "decision": "decide-two", "decision_reason": "pass two"},
-                        ],
-                        "checklist": {"done": 1, "pending": 1, "blocked": 0, "total": 2},
-                        "run_id": "persisted-run-1",
-                    }
-                )
-            return _FakeAutoResult(
-                {
-                    "answer": "docs/models.md updated",
-                    "sources": [],
-                    "trace": [],
-                    "warnings": [],
-                    "changed_files": ["docs/models.md"],
-                    "plan": {
-                        "objective": "Find all models and update docs/models.md",
-                        "steps": [{"id": "s1", "title": "Update docs/models.md"}],
-                    },
-                    "passes": 1,
-                    "terminal_reason": "manager_stop",
-                    "toolsmanager_requests_count": 1,
-                    "pass_logs": [],
-                    "planner_decisions": [],
-                    "run_id": "persisted-run-1",
-                }
-            )
-
+def test_full_auto_profile_cannot_bypass_the_gateway_without_a_coding_agent(monkeypatch, tmp_path):
     monkeypatch.setattr("mana_agent.commands.cli.Settings", lambda: DummySettings())
-    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda _s, model_override=None, **_kwargs: FakeAskService())
-    monkeypatch.setattr("mana_agent.commands.cli.ToolWorkerClient", _FakeWorkerClient)
-    monkeypatch.setattr("mana_agent.commands.cli.QueueManager", _FakeOrchestrator)
-
+    monkeypatch.setattr("mana_agent.commands.cli.build_ask_service", lambda *a, **k: FakeAskService())
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    document = docs / "models.md"
+    document.write_text("original\n")
     result = runner.invoke(
-        app,
-        [
-            "chat",
-            "--agent-tools",
-            "--no-coding-agent",
-            "--execution-profile",
-            "full-auto",
-            "--full-auto-status-every",
-            "2",
-        ],
+        app, ["chat", "--root-dir", str(tmp_path), "--agent-tools", "--no-coding-agent",
+              "--execution-profile", "full-auto"],
         input="execute plan: find all models and update docs/models.md\nquit\n",
     )
     assert result.exit_code == 0
-    assert _FakeOrchestrator.run_calls == 2
-    assert _FakeOrchestrator.run_ids == [None, "persisted-run-1"]
-    assert result.stdout.count("Full-auto Checkpoint") == 1
-    assert "docs/models.md updated" in result.stdout
-    assert "Auto-execute ended without a direct answer" not in result.stdout
-    assert "terminal_reason=pass_cap_reached" not in result.stdout
-    assert "Status: executing (pass_cap_reached)." not in result.stdout
+    assert document.read_text() == "original\n"
+    assert "Full-auto Checkpoint" not in result.stdout

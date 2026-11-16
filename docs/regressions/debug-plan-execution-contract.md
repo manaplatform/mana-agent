@@ -1,5 +1,46 @@
 # Debug and Plan execution contracts
 
+## Automatic coding workflows
+
+The entry router could activate an approval workflow from ordinary prose, and
+the CLI and TUI could interpret the same text independently and send it to
+different executors. A regular coding turn could run the backend before saving
+an accepted plan. The workflow parent and its coding child also cannot both
+acquire conflicting repository locks. A public gateway test exposed the
+parent waiting indefinitely for its own child.
+
+The gateway now validates one AUTO or DEBUG decision for a coding turn. The
+controller advances scoped decisions and the TaskBoard retains the plan,
+evidence, mode transitions, and completed steps. The supervised parent
+coordinates the workflow. Scoped coding children acquire the patch leases
+and record their receipts. Separate verification records let the parent
+repair a failed check and rerun it without repeating a completed patch.
+Only explicit PLAN commands open approval of a revision.
+On resume, an old checkpoint that proves core implementation completed can
+continue to feature integration without applying the core changes again.
+Other legacy coding attempts require reconciliation before they can enter the
+staged workflow.
+
+Codex app-server patch proposals also use a private result field. The ordinary
+assistant summary cleanup collapses repeated spaces, which can change
+indentation inside a patch encoded in JSON. The proposal parser validates the
+envelope and forwards its original patch text to the scoped review and
+mutation gate. Invalid proposals block the step. The proposal field is excluded
+from ordinary result serialization.
+
+**Do not reintroduce** text-based mode selection, an inferred PLAN entry,
+parent write locks that conflict with child leases, or prose cleanup on exact
+patch content. Passing verification must come from executed checks, with
+coordinator authority for runtime integration.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/gateway/test_debug_plan_mode_contract.py tests/gateway/test_chat_gateway.py tests/gateway/test_codex_session_lifecycle.py tests/test_codex_integration.py` for routing, supervised execution, legacy checkpoint recovery and Codex protocol fixtures. Run `node --test tests/dashboard/live_chat_reducer.test.mjs` for the dashboard activity reducer.
+
+The full CLI smoke suite still contains fixtures for the removed console
+auto-execute pipeline and for its response rendering and flow state. Review
+those failures with `venv/bin/python -m pytest -q tests/test_cli_smoke.py`
+before using the full suite as a release check. Keep the gateway as the
+entry point when migrating those fixtures.
+
 ## Symptom and cause
 
 A bug report in ordinary chat had no dedicated evidence-first coding route. The Plan service added prompt keywords to repeated repository-wide globs and searches. Missing or invalid model output could produce a generic implementation template. The console, TUI, and standalone plan command also had different clarification and approval paths. Approval was stored on a session object, and the coding handoff carried only the original goal. The execution controller could therefore replan the work without the steps or boundaries that the user reviewed.

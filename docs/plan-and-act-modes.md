@@ -1,10 +1,18 @@
-# Plan, Act, and Debug in Mana-Agent
+# AUTO, DEBUG, and PLAN in Mana-Agent
 
-Use **Plan** when you want to review the proposed changes before work begins. In ordinary chat, the model can select **Debug** for a reported repository problem. Adding a bug report to a Plan request keeps it in the plan approval workflow. The global logging flag is still called `--debug`.
+Describe the repository change or problem in ordinary chat. The gateway model selects **AUTO** for implementation or **DEBUG** for investigation and repair. Use **PLAN** when you want to review a revision before implementation. The global logging flag is still called `--debug`.
+
+## Implement a change
+
+AUTO starts with scoped repository observations, records an internal plan and its verification requirements on TaskBoard, and executes the plan through the configured CodingAgent. The gateway projects the workflow on the same task through integration, testing, and review. Runtime capabilities require evidence from the existing feature integration coordinator before they are reported as complete. An internal plan has no separate PLAN approval step. Tool and action approvals still apply.
+
+When Codex worktree isolation is enabled, AUTO and DEBUG repairs inspect, patch, and verify in the task's assigned worktree. The result reports the verified worktree path for review. The primary checkout retains the user's changes.
+
+DEBUG and AUTO can switch when the model cites new observed evidence on the same task. Scope, completed steps, and execution permissions carry forward. When a required verification command runs and fails, an automatic workflow can revise its plan once within the accepted file operations and rerun that command. Other failures and unavailable verification environments produce a blocked result with the task's evidence preserved.
 
 ## Plan a change
 
-- In chat or the TUI, use `/plan <request>`. Use `/plan` by itself to inspect the active task or start planning your next message. `/mode plan` also selects planning for subsequent messages. Use `/mode auto` to return to ordinary routing after resolving an active plan.
+- In chat or the TUI, use `/plan <request>`. Use `/plan` by itself to inspect the active task or start planning your next message. `/mode plan` and `mana-agent chat --planning-mode` enter the same workflow. Use `/mode auto` to return to ordinary routing after resolving an active plan. A proposal requested in prose is a read-only response.
 - From a terminal, use `mana-agent plan 'Upgrade the connection pool'`. Use `--no-code` for a draft with no execution approval. `--no-save` skips the Markdown export. For `--output`, select a path outside the target checkout. The default export resides under Mana's repository state directory.
 - If a decision would change the implementation, Mana asks through the durable inbox. Select an option or enter a custom answer when available. In console chat, reply directly to one question or use `/inbox answer <item-id> '<JSON answers keyed by question ID>'` for a group.
 - Review the exact requirements, boundaries, dependencies, file operations, and checks. Use the TUI approval controls or `/approve <item-id>` (`/accept` and `/act` are aliases in that context). In a standalone invocation, use the displayed review prompt or run `mana-agent inbox approve <item-id>`. A bare `--yes` or a Full Access session does not approve a generated revision.
@@ -14,7 +22,7 @@ If a model response fails validation, Mana requests one correction using the sam
 
 The model returns typed records for file operations and clarification choices. Mana validates those records before using them. Saved revisions and their approval digests use the existing plan format.
 
-TaskBoard records step progress. The Execution Supervisor owns the active attempt and lease. The human inbox records the reviewer, timestamp, and digest of the approved revision. Ordinary mode switches and free text cannot substitute for an inbox response. Completed steps are kept when their scope and evidence still match. A patch with an uncertain outcome requires reconciliation before retry.
+TaskBoard records step progress. The Execution Supervisor owns the active attempt and lease. The human inbox records the reviewer, timestamp, and digest of the approved revision. Ordinary mode switches and free text cannot substitute for an inbox response. Completed steps are kept when their scope and evidence still match. A patch with an uncertain outcome requires reconciliation before retry. `ACT` and `EDIT` remain compatibility names for authorized execution phases and tool policy. They are not model-selected workflows.
 
 Each coding proposal is read-only. The internal engine uses registered read tools, and external Codex uses a read-only app-server turn with networking disabled. Mana checks the exact step, current scope, file operations, checkout state, and patch content before the existing Tool Runner and action policy apply a mutation. Scope changes from live steering return the task to review. Git publishing and mutations to external services keep their existing approval flows.
 

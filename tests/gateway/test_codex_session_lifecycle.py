@@ -201,6 +201,55 @@ def test_new_conversation_during_hanging_codex_interrupt_bounds_latency(
     assert session_id in gateway._fenced_sessions
 
 
+def _scoped_codex_workflow(gateway, monkeypatch):
+    from mana_agent.agent.plan_service import DraftDecision, FileReadEvidence, InspectDecision, PlanService, ScopeReview
+    from mana_agent.approval.models import ApprovalMode
+    from mana_agent.approval.policy import set_approval_mode
+    from mana_agent.gateway.entry_routing import EntryRoutingDecision
+
+    def route(*, user_prompt, context):
+        return EntryRoutingDecision(
+            route="coding", confidence=0.99, reason="Scoped change", required_sources=("repository",),
+            source_message_ids=(context.user_message_id,),
+            coding_workflow={
+                "mode": "auto", "requested_effect": "write", "objective": user_prompt,
+                "reason": "Request needs a source update", "investigation_scope": "README.md",
+                "expected_result": "README is updated", "risk_and_uncertainty": "Keep scope to the README",
+                "verification_requirements": ["Verify the changed file"], "clarification": "",
+            },
+        )
+
+    def decide(_service, mode, state, **kwargs):
+        if not state["evidence"]:
+            return InspectDecision(action="inspect", reason="Read the current content",
+                                   evidence=FileReadEvidence(tool="read_file", level=1, paths=("README.md",),
+                                                             reason="Scoped input"))
+        return DraftDecision.model_validate({
+            "action": "draft", "reason": "The requested update is scoped",
+            "draft": {"objectives": ["Update the README"], "findings": "Read the existing file",
+                      "scope": ["README.md"], "steps": [{
+                          "step_id": "update", "instruction": "Update README.md", "changes": {"README.md": ["update"]},
+                          "verification": [{"argv": ["node", "--version"]}], "acceptance_criteria": ["Updated file"],
+                      }]},
+        })
+
+    async def verify(root, command, **kwargs):
+        return {"passed": True, "exit_code": 0, "output": "verified"}
+
+    set_approval_mode(ApprovalMode.FULL_ACCESS)
+    monkeypatch.setattr(gateway._entry_router, "route", route)
+    monkeypatch.setattr(PlanService, "next_decision", decide)
+    monkeypatch.setattr(PlanService, "review", lambda *args, **kwargs: ScopeReview(disposition="in_scope", reason="Only README.md"))
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+
+
+def _codex_patch_event(root, thread_id):
+    before = (root / "README.md").read_text().splitlines()[0]
+    patch = f"*** Begin Patch\n*** Update File: README.md\n@@\n-{before}\n+{before}!\n+    code example\n*** End Patch"
+    return {"method": "item/completed", "params": {"threadId": thread_id,
+            "item": {"id": "response-1", "type": "agentMessage", "text": json.dumps({"patch": patch})}}}
+
+
 def test_new_conversation_after_completed_codex_work_uses_thread_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -228,6 +277,7 @@ def test_new_conversation_after_completed_codex_work_uses_thread_start(
             return {}
 
         async def notifications(self, thread_id: str):
+            yield _codex_patch_event(tmp_path, thread_id)
             yield {
                 "method": "turn/completed",
                 "params": {"threadId": thread_id, "turn": {"id": "turn-1"}},
@@ -251,32 +301,21 @@ def test_new_conversation_after_completed_codex_work_uses_thread_start(
     gateway._coding_agent = shim
     gateway._stack.coding_agent = shim
 
-    from mana_agent.gateway.entry_routing import EntryRoutingDecision
-
-    monkeypatch.setattr(
-        gateway._entry_router,
-        "route",
-        lambda *args, **kwargs: EntryRoutingDecision(
-            route="coding",
-            confidence=0.99,
-            reason="coding task",
-            required_sources=(),
-            reuse_active_route=bool(gateway._coding_agent.get_active_flow_id()),
-        ),
-    )
+    _scoped_codex_workflow(gateway, monkeypatch)
 
     # Turn 1 in session 1: starts thread-1 via thread/start + turn/start
-    gateway.process_turn(session_1, "First task")
+    assert not gateway.process_turn(session_1, "First task").error
+    assert (tmp_path / "README.md").read_text().splitlines()[1] == "    code example"
     assert threads_started == ["thread-1"]
     assert threads_resumed == []
 
     # Turn 2 in session 1: reuses live runtime and calls turn/start only (no thread/resume)
-    gateway.process_turn(session_1, "Second task in same session")
+    assert not gateway.process_turn(session_1, "Second task in same session").error
     assert threads_started == ["thread-1"]
     assert threads_resumed == []
 
     # Turn 3 in session 1: reuses live runtime and calls turn/start only
-    gateway.process_turn(session_1, "Third task in same session")
+    assert not gateway.process_turn(session_1, "Third task in same session").error
     assert threads_started == ["thread-1"]
     assert threads_resumed == []
 
@@ -304,7 +343,7 @@ def test_new_conversation_after_completed_codex_work_uses_thread_start(
     assert shim.resume_thread_id == ""
 
     # Turn 1 in session 2: MUST start fresh thread-2 via thread/start
-    gateway.process_turn(session_2, "First task in new session")
+    assert not gateway.process_turn(session_2, "First task in new session").error
     assert threads_started == ["thread-1", "thread-2"]
 
 
@@ -340,6 +379,7 @@ def test_codex_session_switch_reconstructs_backend_and_resumes_persisted_thread(
             return {}
 
         async def notifications(self, thread_id: str):
+            yield _codex_patch_event(tmp_path, thread_id)
             yield {
                 "method": "turn/completed",
                 "params": {"threadId": thread_id, "turn": {"id": "turn-1"}},
@@ -371,28 +411,16 @@ def test_codex_session_switch_reconstructs_backend_and_resumes_persisted_thread(
     gateway._coding_agent = shim
     gateway._stack.coding_agent = shim
 
-    from mana_agent.gateway.entry_routing import EntryRoutingDecision
-
-    monkeypatch.setattr(
-        gateway._entry_router,
-        "route",
-        lambda *args, **kwargs: EntryRoutingDecision(
-            route="coding",
-            confidence=0.99,
-            reason="coding task",
-            required_sources=(),
-            reuse_active_route=False,
-        ),
-    )
+    _scoped_codex_workflow(gateway, monkeypatch)
 
     # Session 1: Turn 1 -> starts thread-switch-1
-    gateway.process_turn(session_1, "Turn 1 in session 1")
+    assert not gateway.process_turn(session_1, "Turn 1 in session 1").error
     assert threads_started == ["thread-switch-1"]
     assert threads_resumed == []
 
     # Switch away to Session 2
     session_2 = gateway.create_new_session(frontend="cli")
-    gateway.process_turn(session_2, "Turn 1 in session 2")
+    assert not gateway.process_turn(session_2, "Turn 1 in session 2").error
     assert threads_started == ["thread-switch-1", "thread-switch-2"]
 
     # Switch back to Session 1
@@ -401,7 +429,7 @@ def test_codex_session_switch_reconstructs_backend_and_resumes_persisted_thread(
     assert shim.session_id == session_1
 
     # Turn in Session 1: must resume thread-switch-1
-    gateway.process_turn(session_1, "Turn 2 in session 1 after switch")
+    assert not gateway.process_turn(session_1, "Turn 2 in session 1 after switch").error
     assert "thread-switch-1" in threads_resumed
 
 
@@ -424,6 +452,7 @@ def test_codex_explicit_delete_session_cleans_durable_state(
             return {}
 
         async def notifications(self, thread_id: str):
+            yield _codex_patch_event(tmp_path, thread_id)
             yield {"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": "tu-1"}}}
 
         async def close(self, *, wait_timeout: float = 1.0) -> None:
@@ -451,21 +480,9 @@ def test_codex_explicit_delete_session_cleans_durable_state(
     gateway._coding_agent = shim
     gateway._stack.coding_agent = shim
 
-    from mana_agent.gateway.entry_routing import EntryRoutingDecision
+    _scoped_codex_workflow(gateway, monkeypatch)
 
-    monkeypatch.setattr(
-        gateway._entry_router,
-        "route",
-        lambda *args, **kwargs: EntryRoutingDecision(
-            route="coding",
-            confidence=0.99,
-            reason="coding task",
-            required_sources=(),
-            reuse_active_route=False,
-        ),
-    )
-
-    gateway.process_turn(session_1, "Turn in session 1")
+    assert not gateway.process_turn(session_1, "Turn in session 1").error
     assert load_codex_session_thread("repo-delete-test", session_1) == "th-to-delete"
 
     # Explicit deletion

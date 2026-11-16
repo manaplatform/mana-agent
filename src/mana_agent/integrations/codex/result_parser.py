@@ -8,6 +8,8 @@ for failed write turns.
 
 from __future__ import annotations
 
+import json
+
 from mana_agent.coding.models import (
     CodingTask,
     CodingTaskResult,
@@ -60,6 +62,8 @@ def parse_codex_result(
     # Internal last agent message (may be sanitized). Not used as the coding
     # answer for failed write turns — see terminal_summary.
     agent_message_text = ""
+    patch_proposal = ""
+    proposing_patch = bool(task.context.get("mode_patch_proposal"))
     usage: dict[str, int] | None = None
     status = "completed"
     test_failures: list[str] = []
@@ -98,7 +102,17 @@ def parse_codex_result(
                         test_failures.append(command)
             if item_type in _ASSISTANT_ITEM_TYPES:
                 text = str(item.get("text") or item.get("message") or "").strip()
-                if text:
+                if text and proposing_patch:
+                    patch_proposal = ""
+                    if len(text) <= 250_000:
+                        try:
+                            envelope = json.loads(text)
+                        except ValueError:
+                            continue
+                        if (isinstance(envelope, dict) and set(envelope) == {"patch"}
+                                and isinstance(envelope["patch"], str) and envelope["patch"]):
+                            patch_proposal = text
+                elif text:
                     # Keep for plan-mode terminal notes / internal warnings only.
                     if looks_like_freeform_tool_garbage(text):
                         warnings.append(
@@ -198,7 +212,10 @@ def parse_codex_result(
         warnings.append("Test command failed: " + ", ".join(test_failures))
 
     debugging_report = None
-    if status == "completed":
+    if proposing_patch and status == "completed" and not patch_proposal:
+        status = "failed"
+        errors.append("CODING_PATCH_PROPOSAL_INVALID")
+    if status == "completed" and not proposing_patch:
         try:
             _summary, debugging_report = parse_debugging_envelope(agent_message_text)
         except ValueError:
@@ -297,6 +314,7 @@ def parse_codex_result(
         backend="codex",
         status=status,  # type: ignore[arg-type]
         summary=summary,
+        patch_proposal=patch_proposal if status == "completed" else "",
         changed_files=changed_files,
         commands_run=commands,
         tests_run=tests,

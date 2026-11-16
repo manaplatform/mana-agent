@@ -187,6 +187,7 @@ class CodingTaskResult(BaseModel):
     debugging_report: CodingDebuggingReport | None = None
     continuation_context: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
+    patch_proposal: str = Field(default="", exclude=True, repr=False)
     changed_files: list[str] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
     tests_run: list[str] = Field(default_factory=list)

@@ -138,12 +138,12 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             prior_directory = self.working_directory
 
         try:
-            if kwargs.get("coding_mode_proposal"):
+            policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})
+            if kwargs.get("coding_mode_proposal") and (self._active_mode != "external" or policy.required):
                 proposal_root = Path(kwargs["coding_mode_root"]).resolve()
                 if proposal_root != self.repo_root.resolve():
                     raise PermissionError("The coding proposal belongs to a different checkout")
                 self.working_directory = proposal_root
-            policy = TaskExecutionPolicy.model_validate(kwargs.get("execution_policy") or {})
             if self._active_mode == "external" and not policy.required:
                 func = getattr(super(), method)
                 result = func(request, **kwargs)

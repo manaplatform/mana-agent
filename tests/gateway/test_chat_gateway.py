@@ -57,11 +57,53 @@ from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent
 from mana_agent.chat.history import reset_global_history
 
 
+def _coding_fields(payload):
+    return {
+        "source_message_ids": [payload["context"]["user_message_id"]],
+        "coding_workflow": {
+            "mode": "auto", "requested_effect": "write", "objective": payload["user_prompt"],
+            "reason": "Implement the requested change", "investigation_scope": "The named repository file",
+            "expected_result": "The requested behavior", "risk_and_uncertainty": "Caller compatibility",
+            "verification_requirements": ["Run the focused check"], "clarification": "",
+        },
+    }
+
+
+def _mode_decision_fixture(messages, schema, path, *, operation="update"):
+    payload = json.loads(messages[-1].content)
+    if schema["title"] == "ScopeReview":
+        return {"disposition": "in_scope", "reason": "Only the selected file changes"}
+    if not payload["evidence"]:
+        return {"decision": {"action": "inspect", "reason": "Read the named file",
+                             "evidence": {"tool": "read_file", "level": 1, "paths": ["README.md"],
+                                          "reason": "Read the current behavior"}}}
+    return {"decision": {"action": "draft", "reason": "The inspection supports a scoped change",
+                         "draft": {"objectives": ["Implement the request"], "findings": "Read README.md",
+                                   "scope": [path], "steps": [{
+                                       "step_id": "implementation", "instruction": "Implement the scoped change",
+                                       "changes": {path: [operation]},
+                                       "verification": [{"argv": ["python", "-m", "pytest"]}],
+                                       "acceptance_criteria": ["Focused verification passes"],
+                                   }]}}}
+
+
+def _mock_verified_command(monkeypatch):
+    async def verify(root, command, **kwargs):
+        return {"passed": True, "exit_code": 0, "output": "verified against the fixture"}
+
+    from mana_agent.approval.models import ApprovalMode
+    from mana_agent.approval.policy import set_approval_mode
+    set_approval_mode(ApprovalMode.FULL_ACCESS)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+
+
 class _DummyAskService:
     """Minimal stand-in so gateway construction tests do not require OPENAI_API_KEY."""
 
     class _EntryModel:
         def decide_sync(self, messages, schema, **kwargs):
+            if isinstance(schema, dict):
+                return _mode_decision_fixture(messages, schema, "README.md")
             raw = self.generate_sync(messages, **kwargs)
             if isinstance(raw, schema):
                 return raw
@@ -140,6 +182,7 @@ class _DummyAskService:
                         "error_code": "",
                         "reuse_active_route": False,
                         "runtime_capability_change": False,
+                        **(_coding_fields(payload) if route == "coding" else {}),
                     }
                 )
             )
@@ -171,6 +214,9 @@ class _DummyCodingAgent:
         self.tool_worker_client = kwargs.get("tool_worker_client")
 
     def generate(self, request, **kwargs):
+        if kwargs.get("coding_mode_proposal"):
+            patch = "*** Begin Patch\n*** Update File: README.md\n@@\n-before\n+after\n*** End Patch"
+            return {"status": "completed", "output": json.dumps({"patch": patch})}
         return {
             "answer": f"coding-ok: {request[:40]}",
             "status": "completed",
@@ -986,29 +1032,8 @@ def test_gateway_process_turn_ask_path(tmp_path: Path, monkeypatch) -> None:
         lambda root, q: SimpleNamespace(handled=False),
     )
     monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.load_auto_chat_state",
-        lambda root: SimpleNamespace(
-            last_mode="answer_only",
-            last_task="",
-            relevant_files=[],
-            changed_files=[],
-            verification="",
-            summary="",
-        ),
-    )
-    monkeypatch.setattr(
         "mana_agent.gateway.turn_engine.save_auto_chat_state",
         lambda root, state: None,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.resolve_auto_followup",
-        lambda q, state: q,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
-        lambda q: __import__(
-            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
-        ).AutoChatMode.ANSWER_ONLY,
     )
 
     gw = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=True)
@@ -1070,29 +1095,8 @@ def test_gateway_process_turn_coding_path(tmp_path: Path, monkeypatch) -> None:
         lambda root, q: SimpleNamespace(handled=False),
     )
     monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.load_auto_chat_state",
-        lambda root: SimpleNamespace(
-            last_mode="edit",
-            last_task="",
-            relevant_files=[],
-            changed_files=[],
-            verification="",
-            summary="",
-        ),
-    )
-    monkeypatch.setattr(
         "mana_agent.gateway.turn_engine.save_auto_chat_state",
         lambda root, state: None,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.resolve_auto_followup",
-        lambda q, state: q,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
-        lambda q: __import__(
-            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
-        ).AutoChatMode.EDIT,
     )
 
     gw = AgentChatGateway(
@@ -1101,14 +1105,16 @@ def test_gateway_process_turn_coding_path(tmp_path: Path, monkeypatch) -> None:
         agent_tools=True,
         auto_execute_plan=True,
     )
+    (tmp_path / "README.md").write_text("before\n")
+    _mock_verified_command(monkeypatch)
     assert gw.owns_coding_stack()
     sid = gw.create_session(frontend="test")
     result = gw.process_turn(sid, "update the README title")
     assert isinstance(result, ChatTurnResult)
     assert result.error is None
     assert result.used_coding_agent is True
-    assert "auto-exec" in result.answer or "coding-ok" in result.answer
-    assert result.flow_id in {"flow-auto", "flow-test", None} or result.flow_id
+    assert result.payload["mode"] == "auto"
+    assert (tmp_path / "README.md").read_text() == "after\n"
 
 
 def test_gateway_gmail_uses_dedicated_connector_not_coding_or_conversation(tmp_path: Path, monkeypatch) -> None:
@@ -1470,9 +1476,9 @@ def test_gateway_preserves_multiline_message_through_request_and_restored_histor
     class TrackingChatService:
         _ask_service = _DummyAskService()
 
-        def ask(self, question: str, **kwargs: Any):
+        def ask_conversation(self, question: str, **kwargs: Any):
             prompts.append(question)
-            return SimpleNamespace(answer="Understood.", sources=[], warnings=[], trace=[])
+            return "Understood."
 
     gateway = AgentChatGateway(tmp_path, coding_agent=False, agent_tools=False, chat_service=TrackingChatService())
     session_id = gateway.create_session(frontend="test")
@@ -1927,29 +1933,8 @@ def test_gateway_checkpoint_resume_after_core_implementation_no_boundary_attr(
         lambda root, q: SimpleNamespace(handled=False),
     )
     monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.load_auto_chat_state",
-        lambda root: SimpleNamespace(
-            last_mode="edit",
-            last_task="",
-            relevant_files=[],
-            changed_files=[],
-            verification="",
-            summary="",
-        ),
-    )
-    monkeypatch.setattr(
         "mana_agent.gateway.turn_engine.save_auto_chat_state",
         lambda root, state: None,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.resolve_auto_followup",
-        lambda q, state: q,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
-        lambda q: __import__(
-            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
-        ).AutoChatMode.EDIT,
     )
 
     gw = AgentChatGateway(
@@ -2145,29 +2130,8 @@ def test_gateway_checkpoint_resume_legacy_payload_boundary(
         lambda root, q: SimpleNamespace(handled=False),
     )
     monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.load_auto_chat_state",
-        lambda root: SimpleNamespace(
-            last_mode="edit",
-            last_task="",
-            relevant_files=[],
-            changed_files=[],
-            verification="",
-            summary="",
-        ),
-    )
-    monkeypatch.setattr(
         "mana_agent.gateway.turn_engine.save_auto_chat_state",
         lambda root, state: None,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.resolve_auto_followup",
-        lambda q, state: q,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
-        lambda q: __import__(
-            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
-        ).AutoChatMode.EDIT,
     )
 
     gw = AgentChatGateway(
@@ -2369,29 +2333,8 @@ def test_gateway_checkpoint_resume_other_boundary_does_not_invent_after_core_imp
         lambda root, q: SimpleNamespace(handled=False),
     )
     monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.load_auto_chat_state",
-        lambda root: SimpleNamespace(
-            last_mode="edit",
-            last_task="",
-            relevant_files=[],
-            changed_files=[],
-            verification="",
-            summary="",
-        ),
-    )
-    monkeypatch.setattr(
         "mana_agent.gateway.turn_engine.save_auto_chat_state",
         lambda root, state: None,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.resolve_auto_followup",
-        lambda q, state: q,
-    )
-    monkeypatch.setattr(
-        "mana_agent.gateway.turn_engine.classify_auto_chat_intent",
-        lambda q: __import__(
-            "mana_agent.multi_agent.runtime.auto_chat", fromlist=["AutoChatMode"]
-        ).AutoChatMode.EDIT,
     )
 
     gw = AgentChatGateway(
@@ -2456,9 +2399,9 @@ def test_gateway_checkpoint_resume_other_boundary_does_not_invent_after_core_imp
     )
 
     result = gw.process_turn(session_id, "continue readme edit")
-    assert result.error is None
-    # Because boundary is after_routing, core implementation does run
-    assert len(coding_calls) > 0
+    assert result.error
+    assert "legacy coding attempt" in result.answer
+    assert not coding_calls
 
 
 def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
@@ -2484,17 +2427,9 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
 
         def generate(self, request, **kwargs):
             self.calls.append(request)
-            if self.repo_root:
-                p = Path(self.repo_root) / "src" / "provider.py"
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text("class Provider:\n    pass\n", encoding="utf-8")
-            return {
-                "answer": "Provider implemented in src/provider.py",
-                "status": "completed",
-                "changed_files": ["src/provider.py"],
-                "warnings": [],
-                "flow_id": "flow-codex-1",
-            }
+            assert kwargs["coding_mode_proposal"]
+            patch = "*** Begin Patch\n*** Add File: src/provider.py\n+class Provider:\n+    pass\n*** End Patch"
+            return {"status": "completed", "output": json.dumps({"patch": patch})}
 
         def generate_auto_execute(self, request, **kwargs):
             return self.generate(request, **kwargs)
@@ -2513,6 +2448,8 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
 
     class _StructuredEntryModel:
         def decide_sync(self, messages, schema, **kwargs):
+            if isinstance(schema, dict):
+                return _mode_decision_fixture(messages, schema, "src/provider.py", operation="add")
             raw = self.generate_sync(messages, **kwargs)
             if isinstance(raw, schema):
                 return raw
@@ -2595,6 +2532,7 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
                         "error_code": "",
                         "reuse_active_route": False,
                         "runtime_capability_change": True,
+                        **_coding_fields(payload),
                     }
                 )
             )
@@ -2660,6 +2598,8 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
         lambda self, job: SimpleNamespace(ok=True, result={"stdout": "1 passed"}, error=None),
     )
 
+    (tmp_path / "README.md").write_text("Provider entry point is src/main.py\n")
+    _mock_verified_command(monkeypatch)
     result = gw.process_turn(session_id, "add new provider runtime capability")
 
     # Verify P0.1-P0.4 results:

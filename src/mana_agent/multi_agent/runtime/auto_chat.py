@@ -1,7 +1,7 @@
 """Bounded normal-chat routing helpers.
 
 Slash commands are handled by the CLI before this module is consulted. These
-helpers only classify and constrain ordinary chat messages.
+helpers constrain tools after a route has been selected.
 """
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 import json
-import re
 from pathlib import Path
 from mana_agent.workspaces.paths import repository_dir, repository_id_for_path
 from typing import Any
@@ -145,43 +144,6 @@ VERIFY_TOOLS = ["run_command", "run_script_once", "verify_project", "git_status"
 REVIEW_TOOLS = ["git_status", "git_diff", "git_log", "git_branch", "git_remote", "read_file", "repo_batch_read", "ls", "list_files", "repo_search", "repo_batch_search"]
 
 
-# Linear keyword matchers: fixed alternations with word boundaries, no nested quantifiers.
-_EDIT_RE = re.compile(
-    r"\b(?:fix|add|implement|change|update|rename|refactor|create|delete|remove|migrate|patch|edit|modify|rewrite|build)\b",
-    re.IGNORECASE,
-)
-_PLAN_RE = re.compile(
-    r"\b(?:plan|prompt|strategy|approach|design|architecture|roadmap|implementation steps|how should we implement)\b",
-    re.IGNORECASE,
-)
-_EXECUTE_PLAN_RE = re.compile(
-    r"\b(?:implement|execute|run|apply)\s+(?:the\s+|last\s+|that\s+|current\s+)?plan\b",
-    re.IGNORECASE,
-)
-_REVIEW_RE = re.compile(
-    r"\b(?:review|check my changes|inspect diff|what is wrong|quality|code review)\b",
-    re.IGNORECASE,
-)
-_VERIFY_RE = re.compile(
-    r"\b(?:run tests|verify|run checks|pytest|lint|typecheck|test this|check this)\b",
-    re.IGNORECASE,
-)
-_ANALYZE_RE = re.compile(
-    r"\b(?:analyze project|analyze module|full analysis|project analysis|report)\b",
-    re.IGNORECASE,
-)
-_ANSWER_RE = re.compile(
-    r"\b(?:where|what|why|explain|how does|find|locate|show me|which file)\b",
-    re.IGNORECASE,
-)
-# Match already-stripped input; avoid surrounding \s* quantifiers (ReDoS).
-_FOLLOWUP_RE = re.compile(
-    r"^(?:continue|do it|now implement|verify|fix it|proceed|go ahead|resume|and\s+|also\s+|next|what about|how about|why|fix|status)[.!]?",
-    re.IGNORECASE,
-)
-_MAX_CLASSIFY_CHARS = 4000
-
-
 @dataclass(frozen=True)
 class AutoChatLimits:
     max_search_queries: int = AUTO_MAX_SEARCH_QUERIES
@@ -202,61 +164,6 @@ class AutoChatSessionState:
     summary: str = ""
     execution_mode: str = "plan"
     active_plan: dict[str, Any] | None = None
-
-
-def classify_auto_chat_intent(message: str) -> AutoChatMode:
-    """Classify a non-slash chat message into a bounded execution mode."""
-    text = str(message or "").strip()[:_MAX_CLASSIFY_CHARS]
-    if not text:
-        return AutoChatMode.ANSWER_ONLY
-    if text.startswith("/"):
-        return AutoChatMode.ANSWER_ONLY
-    if _VERIFY_RE.search(text):
-        return AutoChatMode.VERIFY
-    if _REVIEW_RE.search(text):
-        return AutoChatMode.REVIEW
-    if _ANALYZE_RE.search(text):
-        return AutoChatMode.ANALYZE
-    if _EXECUTE_PLAN_RE.search(text):
-        return AutoChatMode.EDIT
-    if _PLAN_RE.search(text) and not _EDIT_RE.search(text):
-        return AutoChatMode.PLAN_ONLY
-    if _EDIT_RE.search(text):
-        return AutoChatMode.EDIT
-    if _ANSWER_RE.search(text):
-        return AutoChatMode.ANSWER_ONLY
-    return AutoChatMode.ANSWER_ONLY
-
-
-def is_plan_execution_request(message: str) -> bool:
-    return bool(_EXECUTE_PLAN_RE.search(str(message or "")[:_MAX_CLASSIFY_CHARS]))
-
-
-def is_followup_auto_message(message: str) -> bool:
-    return bool(_FOLLOWUP_RE.match(str(message or "").strip()[:_MAX_CLASSIFY_CHARS]))
-
-
-def resolve_auto_followup(message: str, state: AutoChatSessionState | None) -> str:
-    """Reuse compact prior context for short follow-up turns."""
-    text = str(message or "").strip()
-    if not text or not state or not is_followup_auto_message(text):
-        return text
-    if not state.last_task:
-        return text
-    lines = [
-        text,
-        "",
-        "Previous auto-chat task context:",
-        f"- last_mode: {state.last_mode or 'unknown'}",
-        f"- last_task: {state.last_task}",
-    ]
-    if state.relevant_files:
-        lines.append(f"- relevant_files: {', '.join(state.relevant_files[:AUTO_MAX_CANDIDATE_FILES])}")
-    if state.changed_files:
-        lines.append(f"- changed_files: {', '.join(state.changed_files[:AUTO_MAX_CANDIDATE_FILES])}")
-    if state.summary:
-        lines.append(f"- summary: {state.summary[:600]}")
-    return "\n".join(lines)
 
 
 def mode_allows_mutation(mode: AutoChatMode | str | Any | None) -> bool:

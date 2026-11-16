@@ -218,7 +218,7 @@ See [activity architecture, limitations, regression rules, and user verification
 
 Use `/plan` to review a repository change before approving its exact revision. In
 ordinary chat, describe the failure to start an evidence-based investigation.
-See [Plan, Act, and Debug](docs/plan-and-act-modes.md) for the terminal workflow.
+See [AUTO, DEBUG, and PLAN](docs/plan-and-act-modes.md) for ordinary coding and exact revision approval.
 
 ## License
 

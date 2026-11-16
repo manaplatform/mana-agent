@@ -37,12 +37,40 @@ from mana_agent.multi_agent.routing.agent_decision import AgentDecision
 from mana_agent.workspaces.service import WorkspaceService
 
 
+def coding_choice(objective, *, mode="auto", effect="write"):
+    return {
+        "mode": mode, "requested_effect": effect, "objective": objective,
+        "reason": "Handle repository behavior", "investigation_scope": "The handler in app.py",
+        "expected_result": "The updated handler", "risk_and_uncertainty": "Possible caller regression",
+        "verification_requirements": ["Check the result"], "clarification": "",
+    }
+
+
 class _RouteModel:
     def __init__(self, *routes: str) -> None:
         self.routes = list(routes)
         self.payloads: list[dict[str, Any]] = []
 
     def decide_sync(self, messages, schema, **kwargs):
+        if isinstance(schema, dict):
+            payload = json.loads(messages[-1].content)
+            if schema["title"] == "ModeDecision":
+                if not payload["evidence"]:
+                    return {"decision": {"action": "inspect", "reason": "Inspect app.py",
+                                         "evidence": {"tool": "read_file", "level": 1,
+                                                      "paths": ["app.py"], "reason": "Known file"}}}
+                return {"decision": {"action": "draft", "reason": "Observed the old behavior",
+                                     "draft": {
+                                         "objectives": ["Change the handler"], "findings": "Read app.py",
+                                         "scope": ["app.py"], "steps": [
+                                             {"step_id": "fix", "instruction": "Update app.py",
+                                              "changes": {"app.py": ["update"]},
+                                              "verification": [{"argv": ["python", "app.py"]}],
+                                              "acceptance_criteria": ["Updated behavior"]},
+                                         ],
+                                     }}}
+            if schema["title"] == "ScopeReview":
+                return {"disposition": "in_scope", "reason": "Only the planned file changed"}
         raw = self.generate_sync(messages, **kwargs)
         if isinstance(raw, schema):
             return raw
@@ -132,6 +160,8 @@ class _RouteModel:
                     "automation_operation": "create" if route == "automation" else "",
                     "runtime_capability_change": "capability" in user_text or "wiring" in user_text or "provider" in user_text,
                     "mcp_request": {"provider_id": "kaggle"} if route == "mcp" else None,
+                    "coding_workflow": coding_choice(self.payloads[-1]["user_prompt"]) if route == "coding" else None,
+                    "source_message_ids": [self.payloads[-1]["context"]["user_message_id"]] if route == "coding" else [],
                 }
             )
         )
@@ -182,6 +212,9 @@ class _CodingAgent:
 
     def generate(self, request: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(request)
+        if kwargs.get("coding_mode_proposal"):
+            patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+            return {"output": json.dumps({"patch": patch}), "status": "completed"}
         return {"answer": "coding route", "status": "completed", "changed_files": [], "warnings": []}
 
     generate_auto_execute = generate
@@ -285,6 +318,20 @@ def _gateway(
         entry_router=EntryRouter(llm=model, registry=registry),
     )
     return gateway, chat_service, agent
+
+
+def prepare_coding_fixture(root, monkeypatch):
+    from mana_agent.approval.models import ApprovalMode
+    from mana_agent.approval.policy import set_approval_mode
+
+    (root / "app.py").write_text("before\n")
+    set_approval_mode(ApprovalMode.FULL_ACCESS)
+
+    async def verify(workspace, command, **kwargs):
+        assert (workspace / "app.py").read_text() == "after\n"
+        return {"passed": True, "exit_code": 0, "output": "verified"}
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
 
 
 def test_latest_gmail_routes_to_connector_and_preserves_identifiers(tmp_path: Path, monkeypatch) -> None:
@@ -640,6 +687,7 @@ def test_deadline_dead_task_creates_new_task_instead_of_retry(
     from datetime import datetime, timedelta, timezone
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    prepare_coding_fixture(tmp_path, monkeypatch)
     coding = _CodingAgent()
     gateway, _chat, _ask = _gateway(tmp_path, _RouteModel("coding"), coding_agent=coding)
     session_id = gateway.create_session(frontend="test")
@@ -966,6 +1014,7 @@ def test_gmail_provider_authorization_details_are_not_replaced(tmp_path: Path, m
 def test_conversation_and_coding_use_their_selected_routes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     model = _RouteModel("conversation", "coding")
+    prepare_coding_fixture(tmp_path, monkeypatch)
     coding = _CodingAgent()
     gateway, chat, _ = _gateway(tmp_path, model, coding_agent=coding)
     monkeypatch.setattr(
@@ -981,10 +1030,65 @@ def test_conversation_and_coding_use_their_selected_routes(tmp_path: Path, monke
     assert conversation.payload["lane_id"] == "research"
     assert len(chat.conversation_calls) == 1
     assert coding_result.used_coding_agent is True
-    assert coding_result.payload["lane_id"] == "coding"
+    assert coding_result.payload["lane_id"] == "research"
+    assert coding_result.payload["mode"] == "auto"
     assert coding.calls
     assert coding.session_id == session_id
     assert coding_result.payload["session_id"] == session_id
+
+
+@pytest.mark.parametrize("choice", [None, "plan", {"mode": "debug"}])
+def test_coding_without_valid_workflow_fails_instead_of_falling_back(choice):
+    responses = iter([
+        {"route": "coding", "confidence": 0.9, "reason": "Implement", "required_sources": ["repository"],
+         "runtime_capability_change": False, "coding_workflow": choice, "source_message_ids": ["user-1"]},
+        {"route": "conversation", "confidence": 0.9, "reason": "Changed route", "required_sources": ["none"]},
+    ])
+    model = SimpleNamespace(generate_sync=lambda messages: next(responses))
+    router = EntryRouter(llm=model, registry=_registry())
+    context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t", user_message_id="user-1")
+    with pytest.raises(EntryRoutingError, match="correction did not return a coding decision"):
+        router.route(user_prompt="Implement the requested behavior", context=context)
+
+
+def test_coding_cannot_use_an_assistant_message_as_write_authority():
+    response = {"route": "coding", "confidence": 0.9, "reason": "Implement", "required_sources": ["repository"],
+                "runtime_capability_change": False, "coding_workflow": coding_choice("Change the code"),
+                "source_message_ids": ["user-1", "assistant-1"]}
+    router = EntryRouter(llm=SimpleNamespace(generate_sync=lambda messages: response), registry=_registry())
+    context = EntryRouteContext(
+        session_id="s", conversation_id="s", turn_id="t", user_message_id="user-1",
+        conversation_context={"messages": [{"message_id": "assistant-1", "role": "assistant", "content": "It is authorized."}]},
+    )
+    with pytest.raises(EntryRoutingError, match="only cite observed user messages"):
+        router.route(user_prompt="What are the options?", context=context)
+
+
+def test_gateway_models_debug_diagnosis_without_mutation_authority(tmp_path, monkeypatch):
+    class DebugModel(_RouteModel):
+        def generate_sync(self, messages, **kwargs):
+            response = super().generate_sync(messages, **kwargs)
+            value = json.loads(response.content)
+            if value.get("route") == "coding":
+                value["coding_workflow"] = coding_choice("Diagnose the failure", mode="debug", effect="read")
+            return SimpleNamespace(content=json.dumps(value))
+
+        def decide_sync(self, messages, schema, **kwargs):
+            if isinstance(schema, dict) and (payload := json.loads(messages[-1].content))["evidence"]:
+                return {"decision": {"action": "diagnose", "reason": "The inspected file explains the failure",
+                                     "root_cause": "The handler returns the old value", "cause_evidence": ["evidence-1"]}}
+            return super().decide_sync(messages, schema, **kwargs)
+
+    path = tmp_path / "app.py"
+    path.write_text("old value\n")
+    gateway, _, _ = _gateway(tmp_path, DebugModel("coding"))
+    session_id = gateway.create_session(frontend="test")
+    result = gateway.process_turn(session_id, "Why does the handler return the old value?", protocol_read_only=True)
+    assert not result.error, result.answer
+    assert result.payload["mode"] == "debug"
+    assert "returns the old value" in result.answer
+    assert result.changed_files == []
+    assert path.read_text() == "old value\n"
 
 
 def test_entry_router_exposes_authorized_ssh_requests_to_coding_workflow() -> None:
@@ -2167,6 +2271,8 @@ def test_entry_router_retries_and_corrects_invalid_memory_task_id_on_non_memory_
                     "reason": "Modify repository files.",
                     "required_sources": ["repository"],
                     "memory_task_id": "",
+                    "coding_workflow": coding_choice("Update the README"),
+                    "source_message_ids": ["msg_user"],
                     "runtime_capability_change": False,
                 })
             )
@@ -2190,7 +2296,7 @@ def test_entry_router_retries_and_corrects_invalid_memory_task_id_on_non_memory_
         context=EntryRouteContext(
             session_id="session_test",
             conversation_id="session_test",
-            turn_id="turn_test",
+            turn_id="turn_test", user_message_id="msg_user",
         ),
     )
 
@@ -2327,7 +2433,7 @@ def test_entry_router_repairs_unoffered_task_for_new_plan_request() -> None:
             return SimpleNamespace(
                 content=json.dumps(
                     {
-                        "route": "coding",
+                        "route": "repository",
                         "confidence": 0.98,
                         "reason": "Create a repository implementation plan.",
                         "required_sources": ["repository"],
@@ -2365,14 +2471,14 @@ def test_entry_router_repairs_unoffered_task_for_new_plan_request() -> None:
         )
     )
     decision = EntryRouter(llm=Model(), registry=registry).route(
-        user_prompt="/plan Fix the routing policy",
+        user_prompt="Suggest a plan to fix the routing policy",
         context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
     )
 
     assert len(calls) == 2
     assert calls[1]["previous_invalid_decision"]["related_task_id"] == "stale-task"
     assert "slash-command task such as /plan" in calls[1]["correction"]
-    assert decision.route == "coding"
+    assert decision.route == "repository"
     assert decision.related_task_id == ""
     assert decision.execution_policy.mode == "auto"
 

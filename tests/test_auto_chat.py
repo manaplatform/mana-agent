@@ -13,23 +13,18 @@ from mana_agent.multi_agent.runtime.auto_chat import (
     AutoChatMode,
     AutoChatSessionState,
     apply_auto_chat_tool_policy,
-    classify_auto_chat_intent,
     load_auto_chat_state,
     mode_allows_mutation,
-    resolve_auto_followup,
     save_auto_chat_state,
     tool_allowed_for_mode,
 )
 
 
-def test_auto_chat_intent_classifier_modes() -> None:
-    assert classify_auto_chat_intent("Where is transaction approval handled?") == AutoChatMode.ANSWER_ONLY
-    assert classify_auto_chat_intent("Give me a plan for duplicate detection") == AutoChatMode.PLAN_ONLY
-    assert classify_auto_chat_intent("Fix duplicate transaction approval") == AutoChatMode.EDIT
-    assert classify_auto_chat_intent("review my changes") == AutoChatMode.REVIEW
-    assert classify_auto_chat_intent("run tests") == AutoChatMode.VERIFY
-    assert classify_auto_chat_intent("analyze project") == AutoChatMode.ANALYZE
-    assert classify_auto_chat_intent("execute the plan") == AutoChatMode.EDIT
+def test_prompt_display_does_not_classify_user_intent() -> None:
+    from mana_agent.agent.selection import select_mode
+
+    assert select_mode("Fix the handler and execute the plan") == AutoChatMode.ANSWER_ONLY
+    assert select_mode("Explain the handler", explicit_mode="edit") == AutoChatMode.EDIT
 
 
 def test_auto_chat_mutation_guard_blocks_non_edit_modes() -> None:
@@ -98,21 +93,6 @@ def test_auto_chat_verification_policy_keeps_explicit_test_tools() -> None:
     assert "run_command" in policy["allowed_tools"]
     assert "run_script_once" in policy["allowed_tools"]
     assert tool_allowed_for_mode("run_command", AutoChatMode.VERIFY) is True
-
-
-def test_auto_chat_followup_reuses_compact_state() -> None:
-    state = AutoChatSessionState(
-        last_mode="answer_only",
-        last_task="Where is approval handled?",
-        relevant_files=["src/payments.py"],
-        summary="Approval is handled by approve_payment.",
-    )
-
-    resolved = resolve_auto_followup("do it", state)
-
-    assert "Previous auto-chat task context" in resolved
-    assert "Where is approval handled?" in resolved
-    assert "src/payments.py" in resolved
 
 
 def test_auto_chat_state_roundtrip(tmp_path) -> None:

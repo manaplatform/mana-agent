@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
-from mana_agent.agent.mode import ModePhase, PlanRevision, PlanStep
+from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase, PlanRevision, PlanStep
 from mana_agent.agent.plan_service import EvidenceRequest, PlanService
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
+from mana_agent.execution.autonomous_controller import AutonomousExecutionController
 from mana_agent.gateway.lane_coordinator import LaneCoordinator
 from mana_agent.gateway.mode_workflow import ModeWorkflow, validate_step_patch
 from mana_agent.human_inbox import default_human_inbox_service
@@ -53,6 +55,15 @@ def inspection_batch(*evidence):
     return {"action": "inspect_batch", "reason": "Inspect independent locations", "evidence": list(evidence)}
 
 
+def workflow_choice(*, mode="auto", effect="write", clarification=""):
+    return CodingWorkflowDecision(
+        mode=mode, requested_effect=effect, objective="Add the handler behavior",
+        reason="A repository behavior is missing", investigation_scope="app.py and its tests",
+        expected_result="The handler returns a value", risk_and_uncertainty="Potential caller regression",
+        verification_requirements=("Run the focused handler check",), clarification=clarification,
+    )
+
+
 @pytest.fixture
 def mode_gateway(tmp_path):
     root = tmp_path / "project"
@@ -64,7 +75,10 @@ def mode_gateway(tmp_path):
     gateway = SimpleNamespace(
         root=root, _lane_coordinator=lane,
         _workspaces=SimpleNamespace(store=SimpleNamespace(get_session=lambda _: session)),
-        _autonomous_controller=SimpleNamespace(config=AutonomousExecutionConfig()),
+        _autonomous_controller=AutonomousExecutionController(
+            config=AutonomousExecutionConfig(), supervisor=lane.execution_supervisor,
+            taskboard=lane.taskboard,
+        ),
         human_inbox_service=default_human_inbox_service(branch_controller=lane),
         _entry_router=SimpleNamespace(llm=None), _coding_agent=None,
         _event_sink=None, _append_session_message=lambda *a, **kw: None,
@@ -79,6 +93,146 @@ def mode_gateway(tmp_path):
 
     lane.set_human_resume_dispatcher(resume)
     return gateway, workflow
+
+
+@pytest.mark.parametrize("backend", ["internal", "external"])
+def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, monkeypatch, backend):
+    gateway, workflow = mode_gateway
+    operation = {"action": "inspect", "reason": "Inspect the handler", "evidence": file_evidence("app.py")}
+    gateway._entry_router.llm = Decisions(operation, draft(), {"disposition": "in_scope", "reason": "Only app.py differs"})
+
+    def propose(_prompt, **kwargs):
+        task = next(row for row in workflow.board.list_tasks() if row.mode_workflow.get("mode") == "auto")
+        assert task.mode_workflow["plan"]["draft"]["steps"][0]["step_id"] == "fix"
+        assert task.mode_workflow["phase"] == "executing"
+        assert kwargs["execution_mode"] == "read_only"
+        assert (gateway.root / "app.py").read_text() == "before\n"
+        patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    async def verify(root, command, **kwargs):
+        assert (root / "app.py").read_text() == "after\n"
+        return {"passed": True, "exit_code": 0, "output": "focused check passed"}
+
+    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode=backend)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    from mana_agent.approval.models import ApprovalMode
+    from mana_agent.approval.policy import set_approval_mode
+
+    set_approval_mode(ApprovalMode.FULL_ACCESS)
+    result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
+                            workflow=workflow_choice(), source_message_ids=("user-1",))
+    assert result.status == "success", result.message
+    assert result.data["verification"][0]["passed"]
+    task = workflow.board.get_task(result.data["task_id"])
+    assert task.mode_workflow["evidence"][0]["id"] == "evidence-1"
+    assert task.mode_workflow["approved_digest"] == ""
+    assert not task.mode_workflow.get("inbox_id")
+
+
+def test_auto_switches_to_debug_on_the_same_task_with_observed_evidence(mode_gateway):
+    gateway, workflow = mode_gateway
+
+    class Reassessment(Decisions):
+        def decide_sync(self, messages, schema):
+            payload = super().decide_sync(messages, schema)
+            if payload["decision"]["action"] == "switch_workflow":
+                payload["decision"]["task_id"] = self.inputs[-1]["task_id"]
+            return payload
+
+    gateway._entry_router.llm = Reassessment(
+        {"action": "inspect", "reason": "Inspect the handler", "evidence": file_evidence("app.py")},
+        {"action": "switch_workflow", "reason": "The handler exists but is broken", "mode": "debug",
+         "evidence_ids": ["evidence-1"], "task_id": "filled from request"},
+        {"action": "block", "reason": "The repair needs an unavailable dependency"},
+    )
+    result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
+                            workflow=workflow_choice(), source_message_ids=("user-1",))
+    assert result.status == "error"
+    assert result.data["mode"] == "debug"
+    inputs = gateway._entry_router.llm.inputs
+    assert {item["task_id"] for item in inputs} == {result.data["task_id"]}
+    assert inputs[-1]["evidence"] == inputs[-2]["evidence"]
+    assert (gateway.root / "app.py").read_text() == "before\n"
+
+
+def test_auto_uses_the_required_worktree_and_preserves_dirty_primary_checkout(mode_gateway, monkeypatch):
+    gateway, workflow = mode_gateway
+    from mana_agent.approval.models import ApprovalMode
+    from mana_agent.approval.policy import set_approval_mode
+
+    subprocess.run(["git", "init", "-q"], cwd=gateway.root, check=True)
+    subprocess.run(["git", "add", "app.py"], cwd=gateway.root, check=True)
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "commit", "-qm", "Fixture"], cwd=gateway.root, check=True)
+    source = gateway.root / "app.py"
+    source.write_text("uncommitted user work\n")
+    gateway._entry_router.llm = Decisions(
+        {"action": "inspect", "reason": "Inspect app.py", "evidence": file_evidence("app.py")},
+        draft(), {"disposition": "in_scope", "reason": "Only app.py differs"},
+    )
+
+    def propose(_prompt, **kwargs):
+        worktree = Path(kwargs["coding_mode_root"])
+        assert worktree != gateway.root
+        assert (worktree / "app.py").read_text() == "before\n"
+        patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    async def verify(root, command, **kwargs):
+        assert root != gateway.root
+        assert (root / "app.py").read_text() == "after\n"
+        return {"passed": True, "exit_code": 0, "output": "verified in worktree"}
+
+    gateway._coding_agent = SimpleNamespace(
+        generate=propose, active_engine_mode="external",
+        codex_settings=SimpleNamespace(worktree_isolation=True),
+    )
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    set_approval_mode(ApprovalMode.FULL_ACCESS)
+    result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
+                            workflow=workflow_choice(), source_message_ids=("user-1",))
+    assert result.status == "success", result.message
+    assert "Verified worktree:" in result.message
+    assert source.read_text() == "uncommitted user work\n"
+
+
+def test_auto_repairs_failed_verification_without_repeating_completed_patch(mode_gateway, monkeypatch):
+    gateway, workflow = mode_gateway
+    from mana_agent.approval.models import ApprovalMode
+    from mana_agent.approval.policy import set_approval_mode
+
+    second = draft()
+    second["draft"]["steps"][0]["step_id"] = "repair"
+    second["draft"]["steps"][1]["depends_on"] = ["repair"]
+    review = {"disposition": "in_scope", "reason": "Only app.py changes"}
+    model = Decisions(
+        {"action": "inspect", "reason": "Read app.py", "evidence": file_evidence("app.py")},
+        draft(), review, second, review,
+    )
+    gateway._entry_router.llm = model
+    writes = []
+
+    def propose(_prompt, **kwargs):
+        prior = (gateway.root / "app.py").read_text().strip()
+        new = {"before": "after", "after": "repaired"}[prior]
+        writes.append((prior, new))
+        patch = f"*** Begin Patch\n*** Update File: app.py\n@@\n-{prior}\n+{new}\n*** End Patch"
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    async def verify(root, command, **kwargs):
+        passed = (root / "app.py").read_text() == "repaired\n"
+        return {"passed": passed, "exit_code": 0 if passed else 1, "output": "observed handler behavior"}
+
+    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode="internal")
+    set_approval_mode(ApprovalMode.FULL_ACCESS)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
+                            workflow=workflow_choice(), source_message_ids=("user-1",))
+    assert result.status == "success", result.message
+    assert writes == [("before", "after"), ("after", "repaired")]
+    assert [result["passed"] for result in result.data["verification"]] == [False, True]
+    assert len({row["task_id"] for row in model.inputs if "task_id" in row}) == 1
 
 
 def test_draft_waits_for_exact_approval_and_executes_ordered_steps(mode_gateway, monkeypatch):

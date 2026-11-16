@@ -613,7 +613,13 @@ class LaneCoordinator:
         completion_contract: Sequence[CompletionContract] = (),
         compensation_strategy: str = "",
         important_constraints: Sequence[str] = (),
+        execution_workspace: Path | None = None,
     ) -> LaneReservation:
+        assigned_root = execution_workspace.resolve() if execution_workspace is not None else self.root
+        if assigned_root != self.root:
+            parent = self.execution_supervisor.store.get_task_or_none(parent_task_id) if parent_task_id else None
+            if parent is None or Path(parent.workspace_path).resolve() != assigned_root:
+                raise PermissionError("A child execution must use its parent's assigned worktree")
         if not self.execution_supervisor.config.enabled:
             raise LaneCoordinatorError(
                 "execution supervisor is disabled; no gateway task was created"
@@ -792,7 +798,7 @@ class LaneCoordinator:
                 assigned_agent=f"lane:{lane_id.value}",
                 assigned_model=model,
                 runtime_provider=provider,
-                workspace_path=self.root,
+                workspace_path=assigned_root,
                 routing_decision_id=effective_routing_decision_id,
                 side_effect_classification=side_effect,
                 completion_contract=initial_contract,
@@ -1228,6 +1234,7 @@ class LaneCoordinator:
         self._stop_supervisor_heartbeats(task_id)
         verified = False
         if state == LaneTaskState.COMPLETED:
+            workspace_root = Path(self.execution_supervisor.get_task(task_id).workspace_path or self.root)
             lookup = self.execution_supervisor.get_verified_execution_result(task_id)
             if lookup.status == EscrowLookupStatus.FOUND and lookup.is_verified and lookup.task is not None:
                 supervised = lookup.task
@@ -1238,7 +1245,7 @@ class LaneCoordinator:
             for changed in execution.changed_files:
                 path = Path(changed)
                 try:
-                    relative = path.relative_to(self.root)
+                    relative = path.relative_to(workspace_root)
                 except ValueError:
                     relative = path
                 if path.is_file():
