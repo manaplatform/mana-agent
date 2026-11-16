@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- OpenRouter Claude models in automatic API mode use OpenRouter's native Messages endpoint with the existing model ID, credential, and provider preferences. See [OpenRouter Messages for Claude](docs/regressions/debug-plan-execution-contract.md#openrouter-messages-for-claude).
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'openrouter_claude_mode_decision or openrouter_model_protocol'`.
 - AUTO, DEBUG, and PLAN investigators can list immediate repository directories before choosing a scoped search. The tool schema explains when a search needs paths, a targeted glob, or an authorized level-4 scope. See [discovery without a file path](docs/regressions/intent-driven-repository-discovery.md#starting-an-investigation-without-a-file-path).
 - User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'no_reported_location or investigation_batch_rejects or investigation_tool_schema or repository_audit'`.
 - Direct Anthropic mode decisions use a Claude-compatible strict schema in the native Messages API. Mana enforces the original constraints when decoding the decision. See [direct Anthropic decisions](docs/regressions/debug-plan-execution-contract.md#direct-anthropic-decisions).

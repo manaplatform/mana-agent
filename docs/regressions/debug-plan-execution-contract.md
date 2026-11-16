@@ -113,6 +113,16 @@ The native Messages adapter previously forwarded the original application schema
 
 Run `venv/bin/python -m pytest -q tests/llm/test_engine.py::test_anthropic_mode_decision_uses_messages_and_preserves_validation tests/llm/test_providers.py`. The direct transport fixture checks the upstream model ID, the native Claude request format, and one same-provider correction when a response exceeds the original length bound. Tests and live provider acceptance were not run by the agent.
 
+## OpenRouter Messages for Claude
+
+With `MANA_LLM_API_MODE = "auto"` and the active assignment `openrouter/anthropic/claude-haiku-5.5`, a model request still failed with HTTP 400. The native Anthropic schema change applied to the direct Anthropic adapter. The OpenRouter engine still used Chat Completions because automatic protocol selection considered only the provider. The original 400 did not retain the provider's detailed rejection reason.
+
+Automatic protocol selection now sends OpenRouter's `anthropic/…` model IDs to its Messages endpoint. It keeps the OpenRouter credential, catalog base, exact model ID, and configured provider preferences. Capability lookup uses the same protocol as execution. The Messages adapter sends the schema in `output_config.format` and Mana validates the result against the original contract. An explicit API mode still controls OpenRouter's transport. Restart Mana-Agent to load the new code. Existing tasks keep their assigned provider and model, and continuation receipts remain bound to their original protocol. HTTP rejections end the request without switching API protocols. [OpenRouter Claude integration](https://openrouter.ai/docs/guides/coding-agents/claude-code-integration#how-it-works)
+
+**Do not reintroduce** provider-only protocol selection for OpenRouter Claude models in automatic mode or use direct Anthropic credentials on an OpenRouter request.
+
+Run `venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'openrouter_claude_mode_decision or openrouter_model_protocol'`. The fixtures use the SDK with an in-memory HTTP transport to check the exact URL, bearer authentication, response schema, and one request on HTTP 400. They also check capability lookup and explicit mode selection. These checks and a live provider request were not run by the agent.
+
 ## Action payload regression
 
 Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.

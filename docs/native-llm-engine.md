@@ -9,8 +9,9 @@ The migration inventory records baseline usages and replacements in
 
 `mana_agent.llm` contains JSON/Pydantic messages, content parts, tool calls, usage,
 requests, responses, continuation receipts, streaming events and callable bindings.
-OpenAI uses native Responses, Anthropic uses Messages, and OpenRouter, NVIDIA,
-xAI and configured custom endpoints use Chat Completions. Credentials, base URLs,
+OpenAI uses native Responses and Anthropic uses Messages. In automatic API mode,
+OpenRouter uses its Messages endpoint for Claude and Chat Completions for its
+other models. NVIDIA, xAI and custom endpoints use Chat Completions by default. Credentials, base URLs,
 headers, query parameters and explicit provider request settings stay isolated.
 SDK retries are disabled. Only bounded connection-establishment retries may repeat
 the same request; malformed decisions and interrupted streams never change format,

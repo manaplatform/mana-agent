@@ -346,3 +346,89 @@ def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path
         assert "maxLength" not in objective
         assert "maxLength: 2000" in objective["description"]
     assert requests[0]["extra_body"] == requests[1]["extra_body"]
+
+
+@pytest.mark.parametrize(("status", "error"), [
+    (200, None),
+    (400, "ModeDecision model decision failed.*HTTP 400"),
+])
+def test_openrouter_claude_mode_decision_uses_messages(tmp_path, native_profile, monkeypatch, status, error):
+    import json
+
+    import httpx
+    from anthropic import AsyncAnthropic
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.engine import create_model
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if status == 400:
+            return httpx.Response(status, json={"error": {"message": "fixture rejection"}})
+        decision = {"action": "block", "reason": "The supplied facts are insufficient."}
+        return httpx.Response(200, json={
+            "id": "message-1", "type": "message", "role": "assistant",
+            "model": "anthropic/claude-haiku-5.5", "stop_reason": "end_turn", "stop_sequence": None,
+            "content": [{"type": "text", "text": json.dumps({"decision": decision})}],
+            "usage": {"input_tokens": 40, "output_tokens": 10},
+        })
+
+    def sdk_client(**options):
+        return AsyncAnthropic(**options, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-unrelated-anthropic-key")
+    monkeypatch.setattr("anthropic.AsyncAnthropic", sdk_client)
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **options: pytest.fail("Expected the native Messages client"))
+    model = create_model(provider="openrouter", model="openrouter/anthropic/claude-haiku-5.5",
+                         api_key="fixture-openrouter-key", base_url="https://openrouter.ai/api/v1",
+                         n=1, output_token_parameter="max_completion_tokens",
+                         extra_body={"provider": {"order": ["Anthropic"]}})
+    monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
+    service = PlanService(tmp_path, llm=model)
+
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            service.next_decision("debug", {"request": "Explain the handler's return value"})
+    else:
+        assert service.next_decision("debug", {"request": "Explain the handler's return value"}).action == "block"
+
+    assert model.provider == "openrouter"
+    assert model.endpoint == "anthropic_messages"
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.url == "https://openrouter.ai/api/v1/messages"
+    assert request.headers["authorization"] == "Bearer fixture-openrouter-key"
+    assert "x-api-key" not in request.headers
+    body = json.loads(request.content)
+    assert body["model"] == "anthropic/claude-haiku-5.5"
+    assert body["provider"] == {"order": ["Anthropic"], "require_parameters": True}
+    assert body["max_tokens"] > 0
+    assert "response_format" not in body
+    assert "n" not in body
+    assert "output_token_parameter" not in body
+    output_format = body["output_config"]["format"]
+    assert output_format["type"] == "json_schema"
+    assert "minLength" not in output_format["schema"]["$defs"]["BlockDecision"]["properties"]["reason"]
+
+
+@pytest.mark.parametrize(("model", "mode", "expected"), [
+    ("anthropic/claude-haiku-5.5", "auto", "anthropic_messages"),
+    ("openrouter/~anthropic/claude-haiku-latest", "auto", "anthropic_messages"),
+    ("anthropic/claude-haiku-5.5", "chat_completions", "chat_completions"),
+    ("deepseek/deepseek-v4.1-flash", "auto", "chat_completions"),
+])
+def test_openrouter_model_protocol_agrees_with_capability_lookup(model, mode, expected, monkeypatch):
+    from mana_agent.config.model_capabilities import resolve_model_capability
+    from mana_agent.llm.engine import create_model
+    from mana_agent.llm.registry import resolve_profile
+
+    monkeypatch.setattr("mana_agent.config.user_config.get_setting",
+                        lambda name, default=None: mode if name == "MANA_LLM_API_MODE" else default)
+
+    engine = create_model(provider="openrouter", model=model, api_key="fixture-openrouter-key")
+
+    assert engine.endpoint == expected
+    assert resolve_profile("openrouter", model, catalog_records=[]).transport == expected
+    assert resolve_model_capability("openrouter", model, catalog_records=[]).transport == expected

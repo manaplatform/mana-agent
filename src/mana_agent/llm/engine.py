@@ -319,7 +319,8 @@ class NativeLLMEngine:
             request_error = ProviderRequestError(failure.safe_message, provider=request.provider,
                 status_code=status_code, failure=failure)
         error = request_error or exc
-        metadata = {"provider": request.provider, "model": request.model, "error_type": type(error).__name__}
+        metadata = {"provider": request.provider, "model": request.model, "transport": self.endpoint,
+                    "error_type": type(error).__name__}
         if isinstance(error, ProviderRequestError) and error.failure is not None:
             metadata["reason_code"] = error.failure.error_code
         _emit_inference_activity("model.failed", title="Model request failed", status="failed",

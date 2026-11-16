@@ -7,6 +7,8 @@ Set `OPENROUTER_API_KEY` in the configuration UI (or secure Mana configuration),
 
 The model catalog is fetched from `https://openrouter.ai/api/v1/models`, cached after a successful request, and shown with its source. OpenRouter's advertised tool, structured-output, reasoning, and image-input capabilities are used to filter incompatible role assignments. You can override the optional attribution values with `OPENROUTER_HTTP_REFERER` and `OPENROUTER_TITLE`; they are sent only to OpenRouter. `OPENROUTER_PROVIDER_PREFERENCES` is reserved for OpenRouter request preferences and is never passed to other providers.
 
+With `MANA_LLM_API_MODE = "auto"`, Claude catalog IDs such as `anthropic/claude-haiku-5.5` use OpenRouter's `/api/v1/messages` endpoint and the configured OpenRouter key. Other OpenRouter models use Chat Completions in automatic mode. [OpenRouter Claude integration](https://openrouter.ai/docs/guides/coding-agents/claude-code-integration#how-it-works)
+
 The execution fabric is local-only by default. Existing users need no remote
 configuration: trusted tool commands are explicitly routed to `local-process`.
 Provider configuration contains credential references, never credential values.

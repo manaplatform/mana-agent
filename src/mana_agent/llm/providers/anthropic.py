@@ -19,8 +19,24 @@ class AnthropicProvider:
                  headers: dict[str, str] | None = None, query: dict[str, str] | None = None,
                  timeout: float = 600, client: Any = None,
                  volatile_continuations: dict | None = None):
-        self.options = dict(api_key=api_key, base_url=base_url, default_headers=headers,
+        self.provider = provider
+        # The SDK appends /v1/messages to its base URL.
+        sdk_base_url = base_url.rstrip("/").removesuffix("/v1")
+        self.options = dict(api_key=api_key, base_url=sdk_base_url, default_headers=headers,
                             default_query=query, timeout=timeout, max_retries=0)
+        if provider == "openrouter":
+            # The oldest supported SDK defines Omit here without re-exporting it.
+            from anthropic._types import Omit
+
+            if not api_key:
+                raise ValueError("Configure OPENROUTER_API_KEY to use OpenRouter Messages")
+            headers = {name: value for name, value in (headers or {}).items()
+                       if name.lower() not in {"authorization", "x-api-key"}}
+            # Older SDKs read ambient keys unless api_key is set and may prefer
+            # that field over auth_token. Explicitly replace the wire headers.
+            self.options.update(api_key="", auth_token=api_key, default_headers={
+                **headers, "Authorization": f"Bearer {api_key}", "X-Api-Key": Omit(),
+            })
         self.client = client
         self.owns_client = client is None
         self.volatile_continuations = volatile_continuations if volatile_continuations is not None else {}
@@ -41,6 +57,22 @@ class AnthropicProvider:
                 **body.get("extra_body", {}).get("output_config", {}), "effort": effort}}
         for key in ("callbacks", "config", "stream"):
             body.pop(key, None)
+        if self.provider == "openrouter":
+            if body.pop("n", 1) not in (None, 1):
+                raise ValueError("OpenRouter Messages requires one response choice")
+            output_field = body.pop("output_token_parameter", None)
+            if output_field is not None and output_field not in {"max_tokens", "max_completion_tokens", "max_output_tokens"}:
+                raise ValueError("Unknown output token field for the native adapter")
+            if request.response_schema or "provider" in body:
+                extra = dict(body.get("extra_body") or {})
+                provider = body.pop("provider", {})
+                provider_extra = extra.get("provider", {})
+                if not isinstance(provider, dict) or not isinstance(provider_extra, dict):
+                    raise ValueError("OpenRouter provider routing settings must be an object")
+                extra["provider"] = {**provider, **provider_extra}
+                if request.response_schema:
+                    extra["provider"]["require_parameters"] = True
+                body["extra_body"] = extra
         maximum = body.pop("max_output_tokens", body.pop("max_completion_tokens", None))
         if maximum is not None:
             body["max_tokens"] = maximum
