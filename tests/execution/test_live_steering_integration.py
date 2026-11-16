@@ -759,7 +759,7 @@ def test_submit_steering_during_routing_queues_and_injects() -> None:
             "mode": "auto", "requested_effect": "write", "objective": "Implement the requested change",
             "reason": "The user requested a feature", "investigation_scope": "Affected entry points",
             "expected_result": "The feature is implemented", "risk_and_uncertainty": "Check callers",
-            "verification_requirements": ["Run the focused check"], "clarification": "",
+            "verification_requirements": ["Run the focused check"],
         },
         "reason": "Followed user live steering guidance",
     }))

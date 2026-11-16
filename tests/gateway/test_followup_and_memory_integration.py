@@ -80,6 +80,10 @@ class _RouteModel:
         self.payloads: list[dict[str, Any]] = []
 
     def decide_sync(self, messages, schema, **kwargs):
+        if isinstance(schema, dict) and schema["title"] == "ModeDecision":
+            return {"decision": {"action": "clarify", "reason": "The required behavior is unspecified",
+                                 "questions": [{"field_id": "behavior", "prompt": "What should the new behavior be?",
+                                                "reason": "Required for the implementation contract"}]}}
         raw = self.generate_sync(messages, **kwargs)
         if isinstance(raw, schema):
             return raw
@@ -146,7 +150,6 @@ class _RouteModel:
                         "expected_result": "Related task is implemented",
                         "risk_and_uncertainty": "Confirm the exact target first",
                         "verification_requirements": ["Check the relevant behavior"],
-                        "clarification": "Which file should receive this change?",
                     } if route == "coding" else None),
                     "source_message_ids": [self.payloads[-1]["context"]["user_message_id"]] if route == "coding" else [],
                 }

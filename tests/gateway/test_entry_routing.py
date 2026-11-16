@@ -44,7 +44,7 @@ def coding_choice(objective, *, mode="auto", effect="write"):
         "mode": mode, "requested_effect": effect, "objective": objective,
         "reason": "Handle repository behavior", "investigation_scope": "The handler in app.py",
         "expected_result": "The updated handler", "risk_and_uncertainty": "Possible caller regression",
-        "verification_requirements": ["Check the result"], "clarification": "",
+        "verification_requirements": ["Check the result"],
     }
 
 
@@ -1064,31 +1064,74 @@ def test_coding_cannot_use_an_assistant_message_as_write_authority():
         router.route(user_prompt="What are the options?", context=context)
 
 
-def test_gateway_models_debug_diagnosis_without_mutation_authority(tmp_path, monkeypatch):
+def test_coding_route_must_leave_clarification_to_the_workflow():
+    response = {"route": "coding", "confidence": 0.9, "reason": "Diagnose the failure",
+                "required_sources": ["repository"], "response_kind": "clarification",
+                "clarification_question": "Which handler?", "source_message_ids": ["user-1"],
+                "coding_workflow": coding_choice("Diagnose the failure", mode="debug", effect="read")}
+    router = EntryRouter(llm=SimpleNamespace(generate_sync=lambda messages: response), registry=_registry())
+    context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t", user_message_id="user-1")
+    with pytest.raises(EntryRoutingError, match="decide clarification during the workflow"):
+        router.route(user_prompt="Diagnose the handler in app.py", context=context)
+
+
+def test_saved_coding_route_ignores_legacy_workflow_question():
+    decision = EntryRoutingDecision(
+        route="coding", confidence=1, reason="Diagnose the failure", required_sources=("repository",),
+        coding_workflow={**coding_choice("Diagnose the failure", mode="debug", effect="read"),
+                         "clarification": "Which handler?"},
+    )
+    assert decision.coding_workflow.mode == "debug"
+    assert "clarification" not in decision.to_dict()["coding_workflow"]
+
+
+@pytest.mark.parametrize("followup", [False, True])
+def test_gateway_models_debug_diagnosis_without_mutation_authority(tmp_path, followup):
+    report = "The handler in app.py returns the old value when given an empty argument. Explain why."
+    request = "Explain this without editing files." if followup else report
+    mode_inputs = []
+
     class DebugModel(_RouteModel):
         def generate_sync(self, messages, **kwargs):
             response = super().generate_sync(messages, **kwargs)
             value = json.loads(response.content)
             if value.get("route") == "coding":
-                value["coding_workflow"] = coding_choice("Diagnose the failure", mode="debug", effect="read")
+                value["coding_workflow"] = coding_choice("H", mode="debug", effect="read")
+                if followup:
+                    value["resolved_request"] = report
             return SimpleNamespace(content=json.dumps(value))
 
         def decide_sync(self, messages, schema, **kwargs):
-            if isinstance(schema, dict) and (payload := json.loads(messages[-1].content))["evidence"]:
-                return {"decision": {"action": "diagnose", "reason": "The inspected file explains the failure",
-                                     "root_cause": "The handler returns the old value", "cause_evidence": ["evidence-1"]}}
+            if isinstance(schema, dict) and schema["title"] == "ModeDecision":
+                payload = json.loads(messages[-1].content)
+                mode_inputs.append(payload)
+                if payload["evidence"]:
+                    return {"decision": {"action": "diagnose", "reason": "The inspected file explains the failure",
+                                         "root_cause": "The handler returns the old value", "cause_evidence": ["evidence-1"]}}
             return super().decide_sync(messages, schema, **kwargs)
 
     path = tmp_path / "app.py"
     path.write_text("old value\n")
     gateway, _, _ = _gateway(tmp_path, DebugModel("coding"))
     session_id = gateway.create_session(frontend="test")
-    result = gateway.process_turn(session_id, "Why does the handler return the old value?", protocol_read_only=True)
+    if followup:
+        gateway._append_session_message(session_id, role="user", content=report, turn_id="prior")
+        gateway._append_session_message(session_id, role="assistant", content="I can inspect it.", turn_id="prior")
+    result = gateway.process_turn(session_id, request, protocol_read_only=True)
     assert not result.error, result.answer
     assert result.payload["mode"] == "debug"
     assert "returns the old value" in result.answer
     assert result.changed_files == []
     assert path.read_text() == "old value\n"
+    assert [data["request"] for data in mode_inputs] == [request, request]
+    assert mode_inputs[0]["coding_workflow"]["objective"] == "H"
+    assert mode_inputs[0]["resolved_request"] == (report if followup else "")
+    assert [row["content"] for row in mode_inputs[0]["conversation_context"]] == (
+        [report, "I can inspect it."] if followup else []
+    )
+    state = gateway._lane_coordinator.taskboard.get_task(result.payload["task_id"]).mode_workflow
+    assert state["questions_asked"] == 0
+    assert not state.get("inbox_id")
 
 
 def test_entry_router_exposes_authorized_ssh_requests_to_coding_workflow() -> None:

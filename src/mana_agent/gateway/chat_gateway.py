@@ -10215,7 +10215,7 @@ class AgentChatGateway:
                 kwargs["state"].pop("_batch_coding_runtime", None)
 
     def _execute_coding_workflow(
-        self, decision: EntryRoutingDecision, context: EntryRouteContext, ask_service: Any,
+        self, decision: EntryRoutingDecision, context: EntryRouteContext, text: str, ask_service: Any,
         options: dict[str, Any], task_id: str, policy: TaskExecutionPolicy,
     ) -> ChatTurnResult:
         workflow = validate_coding_workflow(
@@ -10254,10 +10254,17 @@ class AgentChatGateway:
         existing = task.mode_workflow
         if existing and existing.get("repair") and not write:
             raise PermissionError("This request cannot resume repository writes")
+        resolved_request = text if context.atomic_child else (
+            options.get("_canonical_execution_text") or decision.resolved_request
+        )
+        followup = (resolved_request or decision.related_task_id or task.previous_task_id
+                    or any(source != context.user_message_id for source in decision.source_message_ids))
         rendered = self.mode_workflow.start(
-            context.session_id, workflow.objective, task_id=task_id, mode=workflow.mode,
+            context.session_id, task.user_request, task_id=task_id, mode=workflow.mode,
             repair=write, read_only=bool(options.get("protocol_read_only")),
             workflow=workflow, source_message_ids=decision.source_message_ids,
+            resolved_request=resolved_request,
+            conversation_messages=tuple(context.conversation_context.get("messages", ())) if followup else (),
             related_task_id=decision.related_task_id,
             runtime_capability_change=decision.runtime_capability_change,
             execution_policy=policy.model_dump(mode="json"),
@@ -10285,6 +10292,8 @@ class AgentChatGateway:
         # The lane task owns ordinary route output; integration owns a distinct
         # coordinator-created wiring child.
         child_task_id = lane_task_id
+        if decision.route == "coding" and (decision.clarification_question or decision.response_kind != "task"):
+            raise EntryRoutingError("A coding workflow must route as a task and decide clarification during the workflow")
         if decision.clarification_question:
             return ChatTurnResult(answer=decision.clarification_question, mode="route-clarification",
                                   payload={"status": "waiting", "goal_satisfied": False, "entry_route": "conversation"})
@@ -10295,7 +10304,7 @@ class AgentChatGateway:
             checkpoint = state.get("feature_integration_checkpoint") or {}
             execution = self._lane_coordinator.inspect_task(lane_task_id)
             legacy_core = bool(
-                workflow and workflow.requested_effect == "write" and not workflow.clarification
+                workflow and workflow.requested_effect == "write"
                 and execution.checkpoint_id == options["_validated_legacy_core_checkpoint"]
                 and checkpoint.get("gateway_task_id") == lane_task_id
                 and checkpoint.get("boundary") == "after_core_implementation"
@@ -10304,7 +10313,7 @@ class AgentChatGateway:
                 and checkpoint["core_result"].get("status") in {"completed", "success"}
             )
         if decision.route == "coding" and not legacy_core:
-            return self._execute_coding_workflow(decision, context, ask_service, options, lane_task_id, policy)
+            return self._execute_coding_workflow(decision, context, text, ask_service, options, lane_task_id, policy)
         text = options.get("_canonical_execution_text") or decision.resolved_request or text
         execution_text = text
         pending_steering_items = [

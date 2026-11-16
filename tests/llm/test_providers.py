@@ -54,6 +54,47 @@ def test_openrouter_structured_output_requires_parameters_and_preserves_endpoint
     assert "extra_body" not in adapter.encode(request())
 
 
+def test_openrouter_claude_mode_schema_preserves_local_constraints():
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import strict_schema
+
+    adapter = OpenAIProvider(provider="openrouter", api_key="test", base_url="https://example.org",
+                              endpoint="chat_completions")
+    schema = ModeDecision.model_json_schema()
+    selected = InferenceRequest(provider="openrouter", model="anthropic/claude-haiku-5.5",
+                                messages=[UserMessage("Explain the handler")], response_schema=schema)
+    body = adapter.encode(selected)
+    output_format = body["response_format"]["json_schema"]
+    wire = output_format["schema"]
+    assert output_format["strict"]
+    assert body["extra_body"]["provider"]["require_parameters"]
+    assert wire["properties"]["decision"]["anyOf"] == schema["properties"]["decision"]["anyOf"]
+    investigate = wire["$defs"]["InvestigateDecision"]
+    assert investigate["properties"]["action"]["const"] == "investigate"
+    assert "objective" in investigate["required"]
+    objective = investigate["properties"]["objective"]
+    assert "maxLength" not in objective
+    assert "maxLength: 2000" in objective["description"]
+    assert objective["pattern"] == r"\S"
+    report = wire["$defs"]["ModeDebuggingReport"]["properties"]["local_evidence"]
+    assert "maxItems" not in report
+    assert report["minItems"] == 1
+    assert "maxItems: 20" in report["description"]
+
+    def normalize(objective):
+        content = json.dumps({"decision": {"action": "investigate", "reason": "Read the caller",
+            "objective": objective, "scope": "app.py", "initial_repository_scope": ""}})
+        return adapter.normalize({"choices": [{"message": {"content": content}}]}, selected).content
+
+    assert ModeDecision.model_validate_json(normalize("Trace the return value"), strict=True).decision.action == "investigate"
+    with pytest.raises(StructuredOutputError):
+        normalize("x" * 2001)
+
+    assert selected.response_schema == ModeDecision.model_json_schema()
+    other_model = selected.model_copy(update={"model": "openai/fixture"})
+    assert adapter.encode(other_model)["response_format"]["json_schema"]["schema"] == strict_schema(schema)
+
+
 @pytest.mark.parametrize(("content", "diagnostic"), [
     ("fixture-sensitive-output", "not valid JSON"),
     ('{"value": "ok", "unexpected": "fixture-sensitive-output"}', "did not match the requested structured-output schema"),

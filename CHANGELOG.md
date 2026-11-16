@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Mode decisions sent to Claude through OpenRouter now express unsupported schema bounds in field descriptions and enforce the original bounds locally. Provider HTTP rejections give the status in the mode result and activity. See [OpenRouter Claude decision rejection](docs/regressions/debug-plan-execution-contract.md#openrouter-claude-decision-rejection).
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_providers.py::test_openrouter_claude_mode_schema_preserves_local_constraints tests/llm/test_engine.py::test_mode_decision_reports_provider_http_failure_without_replaying`.
+- AUTO, DEBUG, and PLAN read the original request before deciding whether to ask for clarification. Only a validated workflow decision opens a clarification for information that requires user input. See [clarification regression](docs/regressions/debug-plan-execution-contract.md#clarifications-caused-by-a-shortened-request).
+- User verification: `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py`.
 - AUTO, DEBUG, and PLAN delegate repository investigation only when they need evidence. The selected chat model uses native read tools in one bounded session, and the main agent saves progress and observations on TaskBoard. See [investigation latency](docs/regressions/debug-plan-execution-contract.md#investigation-latency).
 - User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py tests/llm/test_providers.py`.
 - Terminal clarification now stays open for explicit answers and resumes the original AUTO, DEBUG, or PLAN task with its saved evidence. Local replies use the assigned Mana reviewer when applicable, and follow-up questions are shown after a resumed task pauses again. See [clarification wait and resume](docs/regressions/debug-plan-execution-contract.md#clarification-wait-and-resume).

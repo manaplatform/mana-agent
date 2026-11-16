@@ -2,7 +2,9 @@
 
 Describe the repository change or problem in ordinary chat. The gateway model selects **AUTO** for implementation or **DEBUG** for investigation and repair. Use **PLAN** when you want to review a revision before implementation. The global logging flag is still called `--debug`.
 
-When Mana needs your answers in any of these workflows, the task pauses at its saved checkpoint. The TUI opens an answer form and interactive console chat asks for each answer. After submission, Mana continues the same task with its existing evidence. Choose **Later** or press Enter at a console answer prompt to leave the task pending in chat. You can also submit the full set with `/inbox answer <item-id> '<JSON answers keyed by question ID>'`, or use `mana-agent inbox answer <item-id> --answer '<JSON answers keyed by question ID>'` from a separate terminal.
+Mana reads the original request, relevant conversation context for follow-ups, and any saved answers before deciding what to do. The workflow asks only for missing information that you need to provide and that affects whether work can continue. It uses repository investigation for questions that the checkout can answer.
+
+When the workflow requests an answer, it pauses at its saved checkpoint. The TUI opens an answer form and interactive console chat asks for each answer. After submission, Mana continues the same task with its existing evidence. Choose **Later** or press Enter at a console answer prompt to leave the task pending in chat. You can also submit the full set with `/inbox answer <item-id> '<JSON answers keyed by question ID>'`, or use `mana-agent inbox answer <item-id> --answer '<JSON answers keyed by question ID>'` from a separate terminal.
 
 When Mana needs repository evidence, the main agent delegates one focused question to a read-only coding session on the selected chat model. The model uses native tools for related searches and file reads. The main agent saves the observations on TaskBoard, then decides whether to diagnose, draft, ask a question, or stop. Each investigation has one bounded allowance and reports any gaps it could not resolve.
 
@@ -18,7 +20,7 @@ DEBUG and AUTO can switch when the model cites new observed evidence on the same
 
 - In chat or the TUI, use `/plan <request>`. Use `/plan` by itself to inspect the active task or start planning your next message. `/mode plan` and `mana-agent chat --planning-mode` enter the same workflow. Use `/mode auto` to return to ordinary routing after resolving an active plan. A proposal requested in prose is a read-only response.
 - From a terminal, use `mana-agent plan 'Upgrade the connection pool'`. Use `--no-code` for a draft with no execution approval. `--no-save` skips the Markdown export. For `--output`, select a path outside the target checkout. The default export resides under Mana's repository state directory.
-- If a decision would change the implementation, Mana asks through the durable inbox. Select an option or enter a custom answer when available.
+- If the plan depends on a missing choice only you can make, Mana asks through the durable inbox. Select an option or enter a custom answer when available.
 - Review the exact requirements, boundaries, dependencies, file operations, and checks. Use the TUI approval controls or `/approve <item-id>` (`/accept` and `/act` are aliases in that context). In a standalone invocation, use the displayed review prompt or run `mana-agent inbox approve <item-id>`. A bare `--yes` or a Full Access session does not approve a generated revision.
 - Use `/revise <change>` to update the plan. To correct a stored clarification answer, supply a JSON object keyed by its question ID. A new revision requires a new approval. Use `/reject` or the existing cancellation controls to stop the task.
 

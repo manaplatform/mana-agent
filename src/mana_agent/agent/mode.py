@@ -101,7 +101,6 @@ class CodingWorkflowDecision(ModeContract):
     risk_and_uncertainty: str = Field(pattern=r"\S", max_length=2000)
     verification_requirements: tuple[str, ...] = Field(min_length=1, max_length=12)
     requested_effect: Literal["read", "write"]
-    clarification: str = Field(max_length=1000)
 
     @model_validator(mode="after")
     def validate_requirements(self):

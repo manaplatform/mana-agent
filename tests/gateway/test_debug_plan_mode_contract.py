@@ -18,6 +18,7 @@ from mana_agent.config.autonomous_config import AutonomousExecutionConfig
 from mana_agent.execution.autonomous_controller import AutonomousExecutionController
 from mana_agent.execution_supervisor.models import ExecutionState
 from mana_agent.gateway.lane_coordinator import LaneCoordinator
+from mana_agent.gateway.lanes import LaneId
 from mana_agent.gateway.mode_workflow import ModeWorkflow, validate_step_patch
 from mana_agent.human_inbox import default_human_inbox_service
 from mana_agent.human_inbox.models import InboxStatus, ResponseOperation
@@ -66,12 +67,12 @@ class Decisions(FileInvestigator):
         return SimpleNamespace(generate_sync=generate)
 
 
-def workflow_choice(*, mode="auto", effect="write", clarification=""):
+def workflow_choice(*, mode="auto", effect="write"):
     return CodingWorkflowDecision(
         mode=mode, requested_effect=effect, objective="Add the handler behavior",
         reason="A repository behavior is missing", investigation_scope="app.py and its tests",
         expected_result="The handler returns a value", risk_and_uncertainty="Potential caller regression",
-        verification_requirements=("Run the focused handler check",), clarification=clarification,
+        verification_requirements=("Run the focused handler check",),
     )
 
 
@@ -312,6 +313,36 @@ def test_clarification_is_structured_and_kept_in_revision(mode_gateway):
     assert plan.constraints == {"behavior": "reject"}
 
 
+@pytest.mark.parametrize("invalid_field", ["prompt", "reason", "field_id"])
+def test_invalid_clarification_does_not_open_another_wait(mode_gateway, invalid_field):
+    gateway, workflow = mode_gateway
+    question = {"field_id": "missing_policy", "prompt": "What policy should this handler enforce?",
+                "reason": "There is no existing policy and the user must choose the behavior"}
+    next_question = {**question, "field_id": "limit", "prompt": "What limit applies?"}
+    next_question[invalid_field] = question["field_id"] if invalid_field == "field_id" else "  "
+    gateway._entry_router.llm = model = Decisions(
+        {"action": "clarify", "reason": "A user choice blocks the task", "questions": [question]},
+        {"action": "clarify", "reason": "Another question is needed", "questions": [next_question]},
+    )
+    request = "Investigate how the handler should enforce the new policy"
+    waiting = workflow.start("session", request, mode="debug")
+    task_id, inbox_id = waiting.data["task_id"], waiting.data["inbox_id"]
+    assert waiting.next_prompt["questions"][0]["field_id"] == question["field_id"]
+    assert not model.inputs[0]["evidence"]
+
+    workflow.respond("session", inbox_id, ResponseOperation.ANSWER, frontend="cli",
+                     answer={question["field_id"]: "reject"})
+    blocked = workflow.wait_for_response(task_id, inbox_id, timeout=8)
+
+    assert blocked.data["phase"] == "blocked", blocked.message
+    assert blocked.next_prompt is None
+    assert model.inputs[1]["request"] == request
+    state = workflow.board.get_task(task_id).mode_workflow
+    assert state["questions_asked"] == 1
+    assert state["constraints"] == {question["field_id"]: "reject"}
+    assert not state.get("inbox_id")
+
+
 @pytest.mark.parametrize("mode", ["auto", "debug"])
 def test_repository_clarification_resumes_exact_wait_and_preserves_evidence(mode_gateway, monkeypatch, mode):
     from mana_agent.chat_commands import CommandContext, CommandDispatcher, build_default_registry
@@ -392,6 +423,39 @@ def test_repository_clarification_resumes_exact_wait_and_preserves_evidence(mode
     assert model.inputs[-1]["evidence"] == model.inputs[1]["evidence"]
     assert workflow.inbox.repository.get(second_id).status == InboxStatus.ANSWERED
     assert (gateway.root / "app.py").read_text() == "before\n"
+
+
+def test_debug_research_suggestion_requires_a_workflow_clarify_decision(mode_gateway, monkeypatch):
+    from mana_agent.execution.continuation_decision import ContinuationAction
+
+    gateway, workflow = mode_gateway
+    gateway.settings = SimpleNamespace(mana_coding_research_enabled=True)
+    gateway._continuation_evaluator = None
+    suggestion = SimpleNamespace(action=ContinuationAction.WAIT_FOR_USER,
+                                 user_message="Which release should be supported?",
+                                 reason="Determine the supported release")
+    monkeypatch.setattr(gateway._autonomous_controller, "coding_research_runtime", lambda **_: SimpleNamespace(
+        decide=lambda **_: suggestion, context=lambda _: {"findings": []},
+    ))
+    gateway._entry_router.llm = model = Decisions(
+        investigation("app.py"),
+        {"action": "research", "reason": "Check an unfamiliar dependency", "debugging_report": {
+            "unresolved_error": "Unexpected return", "local_evidence": ["evidence-1: old return value"],
+            "missing_external_information": "Return value for the supported release",
+        }},
+        {"action": "diagnose", "reason": "The request already specifies the release",
+         "root_cause": "The handler returned the old value.", "cause_evidence": ["evidence-1"]},
+    )
+
+    result = workflow.start("session", "Diagnose the handler for Widget 2", mode="debug")
+
+    assert result.status == "success", result.message
+    assert model.inputs[-1]["request"] == "Diagnose the handler for Widget 2"
+    suggestion_context = model.inputs[-1]["evidence"][-1]["result"]["clarification_suggestion"]
+    assert suggestion_context["question"] == suggestion.user_message
+    state = workflow.board.get_task(result.data["task_id"]).mode_workflow
+    assert state["questions_asked"] == 0
+    assert not state.get("inbox_id")
 
 
 def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion(mode_gateway, monkeypatch):
@@ -629,11 +693,24 @@ def test_investigation_batch_resume_uses_completed_observations(mode_gateway, mo
     )
     gateway._entry_router.llm = model
 
-    blocked = workflow.start("session", "Inspect two files", mode="debug")
+    request = "Inspect the old handler in app.py and compare its behavior with test_app.py"
+    session = gateway._workspaces.store.get_session("session")
+    reservation = workflow.lane.reserve(normalized_intent=request, lane_id=LaneId.RESEARCH,
+                                        session_id="session", workspace_id=session.workspace_id,
+                                        repository_id=session.primary_repository_id)
+    workflow.lane.start(reservation)
+    blocked = workflow.start("session", request, task_id=reservation.execution.task_id, mode="debug",
+                             workflow=workflow_choice(mode="debug", effect="read"))
     assert blocked.data["phase"] == "blocked"
     task_id = blocked.data["task_id"]
-    saved = workflow.board.get_task(task_id).mode_workflow["evidence"]
-    assert [item["id"] for item in saved] == ["evidence-1"]
+    saved = workflow.board.get_task(task_id).mode_workflow
+    assert [item["id"] for item in saved["evidence"]] == ["evidence-1"]
+    # Reproduce a checkpoint saved before the original request was handed to the mode model.
+    for key in ("request", "resolved_request", "conversation_context"):
+        saved.pop(key)
+    saved["goal"] = saved["coding_decision"]["objective"] = "H"
+    saved["coding_decision"]["clarification"] = "What should I investigate?"
+    workflow.board.update_task(task_id, mode_workflow=saved)
 
     resumed = workflow.retry(task_id)
 
@@ -641,6 +718,9 @@ def test_investigation_batch_resume_uses_completed_observations(mode_gateway, mo
     assert calls == ["app.py", "test_app.py", "test_app.py"]
     assert json.loads(model.native_inputs[1][-1].content)["evidence_levels"] == {"evidence-1": 1}
     assert [item["id"] for item in model.inputs[2]["evidence"]] == ["evidence-1", "evidence-2"]
+    assert model.inputs[1]["request"] == request
+    assert "clarification" not in model.inputs[1]["coding_workflow"]
+    assert resumed.data["task_id"] == task_id
 
 
 def test_programmatic_investigation_preserves_provider_continuation_and_callers(mode_gateway, monkeypatch):

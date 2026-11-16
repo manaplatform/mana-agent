@@ -66,7 +66,7 @@ def _coding_fields(payload):
             "mode": "auto", "requested_effect": "write", "objective": payload["user_prompt"],
             "reason": "Implement the requested change", "investigation_scope": "The named repository file",
             "expected_result": "The requested behavior", "risk_and_uncertainty": "Caller compatibility",
-            "verification_requirements": ["Run the focused check"], "clarification": "",
+            "verification_requirements": ["Run the focused check"],
         },
     }
 

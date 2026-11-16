@@ -1,9 +1,12 @@
 """Typed inference failures; exceptions never select another semantic action."""
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from mana_agent.integrations.provider_failure import ProviderFailure
 
 class InferenceError(RuntimeError):
     pass
@@ -49,12 +52,22 @@ class InferenceTimeoutError(InferenceError):
 
 class ProviderRequestError(InferenceError):
     def __init__(self, message: str, *, provider: str, status_code: int | None = None,
-                 retryable: bool = False, capability_rejection: bool = False):
+                 retryable: bool = False, capability_rejection: bool = False,
+                 failure: ProviderFailure | None = None):
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
         self.retryable = retryable
         self.capability_rejection = capability_rejection
+        self.failure = failure
+
+    @property
+    def public_detail(self) -> str:
+        # Native inference classifies by status alone, with no upstream body.
+        if self.failure is not None and not self.failure.upstream_body_snippet:
+            return self.failure.safe_message
+        status = f" (HTTP {self.status_code})" if self.status_code is not None else ""
+        return f"The selected provider could not complete the request{status}."
 
 
 def format_provider_error(exc: BaseException, *, provider: str | None = None, model: str | None = None) -> str:

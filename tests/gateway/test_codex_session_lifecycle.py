@@ -202,7 +202,7 @@ def test_new_conversation_during_hanging_codex_interrupt_bounds_latency(
 
 
 def _scoped_codex_workflow(gateway, monkeypatch):
-    from mana_agent.agent.plan_service import DraftDecision, FileReadEvidence, InspectDecision, PlanService, ScopeReview
+    from mana_agent.agent.plan_service import DraftDecision, PlanService, ScopeReview
     from mana_agent.approval.models import ApprovalMode
     from mana_agent.approval.policy import set_approval_mode
     from mana_agent.gateway.entry_routing import EntryRoutingDecision
@@ -215,15 +215,20 @@ def _scoped_codex_workflow(gateway, monkeypatch):
                 "mode": "auto", "requested_effect": "write", "objective": user_prompt,
                 "reason": "Request needs a source update", "investigation_scope": "README.md",
                 "expected_result": "README is updated", "risk_and_uncertainty": "Keep scope to the README",
-                "verification_requirements": ["Verify the changed file"], "clarification": "",
+                "verification_requirements": ["Verify the changed file"],
             },
         )
 
     def decide(_service, mode, state, **kwargs):
         if not state["evidence"]:
-            return InspectDecision(action="inspect", reason="Read the current content",
-                                   evidence=FileReadEvidence(tool="read_file", level=1, paths=("README.md",),
-                                                             reason="Scoped input"))
+            state["evidence"].append({
+                "id": "evidence-1",
+                "tool": "read_file",
+                "level": 1,
+                "paths": ["README.md"],
+                "fingerprint": "fp-1",
+                "result": {"content": "existing"},
+            })
         return DraftDecision.model_validate({
             "action": "draft", "reason": "The requested update is scoped",
             "draft": {"objectives": ["Update the README"], "findings": "Read the existing file",

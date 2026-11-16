@@ -12,7 +12,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from mana_agent.llm.errors import (
     CapabilityError, InvalidResponseError, InferenceTimeoutError, ProviderRequestError,
-    StructuredOutputError, describe_decision_validation, format_provider_error,
+    StructuredOutputError, describe_decision_validation,
 )
 from mana_agent.llm.messages import messages_from_records, validate_conversation
 from mana_agent.llm.registry import metadata_binding, resolve_profile
@@ -302,16 +302,30 @@ class NativeLLMEngine:
                     metadata={"summary_source": "provider", "summary_trusted": True, "summary_complete": True,
                         "provider": self.provider, "transport": "direct_responses" if self.endpoint == "responses" else self.endpoint})
 
-    def _failed(self, request: InferenceRequest, reservation: str, exc: BaseException) -> None:
+    def _failed(self, request: InferenceRequest, reservation: str, exc: BaseException) -> ProviderRequestError | None:
         if reservation:
             if getattr(exc, "response_accepted", False):
                 self.context_cost_governor.record_model_call(reservation, usage=getattr(exc, "provider_usage", None),
                     provider=request.provider, model=request.model, estimated_input=[message.content for message in request.messages])
             else:
                 self.context_cost_governor.release_reservation(reservation, reason=f"Inference failed: {type(exc).__name__}")
-        _emit_inference_activity("model.failed", title="Model request failed", status="failed", operation_id=request.request_id,
-                      summary=exc.public_detail if isinstance(exc, InvalidResponseError) else "",
-            metadata={"provider": request.provider, "model": request.model, "error_type": type(exc).__name__})
+        request_error = None
+        status_code = getattr(exc, "status_code", None)
+        if not isinstance(exc, ProviderRequestError) and type(status_code) is int and 400 <= status_code < 600:
+            from mana_agent.integrations.provider_failure import classify_http_status
+
+            failure = classify_http_status(status_code, provider=request.provider, model=request.model,
+                operation="native_inference", endpoint=self.endpoint)
+            request_error = ProviderRequestError(failure.safe_message, provider=request.provider,
+                status_code=status_code, failure=failure)
+        error = request_error or exc
+        metadata = {"provider": request.provider, "model": request.model, "error_type": type(error).__name__}
+        if isinstance(error, ProviderRequestError) and error.failure is not None:
+            metadata["reason_code"] = error.failure.error_code
+        _emit_inference_activity("model.failed", title="Model request failed", status="failed",
+            operation_id=request.request_id, metadata=metadata,
+            summary=error.public_detail if isinstance(error, (InvalidResponseError, ProviderRequestError)) else "")
+        return request_error
 
     async def _refresh_metadata(self) -> None:
         selected = self.profile()
@@ -370,17 +384,11 @@ class NativeLLMEngine:
                     if self.adapter is None:
                         await adapter.close()
         except BaseException as exc:
-            self._failed(request, reservation, exc)
+            request_error = self._failed(request, reservation, exc)
+            if request_error is not None:
+                raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
                 raise InferenceTimeoutError("Selected inference request timed out; no alternate action was attempted") from exc
-            if isinstance(getattr(exc, "status_code", None), int):
-                from mana_agent.integrations.provider_failure import classify_http_status
-                failure = classify_http_status(exc.status_code, provider=self.provider, model=self.model,
-                    operation="native_inference", endpoint=self.endpoint)
-                error = ProviderRequestError(failure.safe_message or failure.user_status(), provider=self.provider,
-                    status_code=exc.status_code, retryable=False)
-                error.failure = failure
-                raise error from exc
             raise
         raise InvalidResponseError("Inference attempt budget is empty")
 
@@ -524,7 +532,9 @@ class NativeLLMEngine:
             if not completed:
                 raise InvalidResponseError("Interrupted stream; reconcile checkpoint before continuing")
         except BaseException as exc:
-            self._failed(request, reservation, exc)
+            request_error = self._failed(request, reservation, exc)
+            if request_error is not None:
+                raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
                 raise InferenceTimeoutError("Inference stream timed out; reconcile before continuing") from exc
             raise

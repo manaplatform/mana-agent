@@ -91,6 +91,18 @@ The mode workflow now keeps the frontend turn ID and redaction context for activ
 
 **Do not reintroduce** substituting the task ID for an available frontend turn ID, publishing provider response text as failure detail, or automatically retrying a provider stop by increasing its budget or changing models.
 
+## OpenRouter Claude decision rejection
+
+On 2026-11-16, a DEBUG turn using `anthropic/claude-haiku-5.5` through OpenRouter started and failed its first mode model request before returning a decision. The turn displayed `Invalid or unavailable ModeDecision model decision (ProviderRequestError)`. The journal recorded the selected model and failed operation but kept no HTTP status. The exact rejection from that turn is unknown.
+
+The OpenRouter Chat Completions adapter sent Claude constraints such as `maxLength` on investigation objectives and `maxItems` in research reports. Claude's structured-output API documents those keywords as unsupported. The adapter now expresses these bounds in provider-facing field descriptions for OpenRouter's Anthropic model namespace. It retains the action discriminator values and required fields. Mana validates the response against the original bounds and typed decision before it can dispatch an action. The provider fixtures previously tested decoding and a simple schema without Claude's unsupported bounds. [Claude structured-output schema limitations](https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations)
+
+Native inference had also emitted the failure activity before classifying the HTTP status. PlanService then collapsed the typed failure into its exception name. Buffered and streaming requests now report the provider and HTTP status in the same model activity and mode result, with the failure code in activity metadata. The classification uses the status alone. HTTP rejections stop the decision without a correction or automatic replay. Existing saved tasks and plans require no migration.
+
+**Do not reintroduce** Claude-incompatible bounds in its provider-facing strict schema, validation against the provider schema alone, or raw provider messages in the public activity.
+
+Run `venv/bin/python -m pytest -q tests/llm/test_providers.py::test_openrouter_claude_mode_schema_preserves_local_constraints tests/llm/test_engine.py::test_mode_decision_reports_provider_http_failure_without_replaying`. The fixtures cover the OpenRouter wire schema, rejection of an overlong decision, buffered and streaming HTTP failures, redaction, and request count. These checks were not run by the agent. To verify live provider compatibility, restart Mana-Agent and use the same model for a read-only DEBUG request such as explaining the return value of a local function.
+
 ## Action payload regression
 
 Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.
@@ -122,6 +134,16 @@ Terminal chat now opens the request linked to the exact session, task, and inbox
 **Do not reintroduce** looking up a clarification by the newest task, using the OS username for a Mana-assigned reviewer, publishing a saved wait as worker activity after its lease expired, or treating question recommendations as answers.
 
 User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py::test_repository_clarification_resumes_exact_wait_and_preserves_evidence tests/test_cli_smoke.py::test_chat_planning_mode_requires_revision_approval_after_clarification tests/test_chat_planning_mode.py tests/human_inbox/test_durable_inbox.py`. For live acceptance, trigger several related questions in AUTO or DEBUG, submit them in the TUI or console, and confirm the same task resumes or presents the next question. Decline to answer once and verify that the saved inbox item remains pending. These checks were not run by the agent.
+
+## Clarifications caused by a shortened request
+
+On 2026-11-16, DEBUG tasks `task_20261116_000024` through `task_20261116_000026` opened clarification waits after the router returned one-character objectives for a 1,636-character request. Two of the waits asked for the task description or expected result. TaskBoard retained the user's request, but the coding dispatch passed the router's objective as the request to the mode model. The decision schema required a nonblank objective, so it accepted those summaries. Gateway fixtures generally used a complete objective and did not expose the loss of context.
+
+Coding dispatch now takes the original request from the same TaskBoard task and supplies the resolved reference and bounded conversation context separately for follow-ups. An older routed task recovers its original request on its next workflow decision. The workflow model uses that information alongside observations and saved answers. A validated `clarify` action opens the inbox only for a material gap that requires user input. Research may suggest a question for the workflow model to evaluate. Validation rejects blank questions and field IDs that already have answers. Outstanding inbox requests and approved plan digests retain their existing format.
+
+**Do not reintroduce** replacing the original request with a routing summary or opening a repository clarification from an entry routing field or research continuation. Ask only for the information missing from the request, relevant conversation, and evidence.
+
+User-owned verification: `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py`. Replay the original request with the same model and confirm DEBUG proceeds without asking for details already supplied. Automated checks and live replay were not run by the agent.
 
 ## Verification
 

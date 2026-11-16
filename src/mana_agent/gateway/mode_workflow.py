@@ -25,6 +25,7 @@ from mana_agent.agent.repository_investigation import (
     read_tool_schemas, run_repository_investigation,
 )
 from mana_agent.batch.policy import BatchPending, TaskExecutionPolicy
+from mana_agent.chat.activity import safe_text
 from mana_agent.chat_commands.models import CommandResult
 from mana_agent.execution_supervisor.errors import StaleLeaseError
 from mana_agent.execution_supervisor.models import ExecutionState
@@ -37,7 +38,9 @@ from mana_agent.human_inbox.models import (
 )
 from mana_agent.human_inbox.repository import InboxConcurrentUpdateError
 from mana_agent.multi_agent.core.types import TaskStatus
-from mana_agent.services.activity_context import ActivityContext, activity_scope, current_activity_context, emit_activity
+from mana_agent.services.activity_context import (
+    ActivityContext, activity_protected_text, activity_scope, current_activity_context, emit_activity,
+)
 from mana_agent.tools.apply_patch import extract_patch_operations, safe_apply_patch
 from mana_agent.utils.redaction import redact_secrets
 
@@ -175,19 +178,26 @@ class ModeWorkflow:
         execution_policy: dict | None = None,
         reviewer_id: str = "",
         workflow: CodingWorkflowDecision | None = None,
+        resolved_request: str = "",
+        conversation_messages: tuple[dict[str, Any], ...] = (),
         runtime_capability_change: bool = False,
         source_message_ids: tuple[str, ...] = (),
         related_task_id: str = "",
         model: str = "",
         provider: str = "",
     ) -> CommandResult:
-        goal = str(redact_secrets(goal)).strip()
+        activity = current_activity_context()
+        protected = (activity.protected_text if activity and activity.conversation_id == session_id
+                     else activity_protected_text(getattr(self.gateway, "settings", None)))
+        goal = safe_text(goal, limit=None, protected=protected).strip()
         policy = TaskExecutionPolicy.model_validate(execution_policy or {})
         if mode == "auto" and workflow is None:
             return CommandResult(status="error", message="AUTO requires a validated coding workflow decision.")
         if workflow and (mode != workflow.mode or mode == "plan"
                          or (repair and workflow.requested_effect != "write")):
             return CommandResult(status="error", message="Coding workflow authority does not match the requested action.")
+        if not goal and workflow:
+            return CommandResult(status="error", message="The original repository request is missing from TaskBoard.")
         if not goal:
             return CommandResult(status="input_required", message="What would you like to plan?")
         if output and Path(output).expanduser().resolve().is_relative_to(self.gateway.root):
@@ -198,7 +208,6 @@ class ModeWorkflow:
                 return self.describe(current)
         if not task_id:
             record = self.gateway._workspaces.store.get_session(session_id)
-            activity = current_activity_context()
             reservation = self.lane.reserve(
                 normalized_intent=f"{mode}: {goal}",
                 lane_id=LaneId.RESEARCH,
@@ -236,7 +245,17 @@ class ModeWorkflow:
             "reviewer_id": reviewer_id or getpass.getuser(),
         }
         if workflow:
+            resolved_request = safe_text(resolved_request, limit=None, protected=protected).strip()
             state.update({
+                "request": goal,
+                "goal": resolved_request or goal,
+                "resolved_request": resolved_request if resolved_request != goal else "",
+                "conversation_context": [
+                    {"message_id": message["message_id"], "role": message["role"],
+                     "content": safe_text(message.get("content"), limit=None, protected=protected)}
+                    for message in conversation_messages
+                    if message.get("message_id") and message.get("role") in {"user", "assistant"}
+                ],
                 "coding_decision": redact_secrets(workflow.model_dump(mode="json")),
                 "mode_reason": str(redact_secrets(workflow.reason)),
                 "routing_decision_id": self._check_live(task_id).routing_decision_id,
@@ -257,7 +276,7 @@ class ModeWorkflow:
                     manager = WorkspaceManager(self.gateway.root, repository_id=task.primary_repository_id)
                     state["worktree_required"] = True
                     self._persist(task_id, state)
-                    workspace = manager.create_for_task(task_id, title=goal, session_id=session_id,
+                    workspace = manager.create_for_task(task_id, title=state["goal"], session_id=session_id,
                                                         assigned_agent_id="coding_agent")
                     manager.transition(task_id, WorkspaceStatus.RUNNING)
                     state["isolated_workspace"] = {
@@ -276,15 +295,6 @@ class ModeWorkflow:
                     supervisor.store.update_task(task_id, bind_workspace)
                 except Exception as exc:
                     return self._block(task_id, state, f"Could not prepare the required isolated worktree: {exc}")
-        if workflow and workflow.clarification.strip():
-            with self._activity(task_id, state, read_only=True):
-                self._transition(task_id, state, Phase.CLARIFICATION_REQUIRED)
-                prompt = str(redact_secrets(workflow.clarification))
-                state["questions_asked"] = 1
-                item = self._wait(task_id, state, questions=(
-                    {"field_id": "objective_detail", "prompt": prompt, "choices": {}, "allow_free_form": True},
-                ))
-                return self._describe_item(task_id, state, item)
         if workflow:
             with self._activity(task_id, state, read_only=True):
                 self._transition(task_id, state, Phase.UNDERSTANDING, state["mode_reason"])
@@ -300,6 +310,7 @@ class ModeWorkflow:
         if activity and activity.conversation_id != task.session_id:
             activity = None
         turn_id = activity.execution_id if activity else ""
+        protected = activity.protected_text if activity else activity_protected_text(getattr(self.gateway, "settings", None))
         governor = getattr(getattr(self.gateway, "_stack", None), "context_cost_governor", None)
         identity = governor.scoped_execution_identity(
             task_id=task_id, root_task_id=task.root_task_id, attempt_id=durable.attempt_id,
@@ -313,7 +324,7 @@ class ModeWorkflow:
             root_task_id=task.root_task_id, repository_id=task.primary_repository_id,
             attempt_id=execution.supervisor_attempt_id, lease_token=execution.supervisor_lease_token,
             attempt_generation=durable.attempt_generation, supervisor=supervisor,
-            protected_text=activity.protected_text if activity else (),
+            protected_text=protected,
             execution_registry=getattr(self.gateway, "_execution_registry", None),
             execution_lane=execution.owning_lane.value,
             parent_task_id=task.parent_task_id or "",
@@ -339,6 +350,17 @@ class ModeWorkflow:
             with self._activity(task_id, state, read_only=True):
                 activity = current_activity_context()
                 with activity.publication():
+                    if state.get("coding_decision") and "request" not in state:
+                        # Older workflows saved the routing objective as their goal.
+                        request = safe_text(self.board.get_task(task_id).user_request, limit=None,
+                                            protected=activity.protected_text).strip()
+                        if not request:
+                            raise RuntimeError("The original repository request is missing from TaskBoard.")
+                        state["request"] = request
+                        if not state.get("plan"):
+                            state["goal"] = request
+                        state["coding_decision"].pop("clarification", None)
+                        self._persist(task_id, state)
                     handoff = state.get("investigation", {})
                     if handoff.get("status") == "running" and handoff["attempt_id"] != activity.attempt_id:
                         # The prior attempt's reserved allowance remains charged. Its saved reads are reusable.
@@ -383,7 +405,9 @@ class ModeWorkflow:
             "runtime_capability_change": state.get("runtime_capability_change", False),
             "completed_step_ids": list(state["done_steps"]),
             "recheck_required": state.get("required_recheck"),
-            "request": state["goal"], "constraints": state["constraints"], "skills": state["skills"],
+            "request": state.get("request", state["goal"]), "resolved_request": state.get("resolved_request", ""),
+            "conversation_context": state.get("conversation_context", []),
+            "constraints": state["constraints"], "skills": state["skills"],
             "evidence": _investigation_context(observations),
             "investigation_report": report,
             "revision_request": state.get("revision_request", ""),
@@ -409,8 +433,6 @@ class ModeWorkflow:
             ))
             return None
         if decision.action == "clarify":
-            if set(q.field_id for q in decision.questions).intersection(state["constraints"]):
-                raise ValueError("The model asked for an already resolved decision")
             question_total = state["questions_asked"] + len(decision.questions)
             if state["question_limit"] is not None and question_total > state["question_limit"]:
                 raise RuntimeError("The clarification limit was reached with material decisions unresolved")
@@ -435,10 +457,7 @@ class ModeWorkflow:
             self._transition(task_id, state, Phase.INVESTIGATING, state["mode_reason"])
             return None
         if decision.action == "research":
-            waiting = self._research(task_id, state, decision.debugging_report)
-            if waiting:
-                return waiting
-            return None
+            return self._research(task_id, state, decision.debugging_report)
         if decision.action == "diagnose":
             if not set(decision.cause_evidence).issubset(scope.evidence_levels):
                 raise ValueError("Diagnosis referenced unknown evidence")
@@ -469,7 +488,6 @@ class ModeWorkflow:
         self, task_id: str, state: dict, service: PlanService, decision: InvestigateDecision,
         allowance: InvestigationAllowance,
     ) -> None:
-        from mana_agent.chat.activity import safe_text
         from mana_agent.coding.models import WorkspaceContext
         from mana_agent.gateway.lanes import validate_tool_permission
         from mana_agent.multi_agent.agents.tool_runner_agent import ToolRunnerAgent, bind_tool_authority
@@ -583,7 +601,7 @@ class ModeWorkflow:
         state["decision_count"] = used + 1
         self._persist(task_id, state)
 
-    def _research(self, task_id, state, report):
+    def _research(self, task_id, state, report) -> CommandResult | None:
         from mana_agent.execution.continuation_decision import ContinuationAction
         from mana_agent.gateway.lanes import validate_tool_permission
 
@@ -609,15 +627,17 @@ class ModeWorkflow:
         )
         status = {"debugging_report": redact_secrets(report.model_dump(mode="json")), "status": "waiting"}
         decision = runtime.decide(goal=state["goal"], result=status)
-        if decision.action == ContinuationAction.WAIT_FOR_USER:
-            self._transition(task_id, state, Phase.CLARIFICATION_REQUIRED)
-            questions = [{"field_id": decision.decision_id, "prompt": decision.user_message or decision.reason,
-                          "choices": {}, "recommended_choice": "", "allow_free_form": True}]
-            return self._describe_item(task_id, state, self._wait(task_id, state, questions=questions))
         if decision.action == ContinuationAction.BLOCKED:
             return self._block(task_id, state, decision.reason)
+        observation = runtime.context(status)
+        if decision.action == ContinuationAction.WAIT_FOR_USER:
+            protected = current_activity_context().protected_text
+            observation["clarification_suggestion"] = {
+                "question": safe_text(decision.user_message, protected=protected),
+                "reason": safe_text(decision.reason, protected=protected),
+            }
         evidence = {"id": f"evidence-{len(state['evidence']) + 1}", "fingerprint": canonical_digest(status),
-                    "level": 0, "result": runtime.context(status)}
+                    "level": 0, "result": observation}
         if any(row["fingerprint"] == evidence["fingerprint"] and row["result"] == evidence["result"]
                for row in state["evidence"]):
             raise RuntimeError("External investigation produced no new evidence")

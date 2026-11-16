@@ -424,7 +424,7 @@ def _cli_coding_route(user_prompt, context):
             "mode": "auto", "requested_effect": "write", "objective": user_prompt,
             "reason": "Implement the requested update", "investigation_scope": "app.py",
             "expected_result": "Updated app behavior", "risk_and_uncertainty": "Check the updated behavior",
-            "verification_requirements": ["Run the focused check"], "clarification": "",
+            "verification_requirements": ["Run the focused check"],
         },
     )
 

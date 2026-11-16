@@ -243,3 +243,54 @@ def test_mode_decision_reports_why_the_provider_stopped_correction(
     assert failed["operation_id"] == requests[-1].request_id
     assert "fixture-protected-response" not in str(exc.value)
     assert "fixture-protected-response" not in str(activity)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(("status", "reason_code"), [
+    (400, "upstream_invalid_request"),
+    (429, "upstream_rate_limited"),
+])
+def test_mode_decision_reports_provider_http_failure_without_replaying(
+    tmp_path, native_profile, monkeypatch, stream, status, reason_code,
+):
+    from types import SimpleNamespace
+
+    import httpx
+    from openai import APIStatusError
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.chat.activity import project_activity
+    from mana_agent.llm.providers.openai import OpenAIProvider
+
+    requests, activity = [], []
+    protected = "fixture-provider-body-containing-private-request-text"
+
+    async def create(**body):
+        requests.append(body)
+        response = httpx.Response(status, request=httpx.Request("POST", "https://example.org/chat/completions"))
+        raise APIStatusError(protected, response=response, body={"error": {"message": protected}})
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    adapter = OpenAIProvider(provider="openrouter", api_key="test", base_url="https://example.org",
+                              endpoint="chat_completions", client=client)
+    model = NativeLLMEngine(provider="openrouter", model="anthropic/claude-haiku-5.5", api_key="test",
+                            base_url="https://example.org", endpoint="chat_completions",
+                            parameters={"stream": stream}, adapter=adapter)
+    monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
+    monkeypatch.setattr("mana_agent.llm.engine._emit_inference_activity",
+                        lambda event, **fields: activity.append(project_activity({"type": event, **fields})))
+
+    with pytest.raises(RuntimeError, match=rf"ModeDecision model decision failed.*HTTP {status}") as exc:
+        PlanService(tmp_path, llm=model).next_decision("debug", {"request": "Explain the handler's return value"})
+
+    assert len(requests) == 1
+    assert requests[0]["model"] == model.model
+    assert requests[0]["response_format"]["type"] == "json_schema"
+    assert not requests[0].get("tools")
+    failed = next(event for event in activity if event["type"] == "model.failed")
+    started = next(event for event in activity if event["type"] == "model.started")
+    assert failed["operation_id"] == started["operation_id"]
+    assert f"HTTP {status}" in failed["summary"]
+    assert failed["metadata"]["reason_code"] == reason_code
+    assert protected not in str(exc.value)
+    assert protected not in str(activity)

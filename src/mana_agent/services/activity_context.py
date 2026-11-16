@@ -123,6 +123,14 @@ def observed_activity(title: str):
     return decorate
 
 
+def activity_protected_text(settings: Any) -> tuple[str, ...]:
+    values = (str(getattr(settings, name, "") or "") for name in (
+        "openai_api_key", "openrouter_api_key", "nvidia_api_key", "anthropic_api_key",
+        "xai_api_key", "mana_github_token", "mana_api_token",
+    ))
+    return tuple(value for value in values if len(value) >= 8)
+
+
 def activity_turn(method):
     """Bind the admitted gateway turn, including pre-task routing observations."""
     @wraps(method)
@@ -133,10 +141,8 @@ def activity_turn(method):
         state = gateway._session(session_id)
         state["activity_execution_id"] = turn_id
         settings = getattr(gateway, "settings", None)
-        protected = tuple(str(getattr(settings, name, "") or "") for name in (
-            "openai_api_key", "openrouter_api_key", "nvidia_api_key", "anthropic_api_key", "xai_api_key", "mana_github_token", "mana_api_token"
-        ) if len(str(getattr(settings, name, "") or "")) >= 8)
-        context = ActivityContext(conversation_id=session_id, execution_id=turn_id, protected_text=protected,
+        context = ActivityContext(conversation_id=session_id, execution_id=turn_id,
+                                  protected_text=activity_protected_text(settings),
                                   repository_id=repository_id_for_path(gateway.root),
                                   execution_mode=str(state.get("execution_mode") or ""))
         with activity_scope(context):

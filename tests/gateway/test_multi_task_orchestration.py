@@ -827,7 +827,7 @@ def test_compound_debug_child_uses_the_parent_user_message_and_workflow(tmp_path
                                     "reason": "Inspect the failure", "investigation_scope": "app.py",
                                     "requested_effect": "read", "expected_result": "Explain the cause",
                                     "risk_and_uncertainty": "Cause not yet confirmed",
-                                    "verification_requirements": ["Read the handler"], "clarification": ""},
+                                    "verification_requirements": ["Read the handler"]},
             }
 
         def decide_sync(self, messages, schema, **kwargs):
