@@ -160,6 +160,7 @@ def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
 
 @pytest.mark.parametrize("action,fields", [
     ("inspect", {"evidence"}),
+    ("inspect_batch", {"evidence"}),
     ("clarify", {"questions"}),
     ("draft", {"draft"}),
     ("diagnose", {"root_cause", "cause_evidence", "uncertainty"}),
@@ -229,6 +230,32 @@ def test_mode_evidence_wire_schema_separates_file_reads_from_discovery():
                     {"initial_repository_scope": "explicit_audit"}):
         payload = read.model_dump(mode="json")
         payload["decision"]["evidence"].update(invalid)
+        with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
+            decode_structured(json.dumps(payload), schema)
+
+
+def test_investigation_batch_wire_schema_bounds_independent_operations():
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import decode_structured, strict_schema
+
+    schema = ModeDecision.model_json_schema()
+    evidence = strict_schema(schema)["$defs"]["InspectBatchDecision"]["properties"]["evidence"]
+    assert (evidence["minItems"], evidence["maxItems"]) == (2, 4)
+
+    decision = ModeDecision.model_validate({"decision": {
+        "action": "inspect_batch", "reason": "Read the known file and find a separate symbol",
+        "evidence": [
+            {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Inspect the handler"},
+            {"tool": "find_symbols", "level": 1, "paths": ["tests"], "query": "test_handler",
+             "reason": "Locate the reported test"},
+        ],
+    }})
+    decoded = decode_structured(decision.model_dump_json(), schema)
+    assert ModeDecision.model_validate_json(decoded, strict=True) == decision
+
+    payload = decision.model_dump(mode="json")
+    for count in (1, 5):
+        payload["decision"]["evidence"] = [decision.decision.evidence[0].model_dump(mode="json")] * count
         with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
             decode_structured(json.dumps(payload), schema)
 

@@ -230,6 +230,40 @@ def test_mode_decision_corrects_investigation_scope(tmp_path, native_profile, mo
     assert decision.evidence.prior_evidence == ("evidence-1",)
 
 
+def test_investigation_batch_corrects_glob_used_as_a_literal_path(tmp_path, native_profile, monkeypatch):
+    import json
+
+    from mana_agent.agent.plan_service import PlanService
+
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            search = {"tool": "list_files", "level": 1, "paths": ["tests"], "glob": "tests/**/*.py",
+                      "reason": "Locate the reported test"}
+            if len(requests) == 1:
+                search["paths"] = ["tests/**/*.py"]
+            return ModelResponse(content=json.dumps({"decision": {
+                "action": "inspect_batch", "reason": "Inspect the handler and locate its test",
+                "evidence": [
+                    {"tool": "read_file", "level": 1, "paths": ["app.py"], "reason": "Inspect the handler"},
+                    search,
+                ],
+            }}))
+
+    service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
+    decision = service.next_decision("debug", {"request": "Inspect the handler and locate its test"})
+
+    assert len(requests) == 2
+    assert requests[0].response_schema == requests[1].response_schema
+    correction = requests[1].messages[-1].content
+    assert "Discovery paths must name files or directories inside the repository" in correction
+    assert "tests/**/*.py" not in correction
+    assert decision.action == "inspect_batch"
+    assert decision.evidence[1].paths == ("tests",)
+
+
 def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path, native_profile, monkeypatch):
     import json
 

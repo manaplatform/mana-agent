@@ -45,6 +45,14 @@ class Decisions:
         return {"decision": payload} if schema["title"] == "ModeDecision" else payload
 
 
+def file_evidence(path, **fields):
+    return {"tool": "read_file", "level": 1, "paths": [path], "reason": "Read the named file", **fields}
+
+
+def inspection_batch(*evidence):
+    return {"action": "inspect_batch", "reason": "Inspect independent locations", "evidence": list(evidence)}
+
+
 @pytest.fixture
 def mode_gateway(tmp_path):
     root = tmp_path / "project"
@@ -225,6 +233,91 @@ def test_debug_reads_a_known_file_after_a_repository_audit(mode_gateway):
     assert search["result"]["matches"][0]["file"] == "app.py"
     assert read["level"] == 1
     assert read["result"]["content"] == "before\n"
+
+
+@pytest.mark.parametrize("mode", ["plan", "debug"])
+def test_investigation_batch_reads_multiple_files_in_one_model_decision(mode_gateway, mode):
+    gateway, workflow = mode_gateway
+    (gateway.root / "test_app.py").write_text("assert handler()\n")
+    final = draft() if mode == "plan" else {
+        "action": "diagnose", "reason": "Both files explain the issue", "root_cause": "Old handler value",
+        "cause_evidence": ["evidence-1", "evidence-2"],
+    }
+    gateway._autonomous_controller.config = AutonomousExecutionConfig(max_tool_calls=2, max_model_turns=2)
+    model = Decisions(inspection_batch(file_evidence("app.py"), file_evidence("test_app.py")), final)
+
+    result = workflow.start("session", "Inspect independently known code and test files",
+                            mode=mode, llm=model, no_code=True, save=False)
+
+    assert result.status == "success", result.message
+    assert [call["remaining_tool_calls"] for call in model.inputs] == [2, 0]
+    observations = model.inputs[1]["evidence"]
+    assert [(item["id"], item["result"]["content"]) for item in observations] == [
+        ("evidence-1", "before\n"), ("evidence-2", "assert handler()\n"),
+    ]
+    persisted = workflow.board.get_task(result.data["task_id"]).mode_workflow["evidence"]
+    assert len(persisted) == 2
+    assert all("execution" in item["result"] for item in persisted)
+    assert all("execution" not in item["result"] and "fingerprint" not in item for item in observations)
+
+
+@pytest.mark.parametrize(("second", "tool_budget", "detail"), [
+    (file_evidence("test_app.py"), 1, "remaining tool budget (1)"),
+    (file_evidence("app.py", reason="A different reason"), 2, "Choose distinct inspection operations"),
+    (file_evidence("test_app.py", level=2, prior_evidence=["evidence-1"]), 2, "The next permitted level is 1"),
+])
+def test_investigation_batch_rejects_all_reads_if_any_selection_is_invalid(
+    mode_gateway, monkeypatch, second, tool_budget, detail,
+):
+    gateway, workflow = mode_gateway
+    gateway._autonomous_controller.config = AutonomousExecutionConfig(max_tool_calls=tool_budget)
+    calls = []
+    monkeypatch.setattr(PlanService, "inspect", lambda _, request: calls.append(request))
+    model = Decisions(inspection_batch(file_evidence("app.py"), second))
+
+    result = workflow.start("session", "Inspect two files", mode="debug", llm=model)
+
+    assert result.data["phase"] == "blocked"
+    assert detail in result.message
+    assert not calls
+
+
+def test_investigation_batch_resume_uses_completed_observations(mode_gateway, monkeypatch):
+    from mana_agent.multi_agent.runtime import tool_call_gate
+
+    gateway, workflow = mode_gateway
+    (gateway.root / "test_app.py").write_text("assert handler()\n")
+    calls = []
+    real_dispatch = tool_call_gate.execute_host_operation
+
+    def dispatch(**kwargs):
+        path = kwargs["arguments"]["path"]
+        calls.append(path)
+        if len(calls) == 2:
+            raise PermissionError("Tool dispatch was interrupted")
+        return real_dispatch(**kwargs)
+
+    monkeypatch.setattr(tool_call_gate, "execute_host_operation", dispatch)
+    model = Decisions(
+        inspection_batch(file_evidence("app.py"), file_evidence("test_app.py")),
+        {"action": "inspect", "reason": "Read the outstanding file", "evidence": file_evidence("test_app.py")},
+        {"action": "diagnose", "reason": "Both files explain the issue", "root_cause": "Old handler value",
+         "cause_evidence": ["evidence-1", "evidence-2"]},
+    )
+    gateway._entry_router.llm = model
+
+    blocked = workflow.start("session", "Inspect two files", mode="debug")
+    assert blocked.data["phase"] == "blocked"
+    task_id = blocked.data["task_id"]
+    saved = workflow.board.get_task(task_id).mode_workflow["evidence"]
+    assert [item["id"] for item in saved] == ["evidence-1"]
+
+    resumed = workflow.retry(task_id)
+
+    assert resumed.status == "success", resumed.message
+    assert calls == ["app.py", "test_app.py", "test_app.py"]
+    assert model.inputs[1]["investigation_scope"]["evidence_levels"] == {"evidence-1": 1}
+    assert [item["id"] for item in model.inputs[2]["evidence"]] == ["evidence-1", "evidence-2"]
 
 
 def test_exact_patch_operations_and_protected_paths(tmp_path):

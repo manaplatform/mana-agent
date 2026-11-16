@@ -88,6 +88,28 @@ class ModeContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class CodingWorkflowDecision(ModeContract):
+    """The model's coding choice. Access is still checked at dispatch and at each write."""
+
+    mode: Literal["auto", "debug"]
+    objective: str = Field(pattern=r"\S", max_length=12000)
+    reason: str = Field(pattern=r"\S", max_length=240)
+    investigation_scope: str = Field(pattern=r"\S", max_length=2000)
+    expected_result: str = Field(pattern=r"\S", max_length=2000)
+    risk_and_uncertainty: str = Field(pattern=r"\S", max_length=2000)
+    verification_requirements: tuple[str, ...] = Field(min_length=1, max_length=12)
+    requested_effect: Literal["read", "write"]
+    clarification: str = Field(max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_requirements(self):
+        if any(not item.strip() or len(item) > 1000 for item in self.verification_requirements):
+            raise ValueError("verification requirements must be bounded nonempty statements")
+        if self.mode == "auto" and self.requested_effect != "write":
+            raise ValueError("AUTO requires an explicit implementation request")
+        return self
+
+
 @dataclass(frozen=True)
 class DecisionEntries:
     """Advertise fixed-key records to models and retain dictionaries in saved state."""

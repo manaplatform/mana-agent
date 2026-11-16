@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 from mana_agent.agent.mode import ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
-from mana_agent.agent.plan_service import InvestigationScope, PlanService
+from mana_agent.agent.plan_service import EvidenceRequest, InvestigationScope, PlanService
 from mana_agent.batch.policy import TaskExecutionPolicy
 from mana_agent.chat_commands.models import CommandResult
 from mana_agent.execution_supervisor.models import ExecutionState
@@ -54,6 +54,16 @@ _TRANSITIONS = {
     Phase.VERIFYING: {Phase.EXECUTING, Phase.COMPLETED, Phase.UNDERSTANDING},
     Phase.BLOCKED: {Phase.UNDERSTANDING, Phase.EXECUTING},
 }
+
+
+def _investigation_context(evidence: list[dict]) -> list[dict]:
+    observations = []
+    for item in evidence:
+        result = item["result"]
+        if item["level"] > 0 and isinstance(result, dict):
+            result = {key: value for key, value in result.items() if key not in {"execution", "mutations"}}
+        observations.append({"id": item["id"], "level": item["level"], "result": result})
+    return observations
 
 
 class ModeWorkflow:
@@ -210,8 +220,6 @@ class ModeWorkflow:
             return self._block(task_id, state, str(redact_secrets(str(exc))))
 
     def _plan_or_investigate(self, task_id, state, service):
-        from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
-
         config = self.gateway._autonomous_controller.config
         for _ in range(config.max_model_turns):
             self._check_live(task_id)
@@ -220,35 +228,31 @@ class ModeWorkflow:
             state["decision_count"] = state.get("decision_count", 0) + 1
             self._persist(task_id, state)
             evidence = state["evidence"]
-            scope = InvestigationScope({item["id"]: item["level"] for item in evidence})
+            scope = InvestigationScope(
+                {item["id"]: item["level"] for item in evidence},
+                completed_fingerprints=frozenset(item["fingerprint"] for item in evidence),
+                remaining_tool_calls=max(0, config.max_tool_calls - len(evidence)),
+            )
             decision = service.next_decision(state["mode"], {
                 "request": state["goal"], "constraints": state["constraints"], "skills": state["skills"],
-                "evidence": evidence[-12:], "revision_request": state.get("revision_request", ""),
+                "evidence": _investigation_context(evidence[-12:]),
+                "revision_request": state.get("revision_request", ""),
                 "repair_authorized": state["repair"],
             }, investigation_scope=scope)
             self._check_live(task_id)
-            allowed = ({"inspect", "clarify", "draft", "block"} if state["mode"] == "plan"
-                       else {"inspect", "clarify", "diagnose", "repair", "research", "block"})
+            allowed = ({"inspect", "inspect_batch", "clarify", "draft", "block"} if state["mode"] == "plan"
+                       else {"inspect", "inspect_batch", "clarify", "diagnose", "repair", "research", "block"})
             if decision.action not in allowed:
                 raise ValueError("The model selected an action outside the active mode")
-            if decision.action == "inspect":
-                request = decision.evidence
-                scope.validate(request)
-                if any(item["fingerprint"] == request.fingerprint for item in evidence):
-                    raise ValueError("The model selected an unchanged investigation operation")
-                if len(evidence) >= config.max_tool_calls:
-                    raise RuntimeError("Repository investigation reached the configured tool budget")
-                self._transition(task_id, state, Phase.INVESTIGATING, str(redact_secrets(request.reason))[:240])
-                args = ({"path": request.paths[0], "start_line": request.start_line,
-                         "end_line": request.end_line} if request.tool == "read_file"
-                        else {"query": request.query, "paths": list(request.paths), "glob": request.glob})
-                result = execute_host_operation(
-                    root=self.gateway.root, task_id=task_id, tool_name=request.tool,
-                    arguments=args, effect="read_only", implementation=lambda _: service.inspect(request),
-                )
-                evidence.append({"id": f"evidence-{len(evidence) + 1}", "fingerprint": request.fingerprint,
-                                 "level": request.level, "result": redact_secrets(result)})
-                self._persist(task_id, state)
+            if decision.action in {"inspect", "inspect_batch"}:
+                if decision.action == "inspect":
+                    requests, reason = (decision.evidence,), decision.evidence.reason
+                else:
+                    requests, reason = decision.evidence, decision.reason
+                scope.validate_requests(requests)
+                self._transition(task_id, state, Phase.INVESTIGATING, str(redact_secrets(reason))[:240])
+                for request in requests:
+                    self._inspect(task_id, state, service, request)
                 continue
             if decision.action == "clarify":
                 if set(q.field_id for q in decision.questions).intersection(state["constraints"]):
@@ -286,6 +290,22 @@ class ModeWorkflow:
                 state["uncertainty"] = str(redact_secrets(decision.uncertainty))
             return self._draft(task_id, state, decision.draft, service)
         return self._block(task_id, state, "The configured model decision budget was exhausted.")
+
+    def _inspect(self, task_id: str, state: dict, service: PlanService, request: EvidenceRequest) -> None:
+        from mana_agent.multi_agent.runtime.tool_call_gate import execute_host_operation
+
+        self._check_live(task_id)
+        args = ({"path": request.paths[0], "start_line": request.start_line, "end_line": request.end_line}
+                if request.tool == "read_file"
+                else {"query": request.query, "paths": list(request.paths), "glob": request.glob})
+        result = execute_host_operation(
+            root=self.gateway.root, task_id=task_id, tool_name=request.tool,
+            arguments=args, effect="read_only", implementation=lambda _: service.inspect(request),
+        )
+        evidence = state["evidence"]
+        evidence.append({"id": f"evidence-{len(evidence) + 1}", "fingerprint": request.fingerprint,
+                         "level": request.level, "result": redact_secrets(result)})
+        self._persist(task_id, state)
 
     def _research(self, task_id, state, report):
         from mana_agent.execution.continuation_decision import ContinuationAction
@@ -863,7 +883,7 @@ class ModeWorkflow:
             "If scope is insufficient, return an empty patch string and stop.\n\n"
             + json.dumps({"step": step.model_dump(mode="json"), "scope": plan.draft.scope,
                           "exclusions": plan.draft.exclusions, "user_decisions": plan.constraints,
-                          "evidence": state["evidence"][-8:] if state["mode"] == "debug" else [],
+                          "evidence": _investigation_context(state["evidence"][-8:]) if state["mode"] == "debug" else [],
                           "steering": state.get("guidance", []),
                           "root_cause": state.get("root_cause", "")}, ensure_ascii=False)
         )

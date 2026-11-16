@@ -188,6 +188,11 @@ def _selected_discovery_scope(args: dict[str, Any], *, repository_search_allowed
     raise ValueError(DISCOVERY_DESCRIPTION)
 
 
+def validate_repository_discovery(args: dict[str, Any]) -> None:
+    """Check model-selected discovery arguments without reading the checkout."""
+    _selected_discovery_scope(args)
+
+
 def validate_delegated_discovery(tool: str, args: dict[str, Any]) -> None:
     """Fence scoped parent jobs before handing their arguments to a tool worker."""
     if tool in {"repo_search", "list_files", "find_symbols", "call_graph"}:

@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-16
 
+- Plan and Debug can inspect up to four independent repository targets per model decision, validate discovery arguments before dispatch, and pass observations to the model without execution receipts. See [investigation latency](docs/regressions/debug-plan-execution-contract.md#investigation-latency).
+- User verification: `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py tests/llm/test_providers.py -k 'investigation_batch or mode_decision_wire_schema'`.
 - Mode workflow retry & block synchronization: ensure tasks in `LaneTaskState.RUNNING`, `VERIFYING`, `QUEUED`, or `WAITING` are transitioned via `self.lane.mark_blocked` before the taskboard transitions to `Phase.BLOCKED`, preventing race conditions where rapid retries see an active lane state. Additionally, `retry()` validates that blocked tasks have their lane projection synchronized to `BLOCKED` before requesting a lane retry.
 - User verification: `venv/bin/pytest tests/gateway/test_debug_plan_mode_contract.py::test_resuming_failed_verification_does_not_replay_a_completed_patch -v`.
 - Plan and Debug now provide the current investigation scope and evidence IDs to the model and allow the existing correction attempt to fix invalid scope choices. See [repository discovery regression notes](docs/regressions/intent-driven-repository-discovery.md#investigation-scope-correction-in-plan-and-debug).
