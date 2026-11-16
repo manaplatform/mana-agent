@@ -508,6 +508,9 @@ class ModeWorkflow:
             return self.describe(task)
         if state.get("in_flight_mutation") and not state["in_flight_mutation"].get("action_id"):
             return CommandResult(status="error", message="Reconcile the interrupted patch before resuming or revising this task.")
+        lane_task = self.lane.inspect_task(task_id)
+        if lane_task.state not in self.lane._RETRYABLE_LANE_STATES and state.get("phase") in {Phase.BLOCKED.value, Phase.BLOCKED}:
+            self.lane.mark_blocked(task_id, reason=state.get("result") or "Operator requested mode task recovery")
         reservation = self.lane.retry_task(task_id, session_id=task.session_id, decision=RecoveryDecision(
             decision_id=f"mode-retry:{task_id}:{time.time_ns()}", task_id=task_id,
             action=RecoveryAction.RETRY, retry_category=RetryCategory.MODEL,
@@ -1106,9 +1109,10 @@ class ModeWorkflow:
         state["result"] = message
         durable = self.lane.execution_supervisor.get_task(task_id)
         if durable.cancellation_status is None and durable.state not in {ExecutionState.COMPLETED, ExecutionState.CANCELLED}:
-            self._transition(task_id, state, Phase.BLOCKED)
-            if durable.state == ExecutionState.RUNNING:
+            execution = self.lane.inspect_task(task_id)
+            if execution.state in {LaneTaskState.RUNNING, LaneTaskState.VERIFYING, LaneTaskState.QUEUED, LaneTaskState.WAITING}:
                 self.lane.mark_blocked(task_id, reason=message)
+            self._transition(task_id, state, Phase.BLOCKED)
         return CommandResult(status="error", message=message,
                              data={"task_id": task_id, "phase": state["phase"]})
 
