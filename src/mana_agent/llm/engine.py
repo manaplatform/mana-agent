@@ -10,6 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 from pydantic import BaseModel, ValidationError
+from mana_agent.llm.capabilities import ModelProfile
 from mana_agent.llm.errors import (
     CapabilityError, InvalidResponseError, InferenceTimeoutError, ProviderRequestError,
     StructuredOutputError, describe_decision_validation,
@@ -330,12 +331,11 @@ class NativeLLMEngine:
             summary=error.public_detail if isinstance(error, (InvalidResponseError, ProviderRequestError)) else "")
         return request_error
 
-    async def _refresh_metadata(self) -> None:
-        selected = self.profile()
-        if self.adapter is not None:
-            return
-        if selected.supports("input_text") and selected.supports("output_text") and selected.context_window and selected.max_output_tokens:
-            return
+    async def _refresh_metadata(self, parameters: dict[str, Any] | None = None) -> ModelProfile:
+        selected = self.profile(parameters)
+        required = ("input_text", "output_text", "context_window", "max_output_tokens")
+        if self.adapter is not None or all(selected.supports(name) for name in required):
+            return selected
         from mana_agent.llm.discovery import ModelDiscoveryService
         from mana_agent.config.user_config import load_model_cache
         from datetime import datetime, timedelta, timezone
@@ -348,11 +348,12 @@ class NativeLLMEngine:
                     hashlib.sha256(json.dumps(self.query, sort_keys=True).encode()).hexdigest())
                 if (created.tzinfo and datetime.now(timezone.utc) - created < timedelta(hours=24)
                     and any(isinstance(record, dict) and record.get("_mana_catalog_binding") == binding for record in cached.models)):
-                    return
+                    return selected
             except ValueError:
                 pass
         await ModelDiscoveryService().discover(provider=self.provider, base_url=self.base_url, api_key=self.api_key,
             default_headers=self.headers, query_params=self.query)
+        return self.profile(parameters)
 
     async def generate(self, messages: Any, *, schema: Any = None, continuation: Any = None, **options: Any) -> ModelResponse:
         if options.get("stream", self.parameters.get("stream", False)):
@@ -417,7 +418,9 @@ class NativeLLMEngine:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
 
-        prof = self.profile(options.get("parameters", {}))
+        # Generation refreshes the catalog too, but decisions can fail before
+        # reaching generation or choose a format using outdated evidence.
+        prof = await self._refresh_metadata(options.get("parameters", {}))
         require_native = options.pop("require_native_structured_output", False)
         if require_native:
             prof.require("native_structured_output")

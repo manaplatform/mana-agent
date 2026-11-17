@@ -111,3 +111,15 @@ The [gateway router](../../src/mana_agent/gateway/entry_routing.py) now advertis
 **Do not reintroduce** an unconstrained routing reason or a synthesized explanation that lets an incomplete model decision dispatch.
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/llm/test_engine.py -k entry_route_reason` to check missing and blank reasons, correction through each native response strategy, and terminal failure after one correction. Then restart Mana and resend the original request with the same routing model. The agent did not run the tests or replay the live request.
+
+## Expired capability evidence before entry routing
+
+On 2026-11-17, a chat turn stopped at `entry_route` with `openrouter/deepseek/deepseek-v4.1-flash: output_text=STALE`. The local capability records for the model had expired. A recent model picker cache still listed the model with text output and token limits, but that list was not bound to the inference connection and could not renew its capability evidence.
+
+`NativeLLMEngine.decide()` chose the response format and checked capability evidence before calling `generate()`. With expired evidence, that check could reject the turn before generation reached its built-in catalog refresh. The refresh also used budget accessors that allow stale values, so it could skip renewal when only the token limits had expired.
+
+The [native inference engine](../../src/mana_agent/llm/engine.py) now runs its existing metadata refresh before a decision chooses a response format. The refresh checks for current text and token limit evidence and keeps the existing catalog cache and connection scope. Inference still requires current evidence. Refresh only reads model metadata; it does not run capability probes or substitute another model. There is no configuration or cache migration.
+
+**Do not reintroduce** decision capability checks ahead of metadata refresh, or treat a cached token limit as current solely because it has a numerical value.
+
+Run `venv/bin/python -m pytest -q tests/llm/test_engine.py -k entry_route_refreshes_capability_evidence` to check same-model recovery, expired token limits, and failure before inference when text output is still unverified. Restart Mana and resend the original request to verify the live provider path. To recover on an older build, open `mana-agent --configure`, select OpenRouter, then use **Model capabilities → Refresh metadata** for `deepseek/deepseek-v4.1-flash`. The agent did not run the tests or replay the live request.

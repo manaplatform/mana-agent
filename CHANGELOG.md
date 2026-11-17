@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased — 2026-11-17
+
+- Native decisions refresh expired text and token limit evidence before choosing a response format. Entry routing can recover on the same model when the catalog confirms its capabilities, and still stops before inference if required evidence is missing. See [expired routing capabilities](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md#expired-capability-evidence-before-entry-routing).
+- User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py -k entry_route_refreshes_capability_evidence`.
+
 ## Unreleased — 2026-11-16
 
 - CLI chat auto-execution and custom coding agent orchestration: in CLI chat, auto-execution pipelines now properly preserve flow resets, custom coding agent dispatch (`generate` and `generate_auto_execute`), and balanced execution profiles for edit requests without bypassing Codex gateway entry routing for standard single-shot commands.

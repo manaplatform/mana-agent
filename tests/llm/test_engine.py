@@ -97,6 +97,86 @@ def test_entry_route_reason_correction_stays_on_selected_strategy(
     assert "reason: string too short" in requests[1].messages[-1].content
 
 
+@pytest.mark.parametrize("case", ["expired_profile", "expired_limits", "missing_output_after_refresh"])
+def test_entry_route_refreshes_capability_evidence(tmp_path, native_profile, monkeypatch, case):
+    import hashlib
+    from datetime import datetime, timedelta, timezone
+
+    from mana_agent.config.user_config import save_model_cache
+    from mana_agent.gateway.entry_routing import _invoke_routing_model
+    from mana_agent.llm.capabilities import ModelProfile, metadata_facts
+    from mana_agent.llm.discovery import ModelDiscoveryService
+    from mana_agent.llm.registry import GLOBAL_CAPABILITY_REGISTRY, metadata_binding
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    model = NativeLLMEngine(
+        provider="openrouter", model="deepseek/deepseek-v4.1-flash", api_key="fixture-key",
+        base_url="https://provider.example/api/v1", endpoint="chat_completions",
+    )
+    empty_revision = hashlib.sha256(b"{}").hexdigest()
+    binding = metadata_binding(model.provider, model.base_url, hashlib.sha256(b"fixture-key").hexdigest(),
+                               empty_revision, empty_revision)
+    record = {
+        "id": model.model,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "context_length": 65536,
+        "top_provider": {"max_completion_tokens": 8192},
+        "supported_parameters": ["structured_outputs"],
+    }
+    facts = metadata_facts(record, source="provider", scope=binding)
+    expired = datetime.now(timezone.utc) - timedelta(days=1)
+    for name, fact in facts.items():
+        if case != "expired_limits" or name in {"context_window", "max_output_tokens"}:
+            fact.observed_at = expired - timedelta(days=1)
+            fact.expires_at = expired
+    GLOBAL_CAPABILITY_REGISTRY.merge(ModelProfile(
+        provider=model.provider, model_id=model.model, endpoint=model.base_url, configuration_fingerprint=binding,
+    ), facts)
+    # The model picker can have a recent list without endpoint-bound capability evidence.
+    save_model_cache(model.provider, model.base_url, [record])
+    assert model.profile().is_stale("max_output_tokens")
+    assert model.profile().is_stale("output_text") == (case != "expired_limits")
+
+    calls = []
+
+    async def fetch_records(self, **connection):
+        calls.append("metadata")
+        assert (connection["provider"], connection["base_url"], connection["api_key"]) == (
+            model.provider, model.base_url, model.api_key,
+        )
+        if case == "missing_output_after_refresh":
+            return [{**record, "architecture": {"input_modalities": ["text"]}, "supported_parameters": []}]
+        return [record]
+
+    async def public_catalog(self):
+        return {}
+
+    class Adapter:
+        async def generate(self, request):
+            calls.append("inference")
+            assert (request.provider, request.model) == (model.provider, model.model)
+            assert request.response_schema
+            assert not request.tools
+            return ModelResponse(content='{"route":"conversation","confidence":0.95,'
+                                         '"reason":"Answer directly.","required_sources":["none"]}')
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(ModelDiscoveryService, "fetch_records", fetch_records)
+    monkeypatch.setattr(ModelDiscoveryService, "catalog", public_catalog)
+    monkeypatch.setattr(model, "_adapter", Adapter)
+
+    if case == "missing_output_after_refresh":
+        with pytest.raises(CapabilityError, match="output_text=UNKNOWN"):
+            _invoke_routing_model(model, [UserMessage("Hello")])
+        assert calls == ["metadata"]
+    else:
+        _, decision = _invoke_routing_model(model, [UserMessage("Hello")])
+        assert decision["route"] == "conversation"
+        assert calls == ["metadata", "inference"]
+
+
 def test_timeout_cancels_selected_request_without_other_backend(native_profile, monkeypatch):
     class Adapter:
         cancelled = False
