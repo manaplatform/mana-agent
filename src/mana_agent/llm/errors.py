@@ -30,7 +30,11 @@ def describe_decision_validation(error: ValidationError, schema: dict[str, Any])
 
     def collect(shape: Any) -> None:
         if isinstance(shape, dict):
-            fields.update(shape.get("properties", {}))
+            for name, spec in shape.get("properties", {}).items():
+                fields.add(name)
+                if name in {"action", "tool"} and isinstance(spec, dict):
+                    values = spec.get("enum", [spec.get("const")])
+                    fields.update(value for value in values if isinstance(value, str))
             for value in shape.values():
                 collect(value)
         elif isinstance(shape, list):
@@ -43,7 +47,12 @@ def describe_decision_validation(error: ValidationError, schema: dict[str, Any])
         path = ".".join(str(part) if isinstance(part, int) or part in fields else "<key>"
                         for part in issue["loc"])
         code = issue["type"]
-        message = issue["msg"] if code.startswith("mode_") else code.replace("_", " ")
+        if code.startswith("mode_"):
+            message = issue["msg"]
+        elif code in {"union_tag_invalid", "union_tag_not_found"}:
+            message = "Select an action or tool declared in the schema."
+        else:
+            message = code.replace("_", " ")
         issues.append(f"{path or 'decision'}: {message}")
     return "; ".join(issues)
 

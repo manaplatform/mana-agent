@@ -200,6 +200,7 @@ def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
 
 
 @pytest.mark.parametrize("action,fields", [
+    ("inspect", {"requests"}),
     ("investigate", {"objective", "scope", "initial_repository_scope"}),
     ("clarify", {"questions"}),
     ("draft", {"draft"}),
@@ -220,6 +221,21 @@ def test_mode_decision_wire_schema_exposes_only_the_selected_action_fields(actio
     branch = next(shape for shape in branches if shape["properties"]["action"]["const"] == action)
     assert set(branch["required"]) == {"action", "reason"} | fields
     assert branch["additionalProperties"] is False
+
+
+def test_mode_decision_wire_schema_preserves_inspection_tool_alternatives():
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.providers.openai import strict_schema
+
+    wire = strict_schema(ModeDecision.model_json_schema())
+    items = wire["$defs"]["InspectDecision"]["properties"]["requests"]["items"]
+    assert set(items) == {"anyOf"}
+    tools = set()
+    for ref in items["anyOf"]:
+        branch = wire["$defs"][ref["$ref"].rsplit("/", 1)[-1]]
+        tag = branch["properties"]["tool"]
+        tools.update(tag.get("enum", [tag.get("const")]))
+    assert tools == {"read_file", "ls", "list_files", "repo_search", "find_symbols", "call_graph"}
 
 
 @pytest.mark.parametrize("payload", [

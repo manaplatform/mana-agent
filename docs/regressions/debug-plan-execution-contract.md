@@ -143,6 +143,16 @@ Only transient model decisions use the new response shape. Saved revisions, evid
 
 **Do not reintroduce** independent nullable action payloads in the model-facing schema or infer a missing action or payload from the rest of the response.
 
+## Inspection path correction
+
+On 2026-11-17, AUTO task `task_20261117_000001` saved three successful observations, then blocked after two OpenRouter Claude decision responses. The error named the second request in the new inspection batch and mixed `literal error`, `too short`, and repository-path failures. TaskBoard retained `evidence-1`, `evidence-2`, and `evidence-3`. The journal did not retain the rejected path or identify the selected tool.
+
+The local inspection contract tried every read-tool schema for an invalid request. The diagnostic reported the first four failures across those schemas, so errors from unselected tools could hide the relevant path error from both the model and the user. Each request now selects its local validator by its `tool` value. The provider still receives an `anyOf` with the same tool alternatives. The decision prompt explains which path syntax to use and how to proceed when only protected or out-of-checkout evidence would answer the question. Correction details show the selected tool and field, give a safe next step, and omit rejected values. The same model gets one correction. An invalid batch dispatches no reads, while observations from earlier decisions stay available to the same task on resume. No data migration is needed.
+
+**Do not reintroduce** validation against unselected tool branches or echo rejected path values. Keep protected-path and checkout-confinement checks in place even during correction.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_path_correction or investigation_batch_rejects or mode_decision_wire_schema'`. The fixtures cover same-transport correction, rejection of protected paths before dispatch, redacted diagnostics, and resumption with saved evidence. The agent did not run the fixtures or retry the live task.
+
 ## Investigation latency
 
 On 2026-11-16, the Debug trace for `task_20261116_000021` recorded 18 completed model requests taking 794 seconds in total. The 18 repository operations took under one second total. Three consecutive reads of known files required three provider round trips. Batching independent reads helped, but each dependent read still required the main model to select another typed action. Earlier prompts also repeated execution receipts alongside the observations.

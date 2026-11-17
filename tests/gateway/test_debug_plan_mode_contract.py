@@ -751,6 +751,72 @@ def test_coding_inspection_and_diagnosis_record_provider_usage_for_one_task(mode
     assert result.data["repository_observations"]["workflow_tool_operations"] == 1
 
 
+@pytest.mark.parametrize("corrected", [True, False])
+def test_coding_inspection_path_correction_preserves_saved_evidence(mode_gateway, monkeypatch, corrected):
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    gateway, workflow = mode_gateway
+    (gateway.root / "test_app.py").write_text("assert handler()\n")
+    first = inspection("app.py", evidence_call("test", paths=["test_app.py"]),
+                       evidence_call("layout", "list_files", glob="*"))
+    protected_path = ".git/fixture-private-target"
+    invalid = inspection(None, evidence_call("extension", paths=["app.py"], start_line=2),
+                         evidence_call("protected", "repo_search", paths=[protected_path], query="handler"))
+    conclusion = {"action": "diagnose", "reason": "Use the saved source and test observations",
+                  "root_cause": "Old handler value", "cause_evidence": ["evidence-1", "evidence-2"]}
+    decisions = iter([first, invalid, conclusion] if corrected else [first, invalid, invalid, conclusion])
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            assert [tool["name"] for tool in request.tools] == ["record_decision"]
+            assert request.response_schema is None
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(decisions)},
+            )])
+
+    facts = {name: observation(value, source="provider", confidence=1) for name, value in {
+        "input_text": True, "output_text": True, "tool_calling": True,
+        "context_window": 65536, "max_output_tokens": 1024,
+    }.items()}
+    model = NativeLLMEngine(provider="openrouter", model="anthropic/claude-sonnet-5.5", api_key="fixture",
+                            base_url="https://example.invalid", endpoint="anthropic_messages", adapter=Adapter())
+    profile = ModelProfile(provider=model.provider, model_id=model.model, facts=facts)
+    monkeypatch.setattr(model, "profile", lambda *_: profile)
+    gateway._entry_router.llm = model
+
+    result = workflow.start("session", "Explain the handler behavior", mode="debug", llm=model)
+    task_id = result.data["task_id"]
+    evidence_ids = ["evidence-1", "evidence-2", "evidence-3"]
+    state = workflow.board.get_task(task_id).mode_workflow
+    assert [row["id"] for row in state["evidence"]] == evidence_ids
+    assert state["tool_operations"] == 3
+    assert len(requests) == 3
+    assert requests[1].tools == requests[2].tools
+    correction = requests[2].messages[-1].content
+    detail = ("decision.inspect.requests.1.repo_search.paths.0: Protected repository paths are unavailable. "
+              "Choose an accessible path or report the gap.")
+    assert detail in correction
+    assert "literal error" not in correction
+    assert "too short" not in correction
+    assert protected_path not in correction
+
+    if not corrected:
+        assert result.data["phase"] == "blocked"
+        assert detail in result.message
+        assert protected_path not in result.message
+        result = workflow.retry(task_id)
+        assert result.data["task_id"] == task_id
+        assert list(json.loads(requests[-1].messages[1].content)["evidence_levels"]) == evidence_ids
+
+    assert result.status == "success", result.message
+    assert result.data["repository_observations"]["evidence_ids"] == evidence_ids
+    assert result.data["repository_observations"]["workflow_tool_operations"] == 3
+
+
 def test_coding_inspection_can_exceed_the_former_investigator_caps(mode_gateway):
     gateway, workflow = mode_gateway
     decisions = []
@@ -844,7 +910,7 @@ def test_cancel_during_coding_decision_discards_the_read_batch(mode_gateway, mon
     (evidence_call("second", "list_files", paths=["runtime/../docs"]), 2,
      "paths.0: Discovery paths must name files or directories"),
     (evidence_call("second", "list_files", paths=["./.env/"]), 2,
-     "paths.0: use an unprotected, canonical repository-relative path"),
+     "paths.0: Protected repository paths are unavailable"),
     (evidence_call("second", "list_files", level=4), 2, "The next permitted level is 1"),
     (evidence_call("second", "list_files", level=4, reason=" "), 2, "Provide a reason for the requested level-4 scope"),
     (evidence_call("second", "repo_search", paths=["."], query="before"), 2,
@@ -855,7 +921,7 @@ def test_cancel_during_coding_decision_discards_the_read_batch(mode_gateway, mon
     (evidence_call("second", "ls", paths=["docs"]), 2, "arguments did not match the registered schema"),
     (evidence_call("second", "repo_search", level=4, query="before", initial_repository_scope="explicit_audit"), 2,
      "arguments did not match the registered schema"),
-    (evidence_call("second", paths=[".env"]), 2, "unprotected, canonical repository-relative path"),
+    (evidence_call("second", paths=[".env"]), 2, "Protected repository paths are unavailable"),
     (evidence_call("second", "apply_patch", patch="unauthorized"), 2, "outside the registered read-only set"),
 ])
 def test_investigation_batch_rejects_all_reads_if_any_selection_is_invalid(

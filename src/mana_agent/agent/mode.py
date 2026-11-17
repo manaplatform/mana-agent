@@ -80,9 +80,16 @@ def repository_relative_path(value: str) -> str:
     path = PurePosixPath(value)
     if (not value or path.is_absolute() or path.as_posix() != value or value == "."
             or "\\" in value or ":" in value or any(ord(c) < 32 for c in value)
-            or any(p == ".." or p in {".git", ".mana", ".ssh", "secrets.toml", "credentials.json"}
-                   or p.startswith(".env") for p in path.parts)):
-        raise PydanticCustomError("mode_repository_path", "use an unprotected, canonical repository-relative path")
+            or ".." in path.parts):
+        raise PydanticCustomError(
+            "mode_repository_path", "Use a canonical repository-relative path such as src/app.py.",
+        )
+    if any(p in {".git", ".mana", ".ssh", "secrets.toml", "credentials.json"}
+           or p.startswith(".env") for p in path.parts):
+        raise PydanticCustomError(
+            "mode_repository_protected_path",
+            "Protected repository paths are unavailable. Choose an accessible path or report the gap.",
+        )
     return value
 
 

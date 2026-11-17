@@ -170,7 +170,9 @@ def normalize_discovery_path(raw: str, *, allow_root_listing: bool = False) -> s
     if (not path or parsed.is_absolute() or ".." in parsed.parts
             or normalized != normalized.strip()
             or any(char in path for char in ":*?[") or any(ord(char) < 32 for char in raw)):
-        raise ValueError("Discovery paths must name files or directories inside the repository. Use glob for patterns.")
+        raise ValueError(
+            "Discovery paths must name files or directories relative to the repository root. Use glob for patterns."
+        )
     if not parsed.parts and not allow_root_listing:
         raise ValueError("Use list_files to list top-level files or select a narrower path.")
     return normalized

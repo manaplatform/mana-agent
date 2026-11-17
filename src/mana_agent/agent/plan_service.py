@@ -250,12 +250,31 @@ class InvestigateDecision(_ModeAction):
     initial_repository_scope: Literal["", "explicit_audit", "architecture_wide"] = ""
 
 
+InspectionRequest = Annotated[
+    FileReadEvidence | DirectoryListEvidence | FileListEvidence | RepositoryDiscoveryEvidence,
+    Field(discriminator="tool"),
+]
+
+
+def _provider_decision_union(union: JsonSchemaValue) -> None:
+    # Distinct tags make these branches mutually exclusive. Keep local
+    # discriminator validation and send providers the existing anyOf shape.
+    union["anyOf"] = union.pop("oneOf")
+    del union["discriminator"]
+
+
 class InspectDecision(_ModeAction):
     action: Literal["inspect"]
-    requests: tuple[FileReadEvidence | DirectoryListEvidence | FileListEvidence | RepositoryDiscoveryEvidence, ...] = Field(
+    requests: tuple[InspectionRequest, ...] = Field(
         min_length=1, max_length=MAX_INSPECTION_BATCH,
         description="Independent read-only observations needed for the immediate coding decision.",
     )
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        inspection = handler.resolve_ref_schema(handler(schema))
+        _provider_decision_union(inspection["properties"]["requests"]["items"])
+        return inspection
 
 
 class ClarifyDecision(_ModeAction):
@@ -344,11 +363,7 @@ class ModeDecision(ModeContract):
     @classmethod
     def __get_pydantic_json_schema__(cls, schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
         envelope = handler.resolve_ref_schema(handler(schema))
-        decision = envelope["properties"]["decision"]
-        # The distinct action literals make the branches mutually exclusive.
-        # Keep local discriminator validation and send the provider a nested anyOf.
-        decision["anyOf"] = decision.pop("oneOf")
-        del decision["discriminator"]
+        _provider_decision_union(envelope["properties"]["decision"])
         return envelope
 
 
@@ -410,6 +425,10 @@ class PlanService:
             "Wait for results before selecting dependent reads. Start with known locations or symbols. "
             "Use ls to locate a candidate directory when necessary. Search with literal paths or a targeted glob "
             "before widening. Levels above 1 require prior evidence IDs and can widen by one level at a time. "
+            "In paths, use literal repository-relative names as returned by observations, such as src/app.py. "
+            "Put patterns in glob. Use list_files for top-level files. "
+            "Protected paths include .git, .mana, .ssh, .env files, and credential files. If a needed path is "
+            "protected or outside the repository, use accessible evidence or report the gap in the next decision. "
             "An initial level 4 read requires an explicit user request for an audit or architecture-wide investigation. "
             "Use the reason to explain what each read resolves. Draft or repair as soon as you have enough evidence "
             "to scope the next step. The coding engine can read more while preparing the patch. "

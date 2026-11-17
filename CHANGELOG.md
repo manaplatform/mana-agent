@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-17
 
+- AUTO and DEBUG report an invalid inspection path against the selected tool and give the model a specific correction while preserving prior evidence and protected-path checks. See [inspection path correction](docs/regressions/debug-plan-execution-contract.md#inspection-path-correction).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_path_correction or investigation_batch_rejects or mode_decision_wire_schema'`.
 - Native decisions refresh expired text and token limit evidence before choosing a response format. Entry routing can recover on the same model when the catalog confirms its capabilities, and still stops before inference if required evidence is missing. See [expired routing capabilities](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md#expired-capability-evidence-before-entry-routing).
 - User verification: `venv/bin/python -m pytest -q tests/llm/test_engine.py -k entry_route_refreshes_capability_evidence`.
 
