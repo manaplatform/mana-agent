@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-17
 
+- Repository discovery tool schemas reject patterns in `paths`. The AUTO and DEBUG correction prompt shows how to use a scoped `glob` or request a shallow directory listing before a search. See [repeated invalid search paths](docs/regressions/debug-plan-execution-contract.md#repeated-invalid-search-paths).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or inspection_path_correction or investigation_batch_rejects or native_investigation_tool_schema or mode_decision_wire_schema'`.
+- AUTO, DEBUG, and PLAN final replies show applied changes and verification status. Missing Docker prerequisites produce a resume instruction, and Coding Activity shows the command details. See [verification result replies](docs/regressions/debug-plan-execution-contract.md#verification-result-replies).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'missing_verification_image or resuming_failed_verification or auto_records_internal_plan or auto_uses_the_required_worktree'`.
 - AUTO and DEBUG report an invalid inspection path against the selected tool and give the model a specific correction while preserving prior evidence and protected-path checks. See [inspection path correction](docs/regressions/debug-plan-execution-contract.md#inspection-path-correction).
 - User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_path_correction or investigation_batch_rejects or mode_decision_wire_schema'`.
 - Native decisions refresh expired text and token limit evidence before choosing a response format. Entry routing can recover on the same model when the catalog confirms its capabilities, and still stops before inference if required evidence is missing. See [expired routing capabilities](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md#expired-capability-evidence-before-entry-routing).

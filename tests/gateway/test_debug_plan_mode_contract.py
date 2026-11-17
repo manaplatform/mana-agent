@@ -142,6 +142,8 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
                             workflow=workflow_choice(), source_message_ids=("user-1",))
     assert result.status == "success", result.message
     assert result.data["verification"][0]["passed"]
+    assert result.message == "Changed `app.py`. All required verification checks passed."
+    assert result.data["repository_observations"]["findings"] == "The handler returns the wrong value."
     task = workflow.board.get_task(result.data["task_id"])
     assert task.mode_workflow["evidence"][0]["id"] == "evidence-1"
     assert task.mode_workflow["approved_digest"] == ""
@@ -211,7 +213,7 @@ def test_auto_uses_the_required_worktree_and_preserves_dirty_primary_checkout(mo
     result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
                             workflow=workflow_choice(), source_message_ids=("user-1",))
     assert result.status == "success", result.message
-    assert "Verified worktree:" in result.message
+    assert "Verified in worktree" in result.message
     assert source.read_text() == "uncommitted user work\n"
 
 
@@ -817,6 +819,64 @@ def test_coding_inspection_path_correction_preserves_saved_evidence(mode_gateway
     assert result.data["repository_observations"]["workflow_tool_operations"] == 3
 
 
+def test_inspection_correction_rebuilds_four_invalid_searches_as_scoped_discovery(mode_gateway, monkeypatch):
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    gateway, workflow = mode_gateway
+    runtime = gateway.root / "runtime"
+    runtime.mkdir()
+    (runtime / "handler.py").write_text("value = 'before'\n")
+    rejected_paths = [f"fixture-private-{index}/**/*.py" for index in range(4)]
+    invalid = inspection(None, *(evidence_call(str(index), "repo_search", paths=[path], query="before")
+                                 for index, path in enumerate(rejected_paths)))
+    layout = inspection(None, evidence_call("layout", "ls"))
+    scoped = inspection(None, evidence_call("search", "repo_search", paths=[], glob="runtime/**/*.py", query="before"))
+    conclusion = {"action": "diagnose", "reason": "Read the value in runtime/handler.py",
+                  "root_cause": "The handler returns the old value", "cause_evidence": ["evidence-2"]}
+    decisions = iter([invalid, layout, scoped, conclusion])
+    requests, reads = [], []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(decisions)},
+            )])
+
+    real_inspect = PlanService.inspect
+
+    def inspect(service, request):
+        reads.append((request.tool, request.paths))
+        return real_inspect(service, request)
+
+    monkeypatch.setattr(PlanService, "inspect", inspect)
+    facts = {name: observation(value, source="provider", confidence=1) for name, value in {
+        "input_text": True, "output_text": True, "tool_calling": True,
+        "context_window": 65536, "max_output_tokens": 1024,
+    }.items()}
+    model = NativeLLMEngine(provider="openrouter", model="deepseek/deepseek-v4.1-flash", api_key="fixture",
+                            base_url="https://example.invalid", endpoint="chat_completions", adapter=Adapter())
+    profile = ModelProfile(provider=model.provider, model_id=model.model, facts=facts)
+    monkeypatch.setattr(model, "profile", lambda *_: profile)
+
+    result = workflow.start("session", "Find where the old value comes from", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    assert reads == [("ls", ()), ("repo_search", ())]
+    assert len(requests) == 4
+    assert requests[0].tools == requests[1].tools
+    correction = requests[1].messages[-1].content
+    assert "Provider tool arguments violate the registered schema" in correction
+    assert "none of its reads ran" in correction
+    assert 'paths [] with glob "src/**/*.py"' in correction
+    assert "Use level 1 ls with no paths" in correction
+    assert all(path not in correction for path in rejected_paths)
+    assert "correction_hint" not in requests[1].parameters
+    assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1", "evidence-2"]
+
+
 def test_coding_inspection_can_exceed_the_former_investigator_caps(mode_gateway):
     gateway, workflow = mode_gateway
     decisions = []
@@ -904,11 +964,11 @@ def test_cancel_during_coding_decision_discards_the_read_batch(mode_gateway, mon
     (evidence_call("second", paths=["test_app.py"], level=2, prior_evidence=["evidence-1"]), 2,
      "The next permitted level is 1"),
     (evidence_call("second", "list_files", paths=["tests/**/*.py"]), 2,
-     "Discovery paths must name files or directories"),
+     "arguments did not match the registered schema"),
     (evidence_call("second", "list_files", paths=["/"]), 2,
-     "paths.0: Discovery paths must name files or directories"),
+     "paths.0: Discovery paths must name literal files or directories"),
     (evidence_call("second", "list_files", paths=["runtime/../docs"]), 2,
-     "paths.0: Discovery paths must name files or directories"),
+     "paths.0: Discovery paths must name literal files or directories"),
     (evidence_call("second", "list_files", paths=["./.env/"]), 2,
      "paths.0: Protected repository paths are unavailable"),
     (evidence_call("second", "list_files", level=4), 2, "The next permitted level is 1"),
@@ -1233,6 +1293,80 @@ def test_debug_repair_uses_causal_evidence_and_runs_the_focused_check(mode_gatew
     assert checks == [("python", "app.py")]
 
 
+def test_missing_verification_image_reports_applied_changes_and_can_resume(mode_gateway, monkeypatch):
+    import mana_agent.gateway.mode_workflow as mode_module
+    from mana_agent.approval.policy import set_approval_mode
+
+    set_approval_mode("full_access")
+    gateway, workflow = mode_gateway
+    subprocess.run(["git", "init", "-q"], cwd=gateway.root, check=True)
+    plan = draft()
+    apply_step, verify_step = plan["draft"]["steps"]
+    apply_step["verification"] = verify_step["verification"]
+    plan["draft"]["steps"] = [apply_step]
+    gateway._entry_router.llm = Decisions(
+        inspection("app.py"), plan, {"disposition": "in_scope", "reason": "Matches the step"},
+    )
+    patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+    proposals, activity = [], []
+
+    def propose(*args, **kwargs):
+        proposals.append(patch)
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    gateway._coding_agent = SimpleNamespace(generate=propose)
+    real_run = subprocess.run
+    real_which = mode_module.shutil.which
+
+    def run(argv, **kwargs):
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such image")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(mode_module.subprocess, "run", run)
+    monkeypatch.setattr(mode_module.shutil, "which",
+                        lambda name, *args, **kwargs: "/fixture/docker" if name == "docker"
+                        else real_which(name, *args, **kwargs))
+    monkeypatch.setattr(mode_module, "emit_activity", lambda event, **fields: activity.append(fields))
+
+    blocked = workflow.start("session", "Fix the handler", mode="auto", repair=True, workflow=workflow_choice())
+    task_id = blocked.data["task_id"]
+    assert blocked.status == "error"
+    assert blocked.data["phase"] == "blocked"
+    assert blocked.data["goal_satisfied"] is False
+    assert blocked.data["changed_files"] == ["app.py"]
+    assert blocked.data["verification"] == []
+    assert blocked.data["repository_observations"]["evidence_ids"] == ["evidence-1"]
+    assert (gateway.root / "app.py").read_text() == "after\n"
+    assert blocked.message.startswith("Changed `app.py`.\n\n**Verification pending.**")
+    assert "local image `python:3.12`" in blocked.message
+    assert f"`/task resume {task_id}`" in blocked.message
+    assert "The handler returns the wrong value" not in blocked.message
+    assert "evidence-1" not in blocked.message
+    assert "('python', 'app.py')" not in blocked.message
+    described = workflow.describe(workflow.board.get_task(task_id))
+    assert described.status == blocked.status
+    assert described.data == blocked.data
+    assert described.message == blocked.message
+    pending = next(record for record in activity if record["title"] == "Verification pending")
+    assert pending["status"] == "unverified"
+    assert pending["metadata"]["verification_status"] == "not_run"
+    assert "('python', 'app.py')" in pending["detail"]
+    assert pending["operation_id"] == next(record["operation_id"] for record in activity
+                                           if record["title"] == "Running verification command")
+
+    async def verify(root, command, **kwargs):
+        assert command.argv == ("python", "app.py")
+        assert (root / "app.py").read_text() == "after\n"
+        return {"passed": True, "exit_code": 0, "output": "checked"}
+
+    monkeypatch.setattr(mode_module, "run_isolated_verification", verify)
+    resumed = workflow.retry(task_id)
+    assert resumed.status == "success", resumed.message
+    assert resumed.message == "Changed `app.py`. All required verification checks passed."
+    assert proposals == [patch]
+
+
 def test_resuming_failed_verification_does_not_replay_a_completed_patch(mode_gateway, monkeypatch):
     from mana_agent.approval.policy import set_approval_mode
 
@@ -1258,8 +1392,14 @@ def test_resuming_failed_verification_does_not_replay_a_completed_patch(mode_gat
     task_id, key = result.data["task_id"], result.data["inbox_id"]
     workflow.respond("session", key, ResponseOperation.APPROVE, frontend="cli")
     final = workflow.wait_for_response(task_id, key, timeout=8)
+    assert final.status == "error"
     assert final.data["phase"] == "blocked", final.message
-    assert "Verification failed" in final.message
+    assert final.data["verification"][-1]["exit_code"] == 1
+    assert final.message.startswith("Changed `app.py`.\n\n**Verification failed.**")
+    assert "Coding Activity" in final.message
+    assert f"`/task resume {task_id}`" in final.message
+    assert "fixture result" not in final.message
+    assert "# Implementation Plan" not in final.message
     assert workflow.retry(task_id).status == "success"
     assert proposals == [patch]
 

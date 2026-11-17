@@ -274,6 +274,12 @@ def test_native_investigation_tool_schema_separates_file_reads_from_discovery():
             validate_arguments({**args, **invalid}, read)
     discovery = tools["repo_search"]
     validate_arguments({"level": 4, "query": "target", "reason": "Audit the repository"}, discovery)
+    scoped = {"level": 1, "query": "target", "reason": "Search the selected source"}
+    validate_arguments({**scoped, "paths": ["./src/runtime/"]}, discovery)
+    validate_arguments({**scoped, "paths": [], "glob": "src/runtime/**/*.py"}, discovery)
+    for invalid_path in ("", "src/runtime/*.py", "**/handler.py", "file?.py", "file[1].py", "src/\nfile.py"):
+        with pytest.raises(ValueError, match="registered pattern"):
+            validate_arguments({**scoped, "paths": [invalid_path]}, discovery)
     assert "default" not in discovery["properties"]["glob"]
     assert "require level 4" in discovery["properties"]["glob"]["description"]
     file_list = tools["list_files"]

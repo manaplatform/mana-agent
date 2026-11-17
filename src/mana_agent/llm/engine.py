@@ -413,7 +413,7 @@ class NativeLLMEngine:
     async def decide(
         self, messages: Any, schema: type[BaseModel] | dict[str, Any], *,
         repair_decision: bool = False, validation_context: dict[str, Any] | None = None,
-        complex_schema: bool = False, **options: Any,
+        complex_schema: bool = False, correction_hint: str = "", **options: Any,
     ) -> BaseModel | dict[str, Any]:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
@@ -492,10 +492,13 @@ class NativeLLMEngine:
                 detail = "The response did not match the required JSON fields or types."
             if attempt + 1 >= attempts:
                 raise StructuredOutputError(f"Decision still invalid after one correction (failed schema validation). {detail}") from None
-            decision_messages.append(UserMessage(
+            correction = (
                 f"The decision was invalid. {detail}\n"
                 "Correct the response for the original request using the same response format."
-            ))
+            )
+            if correction_hint:
+                correction += f"\n{correction_hint}"
+            decision_messages.append(UserMessage(correction))
         raise AssertionError("Decision validation attempts were not configured")
 
     def decide_sync(self, messages: Any, schema: type[BaseModel] | dict[str, Any], **options: Any) -> BaseModel | dict[str, Any]:

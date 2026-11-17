@@ -157,6 +157,8 @@ DISCOVERY_DESCRIPTION = (
     "identifying the requested audit, systemic evidence, or what a narrower search failed to find."
 )
 
+DISCOVERY_LITERAL_PATH_PATTERN = r"^[^:*?\[\x00-\x1f]+$"
+
 
 class DiscoveryScopeRequired(ValueError):
     """A discovery selection has no targeted scope or repository-wide reason."""
@@ -169,9 +171,10 @@ def normalize_discovery_path(raw: str, *, allow_root_listing: bool = False) -> s
     normalized = parsed.as_posix()
     if (not path or parsed.is_absolute() or ".." in parsed.parts
             or normalized != normalized.strip()
-            or any(char in path for char in ":*?[") or any(ord(char) < 32 for char in raw)):
+            or not re.fullmatch(DISCOVERY_LITERAL_PATH_PATTERN, raw)):
         raise ValueError(
-            "Discovery paths must name files or directories relative to the repository root. Use glob for patterns."
+            "Discovery paths must name literal files or directories relative to the repository root. "
+            "For a targeted pattern, use an empty paths list and put the pattern in glob."
         )
     if not parsed.parts and not allow_root_listing:
         raise ValueError("Use list_files to list top-level files or select a narrower path.")

@@ -153,6 +153,26 @@ The local inspection contract tried every read-tool schema for an invalid reques
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_path_correction or investigation_batch_rejects or mode_decision_wire_schema'`. The fixtures cover same-transport correction, rejection of protected paths before dispatch, redacted diagnostics, and resumption with saved evidence. The agent did not run the fixtures or retry the live task.
 
+## Repeated invalid search paths
+
+On 2026-11-17, DEBUG task `task_20261117_000004` using OpenRouter DeepSeek returned an invalid initial decision and one invalid correction. The final diagnostic identified four `repo_search` requests with invalid `paths[0]` entries. The task had no repository observations and was later cancelled. The journal did not retain the rejected values, so it cannot establish whether the paths contained wildcards, absolute paths, or another invalid form.
+
+The discovery wire schema previously accepted arbitrary strings as path entries, and the correction asked the model to fix the response without showing how to build a valid replacement batch. The discovery schema now rejects empty strings, glob metacharacters, drive separators, and control characters in `paths` before tool dispatch. The existing path and scope validation still checks relative paths, traversal, protected paths, and level limits. The same-model correction now explains that all reads in the rejected batch were skipped and shows how to request a shallow layout listing or send a targeted `glob` with empty `paths`. The model can select fewer reads or use saved evidence to make another decision.
+
+**Do not reintroduce** accepting patterns as literal paths, moving rejected path data into `glob` automatically, or dispatching valid requests from an invalid batch.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or inspection_path_correction or investigation_batch_rejects or native_investigation_tool_schema or mode_decision_wire_schema'`. The regression uses a scripted batch with four invalid path entries followed by a model-selected layout query and a scoped search. The fixtures and live provider behavior were not verified by the agent.
+
+## Verification result replies
+
+On 2026-11-17, AUTO task `task_20261117_000002` applied its version change to `pyproject.toml` and saved a patch receipt. Its first verification command could not start because the local Docker check could not find `python:3.12`. The blocked reply printed the raw command representation, eight evidence IDs, and the pre-edit research findings. The reply omitted the file already changed. Approval and clarification waits also appended the full plan when reading back a blocked or completed result.
+
+The Docker preflight used the generic exception path, and the chat reply appended the repository investigation report to every blocker. The preflight now reports a pending verification prerequisite and closes the matching Coding Activity entry with the command marked as unrun. The chat reply shows any files already changed, the verification status, and a resume command for the same task. Failed checks retain their exit status and output in Coding Activity and result data. Completed changes report verified work and the worktree when applicable. Status reads return the same outcome and structured evidence. Resume still checks the saved checkout and patch receipts before continuing.
+
+**Do not reintroduce** pre-edit findings, evidence ID dumps, raw command arguments, or the full approved plan into a terminal status reply. Keep an unrun command out of the check results and preserve the verified completion gate.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'missing_verification_image or resuming_failed_verification or auto_records_internal_plan or auto_uses_the_required_worktree'`. The missing-image fixture stops before Docker starts a container, then resumes using the original patch receipt. These tests and the live task were not run by the agent.
+
 ## Investigation latency
 
 On 2026-11-16, the Debug trace for `task_20261116_000021` recorded 18 completed model requests taking 794 seconds in total. The 18 repository operations took under one second total. Three consecutive reads of known files required three provider round trips. Batching independent reads helped, but each dependent read still required the main model to select another typed action. Earlier prompts also repeated execution receipts alongside the observations.

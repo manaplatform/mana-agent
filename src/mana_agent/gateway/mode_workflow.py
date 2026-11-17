@@ -12,6 +12,7 @@ from hashlib import sha256
 import json
 import logging
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
@@ -55,6 +56,10 @@ class ModeBatchWaiting(RuntimeError):
     pass
 
 
+class VerificationUnavailable(RuntimeError):
+    """A verification prerequisite prevented the approved command from running."""
+
+
 class VerificationFailed(RuntimeError):
     def __init__(self, command: VerificationCommand, outcome: dict):
         super().__init__(f"Verification failed for {command.argv!r}: {outcome['output']}")
@@ -81,6 +86,23 @@ _TRANSITIONS = {
 
 def _investigation_context(evidence: list[dict]) -> list[dict]:
     return [compact_observation(item) for item in evidence]
+
+
+def _code_span(value: str) -> str:
+    runs = re.findall(r"`+", value)
+    if not runs:
+        return f"`{value}`"
+    fence = "`" * (max(map(len, runs)) + 1)
+    return f"{fence} {value} {fence}"
+
+
+def _changed_files_summary(files: list[str]) -> str:
+    if not files:
+        return ""
+    preview = ", ".join(_code_span(path) for path in files[:4])
+    if len(files) > 4:
+        preview += f" and {len(files) - 4} more"
+    return f"Changed {preview}."
 
 
 class ModeWorkflow:
@@ -862,7 +884,10 @@ class ModeWorkflow:
             durable = self.lane.execution_supervisor.store.get_task_or_none(task.task_id)
             if state["phase"] == Phase.BLOCKED or (durable and durable.state == ExecutionState.INTERRUPTED):
                 text += f"\n\nResume the investigation with `/task resume {task.task_id}`."
-        if state.get("plan"):
+        if state["phase"] in {Phase.COMPLETED, Phase.BLOCKED}:
+            return self._outcome(task.task_id, state, text, self._repository_report(state),
+                                 completed=state["phase"] == Phase.COMPLETED)
+        if state.get("plan") and state["phase"] not in _TERMINAL:
             text += "\n\n" + PlanRevision.model_validate(state["plan"]).to_markdown()
         return CommandResult(status="success", message=text,
                              data={"task_id": task.task_id, "phase": state["phase"]})
@@ -1154,10 +1179,18 @@ class ModeWorkflow:
             if state["mode"] == "plan":
                 return self._restart_draft(task_id, state, str(exc))
             return self._block(task_id, state, str(exc))
+        except VerificationUnavailable as exc:
+            return self._block(
+                task_id, state, f"**Verification pending.** {exc}\n\n"
+                f"Once Docker is ready, run `/task resume {task_id}` to continue.",
+            )
         except VerificationFailed as exc:
             if state.get("coding_decision") and state["repair"] and "repair_limits" not in state:
                 return self._replan_failed_check(task_id, state, service, exc)
-            return self._block(task_id, state, str(exc))
+            return self._block(
+                task_id, state, "**Verification failed.** See Coding Activity for the command and output.\n\n"
+                f"After addressing the failure, run `/task resume {task_id}`.",
+            )
         except Exception as exc:
             return self._block(task_id, state, str(redact_secrets(str(exc))))
 
@@ -1255,17 +1288,15 @@ class ModeWorkflow:
             if not any(check["passed"] and check["exit_code"] == 0
                        for check in state.get("verification", [])):
                 raise RuntimeError("A passing verification command is required before completion")
-        passed = sum(bool(check["passed"]) for check in state.get("verification", []))
-        message = f"Revision {plan.revision} completed. Verified {passed} command(s)."
+        summary = _changed_files_summary(state["files_changed"])
+        lines = [f"{summary} All required verification checks passed.".strip()]
         if state["mode"] == "debug":
-            message = f"Root cause: {state['root_cause']}\n\n{message}"
+            lines.insert(0, state["root_cause"])
             if state.get("uncertainty"):
-                message += "\n\nRemaining uncertainty: " + state["uncertainty"]
-        if state["files_changed"]:
-            message += "\n\nChanged files: " + ", ".join(state["files_changed"])
+                lines.append(state["uncertainty"])
         if state.get("isolated_workspace"):
-            message += f"\n\nVerified worktree: {plan.repository_root}"
-        return self._complete(task_id, state, message)
+            lines.append(f"Verified in worktree {_code_span(plan.repository_root)}.")
+        return self._complete(task_id, state, "\n\n".join(lines))
 
     def _run_step_child(self, task_id, child_id, state, plan, step, service, expected_files, *, verify):
         root = Path(plan.repository_root)
@@ -1679,14 +1710,22 @@ class ModeWorkflow:
     def _verify(self, task_id: str, command: VerificationCommand, state: dict):
         self._charge_tool(task_id, state)
         operation_id = f"{task_id}:verify:{len(state.get('verification', [])) + 1}"
+        command_detail = f"{command.argv!r} in {command.cwd}"
         emit_activity("coding.progress", task_id=task_id, title="Running verification command",
-                      summary=f"{command.argv!r} in {command.cwd}",
-                      status="running", operation_id=operation_id)
-        outcome = asyncio.run(run_isolated_verification(self._workspace_root(state), command, task_id=task_id))
+                      summary=command_detail, status="running", operation_id=operation_id)
+        try:
+            outcome = asyncio.run(run_isolated_verification(self._workspace_root(state), command, task_id=task_id))
+        except VerificationUnavailable as exc:
+            emit_activity("coding.progress", task_id=task_id, title="Verification pending",
+                          summary=str(exc), detail=f"{exc}\n{command_detail}",
+                          status="unverified", operation_id=operation_id,
+                          metadata={"verification_status": "not_run"})
+            raise
         state.setdefault("verification", []).append(outcome)
         self._persist(task_id, state)
         emit_activity("coding.progress", task_id=task_id, title="Verification command",
                       summary=f"{command.argv!r} · {outcome['exit_code']}",
+                      detail=f"{command_detail}\n{outcome['output']}",
                       status="success" if outcome["passed"] else "failed",
                       operation_id=operation_id)
         if not outcome["passed"]:
@@ -1726,10 +1765,6 @@ class ModeWorkflow:
 
     def _complete(self, task_id, state, message):
         message = str(redact_secrets(message))
-        if state["mode"] == "auto" and state.get("plan"):
-            findings = state["plan"]["draft"].get("findings", "").strip()
-            if findings and findings not in message:
-                message += f"\n\nFindings: {findings}"
         report = self._repository_report(state)
         root = self._workspace_root(state)
         finished = self.lane.finish(task_id, changed_files=[str(root / path) for path in state["files_changed"]],
@@ -1746,23 +1781,17 @@ class ModeWorkflow:
             manager.transition(task_id, WorkspaceStatus.MERGE_CANDIDATE)
         state["result"] = message
         self._transition(task_id, state, Phase.COMPLETED)
-        return CommandResult(status="success", message=message,
-                             data={"task_id": task_id, "phase": state["phase"], "mode": state["mode"],
-                                   "mode_reason": state.get("mode_reason", ""),
-                                   "changed_files": state["files_changed"], "goal_satisfied": True,
-                                   "repository_observations": report,
-                                   "used_coding_agent": state.get("used_coding_agent", False),
-                                   "verification": state.get("verification", []),
-                                   "integration": state.get("integration", {})})
+        return self._outcome(task_id, state, message, report, completed=True)
 
     def _block(self, task_id, state, message):
-        message = str(redact_secrets(message))
         report = self._repository_report(state)
-        if report["evidence_ids"]:
-            message += "\n\nSaved repository evidence: " + ", ".join(report["evidence_ids"]) + "."
-        for detail in (report["findings"], report["gaps"], report["stop"], report["pending_question"]):
-            if detail and detail not in message:
-                message += "\n" + detail
+        sections = [_changed_files_summary(state["files_changed"]), message]
+        if state["files_changed"] and state.get("isolated_workspace"):
+            sections.insert(1, f"Worktree {_code_span(state['isolated_workspace']['path'])}.")
+        for detail in (report["gaps"], report["stop"], report["pending_question"]):
+            if detail and not any(detail in section for section in sections):
+                sections.append(detail)
+        message = str(redact_secrets("\n\n".join(filter(None, sections))))
         state["result"] = message
         durable = self.lane.execution_supervisor.get_task(task_id)
         if durable.cancellation_status is None and durable.state not in {ExecutionState.COMPLETED, ExecutionState.CANCELLED}:
@@ -1770,13 +1799,18 @@ class ModeWorkflow:
             if execution.state in {LaneTaskState.RUNNING, LaneTaskState.QUEUED, LaneTaskState.WAITING}:
                 self.lane.mark_blocked(task_id, reason=message)
             self._transition(task_id, state, Phase.BLOCKED)
-        return CommandResult(status="error", message=message,
-                             data={"task_id": task_id, "phase": state["phase"], "mode": state["mode"],
-                                   "mode_reason": state.get("mode_reason", ""),
-                                   "changed_files": state["files_changed"], "goal_satisfied": False,
-                                   "repository_observations": report,
-                                   "used_coding_agent": state.get("used_coding_agent", False),
-                                   "verification": state.get("verification", [])})
+        return self._outcome(task_id, state, message, report, completed=False)
+
+    @staticmethod
+    def _outcome(task_id: str, state: dict, message: str, report: dict, *, completed: bool) -> CommandResult:
+        data = {"task_id": task_id, "phase": state["phase"], "mode": state["mode"],
+                "mode_reason": state.get("mode_reason", ""), "changed_files": state["files_changed"],
+                "goal_satisfied": completed, "repository_observations": report,
+                "used_coding_agent": state.get("used_coding_agent", False),
+                "verification": state.get("verification", [])}
+        if completed:
+            data["integration"] = state.get("integration", {})
+        return CommandResult(status="success" if completed else "error", message=message, data=data)
 
     def _repository_report(self, state: dict) -> dict:
         inspection = state.get("inspection", {})
@@ -1821,7 +1855,7 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
     from mana_agent.execution.providers.local_docker import LocalDockerProvider
 
     if not shutil.which("docker"):
-        raise RuntimeError(f"Verification pending. An isolated Docker environment is required for {command.argv!r}.")
+        raise VerificationUnavailable("The Docker CLI is unavailable. Install Docker and start its daemon.")
     cwd = root / command.cwd
     if cwd.resolve() != cwd or not cwd.is_dir():
         raise ValueError("Verification cwd must be a real directory inside the checkout")
@@ -1836,7 +1870,9 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
     image_lookup = subprocess.run([provider.docker_binary, "image", "inspect", "--format", "{{.Id}}", image],
                                   capture_output=True, text=True, timeout=30, check=False)
     if image_lookup.returncode != 0 or not image_lookup.stdout.strip():
-        raise RuntimeError(f"Verification pending. Docker image {image} is unavailable locally for {command.argv!r}.")
+        raise VerificationUnavailable(
+            f"Docker could not access the local image {_code_span(image)}. Make the image available in Docker."
+        )
     with TemporaryDirectory(prefix="mana-mode-verify-") as temporary:
         snapshot = Path(temporary).resolve()
         (snapshot / command.cwd).mkdir(parents=True, exist_ok=True)
