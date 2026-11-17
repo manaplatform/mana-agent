@@ -238,6 +238,29 @@ def test_mode_decision_wire_schema_preserves_inspection_tool_alternatives():
     assert tools == {"read_file", "ls", "list_files", "repo_search", "find_symbols", "call_graph"}
 
 
+def test_mode_decision_wire_schema_ls_accepts_only_listing_arguments():
+    from mana_agent.agent.plan_service import DirectoryListEvidence, EvidenceRequest, ModeDecision
+    from mana_agent.llm.providers.openai import decode_structured, strict_schema
+
+    schema = ModeDecision.model_json_schema()
+    branch = strict_schema(schema)["$defs"]["DirectoryListEvidence"]
+    assert set(branch["properties"]) == set(branch["required"]) == {"tool", "level", "reason"}
+    assert branch["additionalProperties"] is False
+
+    listing = {"tool": "ls", "level": 1, "reason": "Locate the owning directory"}
+    decision = {"action": "inspect", "reason": "Find repository layout"}
+    payload = json.dumps({"decision": {**decision, "requests": [listing]}})
+    selected = ModeDecision.model_validate_json(decode_structured(payload, schema), strict=True).decision
+    assert isinstance(selected.requests[0], DirectoryListEvidence)
+    assert selected.requests[0].fingerprint == EvidenceRequest.model_validate(listing).fingerprint
+
+    for extra in ({"paths": ["runtime"]}, {"glob": "*"}, {"glob": ""}, {"query": "handler"},
+                  {"start_line": 2}, {"prior_evidence": ["evidence-1"]}, {"level": 2}):
+        invalid = json.dumps({"decision": {**decision, "requests": [{**listing, **extra}]}})
+        with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
+            decode_structured(invalid, schema)
+
+
 @pytest.mark.parametrize("payload", [
     {"action": "investigate", "reason": "Investigate the file"},
     {"action": "clarify", "reason": "Two choices", "questions": []},

@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-17
 
+- The model-facing `ls` decision now requires only the tool name, level 1, and a reason. Correction guidance shows the exact listing shape. See [directory listing decision schema](docs/regressions/debug-plan-execution-contract.md#directory-listing-decision-schema).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or debug_can_find_an_error_with_no_reported_location or mode_decision_wire_schema or native_investigation_tool_schema'`.
 - Repository discovery tool schemas reject patterns in `paths`. The AUTO and DEBUG correction prompt shows how to use a scoped `glob` or request a shallow directory listing before a search. See [repeated invalid search paths](docs/regressions/debug-plan-execution-contract.md#repeated-invalid-search-paths).
 - User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or inspection_path_correction or investigation_batch_rejects or native_investigation_tool_schema or mode_decision_wire_schema'`.
 - AUTO, DEBUG, and PLAN final replies show applied changes and verification status. Missing Docker prerequisites produce a resume instruction, and Coding Activity shows the command details. See [verification result replies](docs/regressions/debug-plan-execution-contract.md#verification-result-replies).

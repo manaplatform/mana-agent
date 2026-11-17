@@ -57,7 +57,8 @@ MAX_INSPECTION_BATCH = 4
 _INSPECTION_PATH_GUIDANCE = (
     'For searches use a known literal path relative to the checkout, such as paths ["src"] with the default glob. '
     'For a targeted pattern, send paths [] with glob "src/**/*.py" or "**/*executor.py". '
-    "Use level 1 ls with no paths when you need to discover the owning directory. "
+    'For layout use {"tool":"ls","level":1,"reason":"Locate the owning directory"}. '
+    "Use list_files or repo_search for a scoped follow-up. "
 )
 
 
@@ -113,14 +114,29 @@ class FileReadEvidence(EvidenceRequest):
 
 
 class DirectoryListEvidence(EvidenceRequest):
+    """List immediate directories at the repository root."""
+
     tool: Literal["ls"]
     level: Literal[1]
 
     @model_validator(mode="after")
     def validate_directory_listing(self):
         if self.paths or self.query or self.glob != "**/*" or self.start_line != 1 or self.end_line is not None:
-            raise PydanticCustomError("mode_directory_listing", "ls only lists top-level repository directories.")
+            raise PydanticCustomError(
+                "mode_directory_listing",
+                "Send only tool ls, level 1, and reason for a top-level directory listing. "
+                "Use list_files or repo_search for a scoped request.",
+            )
         return self
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        listing = handler.resolve_ref_schema(handler(schema))
+        if handler.mode == "validation":
+            # Keep the inherited defaults for local callers and saved
+            # fingerprints. The model supplies only the listing arguments.
+            listing["properties"] = {name: listing["properties"][name] for name in ("tool", "level", "reason")}
+        return listing
 
 
 class RepositoryDiscoveryEvidence(EvidenceRequest):

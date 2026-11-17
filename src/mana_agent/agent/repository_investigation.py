@@ -38,10 +38,7 @@ class InvestigationReport(ModeContract):
 
 def _read_schema(model: type[EvidenceRequest]) -> dict:
     schema = model.model_json_schema()
-    excluded = {"tool", "initial_repository_scope"}
-    if model is DirectoryListEvidence:
-        excluded.update({"paths", "glob", "query", "start_line", "end_line", "prior_evidence"})
-    for field in excluded:
+    for field in {"tool", "initial_repository_scope"} & schema["properties"].keys():
         schema["properties"].pop(field)
         if field in schema.get("required", []):
             schema["required"].remove(field)

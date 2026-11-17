@@ -163,6 +163,16 @@ The discovery wire schema previously accepted arbitrary strings as path entries,
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or inspection_path_correction or investigation_batch_rejects or native_investigation_tool_schema or mode_decision_wire_schema'`. The regression uses a scripted batch with four invalid path entries followed by a model-selected layout query and a scoped search. The fixtures and live provider behavior were not verified by the agent.
 
+## Directory listing decision schema
+
+On 2026-11-17, AUTO task `task_20261117_000005` using OpenRouter DeepSeek blocked after the correction returned a level-1 `ls` request that failed its directory listing contract. The journal shows zero reads and does not retain the rejected arguments. Setting a search field such as `glob` to an alternate value reproduces the validation failure.
+
+The `ls` branch inherited path, query, glob, and line-range fields from the generic evidence request. The ModeDecision schema advertised those fields even though directory listing could only use their defaults. Native PLAN already stripped the extra fields from its registered tool schema, which let the two schemas drift. The shared model-facing listing schema now exposes only `tool`, `level`, and `reason`. PLAN derives its existing arguments from the same schema. The correction prompt includes an exact listing request and points to `list_files` or `repo_search` for scoped reads. Local request defaults and saved evidence fingerprints are preserved.
+
+**Do not reintroduce** search or line-range fields in the model-facing `ls` schema. Keep its traversal limited to immediate repository directories.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or debug_can_find_an_error_with_no_reported_location or mode_decision_wire_schema or native_investigation_tool_schema'`. The fixtures cover strict schema decoding, rejection of extra arguments, fingerprint compatibility, and same-model correction followed by scoped discovery. The agent did not run the fixtures or resume the live task.
+
 ## Verification result replies
 
 On 2026-11-17, AUTO task `task_20261117_000002` applied its version change to `pyproject.toml` and saved a patch receipt. Its first verification command could not start because the local Docker check could not find `python:3.12`. The blocked reply printed the raw command representation, eight evidence IDs, and the pre-edit research findings. The reply omitted the file already changed. Approval and clarification waits also appended the full plan when reading back a blocked or completed result.

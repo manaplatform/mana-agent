@@ -819,7 +819,8 @@ def test_coding_inspection_path_correction_preserves_saved_evidence(mode_gateway
     assert result.data["repository_observations"]["workflow_tool_operations"] == 3
 
 
-def test_inspection_correction_rebuilds_four_invalid_searches_as_scoped_discovery(mode_gateway, monkeypatch):
+@pytest.mark.parametrize("invalid_selection", ["search_paths", "listing_options"])
+def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_gateway, monkeypatch, invalid_selection):
     from mana_agent.llm.capabilities import ModelProfile, observation
     from mana_agent.llm.engine import NativeLLMEngine
     from mana_agent.llm.messages import ToolCall
@@ -828,9 +829,14 @@ def test_inspection_correction_rebuilds_four_invalid_searches_as_scoped_discover
     runtime = gateway.root / "runtime"
     runtime.mkdir()
     (runtime / "handler.py").write_text("value = 'before'\n")
-    rejected_paths = [f"fixture-private-{index}/**/*.py" for index in range(4)]
-    invalid = inspection(None, *(evidence_call(str(index), "repo_search", paths=[path], query="before")
-                                 for index, path in enumerate(rejected_paths)))
+    rejected_globs = [f"fixture-private-{index}/**/*.py" for index in range(4)]
+    if invalid_selection == "search_paths":
+        invalid = inspection(None, *(
+            evidence_call(str(index), "repo_search", paths=[path], query="before")
+            for index, path in enumerate(rejected_globs)
+        ))
+    else:
+        invalid = inspection(None, evidence_call("layout", "ls", glob=rejected_globs[0]))
     layout = inspection(None, evidence_call("layout", "ls"))
     scoped = inspection(None, evidence_call("search", "repo_search", paths=[], glob="runtime/**/*.py", query="before"))
     conclusion = {"action": "diagnose", "reason": "Read the value in runtime/handler.py",
@@ -871,8 +877,8 @@ def test_inspection_correction_rebuilds_four_invalid_searches_as_scoped_discover
     assert "Provider tool arguments violate the registered schema" in correction
     assert "none of its reads ran" in correction
     assert 'paths [] with glob "src/**/*.py"' in correction
-    assert "Use level 1 ls with no paths" in correction
-    assert all(path not in correction for path in rejected_paths)
+    assert '{"tool":"ls","level":1,"reason":"Locate the owning directory"}' in correction
+    assert all(glob not in correction for glob in rejected_globs)
     assert "correction_hint" not in requests[1].parameters
     assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1", "evidence-2"]
 

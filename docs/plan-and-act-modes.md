@@ -8,6 +8,8 @@ When the workflow requests an answer, it pauses at its saved checkpoint. The TUI
 
 In AUTO and DEBUG, repository reads are Coding actions. Mana batches independent reads when the next decision needs evidence and saves each observation on the same task. It validates each request against the selected read tool. A rejected batch runs no reads. The model can use its correction to request a shallow directory listing, give a targeted glob its own field, or use observations it already has. If correction fails, the blocked task shows the failed check and retains earlier observations for `/task resume <task-id>`. Once Mana has enough evidence to scope a change, the coding backend can read more while preparing the patch. A diagnosis can use the evidence already supplied. Reads and model decisions share the workflow budget and repeated results stop further inspection. The task result includes findings, verification, and any material gaps.
 
+An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` or `repo_search` to inspect a selected directory.
+
 ## Implement a change
 
 AUTO starts with scoped repository observations, records an internal plan and its verification requirements on TaskBoard, and executes the plan through the configured CodingAgent. The gateway projects the workflow on the same task through integration, testing, and review. Runtime capabilities require evidence from the existing feature integration coordinator before they are reported as complete. An internal plan has no separate PLAN approval step. Tool and action approvals still apply.
