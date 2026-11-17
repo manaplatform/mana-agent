@@ -274,3 +274,15 @@ For the activity and provider-stop regression, run `venv/bin/python -m pytest -q
 For action payloads, run `venv/bin/python -m pytest -q tests/llm/test_providers.py tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py tests/test_execution_modes.py`. The fixtures check the provider schema for each action, reject missing or unrelated payloads, exercise semantic correction using all three response strategies, and confirm a resumed draft still waits for approval. These checks and live provider acceptance remain pending.
 
 For investigation latency, run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py tests/llm/test_providers.py`. The fixtures cover dependent reads in one native session, invalid batches, bounded operation counts, cancellation, resume, and PLAN approval. Replay the same Debug request with the same model and checkout. Compare main decision count, provider calls, time to first evidence, and time to result. The agent did not run the tests or measure a live turn after the change.
+
+
+## Repository Evidence Board task architecture
+
+The repository-evidence implementation supersedes the embedded native investigator
+and understanding/investigating phase descriptions above. AUTO, DEBUG, and PLAN
+now materialize investigation and understanding as supervised TaskBoard tasks,
+using the selected coding engine in read-only mode. The existing controller
+advances decisions and the existing approval, scope, verification, and integration
+gates remain authoritative. See [current contracts, migration, and user-owned
+verification](repository-evidence-orchestration.md). Legacy observations without
+source provenance remain diagnostic context rather than verified board entries.

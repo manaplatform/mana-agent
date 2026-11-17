@@ -15,6 +15,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from mana_agent.repository_evidence.models import InvestigationResult, PatchEvidenceResult
 from mana_agent.coding.models import AgentEvent, CodingTask, CodingTaskResult, WorkspaceContext
 from mana_agent.chat.activity import ProviderSummaryAssembler
 from mana_agent.config.model_capabilities import resolve_model_capability
@@ -509,12 +510,14 @@ class CodexCodingBackend:
                         "threadId": thread_id,
                         "input": [{"type": "text", "text": prompt}],
                         "cwd": str(_execution_directory(workspace)),
-                        "approvalPolicy": "never" if task.context.get("mode_patch_proposal") else self.settings.approval_policy,
+                        "approvalPolicy": "never" if task.context.get("mode_patch_proposal") or task.context.get("repository_investigation") else self.settings.approval_policy,
                         **({
                             "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
-                            "outputSchema": {"type": "object", "properties": {"patch": {"type": "string"}},
-                                             "required": ["patch"], "additionalProperties": False},
-                        } if task.context.get("mode_patch_proposal") else {"sandbox": _codex_sandbox(workspace)}),
+                            "outputSchema": PatchEvidenceResult.model_json_schema(),
+                        } if task.context.get("mode_patch_proposal") else {
+                            "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+                            "outputSchema": InvestigationResult.model_json_schema(),
+                        } if task.context.get("repository_investigation") else {"sandbox": _codex_sandbox(workspace)}),
                         **({"model": self.settings.model} if self.settings.model else {}),
                     },
                 )

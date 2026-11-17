@@ -61,6 +61,8 @@ def normalize_execution_mode(value: Any, default: ExecutionMode = ExecutionMode.
 
 
 class ModePhase(str, Enum):
+    ACTIVE = "active"
+    # Decode-only compatibility for saved v1 workflows. No new work emits these.
     UNDERSTANDING = "understanding"
     INVESTIGATING = "investigating"
     CLARIFICATION_REQUIRED = "clarification_required"
@@ -222,6 +224,13 @@ class PlanRevision(ModeContract):
     coding_backend: Literal["", "internal", "external"] = ""
     execution_policy: dict[str, Any] = Field(default_factory=dict)
     draft: PlanDraft
+    evidence_refs: tuple[dict[str, Any], ...] = ()
+
+    def model_dump(self, **kwargs):
+        result = super().model_dump(**kwargs)
+        if not self.evidence_refs:
+            result.pop("evidence_refs", None)
+        return result
 
     @property
     def digest(self) -> str:
@@ -232,6 +241,8 @@ class PlanRevision(ModeContract):
                  "", "## Findings", self.draft.findings]
         if self.coding_backend:
             lines.extend(["", f"Coding backend: {self.coding_backend}"])
+        if self.evidence_refs:
+            lines.extend(["", "Repository evidence:", *(f"- `{ref['evidence_id']}:{ref['revision']}`" for ref in self.evidence_refs)])
         for title, entries in (
             ("Objectives", self.draft.objectives), ("Scope", self.draft.scope),
             ("Out of scope", self.draft.exclusions), ("Dependencies", self.draft.dependencies),

@@ -521,6 +521,24 @@ class AutonomousExecutionController:
         effective_max_turns = max_turns if max_turns is not None else self.config.max_model_turns
         effective_max_tools = self.config.max_tool_calls
 
+        def charge_repository_boundary(*, model=False):
+            """Charge delegated calls to this existing supervised pursuit."""
+            from mana_agent.execution_supervisor.errors import BudgetExceededError
+            def update(current):
+                self.supervisor._validate_lease(current, attempt_id=active_attempt_id or "", lease_token=active_lease_token)
+                if current.state != ExecutionState.RUNNING or current.cancellation_status is not None:
+                    raise PermissionError("The supervising pursuit is no longer runnable")
+                field = "autonomous_model_turns" if model else "autonomous_tool_calls"
+                maximum = effective_max_turns if model else effective_max_tools
+                used = max(getattr(current, field), metrics.model_turns if model else metrics.tool_calls)
+                if used >= maximum:
+                    raise BudgetExceededError("The supervising pursuit's delegated call budget is exhausted")
+                setattr(current, field, used + 1)
+            self.supervisor.store.update_task(task_id, update)
+
+        ctx["charge_model"] = lambda: charge_repository_boundary(model=True)
+        ctx["charge_tool"] = charge_repository_boundary
+
         step_index = 0
         completed_steps: list[dict[str, Any]] = []
         overall_trace: list[dict[str, Any]] = []
@@ -724,6 +742,9 @@ class AutonomousExecutionController:
                     logger.warning("Checkpoint before step %d failed: %s", step_index, cp_exc)
 
             # 4. Execute Step via Capability Runner
+            accounted = self.supervisor.get_task(task_id)
+            ctx["remaining_model_turns"] = max(0, effective_max_turns - max(metrics.model_turns, accounted.autonomous_model_turns))
+            ctx["remaining_tool_calls"] = max(0, effective_max_tools - max(metrics.tool_calls, accounted.autonomous_tool_calls))
             step_t0 = time.perf_counter()
             try:
                 try:
@@ -846,6 +867,9 @@ class AutonomousExecutionController:
                 progress_summary=evidence_summary,
                 evidence_fingerprint=evidence_fingerprint,
             )
+            accounted = self.supervisor.get_task(task_id)
+            metrics.model_turns = max(metrics.model_turns, accounted.autonomous_model_turns)
+            metrics.tool_calls = max(metrics.tool_calls, accounted.autonomous_tool_calls)
 
             # Synchronize TaskBoard with step results
             if self.taskboard is not None:
@@ -1337,27 +1361,19 @@ class AutonomousExecutionController:
                         reason="independent completion verification failed",
                     )
                 else:
-                    current_task = self.supervisor.get_task(task_id)
-                    if current_task.state == ExecutionState.COMPLETED_PENDING_VERIFICATION and current_task.attempt_id == active_attempt_id:
-                        try:
-                            self.supervisor.transition(
-                                task_id,
-                                ExecutionState.COMPLETED,
-                                attempt_id=active_attempt_id,
-                                generation=active_generation,
-                            )
-                        except Exception:
-                            pass
+                    receipt = self.supervisor.get_verified_execution_result(task_id)
+                    if not receipt.is_verified:
+                        return _finish(AutonomousExecutionResult(
+                            task_id=task_id, status="blocked", goal_satisfied=False,
+                            answer="Completion is pending a verified supervisor result.",
+                            metrics=metrics, decision=decision, verification_passed=False,
+                            error="supervisor_result_unverified", trace=overall_trace,
+                            warnings=warnings, completed_steps=completed_steps))
                     if self.taskboard is not None:
-                        try:
-                            tb_task = self.taskboard.get_task(task_id)
-                            if tb_task.status != TaskStatus.VERIFYING:
-                                self.taskboard.mark_completed(task_id, evidence=final_answer, cross_off=True)
-                            tb_task.verification_status = "passed"
-                            tb_task.implementation_verified = True
-                            self.taskboard.save()
-                        except Exception:
-                            pass
+                        manifest = self.supervisor.store.artifact_manifest(task_id) or {}
+                        self.taskboard.project_supervisor_completion(task_id, supervisor_task=receipt.task,
+                            verification_evidence={"result_id": receipt.task.result_id,
+                                                   "verification": manifest.get("verification")})
 
                     # Reinforce verified learning memories
                     if self.global_memory is not None:
@@ -1770,9 +1786,8 @@ class AutonomousExecutionController:
         tool_name = (
             getattr(task_item, "routing_evidence", {}).get("tool")
             or (task_item.metadata.get("tool") if hasattr(task_item, "metadata") and isinstance(task_item.metadata, dict) else None)
-            or (getattr(task_item, "allowed_tools", [None])[0] if getattr(task_item, "allowed_tools", None) else None)
             or getattr(task_item, "preferred_tool", None)
-            or "subtask_executor"
+            or ""
         )
         tool_args = (
             getattr(task_item, "routing_evidence", {}).get("tool_args")
@@ -1824,7 +1839,7 @@ class AutonomousExecutionController:
                 coding_res = self.coding_engine.execute(task_item, ctx)
                 result_output = str(coding_res)
             else:
-                result_output = f"Completed subtask: {title}"
+                raise PermissionError(f"No authorized executor is bound to subtask {child_id}")
         except Exception as exc:
             error_msg = str(exc)
             logger.exception("Error executing subtask %s: %s", child_id, exc)
@@ -1835,9 +1850,14 @@ class AutonomousExecutionController:
         if self.taskboard is not None:
             try:
                 if success:
-                    self.taskboard.mark_completed(child_id, result_summary=result_output)
                     if changed_files:
                         self.taskboard.add_files_touched(child_id, changed_files)
+                    completed = self.taskboard.get_task(child_id)
+                    if not (completed.status == TaskStatus.DONE and completed.supervisor_state == "completed"
+                            and completed.verification_status == "passed"):
+                        success = False
+                        error_msg = "Executed subtask awaits its own supervisor verification"
+                        self.taskboard.mark_blocked(child_id, reason=error_msg)
                 else:
                     self.taskboard.mark_blocked(child_id, reason=error_msg)
                 self.taskboard.save()

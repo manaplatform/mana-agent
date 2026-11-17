@@ -195,6 +195,7 @@ class InternalCodingEngine(CodingEngine):
         self._task_statuses: dict[str, CodingStatus] = {}
         self._active_sessions: dict[str, ProgrammaticExecutionSession] = {}
         self._cancellation_events: dict[str, asyncio.Event] = {}
+        self._pending_model_calls: dict[str, asyncio.Task] = {}
         self._tool_runners: dict[str, Any] = {}
         self.max_auto_renewals: int = 3
         self.renew_tool_calls: int = 50
@@ -322,6 +323,7 @@ class InternalCodingEngine(CodingEngine):
             cache_enabled=self.cache_enabled,
             cache_ttl_seconds=self.cache_ttl_seconds,
         )
+        dispatcher.charge_tool = getattr(self, "charge_tool", None)
         from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
         from mana_agent.multi_agent.core.types import AgentRole
         registry = getattr(self, "execution_registry", None) or AgentRegistry()
@@ -378,6 +380,8 @@ class InternalCodingEngine(CodingEngine):
             pending_operation = None
             human_input = {}
             debugging_report = None
+            investigation_result = None
+            missing_evidence = []
 
             ctx_mode = ""
             if hasattr(task, "context") and isinstance(task.context, dict):
@@ -402,6 +406,18 @@ class InternalCodingEngine(CodingEngine):
                 else:
                     final_summary = await self._run_direct_tool_workflow(task, workspace, session, cancel_ev)
 
+                if task.context.get("repository_investigation"):
+                    from mana_agent.repository_evidence.handoff import parse_investigation_result
+                    investigation_result = parse_investigation_result(final_summary).model_dump(mode="json")
+                    missing_evidence = investigation_result["missing_evidence"]
+                    final_summary = "Repository investigation returned structured findings."
+                else:
+                    from mana_agent.repository_evidence.handoff import missing_evidence_from_text
+                    missing_evidence = missing_evidence_from_text(final_summary)
+                if missing_evidence:
+                    if any(item["task_id"] != task_id for item in missing_evidence):
+                        raise ValueError("Missing evidence request belongs to another task")
+                    status = "waiting"
                 final_summary, debugging_report = parse_debugging_envelope(final_summary)
                 if debugging_report is not None:
                     status = "waiting"
@@ -494,6 +510,8 @@ class InternalCodingEngine(CodingEngine):
                 backend=self.name,
                 status=status,  # type: ignore[arg-type]
                 summary=final_summary or f"Task {status}",
+                investigation_result=investigation_result,
+                missing_evidence=missing_evidence,
                 changed_files=changed_files,
                 commands_run=list(session.state.commands_run),
                 tests_run=tests_run,
@@ -553,6 +571,51 @@ class InternalCodingEngine(CodingEngine):
         skills = render_stable_skills_index(repo_root=workspace.worktree_path)
         return "\n\n".join((self.system_instruction, rules, skills))
 
+    async def _await_model_turn(self, task_id, turn, model, messages, continuation, cancel_ev):
+        """Track the provider await for cancellation and publish one model lifecycle."""
+        from mana_agent.llm.engine import NativeLLMEngine
+        from mana_agent.services.activity_context import emit_activity
+
+        async def invoke():
+            if hasattr(model, "generate"):
+                return await model.generate(messages, continuation=continuation)
+            if hasattr(model, "generate_sync"):
+                return await asyncio.to_thread(model.generate_sync, messages)
+            if callable(getattr(model, "ainvoke", None)):
+                return await model.ainvoke(messages)
+            if callable(getattr(model, "invoke", None)):
+                return await asyncio.to_thread(model.invoke, messages)
+            if callable(model):
+                return await asyncio.to_thread(model, messages)
+            raise RuntimeError(f"Coding model {type(model).__name__} does not provide an inference method")
+
+        # NativeLLMEngine tracks the actual HTTP request, including timeout and failure.
+        report_locally = not isinstance(model, NativeLLMEngine)
+        identity = {"operation_id": f"model-{task_id}-{turn}", "model": self.model}
+        if report_locally:
+            emit_activity("model.started", title="Waiting for the coding model", status="running", **identity)
+        pending = asyncio.create_task(invoke())
+        self._pending_model_calls[task_id] = pending
+        if cancel_ev.is_set():
+            pending.cancel()
+        try:
+            response = await pending
+        except asyncio.CancelledError:
+            if report_locally:
+                emit_activity("model.failed", title="Coding model request cancelled", status="cancelled", **identity)
+            raise
+        except Exception as exc:
+            if report_locally:
+                emit_activity("model.failed", title="Coding model request failed", status="failed",
+                              metadata={"error_type": type(exc).__name__}, **identity)
+            raise
+        else:
+            if report_locally:
+                emit_activity("model.completed", title="Coding model responded", status="success", **identity)
+            return response
+        finally:
+            self._pending_model_calls.pop(task_id, None)
+
     async def _run_model_tool_loop(
         self,
         task: CodingTask,
@@ -608,6 +671,8 @@ class InternalCodingEngine(CodingEngine):
                 logger.debug("InternalCodingEngine memory retrieval failed safely: %s", gm_exc)
 
         context_parts.append(CODING_DEBUGGING_HANDOFF_INSTRUCTION)
+        from mana_agent.repository_evidence.handoff import MISSING_EVIDENCE_INSTRUCTION
+        context_parts.append(MISSING_EVIDENCE_INSTRUCTION)
         user_content = "\n\n".join(context_parts)
 
         messages: list[Any] = [
@@ -621,7 +686,7 @@ class InternalCodingEngine(CodingEngine):
             self.provider,
         )
 
-        max_turns = MAX_INTERNAL_MODEL_TURNS
+        max_turns = min(MAX_INTERNAL_MODEL_TURNS, getattr(self, "max_model_turns", MAX_INTERNAL_MODEL_TURNS))
         final_summary = ""
 
         saved_native = task.context.get("coding_resume_context") or {}
@@ -645,22 +710,11 @@ class InternalCodingEngine(CodingEngine):
             if cancel_ev.is_set():
                 raise asyncio.CancelledError()
 
-            from mana_agent.services.activity_context import emit_activity
-            model_operation = f"model-{task.task_id}-{turn}"
-            emit_activity("model.started", title="Waiting for the coding model", status="running",
-                          operation_id=model_operation, model=self.model)
-            if hasattr(model_with_tools, "generate"):
-                response = await model_with_tools.generate(messages, continuation=continuation)
-            elif hasattr(model_with_tools, "generate_sync"):
-                response = await asyncio.to_thread(model_with_tools.generate_sync, messages)
-            elif hasattr(model_with_tools, "ainvoke") and callable(model_with_tools.ainvoke):
-                response = await model_with_tools.ainvoke(messages)
-            elif hasattr(model_with_tools, "invoke") and callable(model_with_tools.invoke):
-                response = await asyncio.to_thread(model_with_tools.invoke, messages)
-            elif callable(model_with_tools):
-                response = await asyncio.to_thread(model_with_tools, messages)
-            else:
-                raise RuntimeError(f"Coding model {type(model_with_tools)} does not provide an inference method")
+            if callable(getattr(self, "charge_model", None)):
+                self.charge_model()
+            response = await self._await_model_turn(
+                task.task_id, turn, model_with_tools, messages, continuation, cancel_ev,
+            )
             usage = getattr(response, "usage", None)
             if usage is not None and hasattr(usage, "model_dump"):
                 for name, value in usage.model_dump().items():
@@ -690,8 +744,6 @@ class InternalCodingEngine(CodingEngine):
                 turn += 1
                 continue
 
-            emit_activity("model.completed", title="Coding model responded", status="success",
-                          operation_id=model_operation, model=self.model)
             tool_calls = getattr(response, "tool_calls", None)
             if not tool_calls:
                 content_val = getattr(response, "content", response)
@@ -1178,6 +1230,8 @@ class InternalCodingEngine(CodingEngine):
 
         # If an LLM client or callable was provided, invoke it
         if callable(self.llm_client):
+            if callable(getattr(self, "charge_model", None)):
+                self.charge_model()
             handoff_task = task.model_copy(update={"requirements": [*task.requirements, CODING_DEBUGGING_HANDOFF_INSTRUCTION]})
             response = await asyncio.to_thread(self.llm_client, handoff_task, workspace, tool_defs, session)
             if not response:
@@ -1185,6 +1239,8 @@ class InternalCodingEngine(CodingEngine):
             return str(response)
 
         if hasattr(self.llm_client, "execute_responses_stream"):
+            if callable(getattr(self, "charge_model", None)):
+                self.charge_model()
             handoff_task = task.model_copy(update={"requirements": [*task.requirements, CODING_DEBUGGING_HANDOFF_INSTRUCTION]})
             return await self.llm_client.execute_responses_stream(handoff_task, workspace, tool_defs, session)
 
@@ -1194,24 +1250,6 @@ class InternalCodingEngine(CodingEngine):
             llm = None
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
-
-        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
-            session.handle_function_call({
-                "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
-                "name": "batch_read_files",
-                "arguments": {"files": list(task.allowed_files)},
-                "caller": {"type": "program", "call_id": "prog_init"},
-            })
-            return f"Completed internal coding task: {task.goal}"
-        elif task.allowed_files:
-            for allowed in task.allowed_files:
-                session.handle_function_call({
-                    "call_id": f"call_init_{uuid.uuid4().hex[:8]}",
-                    "name": "read_file",
-                    "arguments": {"path": allowed},
-                    "caller": {"type": "program", "call_id": "prog_init"},
-                })
-            return f"Completed internal coding task: {task.goal}"
 
         raise RuntimeError("Selected internal coding model is unavailable; no direct-tool fallback was executed")
 
@@ -1225,6 +1263,8 @@ class InternalCodingEngine(CodingEngine):
         """Direct tool calling fallback when Programmatic Tool Calling is unsupported."""
         logger.info("Executing native internal coding task with Direct Tool Calling: %s", task.task_id)
         if callable(self.llm_client):
+            if callable(getattr(self, "charge_model", None)):
+                self.charge_model()
             handoff_task = task.model_copy(update={"requirements": [*task.requirements, CODING_DEBUGGING_HANDOFF_INSTRUCTION]})
             response = await asyncio.to_thread(self.llm_client, handoff_task, workspace, [], session)
             if not response:
@@ -1237,22 +1277,6 @@ class InternalCodingEngine(CodingEngine):
             llm = None
         if llm is not None:
             return await self._run_model_tool_loop(task, workspace, session, cancel_ev, llm=llm)
-
-        if len(task.allowed_files) > 1 and self.batch_operations_enabled:
-            session.handle_function_call({
-                "call_id": f"call_direct_batch_{uuid.uuid4().hex[:8]}",
-                "name": "batch_read_files",
-                "arguments": {"files": list(task.allowed_files)},
-            })
-            return f"Completed internal direct tool coding task: {task.goal}"
-        elif task.allowed_files:
-            for allowed in task.allowed_files:
-                session.handle_function_call({
-                    "call_id": f"call_direct_{uuid.uuid4().hex[:8]}",
-                    "name": "read_file",
-                    "arguments": {"path": allowed},
-                })
-            return f"Completed internal direct tool coding task: {task.goal}"
 
         raise RuntimeError("Internal coding model is unavailable; no tool action was selected")
 
@@ -1332,7 +1356,18 @@ class InternalCodingEngine(CodingEngine):
 
     async def cancel(self, task_id: str) -> None:
         ev = self._cancellation_events.get(task_id)
-        if ev is not None:
+        pending = self._pending_model_calls.get(task_id)
+        if pending is not None and not pending.done():
+            def stop_inference():
+                if ev is not None:
+                    ev.set()
+                pending.cancel()
+            try:
+                pending.get_loop().call_soon_threadsafe(stop_inference)
+            except RuntimeError:
+                # The owner loop already shut down.
+                pass
+        elif ev is not None:
             ev.set()
         if task_id in self._task_statuses:
             prev = self._task_statuses[task_id]

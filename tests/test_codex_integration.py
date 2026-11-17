@@ -1019,3 +1019,24 @@ def test_interrupted_turn_is_cancelled(tmp_path: Path) -> None:
         ],
     )
     assert result.status == "cancelled"
+
+
+def test_codex_preserves_continuation_for_missing_evidence(tmp_path: Path) -> None:
+    import json
+
+    task = _task().model_copy(update={"context": {"mode_patch_proposal": True,
+        "coding_continuation_id": "continuation-1"}, "requires_repository_write": False})
+    gap = {"task_id": task.task_id, "requirement": {"requirement_id": "caller",
+        "objective": "Identify the caller", "acceptance_criteria": ["Cite a call site"]},
+        "reason": "The caller is unresolved"}
+    result = parse_codex_result(task=task, workspace=_workspace(tmp_path), worker_id="worker-1",
+        thread_id="thread-1", turn_id="turn-1", changed_files=[],
+        notifications=[
+            {"method": "item/completed", "params": {"item": {"type": "agentMessage",
+                "text": json.dumps({"patch": "", "missing_evidence": [gap]})}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ])
+    assert result.status == "waiting"
+    assert result.missing_evidence[0]["task_id"] == task.task_id
+    assert result.continuation_context == {"coding_continuation_id": "continuation-1",
+        "thread_id": "thread-1", "turn_id": "turn-1", "changed_files": []}

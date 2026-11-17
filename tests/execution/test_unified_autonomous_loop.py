@@ -402,7 +402,7 @@ def test_cancellation_propagates_to_supervisor_and_taskboard(tmp_path: Path) -> 
 # 7. TaskBoard consistency & continued reasoning without pending tasks
 # ==============================================================================
 
-def test_taskboard_consistency_reasoning_without_pending_tasks(tmp_path: Path) -> None:
+def test_taskboard_consistency_reasoning_without_pending_tasks(tmp_path: Path, complete_supervised_task) -> None:
     supervisor = _make_supervisor(tmp_path)
     tb = TaskBoard(tmp_path / "workspace")
 
@@ -441,7 +441,7 @@ def test_taskboard_consistency_reasoning_without_pending_tasks(tmp_path: Path) -
     # Create a parent task and child task that is already marked DONE
     parent = tb.create_task(title="Parent Task", user_request="task-tb-reasoning")
     child = tb.create_child_task(parent.task_id, title="Initial task", user_request="done work")
-    tb.mark_completed(child.task_id, result_summary="already finished")
+    complete_supervised_task(tb, child.task_id, supervisor)
 
     turns_executed = 0
     def step_runner(step_idx: int, ctx: dict[str, Any]):

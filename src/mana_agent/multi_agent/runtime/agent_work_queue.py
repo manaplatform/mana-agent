@@ -578,6 +578,10 @@ class WorkItem(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     kind: WorkKind
+    task_id: str = ""
+    queue_job_id: str = ""
+    attempt_id: str = ""
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
     title: str = ""
     gate: str = ""
     tool_name: str = ""
@@ -713,6 +717,14 @@ class AgentWorkQueue:
     def submit(self, item: WorkItem) -> bool:
         """Add a job. Returns ``False`` if a duplicate was suppressed."""
         with self._lock:
+            from mana_agent.services.activity_context import current_activity_context
+            activity = current_activity_context()
+            if activity is not None and activity.task_id:
+                if item.task_id and item.task_id != activity.task_id:
+                    raise PermissionError("Native work item belongs to another TaskBoard task")
+                item.task_id = activity.task_id
+                item.attempt_id = activity.attempt_id
+                item.queue_job_id = item.queue_job_id or item.id
             if self._memory_service is not None:
                 accepted, existing_id = self._memory_service.register_queue_item(
                     queue_item_id=item.id,

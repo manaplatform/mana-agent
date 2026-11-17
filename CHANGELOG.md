@@ -2,6 +2,13 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased — 2026-11-18
+
+- Coding assignments. Construct the task worker's frozen Codex settings with the assigned checkout policy already applied. Verify both engines with `venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k task_local_facades`. This check was not run by the agent.
+- Codex startup and recovery. Merge continuation metadata into a single result field to fix the CLI import failure and preserve the existing continuation ID alongside the missing-evidence handoff. Verify with `venv/bin/mana-agent --help` and `venv/bin/python -m pytest -q tests/test_codex_integration.py -k preserves_continuation_for_missing_evidence`. These checks were not run by the agent.
+- Repository evidence and orchestration: add workspace-local structured evidence revisions, source hashes, provenance, relationships, bounded retrieval, staleness checks, independently supervised investigation/understanding tasks, selected-engine read-only investigation, typed missing-evidence handoffs, and evidence-aware coding assignments. Extend existing task/queue persistence with version checks, dependency-aware claims, dynamic task graph adoption, and supervisor-backed completion. Preserve explicit PLAN approvals and external Codex ownership. See [contracts, migration, limitations, and regression protection](docs/regressions/repository-evidence-orchestration.md).
+- User-owned verification (not run by the agent): `venv/bin/python -m pytest -q tests/evidence/test_repository_evidence_board.py tests/coding/test_investigation_engines.py tests/gateway/test_evidence_driven_orchestration.py`; compatibility commands and live acceptance are documented in the regression note. No commit, publication, or deployment is implied.
+
 ## Unreleased — 2026-11-17
 
 - The `repo_search` decision and native tool schemas require nonblank literal query text. Correction guidance directs path-only and glob-only discovery to `list_files`. See [text search query contract](docs/regressions/debug-plan-execution-contract.md#text-search-query-contract).

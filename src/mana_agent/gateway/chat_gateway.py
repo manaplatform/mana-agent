@@ -8961,6 +8961,12 @@ class AgentChatGateway:
             self._lane_coordinator.start(root_reservation)
 
         def execute_child(item: Any, child_task_id: str) -> MultiTaskChildResult:
+            selected_task = board.get_task(child_task_id)
+            if selected_task.task_kind in {"investigation", "understanding"}:
+                completed = self.mode_workflow.execute_investigation_task(child_task_id)
+                return MultiTaskChildResult(item.local_id, child_task_id, completed.title, completed.entry_route,
+                    "completed" if completed.status == TaskStatus.DONE else "blocked", result=completed.result_summary,
+                    verification_status=completed.verification_status, blocker="; ".join(completed.blockers))
             child_accounting = self._stack.context_cost_governor.accounting_snapshot(
                 task_id=child_task_id, turn_id=context.turn_id
             )

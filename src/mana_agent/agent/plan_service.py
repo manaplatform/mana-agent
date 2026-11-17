@@ -13,6 +13,7 @@ from pydantic import AfterValidator, Field, GetJsonSchemaHandler, ValidationErro
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, PydanticCustomError
 
+from mana_agent.execution_supervisor.models import RecoveryDecision
 from mana_agent.agent.mode import DecisionEntries, ModeContract, PlanDraft, PlanRevision, repository_relative_path
 from mana_agent.coding_research_contracts import CodingDebuggingReport
 from mana_agent.human_inbox.models import canonical_digest
@@ -325,6 +326,9 @@ class InvestigateDecision(_ModeAction):
     action: Literal["investigate"]
     objective: str = Field(pattern=r"\S", max_length=2000)
     scope: str = Field(pattern=r"\S", max_length=2000)
+    paths: tuple[str, ...] = Field(min_length=1, max_length=16)
+    task_kind: Literal["investigation", "understanding"] = "investigation"
+    recovery: RecoveryDecision | None = None
     initial_repository_scope: Literal["", "explicit_audit", "architecture_wide"] = ""
 
 
@@ -401,6 +405,25 @@ class BlockDecision(_ModeAction):
     action: Literal["block"]
 
 
+from mana_agent.repository_evidence.models import EvidenceQuery, EvidenceRef
+
+
+class ResumeEvidenceDecision(_ModeAction):
+    action: Literal["resume_implementation"]
+    recovery: RecoveryDecision
+
+
+class QueryEvidenceDecision(_ModeAction):
+    action: Literal["query_evidence"]
+    query: EvidenceQuery
+
+
+class UseEvidenceDecision(_ModeAction):
+    action: Literal["use_evidence"]
+    evidence: tuple[EvidenceRef, ...] = Field(min_length=1, max_length=20)
+    requirement_id: str = ""
+
+
 class SwitchWorkflowDecision(_ModeAction):
     action: Literal["switch_workflow"]
     mode: Literal["auto", "debug"]
@@ -410,7 +433,7 @@ class SwitchWorkflowDecision(_ModeAction):
 
 ModeAction = (
     InspectDecision | InvestigateDecision | ClarifyDecision | DraftDecision | DiagnoseDecision
-    | RepairDecision | ResearchDecision | BlockDecision | SwitchWorkflowDecision
+    | RepairDecision | ResearchDecision | BlockDecision | SwitchWorkflowDecision | QueryEvidenceDecision | UseEvidenceDecision | ResumeEvidenceDecision
 )
 
 
@@ -420,7 +443,7 @@ class ModeDecision(ModeContract):
     @model_validator(mode="after")
     def validate_handoff(self, info: ValidationInfo):
         context = info.context or {}
-        if self.decision.action in {"inspect", "investigate"} and context.get("inspection_action") not in {
+        if self.decision.action == "inspect" and context.get("inspection_action") not in {
             None, self.decision.action,
         }:
             raise PydanticCustomError("mode_inspection_action", "Use {action} for repository reads in this mode.",
@@ -523,7 +546,17 @@ class PlanService:
             "to scope the next step. The coding engine can read more while preparing the patch. "
             "Consider the decisions and tools still needed for patching and verification before requesting more reads. "
             "When reads are unavailable, use the saved observations and explain material unresolved gaps. "
-            "In PLAN only, use investigate when investigation_available is true and the draft needs evidence. "
+            "When pending_repository_evidence is present, preserve the approved plan and completed steps. "
+            "If current evidence satisfies the request, select use_evidence with the exact requirement_id. "
+            "Create only the investigation tasks required by the gap, then use resume_implementation with an "
+            "explicit safe same-task RecoveryDecision after its evidence requirements are satisfied. "
+            "Before creating repository tasks, query_evidence with bounded paths/symbols or a specific literal query. "
+            "Use use_evidence to reuse current Evidence Board references without reading files again. "
+            "In any mode, use investigate to create an independently supervised investigation or understanding task "
+            "when repository evidence is missing. Supply bounded literal paths, an objective, and task_kind. "
+            "Use paths [\".\"] only for a shallow layout task unless an explicit repository-wide audit is authorized. "
+            "Investigation and understanding are tasks, never mandatory workflow stages. Reuse valid Evidence Board "
+            "entries and do not create work for facts already known. "
             "Delegate the narrowest question and use the cited observations in the resulting report. "
             "Set initial_repository_scope only for an explicit audit or architecture-wide request. "
             "Clarify requires questions, draft and repair require a draft, and research requires a debugging report. "
@@ -539,14 +572,14 @@ class PlanService:
             "steps. A draft needs explicit step IDs with dependencies on earlier steps and a "
             "passing verification check (argv is an array of individual command arguments). Each step "
             "must have file operations or a verification command and clear acceptance criteria. "
-            "Auto mode may inspect, clarify, draft or block. Draft from observed repository evidence. "
+            "Auto mode may investigate, clarify, draft or block. Draft from observed repository evidence. "
             "The draft is an execution plan, so list production entry point changes and relevant checks "
             "as concrete steps. If the goal already holds, use a verification-only draft and cite observed evidence. "
             "If recheck_required is present, rerun that exact check after the repair. Use fresh step IDs "
             "only for new work and do not repeat completed steps. "
             "Auto and Debug may use switch_workflow only when new evidence changes the needed workflow "
             "within the same authorized scope. Include the current task_id and observed evidence_ids. "
-            "Debug mode may inspect, clarify, diagnose, repair, research or block. "
+            "Debug mode may investigate, clarify, diagnose, repair, research or block. "
             "Keep diagnostics-only requests read-only and use diagnose to report the finding. Repair requires an "
             "evidence-backed hypothesis, the smallest fix, and goal-specific verification. If possible "
             "include a verification-only step expecting reproduction failure before repair, then a "
@@ -577,7 +610,8 @@ class PlanService:
         root = self.repo_root
         self.validate_inspection_target(request)
         if request.tool == "ls":
-            result = list_repository_directories(root)
+            from mana_agent.repository_evidence.observations import read_directory
+            result = read_directory(root)
         elif request.tool != "read_file":
             result = execute_repository_discovery(root, request.tool, request.discovery_arguments())
         else:
@@ -586,11 +620,11 @@ class PlanService:
             start = request.start_line
             stop = min(request.end_line or start + 119, start + 119)
             try:
-                with path.open(encoding="utf-8") as stream:
-                    result = {"ok": True, "path": relative, "start_line": start,
-                              "content": "".join(islice(stream, start - 1, stop))[:16_000]}
+                from mana_agent.repository_evidence.observations import read_source
+                result = read_source(root, relative, start_line=start, end_line=stop, max_chars=16_000)
             except (OSError, UnicodeError) as exc:
                 result = {"ok": False, "path": relative, "error": type(exc).__name__}
+
         return redact_secrets(result)
 
     def review(self, *, patch: str, step: dict[str, Any], context: dict[str, Any]) -> ScopeReview:

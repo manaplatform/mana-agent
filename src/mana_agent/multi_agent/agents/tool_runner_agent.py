@@ -43,6 +43,18 @@ class ExecutionAuthorityError(PermissionError):
     pass
 
 
+_INVESTIGATION_READ_TOOLS = frozenset({
+    "read_file", "repo_read", "repo_batch_read", "batch_read_files", "ls",
+    "list_files", "repo_search", "find_symbols", "call_graph",
+})
+_EVIDENCE_CONTEXT_TOOLS = frozenset({"repository_evidence_query", "repository_evidence_get"})
+
+
+def _shallow_investigation(task) -> bool:
+    return (list(task.investigation_scope) == ["."]
+            and not task.mode_workflow.get("initial_repository_scope"))
+
+
 @dataclass(frozen=True)
 class ToolExecutionAuthority:
     """Nonserializable host binding; deserializing a request cannot create one."""
@@ -58,6 +70,7 @@ class ToolExecutionAuthority:
     authorize: Callable[[str], Any] | None = field(default=None, repr=False)
     taskboard: Any = field(default=None, repr=False, compare=False)
     record_taskboard_evidence: bool = True
+    coding_assignment: dict = field(default_factory=dict, repr=False, compare=False)
     registry: Any = field(default=None, repr=False, compare=False)
     externally_locked: bool = field(default=False, repr=False)
     scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -100,6 +113,11 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
         execution_root = assigned.execution_repo_root or assigned.managed_worktree_path
         if execution_root and Path(execution_root).resolve() != workspace.worktree_path.resolve():
             raise ExecutionAuthorityError("Workspace differs from the TaskBoard execution assignment")
+        if assigned.task_kind in {"investigation", "understanding"}:
+            reads = {"ls", "list_files"} if _shallow_investigation(assigned) else _INVESTIGATION_READ_TOOLS
+            policies = {name: policy for name, policy in policies.items()
+                        if policy.effect == "read_only" and name in reads | _EVIDENCE_CONTEXT_TOOLS}
+            schemas = {name: schemas[name] for name in policies}
     worker = registry.agents.get(worker_id) if worker_id else next((candidate for candidate in registry.agents.values()
         if candidate.role == AgentRole.TOOL_WORKER and candidate.parent_agent_id == actor_id and candidate.state != AgentState.DONE), None)
     if worker_id and (worker is None or worker.role != AgentRole.TOOL_WORKER or worker.parent_agent_id != actor_id or worker.state == AgentState.DONE):
@@ -112,6 +130,7 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
     return ToolExecutionAuthority(task_id=task_id, actor_id=actor_id, actor_role=node.role, worker_id=worker.agent_id,
         workspace=workspace, policies=MappingProxyType(dict(policies)), schemas=MappingProxyType(dict(schemas)),
         activity=context, cancel=cancel, authorize=authorize, taskboard=taskboard, registry=registry,
+        coding_assignment=dict(assigned.coding_assignment) if taskboard is not None else {},
         externally_locked=externally_locked, record_taskboard_evidence=record_taskboard_evidence, seal=_SEAL)
 
 
@@ -230,6 +249,9 @@ class RunningOperation:
         if self.authority.cancel():
             raise InterruptedError("Execution cancelled by its owner")
         if self.authority.taskboard is not None:
+            from mana_agent.repository_evidence.tasks import validate_assignment
+            validate_assignment(self.authority.taskboard, self.request.task_id,
+                                expected=self.authority.coding_assignment)
             assigned = self.authority.taskboard.get_task(self.request.task_id)
             if self.authority.actor_id not in {assigned.owner_agent_id, *assigned.assigned_agent_ids, *assigned.assigned_subagent_ids}:
                 raise ExecutionAuthorityError("Execution task assignment was revoked")
@@ -408,7 +430,23 @@ class ToolRunnerAgent:
         cwd = (a.workspace.worktree_path / str(request.arguments.get("cwd") or ".")).resolve()
         if not cwd.is_relative_to(a.workspace.worktree_path.resolve()):
             raise ExecutionAuthorityError("Tool cwd escapes its assigned workspace")
+        assigned_task = a.taskboard.get_task(request.task_id) if a.taskboard else None
+        investigation = assigned_task is not None and assigned_task.task_kind in {"investigation", "understanding"}
+        if investigation and not policy.repository and request.tool_name not in _EVIDENCE_CONTEXT_TOOLS:
+            raise ExecutionAuthorityError("Investigation cannot run unrelated tools or access external services")
         if policy.repository:
+            allowed_scope = (list(assigned_task.investigation_scope) if investigation else
+                list(assigned_task.coding_assignment.get("allowed_scope", []))
+                if assigned_task is not None and policy.effect != "read_only" else [])
+            if investigation and request.tool_name not in _INVESTIGATION_READ_TOOLS:
+                raise ExecutionAuthorityError("Investigation only permits registered repository read tools")
+            if investigation and _shallow_investigation(assigned_task):
+                paths = request.arguments.get("paths") or []
+                if (request.tool_name not in {"ls", "list_files"} or request.arguments.get("repository_reason")
+                        or any(path != "." for path in paths)):
+                    raise ExecutionAuthorityError("The initial dot scope permits only shallow layout discovery")
+            if investigation and request.tool_name not in {"ls"} and not (request.arguments.get("paths") or request.arguments.get("path") or request.arguments.get("files")):
+                raise ExecutionAuthorityError("Investigation calls require explicit bounded paths")
             def validate_paths(value):
                 if isinstance(value, dict):
                     for key, item in value.items():
@@ -416,6 +454,10 @@ class ToolRunnerAgent:
                             target = (a.workspace.worktree_path / item).resolve()
                             if not target.is_relative_to(a.workspace.worktree_path.resolve()):
                                 raise ExecutionAuthorityError("Tool target escapes its assigned workspace")
+                            if allowed_scope and "." not in allowed_scope and not any(
+                                target == (a.workspace.worktree_path / scope).resolve() or target.is_relative_to((a.workspace.worktree_path / scope).resolve())
+                                for scope in allowed_scope):
+                                raise ExecutionAuthorityError("Repository target exceeds its assigned scope")
                             if any(part.startswith(".env") or part in {".ssh", "secrets.toml", "id_rsa", "id_ed25519"} for part in target.relative_to(a.workspace.worktree_path.resolve()).parts):
                                 raise ExecutionAuthorityError("Tool target is protected credential material")
                         elif key in {"paths", "files"} and isinstance(item, list):
@@ -501,6 +543,13 @@ class ToolRunnerAgent:
             policy.effect == "command" and not _is_read_only_observation(request.tool_name, request.arguments)
         )
         before = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
+        queue_store = None
+        operation_key = ""
+        if self.authority.taskboard is not None:
+            from mana_agent.repository_evidence.tool_queue import ToolQueueStore
+            queue_store = ToolQueueStore(self.authority.taskboard.store.db)
+            with context.publication() if context else nullcontext():
+                operation_key = queue_store.begin_operation(request)
         operation.emit("tool.started")
         raw: dict[str, Any]
         try:
@@ -569,6 +618,14 @@ class ToolRunnerAgent:
         result.trace_complete = operation.trace_complete
         result.result["execution"] = result.model_dump(mode="json", exclude={"result", "mutations"})
         result.result["mutations"] = _public_value([m.model_dump() for m in mutations], operation.protected)
+        if queue_store is not None:
+            with context.publication() if context else nullcontext():
+                queue_store.finish_operation(operation_key, result)
+        if (self.authority.taskboard is not None and context is not None and context.attempt_id
+                and (policy.repository or mutations or policy.effect == "command")):
+            from mana_agent.repository_evidence.observations import ingest_operation
+            with context.publication():
+                ingest_operation(self.authority, result)
         return result
 
 

@@ -363,6 +363,8 @@ def select_lane(*, entry_route: str = "", intent: str = "", model_lane: str | La
 
 
 TOOL_CAPABILITIES: dict[str, frozenset[str]] = {
+    "repository_evidence_query": frozenset({"repository_read"}),
+    "repository_evidence_get": frozenset({"repository_read"}),
     "repo_search": frozenset({"repository_read"}), "repo_batch_search": frozenset({"repository_read"}),
     "read_file": frozenset({"repository_read"}), "repo_batch_read": frozenset({"repository_read"}),
     "generate_image": frozenset({"media.image.generate", "media.artifact.write"}),

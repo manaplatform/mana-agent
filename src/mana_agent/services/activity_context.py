@@ -54,13 +54,16 @@ class ActivityContext:
         from mana_agent.execution_supervisor.models import ExecutionState
         with self.supervisor.store.locked():
             task = self.supervisor.get_task(self.task_id)
+            if self.attempt_id and (task.attempt_id != self.attempt_id
+                    or self.attempt_generation and task.attempt_generation != self.attempt_generation):
+                raise StaleLeaseError("activity belongs to a retired execution attempt")
             attempt_id = self.attempt_id
             lease_token = self.lease_token
             coordinator = getattr(self, "coordinator", None)
             if coordinator is not None and hasattr(coordinator, "inspect_task"):
                 try:
                     lane_exec = coordinator.inspect_task(self.task_id)
-                    if lane_exec and lane_exec.supervisor_attempt_id and lane_exec.supervisor_lease_token:
+                    if lane_exec and lane_exec.supervisor_attempt_id == task.attempt_id and lane_exec.supervisor_lease_token:
                         attempt_id = lane_exec.supervisor_attempt_id
                         lease_token = lane_exec.supervisor_lease_token
                 except Exception:

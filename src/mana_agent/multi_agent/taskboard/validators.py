@@ -66,7 +66,7 @@ def validate_transition(task: TaskBoardItem, next_status: TaskStatus, *, reason:
                     "INCOMPLETE_FEATURE_WIRING: runtime evidence provenance is absent"
                 )
         evidence = dict(task.supervisor_verification_evidence or {})
-        if not (task.status == TaskStatus.NEW and not task.wiring_required):
+        if next_status == TaskStatus.DONE:
             if not task.supervisor_execution_id:
                 raise InvalidTaskTransition(
                     "done status requires the authoritative supervisor execution identity"

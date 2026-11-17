@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from repository_investigation_fixture import FileInvestigator, evidence_call, inspection, investigation, report_call
+from mana_agent.multi_agent.core.types import TaskStatus
 
 from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase, PlanRevision, PlanStep
 from mana_agent.agent.plan_service import EvidenceRequest, PlanService
@@ -119,8 +120,9 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
         assert task.mode_workflow["plan"]["draft"]["steps"][0]["step_id"] == "fix"
         assert task.mode_workflow["phase"] == "executing"
         assert task.owning_lane == "coding"
-        assert len(task.mode_workflow["evidence"]) == 1
-        assert "investigation" not in task.mode_workflow
+        assert task.evidence_refs
+        assert any(child.task_kind == "investigation" and child.status == TaskStatus.DONE
+                   for child in workflow.board.list_tasks(parent_task_id=task.task_id))
         assert kwargs["execution_mode"] == "read_only"
         assert (Path(kwargs["coding_mode_root"]) / "app.py").read_text() == "before\n"
         assert kwargs["execution_mode"] == "read_only"
@@ -132,7 +134,22 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
         assert (root / "app.py").read_text() == "after\n"
         return {"passed": True, "exit_code": 0, "output": "focused check passed"}
 
-    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode=backend)
+    from mana_agent.repository_evidence.observations import read_source
+
+    def assign(*, root, **_):
+        def generate(prompt, **kwargs):
+            if kwargs.get("repository_investigation"):
+                assert kwargs["execution_mode"] == "read_only"
+                return {"status": "completed", "investigation_result": {
+                    "findings": [{"category": "code_behavior", "statement": "The handler returns the wrong value.",
+                                  "classification": "inferred", "confidence": 0.9,
+                                  "sources": [read_source(root, "app.py")["source_evidence"]]}],
+                    "requirement_bindings": {"repository_finding": [0]},
+                }}
+            return propose(prompt, **kwargs)
+        return SimpleNamespace(generate=generate, close=lambda: None)
+
+    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode=backend, for_assignment=assign)
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
     from mana_agent.approval.models import ApprovalMode
     from mana_agent.approval.policy import set_approval_mode
@@ -145,7 +162,7 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
     assert result.message == "Changed `app.py`. All required verification checks passed."
     assert result.data["repository_observations"]["findings"] == "The handler returns the wrong value."
     task = workflow.board.get_task(result.data["task_id"])
-    assert task.mode_workflow["evidence"][0]["id"] == "evidence-1"
+    assert task.mode_workflow["evidence"][0]["board_ref"] in task.evidence_refs
     assert task.mode_workflow["approved_digest"] == ""
     assert not task.mode_workflow.get("inbox_id")
 

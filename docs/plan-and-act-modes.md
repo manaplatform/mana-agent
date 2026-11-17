@@ -6,11 +6,13 @@ Mana reads the original request, relevant conversation context for follow-ups, a
 
 When the workflow requests an answer, it pauses at its saved checkpoint. The TUI opens an answer form and interactive console chat asks for each answer. After submission, Mana continues the same task with its existing evidence. Choose **Later** or press Enter at a console answer prompt to leave the task pending in chat. You can also submit the full set with `/inbox answer <item-id> '<JSON answers keyed by question ID>'`, or use `mana-agent inbox answer <item-id> --answer '<JSON answers keyed by question ID>'` from a separate terminal.
 
-In AUTO and DEBUG, repository reads are Coding actions. Mana batches independent reads when the next decision needs evidence and saves each observation on the same task. It validates each request against the selected read tool. A rejected batch runs no reads. The model can use its correction to request a shallow directory listing, give a targeted glob its own field, or use observations it already has. If correction fails, the blocked task shows the failed check and retains earlier observations for `/task resume <task-id>`. Once Mana has enough evidence to scope a change, the coding backend can read more while preparing the patch. A diagnosis can use the evidence already supplied. Reads and model decisions share the workflow budget and repeated results stop further inspection. The task result includes findings, verification, and any material gaps.
+Repository investigation and understanding are independently supervised TaskBoard tasks in every mode. MainAgent queries the persistent Repository Evidence Board before choosing more work. Current findings can be shared across tasks; missing, contradictory, or stale findings can cause a focused investigation task. Coding waits only on its own dependencies, and unrelated tasks can continue. Investigation completion requires satisfying evidence requirements, rather than counting reads.
+
+Investigation uses the configured coding engine in read-only mode, including external Codex when selected. Native reads use the registered ToolRunner boundary; Codex retains its inner loop and provider-owned provenance. Findings remain inferences or hypotheses until supported by actual observations. Scoped source validation, content hashes, and task/attempt identities accompany persisted evidence. There is no mandatory investigation stage. See [evidence contracts and recovery](regressions/repository-evidence-orchestration.md).
 
 An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` to find files by path or glob. Use `repo_search` with a nonblank literal `query` to find text in the selected files.
 
-Inspection decisions reject duplicates within a batch. When a request exactly matches a successful read from the same task, Mana gives the model the existing observation and dispatches only new reads. Batches that only reuse saved results count toward the no-progress limit. The model receives the saved checkout layout alongside recent observations. A failed saved read is included as context if the model requests it again and needs to correct its decision.
+Compatibility inspection decisions become scoped investigation tasks. The selected engine receives their scope and requested observations, along with reusable board evidence. Existing run caches can avoid repeated reads. The Autonomous Loop retains its no-progress and budget limits; a saved failed read cannot satisfy an evidence requirement.
 
 ## Implement a change
 
@@ -22,7 +24,7 @@ DEBUG and AUTO can switch when the model cites new observed evidence on the same
 
 ## Plan a change
 
-Explicit PLAN can still collect evidence with a native read-only session. Its reads and model calls draw from the shared workflow budget. If the session reaches that budget or stops finding new evidence, planning continues from the saved observations.
+Explicit PLAN can create read-only investigation and understanding tasks through the selected coding engine. Task and evidence writes are durable, while repository writes remain blocked until the exact plan revision is approved. New revisions cite Evidence Board references; old approved revisions retain their original digest.
 
 - In chat or the TUI, use `/plan <request>`. Use `/plan` by itself to inspect the active task or start planning your next message. `/mode plan` and `mana-agent chat --planning-mode` enter the same workflow. Use `/mode auto` to return to ordinary routing after resolving an active plan. A proposal requested in prose is a read-only response.
 - From a terminal, use `mana-agent plan 'Upgrade the connection pool'`. Use `--no-code` for a draft with no execution approval. `--no-save` skips the Markdown export. For `--output`, select a path outside the target checkout. The default export resides under Mana's repository state directory.

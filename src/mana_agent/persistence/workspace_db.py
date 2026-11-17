@@ -555,6 +555,15 @@ class WorkspaceDatabase:
                     "INSERT INTO schema_migrations (version, applied_at, migration_name, details) VALUES (?, ?, ?, ?);",
                     (1, _utc_now_iso(), "initial_normalized_workspace_schema", "{}"),
                 )
+            from mana_agent.repository_evidence.schema import STATEMENTS
+            if conn.execute("SELECT 1 FROM schema_migrations WHERE version=2").fetchone() is None:
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+                if "row_version" not in columns:
+                    conn.execute("ALTER TABLE tasks ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0")
+                for statement in STATEMENTS:
+                    conn.execute(statement)
+                conn.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?)",
+                             (2, _utc_now_iso(), "repository_evidence_and_operation_identity", "{}"))
 
 
 _DATABASES: dict[str, WorkspaceDatabase] = {}

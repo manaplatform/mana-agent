@@ -63,6 +63,9 @@ def parse_codex_result(
     # answer for failed write turns — see terminal_summary.
     agent_message_text = ""
     patch_proposal = ""
+    investigation_result = None
+    missing_evidence = []
+    investigating = bool(task.context.get("repository_investigation"))
     proposing_patch = bool(task.context.get("mode_patch_proposal"))
     usage: dict[str, int] | None = None
     status = "completed"
@@ -102,17 +105,34 @@ def parse_codex_result(
                         test_failures.append(command)
             if item_type in _ASSISTANT_ITEM_TYPES:
                 text = str(item.get("text") or item.get("message") or "").strip()
-                if text and proposing_patch:
+                if text and investigating:
+                    from mana_agent.repository_evidence.handoff import parse_investigation_result
+                    try:
+                        investigation_result = parse_investigation_result(text).model_dump(mode="json")
+                        missing_evidence = investigation_result["missing_evidence"]
+                    except ValueError:
+                        investigation_result = None
+                        missing_evidence = []
+                elif text and proposing_patch:
+                    from mana_agent.repository_evidence.handoff import json_response_text, missing_evidence_from_text
+                    missing_evidence = missing_evidence_from_text(text)
+                    if missing_evidence and any(item["task_id"] != task.task_id for item in missing_evidence):
+                        raise ValueError("Missing evidence request belongs to another task")
                     patch_proposal = ""
                     if len(text) <= 250_000:
                         try:
-                            envelope = json.loads(text)
+                            envelope = json.loads(json_response_text(text))
                         except ValueError:
                             continue
-                        if (isinstance(envelope, dict) and set(envelope) == {"patch"}
+                        if (isinstance(envelope, dict) and set(envelope).issubset({"patch", "missing_evidence"}) and "patch" in envelope and not missing_evidence
                                 and isinstance(envelope["patch"], str) and envelope["patch"]):
                             patch_proposal = text
                 elif text:
+                    from mana_agent.repository_evidence.handoff import missing_evidence_from_text
+                    missing_evidence = missing_evidence_from_text(text)
+                    if missing_evidence:
+                        if any(item["task_id"] != task.task_id for item in missing_evidence):
+                            raise ValueError("Missing evidence request belongs to another task")
                     # Keep for plan-mode terminal notes / internal warnings only.
                     if looks_like_freeform_tool_garbage(text):
                         warnings.append(
@@ -212,6 +232,11 @@ def parse_codex_result(
         warnings.append("Test command failed: " + ", ".join(test_failures))
 
     debugging_report = None
+    if status == "completed" and missing_evidence:
+        status = "waiting"
+    if investigating and status == "completed" and investigation_result is None:
+        status = "failed"
+        errors.append("CODING_INVESTIGATION_RESULT_INVALID")
     if proposing_patch and status == "completed" and not patch_proposal:
         status = "failed"
         errors.append("CODING_PATCH_PROPOSAL_INVALID")
@@ -308,12 +333,17 @@ def parse_codex_result(
     }
 
     tests_passed = bool(tests) and not test_failures and status == "completed" and not errors
+    continuation_context = {"coding_continuation_id": task.context.get("coding_continuation_id", "")}
+    if missing_evidence:
+        continuation_context.update(thread_id=thread_id, turn_id=turn_id, changed_files=changed_files)
     return CodingTaskResult(
         task_id=task.task_id,
         worker_id=worker_id,
         backend="codex",
         status=status,  # type: ignore[arg-type]
         summary=summary,
+        investigation_result=investigation_result,
+        missing_evidence=missing_evidence,
         patch_proposal=patch_proposal if status == "completed" else "",
         changed_files=changed_files,
         commands_run=commands,
@@ -334,7 +364,7 @@ def parse_codex_result(
         duration_breakdown=calculated_breakdown,
         codex_metadata=codex_meta,
         debugging_report=debugging_report,
-        continuation_context={"coding_continuation_id": task.context.get("coding_continuation_id", "")},
+        continuation_context=continuation_context,
     )
 
 

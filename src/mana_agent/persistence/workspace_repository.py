@@ -111,6 +111,12 @@ class WorkspaceRepository:
 
     def save_task(self, task: TaskBoardItem) -> TaskBoardItem:
         extra = {
+            "task_kind": task.task_kind,
+            "evidence_requirements": task.evidence_requirements,
+            "evidence_refs": task.evidence_refs,
+            "investigation_scope": task.investigation_scope,
+            "coding_assignment": task.coding_assignment,
+            "missing_evidence": task.missing_evidence,
             "routing_evidence": task.routing_evidence,
             "execution_policy": task.execution_policy,
             "mode_workflow": task.mode_workflow,
@@ -129,6 +135,11 @@ class WorkspaceRepository:
         extra_json = json.dumps(json_safe_tool_payload(extra), sort_keys=True, ensure_ascii=False)
 
         with self.db.transaction() as conn:
+            from mana_agent.repository_evidence.service import EvidenceConflict
+            existing = conn.execute("SELECT row_version FROM tasks WHERE task_id=?", (task.task_id,)).fetchone()
+            current_version = int(existing["row_version"]) if existing else 0
+            if current_version != task.row_version:
+                raise EvidenceConflict(f"Task {task.task_id} changed; reload before updating")
             conn.execute(
                 """
                 INSERT OR REPLACE INTO tasks (
@@ -264,6 +275,8 @@ class WorkspaceRepository:
                     col_rows,
                 )
 
+            conn.execute("UPDATE tasks SET row_version=? WHERE task_id=?", (current_version + 1, task.task_id))
+
             # Dependencies
             conn.execute("DELETE FROM task_dependencies WHERE task_id = ?;", (task.task_id,))
             dep_rows = []
@@ -362,6 +375,7 @@ class WorkspaceRepository:
                     ],
                 )
 
+        task.row_version = current_version + 1
         return task
 
     def _hydrate_task(self, row: sqlite3.Row, conn: sqlite3.Connection) -> TaskBoardItem:
@@ -478,6 +492,13 @@ class WorkspaceRepository:
 
         return TaskBoardItem(
             task_id=task_id,
+            row_version=int(row["row_version"]),
+            task_kind=extra.get("task_kind", "general"),
+            evidence_requirements=extra.get("evidence_requirements", []),
+            evidence_refs=extra.get("evidence_refs", []),
+            investigation_scope=extra.get("investigation_scope", []),
+            coding_assignment=extra.get("coding_assignment", {}),
+            missing_evidence=extra.get("missing_evidence", []),
             parent_task_id=str(row["parent_task_id"]) if row["parent_task_id"] else None,
             root_task_id=str(row["root_task_id"]),
             title=str(row["title"]),

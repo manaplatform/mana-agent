@@ -178,6 +178,12 @@ def test_entry_route_refreshes_capability_evidence(tmp_path, native_profile, mon
 
 
 def test_timeout_cancels_selected_request_without_other_backend(native_profile, monkeypatch):
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+
+    activity = []
+    monkeypatch.setattr("mana_agent.services.activity_context.emit_activity",
+                        lambda event, **fields: activity.append((event, fields)))
+
     class Adapter:
         cancelled = False
         async def generate(self, request, **_native_options):
@@ -189,9 +195,19 @@ def test_timeout_cancels_selected_request_without_other_backend(native_profile, 
     adapter = Adapter()
     value = engine(native_profile, monkeypatch, adapter)
     value.timeout = .001
+    async def coding_request():
+        return await InternalCodingEngine()._await_model_turn(
+            "coding-task", 0, value, [UserMessage("hello")], None, asyncio.Event(),
+        )
     with pytest.raises(InferenceTimeoutError):
-        value.generate_sync("hello")
+        asyncio.run(coding_request())
     assert adapter.cancelled
+    assert [event for event, _ in activity] == ["model.started", "model.failed"]
+    started, failed = activity[0][1], activity[1][1]
+    assert failed["operation_id"] == started["operation_id"]
+    assert started["metadata"]["timeout_seconds"] == value.timeout
+    assert failed["metadata"]["reason_code"] == "inference_timeout"
+    assert failed["title"] == "Model request timed out"
 
 def test_empty_response_does_not_prove_completion(native_profile, monkeypatch):
     class Adapter:

@@ -326,6 +326,14 @@ class CodexCodingAgentShim:
                     raise PermissionError("The patch proposal is outside the assigned worktree")
                 validate_prepared_repository(selected, selected)
                 proposal_root = selected
+        if kwargs.get("repository_investigation"):
+            from mana_agent.repository_evidence.models import CodingAssignment
+            assignment = CodingAssignment.model_validate(kwargs["repository_investigation"])
+            if requires_write or assignment.task_id != kwargs.get("gateway_task_id"):
+                raise PermissionError("Investigation assignment requires its exact read-only task")
+            proposal_root = Path(assignment.source_view).resolve()
+            if proposal_root != self.working_directory.resolve():
+                raise PermissionError("Investigation checkout differs from its assigned execution directory")
         return self._execute_turn(
             request,
             requires_repository_write=requires_write,
@@ -335,6 +343,7 @@ class CodexCodingAgentShim:
             user_message_id=kwargs.get("user_message_id"),
             dispatch_source=kwargs.get("dispatch_source") or "generate",
             coding_continuation_id=kwargs.get("coding_continuation_id", ""),
+            repository_investigation=kwargs.get("repository_investigation"),
             mode_proposal=tuple(kwargs.get("coding_mode_files") or ()) if kwargs.get("coding_mode_proposal") else (),
             **({"proposal_root": proposal_root} if proposal_root is not None else {}),
         )
@@ -424,6 +433,7 @@ class CodexCodingAgentShim:
         _mutation_recovery: bool = False,
         coding_continuation_id: str = "",
         mode_proposal: tuple[str, ...] = (),
+        repository_investigation: dict | None = None,
         proposal_root: Path | None = None,
     ) -> dict[str, Any]:
         """Run a coding turn with bounded mutation recovery (explicit attempt loop).
@@ -555,6 +565,7 @@ class CodexCodingAgentShim:
                     turn_id=turn_id,
                     is_recovery=is_recovery,
                     coding_continuation_id=coding_continuation_id,
+                    repository_investigation=repository_investigation,
                     **({"mode_proposal": mode_proposal} if mode_proposal else {}),
                     **({"proposal_root": proposal_root} if proposal_root is not None else {}),
                 )
@@ -657,6 +668,7 @@ class CodexCodingAgentShim:
         is_recovery: bool = False,
         coding_continuation_id: str = "",
         mode_proposal: tuple[str, ...] = (),
+        repository_investigation: dict | None = None,
         proposal_root: Path | None = None,
     ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
@@ -776,6 +788,8 @@ class CodexCodingAgentShim:
             ]
         from mana_agent.coding_research_contracts import CODING_DEBUGGING_HANDOFF_INSTRUCTION
         requirements.append(CODING_DEBUGGING_HANDOFF_INSTRUCTION)
+        from mana_agent.repository_evidence.handoff import MISSING_EVIDENCE_INSTRUCTION
+        requirements.append(MISSING_EVIDENCE_INSTRUCTION)
         task = CodingTask(
             task_id=task_id,
             goal=goal,
@@ -799,7 +813,7 @@ class CodexCodingAgentShim:
             ),
             requires_repository_write=requires_repository_write,
             context={"coding_research_resume": bool(coding_continuation_id), "coding_continuation_id": coding_continuation_id,
-                     "mode_patch_proposal": bool(mode_proposal)},
+                     "mode_patch_proposal": bool(mode_proposal), "repository_investigation": repository_investigation},
         )
 
         manager: WorkspaceManager | None = None
@@ -1299,10 +1313,13 @@ class CodexCodingAgentShim:
         return {
             "answer": answer,
             "backend": result.backend,
+            "producing_agent_id": result.worker_id,
             "status": result.status,
             "run_status": result.status,
             "debugging_report": result.debugging_report.model_dump(mode="json") if result.debugging_report else None,
             "continuation_context": result.continuation_context,
+            "investigation_result": result.investigation_result,
+            "missing_evidence": result.missing_evidence,
             "pending_required_work": result.debugging_report is not None,
             "run_id": result.task_id,
             "task_id": result.task_id,

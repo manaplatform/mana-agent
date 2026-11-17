@@ -124,7 +124,7 @@ def test_children_preserve_lineage_context_dependencies_and_serialization(tmp_pa
     assert legacy.decomposition_id_map == {}
 
 
-def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path: Path) -> None:
+def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path: Path, complete_supervised_task) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)
     plan = _plan(_item("a"), _item("b"), _item("c"))
@@ -141,6 +141,7 @@ def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path
         time.sleep(0.05)
         with lock:
             active -= 1
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(item.local_id, task_id, item.title, "repository", "completed")
 
     results = orchestrator.execute(root_task_id=root.task_id, plan=plan, execute_child=execute)
@@ -150,7 +151,7 @@ def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path
     assert board.get_task(root.task_id).aggregate_progress == "3/3 completed"
 
 
-def test_dependencies_run_in_order_and_failed_prerequisite_blocks_child(tmp_path: Path) -> None:
+def test_dependencies_run_in_order_and_failed_prerequisite_blocks_child(tmp_path: Path, complete_supervised_task) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)
     plan = _plan(_item("first"), _item("second", depends_on=["first"]), _item("independent"))
@@ -161,6 +162,7 @@ def test_dependencies_run_in_order_and_failed_prerequisite_blocks_child(tmp_path
         calls.append(item.local_id)
         if item.local_id == "first":
             return MultiTaskChildResult(item.local_id, task_id, item.title, "github", "failed", blocker="boom")
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(item.local_id, task_id, item.title, "repository", "completed")
 
     results = orchestrator.execute(root_task_id=root.task_id, plan=plan, execute_child=execute)
@@ -195,7 +197,7 @@ def test_approval_wait_keeps_dependents_queued_for_safe_resume(tmp_path: Path) -
 
 
 def test_worker_threads_inherit_parent_contextvars_for_computer_client(
-    tmp_path: Path,
+    tmp_path: Path, complete_supervised_task,
 ) -> None:
     """Computer route children must see the authenticated parent-turn client.
 
@@ -232,6 +234,7 @@ def test_worker_threads_inherit_parent_contextvars_for_computer_client(
             assert scoped is not None
             assert scoped.client_type == "tui"
             assert f"{item.local_id}:computer-entry-decision" in scoped.allowed_decision_ids
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(
             item.local_id, task_id, item.title, "computer", "completed", result="ok"
         )
@@ -267,7 +270,7 @@ def test_resume_materialization_does_not_duplicate_persisted_children(tmp_path: 
     assert len(board.get_task(root.task_id).child_task_ids) == 2
 
 
-def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path) -> None:
+def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path, complete_supervised_task) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)
     plan = _plan(_item("done"), _item("unfinished", depends_on=["done"]))
@@ -290,6 +293,7 @@ def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path) -> N
 
     def execute(item: MultiTaskItem, task_id: str) -> MultiTaskChildResult:
         calls.append(item.local_id)
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(item.local_id, task_id, item.title, "coding", "completed")
 
     results = orchestrator.execute(root_task_id=root.task_id, plan=plan, execute_child=execute)

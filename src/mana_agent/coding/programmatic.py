@@ -249,6 +249,8 @@ class ToolExecutionDispatcher:
             request = self.runner.request(name, arguments, call_id=cid, decision_id=cid,
                 timeout_seconds=float(arguments.get("timeout") or 120))
             from mana_agent.multi_agent.agents.tool_runner_agent import model_result
+            if callable(getattr(self, "charge_tool", None)):
+                self.charge_tool()
             return model_result(self.runner.execute(request, execute), self.runner.authority)
         except (ExecutionAuthorityError, ValueError) as exc:
             return {"ok": False, "error_code": "SANDBOX_VIOLATION" if self.workspace.sandbox == "readOnly" else "EXECUTION_AUTHORITY_REJECTED", "error": str(exc)}
@@ -281,19 +283,8 @@ class ToolExecutionDispatcher:
             target = (self.repo_root / rel_path).resolve()
             if not target.is_relative_to(self.repo_root) or not target.is_file():
                 return {"ok": False, "error": f"File not found or outside workspace: {rel_path}"}
-            start_line = args.get("start_line")
-            end_line = args.get("end_line")
-            if start_line is not None or end_line is not None:
-                start = max(1, int(start_line or 1))
-                end = int(end_line) if end_line is not None else None
-                if end is not None and end < start:
-                    return {"ok": False, "error": "end_line precedes start_line"}
-                with target.open(encoding="utf-8", errors="replace") as stream:
-                    lines = list(islice(stream, start - 1, end))
-                return {"ok": True, "path": rel_path, "content": "".join(lines), "start_line": start,
-                        "end_line": start + len(lines) - 1}
-            text = target.read_text(encoding="utf-8", errors="replace")
-            return {"ok": True, "path": rel_path, "content": text, "total_lines": len(text.splitlines())}
+            from mana_agent.repository_evidence.observations import read_source
+            return read_source(self.repo_root, rel_path, start_line=args.get("start_line"), end_line=args.get("end_line"))
 
         elif name == "read_skill":
             from mana_agent.skills.manager import read_skill
@@ -305,7 +296,18 @@ class ToolExecutionDispatcher:
                 return {"ok": False, "error": str(exc), "error_code": "SKILL_READ_FAILED"}
 
         elif name == "ls":
-            return list_repository_directories(self.repo_root)
+            from mana_agent.repository_evidence.observations import read_directory
+            return read_directory(self.repo_root)
+
+        elif name == "list_files" and args.get("paths") == ["."] and not args.get("repository_reason"):
+            from mana_agent.repository_evidence.observations import read_directory
+            from mana_agent.tools.repository import _matches_file_glob
+            manifest = read_directory(self.repo_root)
+            limit = max(1, min(int(args.get("limit") or 200), 5000))
+            pattern = str(args.get("glob") or "**/*")
+            selected = [path for path in manifest.get("files", []) if _matches_file_glob(path, pattern)]
+            return {**manifest, "files": selected[:limit], "limit": limit,
+                    "truncated": bool(manifest.get("truncated") or len(selected) >= limit)}
 
         elif name in {"list_files", "repo_search", "repo_batch_search", "find_symbols", "call_graph",
                       "batch_search_files", "batch_list_files"}:

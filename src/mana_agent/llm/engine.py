@@ -296,7 +296,8 @@ class NativeLLMEngine:
             "model": request.model, "task_id": request.task_id, "request_id": request.request_id,
             "usage": response.usage.model_dump(), "latency_seconds": time.perf_counter() - started})
         _emit_inference_activity("model.completed", title="Model responded", status="success", operation_id=request.request_id,
-                      metadata={"provider": request.provider, "model": request.model})
+                      metadata={"provider": request.provider, "model": request.model,
+                                "duration_ms": int((time.perf_counter() - started) * 1000)})
         if response.public_summaries and self.profile().supports("public_reasoning_summaries"):
             for index, summary in enumerate(response.public_summaries):
                 _emit_inference_activity("agent.summary", title="Reasoning summary", summary=summary, status="success",
@@ -304,7 +305,7 @@ class NativeLLMEngine:
                     metadata={"summary_source": "provider", "summary_trusted": True, "summary_complete": True,
                         "provider": self.provider, "transport": "direct_responses" if self.endpoint == "responses" else self.endpoint})
 
-    def _failed(self, request: InferenceRequest, reservation: str, exc: BaseException) -> ProviderRequestError | None:
+    def _failed(self, request: InferenceRequest, reservation: str, exc: BaseException, started: float) -> ProviderRequestError | None:
         if reservation:
             if getattr(exc, "response_accepted", False):
                 self.context_cost_governor.record_model_call(reservation, usage=getattr(exc, "provider_usage", None),
@@ -323,12 +324,20 @@ class NativeLLMEngine:
                 status_code=status_code, failure=failure)
         error = request_error or exc
         metadata = {"provider": request.provider, "model": request.model, "transport": self.endpoint,
-                    "error_type": type(error).__name__}
+                    "error_type": type(error).__name__,
+                    "duration_ms": int((time.perf_counter() - started) * 1000)}
+        title, status = "Model request failed", "failed"
+        summary = error.public_detail if isinstance(error, (InvalidResponseError, ProviderRequestError)) else ""
+        if isinstance(error, asyncio.TimeoutError):
+            title = "Model request timed out"
+            summary = f"The provider response did not complete within the {self.timeout:g}-second request deadline."
+            metadata["reason_code"] = "inference_timeout"
+        elif isinstance(error, asyncio.CancelledError):
+            title, status = "Model request cancelled", "cancelled"
         if isinstance(error, ProviderRequestError) and error.failure is not None:
             metadata["reason_code"] = error.failure.error_code
-        _emit_inference_activity("model.failed", title="Model request failed", status="failed",
-            operation_id=request.request_id, metadata=metadata,
-            summary=error.public_detail if isinstance(error, (InvalidResponseError, ProviderRequestError)) else "")
+        _emit_inference_activity("model.failed", title=title, status=status,
+            operation_id=request.request_id, metadata=metadata, summary=summary)
         return request_error
 
     async def _refresh_metadata(self, parameters: dict[str, Any] | None = None) -> ModelProfile:
@@ -368,7 +377,7 @@ class NativeLLMEngine:
         request = self._request(messages, schema=schema, continuation=continuation, **options)
         reservation, started = self._reserve(request), time.perf_counter()
         _emit_inference_activity("model.started", title="Waiting for model", status="running", operation_id=request.request_id,
-                      metadata={"provider": request.provider, "model": request.model})
+                      metadata={"provider": request.provider, "model": request.model, "timeout_seconds": self.timeout})
         try:
             for attempt in range(self.max_attempts):
                 adapter = self._adapter()
@@ -388,7 +397,7 @@ class NativeLLMEngine:
                     if self.adapter is None:
                         await adapter.close()
         except BaseException as exc:
-            request_error = self._failed(request, reservation, exc)
+            request_error = self._failed(request, reservation, exc, started)
             if request_error is not None:
                 raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
@@ -523,7 +532,8 @@ class NativeLLMEngine:
         completed = False
         deadline = time.monotonic() + self.timeout
         _emit_inference_activity("model.started", title="Waiting for model stream", status="running",
-            operation_id=request.request_id, metadata={"provider": self.provider, "model": self.model})
+            operation_id=request.request_id, metadata={"provider": self.provider, "model": self.model,
+                                                        "timeout_seconds": self.timeout})
         try:
             adapter = self._adapter()
             events = adapter.stream(request).__aiter__()
@@ -550,7 +560,7 @@ class NativeLLMEngine:
             if not completed:
                 raise InvalidResponseError("Interrupted stream; reconcile checkpoint before continuing")
         except BaseException as exc:
-            request_error = self._failed(request, reservation, exc)
+            request_error = self._failed(request, reservation, exc, started)
             if request_error is not None:
                 raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
