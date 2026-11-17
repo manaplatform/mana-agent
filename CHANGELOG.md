@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-17
 
+- The `repo_search` decision and native tool schemas require nonblank literal query text. Correction guidance directs path-only and glob-only discovery to `list_files`. See [text search query contract](docs/regressions/debug-plan-execution-contract.md#text-search-query-contract).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'repo_search_requires_nonblank_query or inspection_correction_rebuilds or native_investigation_tool_schema or mode_decision_wire_schema'`.
 - AUTO and DEBUG reuse a successful exact-match repository read from the same task. Mixed batches dispatch only new reads, and reuse-only batches count toward the existing no-progress limit. See [reuse of saved inspection results](docs/regressions/debug-plan-execution-contract.md#reuse-of-saved-inspection-results).
 - User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'reuses_saved_layout or repeated_repository_results or duplicate_inspection or over_budget_read_batch'`.
 - AUTO and DEBUG retain the shallow directory listing alongside recent observations and include the matching saved result when correcting a repeated inspection. See [saved evidence in duplicate corrections](docs/regressions/debug-plan-execution-contract.md#saved-evidence-in-duplicate-corrections).

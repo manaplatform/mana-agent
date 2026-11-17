@@ -58,7 +58,8 @@ _INSPECTION_PATH_GUIDANCE = (
     'For searches use a known literal path relative to the checkout, such as paths ["src"] with the default glob. '
     'For a targeted pattern, send paths [] with glob "src/**/*.py" or "**/*executor.py". '
     'For layout use {"tool":"ls","level":1,"reason":"Locate the owning directory"}. '
-    "Use list_files or repo_search for a scoped follow-up. "
+    "For repo_search, put the literal text to find in query, such as a symbol name or error message. "
+    "Use list_files to find files by path or glob alone. "
 )
 
 _INSPECTION_CORRECTION = (
@@ -164,7 +165,7 @@ class DirectoryListEvidence(EvidenceRequest):
 
 
 class RepositoryDiscoveryEvidence(EvidenceRequest):
-    tool: Literal["repo_search", "find_symbols", "call_graph"]
+    tool: Literal["repo_search", "list_files", "find_symbols", "call_graph"]
     level: Literal[1, 2, 3, 4] = Field(
         description="Use level 1 to start. Levels 2–4 require prior evidence, unless an initial audit is authorized. "
                     "Repository-wide discovery requires level 4.",
@@ -200,6 +201,15 @@ class RepositoryDiscoveryEvidence(EvidenceRequest):
         except ValueError as exc:
             raise PydanticCustomError("mode_discovery_selection", str(exc)) from None
         return self
+
+
+class RepositorySearchEvidence(RepositoryDiscoveryEvidence):
+    tool: Literal["repo_search"]
+    query: str = Field(pattern=r"\S", description="Nonblank literal text to find in the selected files.")
+
+
+class RepositorySymbolEvidence(RepositoryDiscoveryEvidence):
+    tool: Literal["find_symbols", "call_graph"]
 
 
 class FileListEvidence(RepositoryDiscoveryEvidence):
@@ -319,7 +329,7 @@ class InvestigateDecision(_ModeAction):
 
 
 InspectionRequest = Annotated[
-    FileReadEvidence | DirectoryListEvidence | FileListEvidence | RepositoryDiscoveryEvidence,
+    FileReadEvidence | DirectoryListEvidence | FileListEvidence | RepositorySearchEvidence | RepositorySymbolEvidence,
     Field(discriminator="tool"),
 ]
 

@@ -10,7 +10,7 @@ from pydantic import Field, ValidationError
 from mana_agent.agent.mode import ModeContract
 from mana_agent.agent.plan_service import (
     DirectoryListEvidence, EvidenceRequest, FileListEvidence, FileReadEvidence, InvestigateDecision, InvestigationScope,
-    MAX_INSPECTION_BATCH, PlanService, RepositoryDiscoveryEvidence,
+    MAX_INSPECTION_BATCH, PlanService, RepositoryDiscoveryEvidence, RepositorySearchEvidence, RepositorySymbolEvidence,
 )
 from mana_agent.human_inbox.models import canonical_digest
 from mana_agent.llm.errors import InvalidResponseError, StructuredOutputError, describe_decision_validation
@@ -21,11 +21,11 @@ from mana_agent.multi_agent.tools.operation_policy import validate_arguments
 READ_TOOLS = {
     "read_file": ("Read lines from one known file.", FileReadEvidence),
     "ls": ("List immediate repository directories without descending or reading files.", DirectoryListEvidence),
-    "repo_search": ("Search the selected repository scope for text.", RepositoryDiscoveryEvidence),
+    "repo_search": ("Find the literal query text in the selected repository scope.", RepositorySearchEvidence),
     "list_files": ("List files in the selected scope. At levels 1–3, omitting paths and a targeted glob "
                    "lists only top-level files. Use paths [\".\"] to request that scope explicitly.", FileListEvidence),
-    "find_symbols": ("Find symbols in the selected repository scope.", RepositoryDiscoveryEvidence),
-    "call_graph": ("Find callers in the selected repository scope.", RepositoryDiscoveryEvidence),
+    "find_symbols": ("Find symbols in the selected repository scope.", RepositorySymbolEvidence),
+    "call_graph": ("Find callers in the selected repository scope.", RepositorySymbolEvidence),
 }
 REPORT_TOOL = "report_investigation"
 

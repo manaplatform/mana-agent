@@ -203,6 +203,16 @@ AUTO and DEBUG now resolve a model-selected exact match to the original successf
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'reuses_saved_layout or repeated_repository_results or duplicate_inspection or over_budget_read_batch'`. The fixtures cover a saved listing plus a new read under a one-call remaining budget, reuse-only loops, and rejection and correction of invalid duplicates. The agent did not run the fixtures or resume the live task.
 
+## Text search query contract
+
+On 2026-11-17, DEBUG task `task_20261117_000009` using OpenRouter DeepSeek saved 96 observations before decision validation rejected the second request in a proposed batch. The corrected `repo_search` request lacked a nonblank query. The journal retained the validation failure and the saved observations. It did not retain the rejected argument.
+
+`repo_search` inherited the optional query used by other discovery operations. The model could return a missing, empty, or whitespace-only query that satisfied the provider schema and failed only during local semantic validation. Text search now has its own decision branch, shared with the native PLAN tool, with a required string containing a non-whitespace character. Query text retains its original whitespace and existing read fingerprints. File listings and symbol queries retain their existing behavior. The correction prompt explains the difference between finding literal text and listing files by path or glob.
+
+**Do not reintroduce** an optional or blank query in the model-facing `repo_search` schema. Validate the complete batch before dispatching any read.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'repo_search_requires_nonblank_query or inspection_correction_rebuilds or native_investigation_tool_schema or mode_decision_wire_schema'`. The fixtures cover schema and runtime validation, query preservation, query-free discovery, and same-model correction of a batch containing a valid read and a blank search. The agent did not run the fixtures or resume the live task.
+
 ## Verification result replies
 
 On 2026-11-17, AUTO task `task_20261117_000002` applied its version change to `pyproject.toml` and saved a patch receipt. Its first verification command could not start because the local Docker check could not find `python:3.12`. The blocked reply printed the raw command representation, eight evidence IDs, and the pre-edit research findings. The reply omitted the file already changed. Approval and clarification waits also appended the full plan when reading back a blocked or completed result.

@@ -819,7 +819,7 @@ def test_coding_inspection_path_correction_preserves_saved_evidence(mode_gateway
     assert result.data["repository_observations"]["workflow_tool_operations"] == 3
 
 
-@pytest.mark.parametrize("invalid_selection", ["search_paths", "listing_options"])
+@pytest.mark.parametrize("invalid_selection", ["search_paths", "listing_options", "search_query"])
 def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_gateway, monkeypatch, invalid_selection):
     from mana_agent.llm.capabilities import ModelProfile, observation
     from mana_agent.llm.engine import NativeLLMEngine
@@ -835,8 +835,11 @@ def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_g
             evidence_call(str(index), "repo_search", paths=[path], query="before")
             for index, path in enumerate(rejected_globs)
         ))
-    else:
+    elif invalid_selection == "listing_options":
         invalid = inspection(None, evidence_call("layout", "ls", glob=rejected_globs[0]))
+    else:
+        invalid = inspection(None, evidence_call("layout", "ls"),
+                             evidence_call("search", "repo_search", paths=["runtime"], query=" \t"))
     layout = inspection(None, evidence_call("layout", "ls"))
     scoped = inspection(None, evidence_call("search", "repo_search", paths=[], glob="runtime/**/*.py", query="before"))
     conclusion = {"action": "diagnose", "reason": "Read the value in runtime/handler.py",
@@ -847,6 +850,8 @@ def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_g
     class Adapter:
         async def generate(self, request):
             requests.append(request)
+            if len(requests) == 2:
+                assert not reads
             return ModelResponse(tool_calls=[ToolCall(
                 id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(decisions)},
             )])
@@ -878,6 +883,7 @@ def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_g
     assert "none of its reads ran" in correction
     assert 'paths [] with glob "src/**/*.py"' in correction
     assert '{"tool":"ls","level":1,"reason":"Locate the owning directory"}' in correction
+    assert "put the literal text to find in query" in correction
     assert all(glob not in correction for glob in rejected_globs)
     assert "correction_hint" not in requests[1].parameters
     assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1", "evidence-2"]

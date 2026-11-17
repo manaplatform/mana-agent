@@ -261,6 +261,34 @@ def test_mode_decision_wire_schema_ls_accepts_only_listing_arguments():
             decode_structured(invalid, schema)
 
 
+def test_mode_decision_wire_schema_repo_search_requires_nonblank_query():
+    from pydantic import ValidationError
+
+    from mana_agent.agent.plan_service import EvidenceRequest, ModeDecision, RepositorySearchEvidence
+    from mana_agent.llm.providers.openai import decode_structured
+    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+
+    schema = ModeDecision.model_json_schema()
+    search = {"tool": "repo_search", "level": 1, "paths": ["runtime"], "reason": "Locate the handler"}
+    decision = {"action": "inspect", "reason": "Find the implementation"}
+    for query_fields in ({}, {"query": ""}, {"query": " \t\n"}):
+        invalid = {"decision": {**decision, "requests": [{**search, **query_fields}]}}
+        with pytest.raises(ValueError):
+            validate_arguments(invalid, schema)
+        with pytest.raises(ValidationError, match="query"):
+            ModeDecision.model_validate(invalid)
+
+    search["query"] = " handler "
+    payload = {"decision": {**decision, "requests": [search]}}
+    validate_arguments(payload, schema)
+    selected = ModeDecision.model_validate(payload)
+    decoded = ModeDecision.model_validate_json(decode_structured(selected.model_dump_json(), schema), strict=True)
+    result = decoded.decision.requests[0]
+    assert isinstance(result, RepositorySearchEvidence)
+    assert result.query == " handler "
+    assert result.fingerprint == EvidenceRequest.model_validate(search).fingerprint
+
+
 @pytest.mark.parametrize("payload", [
     {"action": "investigate", "reason": "Investigate the file"},
     {"action": "clarify", "reason": "Two choices", "questions": []},
@@ -297,6 +325,12 @@ def test_native_investigation_tool_schema_separates_file_reads_from_discovery():
             validate_arguments({**args, **invalid}, read)
     discovery = tools["repo_search"]
     validate_arguments({"level": 4, "query": "target", "reason": "Audit the repository"}, discovery)
+    with pytest.raises(ValueError, match="missing query"):
+        validate_arguments({"level": 1, "paths": ["runtime"], "reason": "Search the selected source"}, discovery)
+    with pytest.raises(ValueError, match="registered pattern"):
+        validate_arguments({"level": 1, "paths": ["runtime"], "query": " ", "reason": "Search source"}, discovery)
+    for tool in ("find_symbols", "call_graph"):
+        validate_arguments({"level": 1, "paths": ["runtime"], "reason": "Inspect symbols and callers"}, tools[tool])
     scoped = {"level": 1, "query": "target", "reason": "Search the selected source"}
     validate_arguments({**scoped, "paths": ["./src/runtime/"]}, discovery)
     validate_arguments({**scoped, "paths": [], "glob": "src/runtime/**/*.py"}, discovery)
