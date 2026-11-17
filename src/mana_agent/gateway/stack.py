@@ -432,10 +432,11 @@ def build_chat_stack(
     tool_worker_client = None
     tools_manager_orchestrator = cfg.tools_orchestrator
     tools_executor_instance = None
-    public_coding_agent_cls = _public_symbol("CodingAgent", CodingAgent)
+    cli_coding_agent_cls = _public_symbol("CodingAgent", None)
+    public_coding_agent_cls = cli_coding_agent_cls if cli_coding_agent_cls is not None else CodingAgent
     coding_selection = resolve_coding_backend(settings) if cfg.coding_agent else None
     coding_agent_cls = public_coding_agent_cls
-    coding_agent_is_custom = public_coding_agent_cls is not CodexCodingAgentShim
+    coding_agent_is_custom = cli_coding_agent_cls is not None and cli_coding_agent_cls is not CodexCodingAgentShim
 
     def _build_tools_executor(worker_client: Any) -> Any:
         helper = _public_symbol("build_tools_executor_with_fallback", build_tools_executor_with_fallback)

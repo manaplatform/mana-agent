@@ -183,6 +183,26 @@ The response passed typed decision validation. The gateway checked for duplicate
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection or deduplicates_aliases or investigation_batch_rejects or over_budget_read_batch or unjustified_expansion'`. The fixtures cover correction of same-batch and saved-read duplicates, normalized aliases, and blocking after a repeated invalid selection. The agent did not run the fixtures or resume the live task.
 
+## Saved evidence in duplicate corrections
+
+On 2026-11-17, DEBUG task `task_20261117_000007` saved 11 observations and then blocked after its model requested the same `ls` operation twice, including during correction. TaskBoard had the layout under `evidence-1`. The model prompt included evidence IDs for the full history but only showed the latest eight observations. The correction identified `evidence-1` without supplying its result.
+
+The workflow keeps the shallow layout alongside recent observations. The same model's single correction attempt receives the matching saved observation as data. The public validation message contains the diagnostic and evidence ID. The correction uses the existing observation compaction, and the layout preview includes at most 50 directory names. TaskBoard retains the complete result with its original read receipt.
+
+**Do not reintroduce** telling the model to use an evicted observation without supplying it. Keep rejecting duplicates within a batch and keep saved observation contents out of public errors.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py -k 'duplicate_inspection or compact_observation_bounds_saved_layout or mode_decision_repairs_semantic_failure or inspection_correction_rebuilds'`. The fixtures exercise retention of an older layout, recovery of an older failed read for correction, and blocking if the model repeats that failed read. The agent did not run these fixtures or resume the live task.
+
+## Reuse of saved inspection results
+
+On 2026-11-17, DEBUG task `task_20261117_000008` received the duplicate error after four successful repository reads. `evidence-1` held the shallow directory listing and was within the recent evidence window. The corrected decision repeated that listing. The journal did not retain the first rejected decision or the model's prompt.
+
+AUTO and DEBUG now resolve a model-selected exact match to the original successful result from the same task. The gateway validates the complete inspection batch, including the selected tool, arguments, and scope. It dispatches only the new reads and returns the saved evidence ID and observation to the next decision. Reuse preserves the original receipt, level, and evidence ID. A reuse-only batch counts toward the existing no-progress limit, after which the next decision uses the evidence already collected. Duplicates within a batch, failed records, and direct PLAN investigator batches retain their rejection checks.
+
+**Do not reintroduce** treating an exact successful match to saved inspection evidence as a fatal AUTO or DEBUG error. Do not execute the matched read again, create a second observation for it, or count reuse as new evidence.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'reuses_saved_layout or repeated_repository_results or duplicate_inspection or over_budget_read_batch'`. The fixtures cover a saved listing plus a new read under a one-call remaining budget, reuse-only loops, and rejection and correction of invalid duplicates. The agent did not run the fixtures or resume the live task.
+
 ## Verification result replies
 
 On 2026-11-17, AUTO task `task_20261117_000002` applied its version change to `pyproject.toml` and saved a patch receipt. Its first verification command could not start because the local Docker check could not find `python:3.12`. The blocked reply printed the raw command representation, eight evidence IDs, and the pre-edit research findings. The reply omitted the file already changed. Approval and clarification waits also appended the full plan when reading back a blocked or completed result.

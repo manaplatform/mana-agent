@@ -86,6 +86,9 @@ def compact_observation(row: dict) -> dict:
         if isinstance(result.get("content"), str) and len(result["content"]) > 6000:
             result["content"] = result["content"][:6000]
             result["content_truncated"] = True
+        if isinstance(result.get("directories"), list) and len(result["directories"]) > 50:
+            result["directories"] = result["directories"][:50]
+            result["directories_truncated"] = True
     return {"id": row["id"], "level": row["level"], "result": result}
 
 

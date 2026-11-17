@@ -883,27 +883,41 @@ def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_g
     assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1", "evidence-2"]
 
 
-@pytest.mark.parametrize(("saved_read", "corrected"), [(False, True), (True, True), (False, False)])
-def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch, saved_read, corrected):
+@pytest.mark.parametrize(("saved_read", "corrected", "older"), [
+    (False, True, False), (True, True, False), (False, False, False), (True, True, True), (True, False, True),
+])
+def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch, saved_read, corrected, older):
     from mana_agent.llm.capabilities import ModelProfile, observation
     from mana_agent.llm.engine import NativeLLMEngine
     from mana_agent.llm.messages import ToolCall
 
     gateway, workflow = mode_gateway
     (gateway.root / "test_app.py").write_text("assert handler()\n")
+    repeated_path = "missing.py" if saved_read else "app.py"
     read_app = inspection("app.py")
     extra_reads = [evidence_call("new", paths=["test_app.py"])]
     if not saved_read:
         extra_reads.insert(0, evidence_call("duplicate", paths=["app.py"], reason="Double-check the source"))
-    invalid = inspection("app.py", *extra_reads)
+    invalid = inspection(repeated_path, *extra_reads)
+    prior_decisions = [inspection(repeated_path)] if saved_read else []
+    prior_reads = [repeated_path] if saved_read else []
+    evidence_id = "evidence-1"
+    if older:
+        (gateway.root / "runtime").mkdir()
+        prior_decisions.insert(0, inspection(None, evidence_call("layout", "ls")))
+        prior_reads.insert(0, "ls")
+        evidence_id = "evidence-2"
+        for start in (0, 4):
+            paths = [f"other_{index}.py" for index in range(start, start + 4)]
+            for path in paths:
+                (gateway.root / path).write_text(f"# observation in {path}\n")
+            prior_decisions.append(inspection(None, *(evidence_call(path, paths=[path]) for path in paths)))
+            prior_reads.extend(paths)
+    found_evidence = f"evidence-{len(prior_reads) + 1}"
     conclusion = {"action": "diagnose", "reason": "The source explains the behavior",
-                  "root_cause": "Old handler value", "cause_evidence": ["evidence-1"]}
-    if saved_read:
-        scripted = [read_app, invalid, conclusion]
-    elif corrected:
-        scripted = [invalid, read_app, conclusion]
-    else:
-        scripted = [invalid, invalid]
+                  "root_cause": "Old handler value", "cause_evidence": [found_evidence]}
+    replacement = [read_app, conclusion]
+    scripted = [*prior_decisions, invalid, *(replacement if corrected else [invalid])]
     decisions = iter(scripted)
     requests, reads = [], []
 
@@ -917,7 +931,7 @@ def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch,
     real_inspect = PlanService.inspect
 
     def inspect(service, request):
-        reads.append(request.paths[0])
+        reads.append(request.paths[0] if request.paths else request.tool)
         return real_inspect(service, request)
 
     monkeypatch.setattr(PlanService, "inspect", inspect)
@@ -933,25 +947,49 @@ def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch,
     result = workflow.start("session", "Explain the old handler value", mode="debug", llm=model)
 
     assert len(requests) == len(scripted)
-    first_attempt, _ = requests[1 if saved_read else 0]
-    correction, reads_at_correction = requests[2 if saved_read else 1]
+    first_attempt, _ = requests[len(prior_decisions)]
+    correction, reads_at_correction = requests[len(prior_decisions) + 1]
     assert correction.tools == first_attempt.tools
-    assert reads_at_correction == (("app.py",) if saved_read else ())
-    detail = ("Inspection request 1 repeats the read saved as evidence-1" if saved_read
+    assert reads_at_correction == tuple(prior_reads)
+    detail = (f"Inspection request 1 repeats the read saved as {evidence_id}" if saved_read
               else "Inspection requests 1 and 2 select the same read")
-    assert detail in correction.messages[-1].content
+    feedback = correction.messages[-1].content
+    assert detail in feedback
+    if saved_read:
+        observation = json.loads(feedback.splitlines()[-1])
+        assert observation["id"] == evidence_id
+        assert observation["result"]["path"] == repeated_path
+        assert observation["result"]["ok"] is False
+        assert "execution" not in observation["result"]
+    if older:
+        visible = {row["id"]: row for row in json.loads(first_attempt.messages[1].content)["evidence"]}
+        assert evidence_id not in visible
+        assert visible["evidence-1"]["result"]["directories"] == ["runtime"]
     report = result.data["repository_observations"]
     if corrected:
         assert result.status == "success", result.message
-        assert reads == ["app.py"]
-        assert report["evidence_ids"] == ["evidence-1"]
-        assert report["workflow_tool_operations"] == 1
+        assert reads == [*prior_reads, "app.py"]
+        assert found_evidence in report["evidence_ids"]
     else:
         assert result.data["phase"] == "blocked"
         assert "Decision still invalid after one correction" in result.message
         assert detail in result.message
-        assert not reads
-        assert not report["workflow_tool_operations"]
+        assert reads == prior_reads
+        assert repeated_path not in result.message
+    assert report["workflow_tool_operations"] == len(reads)
+
+
+def test_compact_observation_bounds_saved_layout():
+    from mana_agent.agent.repository_investigation import compact_observation
+
+    directories = [f"dir_{index}" for index in range(51)]
+    row = {"id": "evidence-1", "level": 1, "result": {"ok": True, "directories": directories}}
+
+    preview = compact_observation(row)
+
+    assert preview["result"]["directories"] == directories[:50]
+    assert preview["result"]["directories_truncated"] is True
+    assert row["result"]["directories"] == directories
 
 
 def test_coding_inspection_can_exceed_the_former_investigator_caps(mode_gateway):
@@ -977,12 +1015,43 @@ def test_coding_inspection_can_exceed_the_former_investigator_caps(mode_gateway)
     assert len(state["evidence"]) == 27
 
 
-def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(mode_gateway):
+def test_coding_inspection_reuses_saved_layout_in_mixed_batch(mode_gateway, monkeypatch):
+    gateway, workflow = mode_gateway
+    gateway._autonomous_controller.config = AutonomousExecutionConfig(max_tool_calls=2)
+    (gateway.root / "runtime").mkdir()
+    layout = evidence_call("layout", "ls", reason="Locate the source directory")
+    model = Decisions(
+        inspection(None, layout),
+        inspection(None, layout, evidence_call("source", paths=["app.py"])),
+        {"action": "diagnose", "reason": "The layout and source are available",
+         "root_cause": "The handler returns the old value", "cause_evidence": ["evidence-1", "evidence-2"]},
+    )
+    reads = []
+    real_inspect = PlanService.inspect
+
+    def inspect(service, request):
+        reads.append(request.tool)
+        return real_inspect(service, request)
+
+    monkeypatch.setattr(PlanService, "inspect", inspect)
+
+    result = workflow.start("session", "Explain where the old value comes from", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    assert reads == ["ls", "read_file"]
+    assert len(model.inputs) == 3
+    assert model.inputs[-1]["reused_evidence_ids"] == ["evidence-1"]
+    assert [item["id"] for item in model.inputs[-1]["evidence"]] == ["evidence-1", "evidence-2"]
+    assert result.data["repository_observations"]["workflow_tool_operations"] == 2
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(mode_gateway, reuse):
     gateway, workflow = mode_gateway
     gateway._autonomous_controller.config = AutonomousExecutionConfig(max_no_progress_cycles=2)
     queries = [
         inspection(None, evidence_call(query, "repo_search", paths=["app.py"], query=query))
-        for query in ("before", "bef", "befo")
+        for query in (("before",) * 3 if reuse else ("before", "bef", "befo"))
     ]
     model = Decisions(*queries, {"action": "block", "reason": "The caller is still unknown"})
 
@@ -990,7 +1059,10 @@ def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(
 
     assert result.data["phase"] == "blocked"
     assert "Repository reads stopped yielding new evidence" in result.message
-    assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1", "evidence-2", "evidence-3"]
+    report = result.data["repository_observations"]
+    assert report["evidence_ids"] == (["evidence-1"] if reuse else ["evidence-1", "evidence-2", "evidence-3"])
+    assert report["workflow_tool_operations"] == (1 if reuse else 3)
+    assert model.inputs[-1]["reused_evidence_ids"] == (["evidence-1"] if reuse else [])
     assert [turn["inspection_available"] for turn in model.inputs] == [True, True, True, False]
 
 

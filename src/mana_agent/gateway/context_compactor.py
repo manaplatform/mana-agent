@@ -652,6 +652,22 @@ class ContextCompactor:
                 envelope=env,
                 routes=cur_routes,
             )
+            if breakdown.total_tokens > resolved_window:
+                cur_routes = [
+                    {
+                        "name": r.get("name", ""),
+                        "available": bool((r.get("availability") or {}).get("available", True)) if isinstance(r.get("availability"), dict) else True,
+                    }
+                    if isinstance(r, (dict, Mapping)) else r
+                    for r in cur_routes
+                ]
+                breakdown = self.calculate_raw_breakdown(
+                    user_prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    context=ctx,
+                    envelope=env,
+                    routes=cur_routes,
+                )
 
         compacted_total = breakdown.total_tokens
         tokens_saved = max(0, raw_total - compacted_total)

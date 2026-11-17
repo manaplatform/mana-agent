@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 from pydantic import BaseModel, ValidationError
 from mana_agent.llm.capabilities import ModelProfile
@@ -413,7 +413,7 @@ class NativeLLMEngine:
     async def decide(
         self, messages: Any, schema: type[BaseModel] | dict[str, Any], *,
         repair_decision: bool = False, validation_context: dict[str, Any] | None = None,
-        complex_schema: bool = False, correction_hint: str = "", **options: Any,
+        complex_schema: bool = False, correction_hint: str | Callable[[ValueError], str] = "", **options: Any,
     ) -> BaseModel | dict[str, Any]:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
@@ -496,8 +496,9 @@ class NativeLLMEngine:
                 f"The decision was invalid. {detail}\n"
                 "Correct the response for the original request using the same response format."
             )
-            if correction_hint:
-                correction += f"\n{correction_hint}"
+            hint = correction_hint(failure) if callable(correction_hint) else correction_hint
+            if hint:
+                correction += f"\n{hint}"
             decision_messages.append(UserMessage(correction))
         raise AssertionError("Decision validation attempts were not configured")
 

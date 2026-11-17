@@ -1066,8 +1066,9 @@ def test_coding_cannot_use_an_assistant_message_as_write_authority():
 
 def test_coding_route_must_leave_clarification_to_the_workflow():
     response = {"route": "coding", "confidence": 0.9, "reason": "Diagnose the failure",
-                "required_sources": ["repository"], "response_kind": "clarification",
-                "clarification_question": "Which handler?", "source_message_ids": ["user-1"],
+                "required_sources": ["repository"], "runtime_capability_change": False,
+                "response_kind": "clarification", "clarification_question": "Which handler?",
+                "source_message_ids": ["user-1"],
                 "coding_workflow": coding_choice("Diagnose the failure", mode="debug", effect="read")}
     router = EntryRouter(llm=SimpleNamespace(generate_sync=lambda messages: response), registry=_registry())
     context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t", user_message_id="user-1")

@@ -422,14 +422,27 @@ class ModeWorkflow:
         remaining_decisions = self._remaining_decisions(state)
         boundary = list(self._investigation_boundary(state))
         inspection = state.get("inspection", {})
-        stop = inspection.get("stop", "") if inspection.get("boundary") == boundary else ""
+        current_inspection = inspection.get("boundary") == boundary
+        stop = inspection.get("stop", "") if current_inspection else ""
+        reused_evidence_ids = inspection.get("reused_evidence_ids", []) if current_inspection else []
         can_inspect = not planning and remaining_tools > 0 and remaining_decisions > 0 and not stop
         can_investigate = (planning and remaining_tools > 0 and remaining_decisions > 1
                            and (handoff.get("revision"), handoff.get("epoch")) != tuple(boundary))
         report = handoff.get("report") or {}
         cites = set(report.get("evidence_ids", []))
-        latest = {row["id"] for row in evidence[-8:]}
-        observations = [row for row in evidence if row["id"] in cites | latest]
+        visible_evidence = cites | set(reused_evidence_ids) | {row["id"] for row in evidence[-8:]}
+        if not planning:
+            # The shallow layout is useful after it ages out of the recent reads.
+            layout = next((row for row in reversed(evidence)
+                           if row["level"] == 1 and isinstance(row["result"], dict)
+                           and isinstance(row["result"].get("directories"), list)), None)
+            if layout is not None:
+                visible_evidence.add(layout["id"])
+        observations = [row for row in evidence if row["id"] in visible_evidence]
+
+        def lookup_observation(evidence_id: str) -> dict | None:
+            return next((compact_observation(row) for row in evidence if row["id"] == evidence_id), None)
+
         decision = service.next_decision(state["mode"], {
             "task_id": task_id, "coding_workflow": state.get("coding_decision"),
             "runtime_capability_change": state.get("runtime_capability_change", False),
@@ -439,6 +452,7 @@ class ModeWorkflow:
             "conversation_context": state.get("conversation_context", []),
             "constraints": state["constraints"], "skills": state["skills"],
             "evidence": _investigation_context(observations),
+            "reused_evidence_ids": reused_evidence_ids,
             "evidence_levels": scope.evidence_levels,
             "max_next_level": scope.max_next_level,
             "remaining_inspections": min(remaining_tools, MAX_INSPECTION_BATCH) if can_inspect else 0,
@@ -448,7 +462,8 @@ class ModeWorkflow:
             "investigation_report": report,
             "revision_request": state.get("revision_request", ""),
             "repair_authorized": state["repair"],
-        }, investigation_available=can_investigate, inspection_available=can_inspect, scope=scope)
+        }, investigation_available=can_investigate, inspection_available=can_inspect, scope=scope,
+            lookup_observation=lookup_observation)
         with current_activity_context().publication():
             self._check_live(task_id)
         allowed = {"investigate" if planning else "inspect", "clarify", "block"}
@@ -591,9 +606,10 @@ class ModeWorkflow:
 
         with self._repository_reader(task_id, service) as runner:
             schemas = runner.authority.schemas
-            investigation_scope(evidence).validate_requests(decision.requests)
+            saved_reads = investigation_scope(evidence).validate_requests(decision.requests, reuse_saved_reads=True)
             selected = []
-            for request in decision.requests:
+            reused_evidence_ids = []
+            for request, evidence_id in zip(decision.requests, saved_reads, strict=True):
                 if not request.reason.strip():
                     raise ValueError("Each repository read must explain the fact it will resolve.")
                 if request.tool not in schemas:
@@ -601,21 +617,27 @@ class ModeWorkflow:
                 service.validate_inspection_target(request)
                 arguments = request.model_dump(mode="json", include=set(schemas[request.tool]["properties"]))
                 validate_arguments(arguments, schemas[request.tool])
-                selected.append(runner.request(
+                if evidence_id is not None:
+                    reused_evidence_ids.append(evidence_id)
+                    continue
+                tool_call = runner.request(
                     request.tool, arguments, call_id=f"{decision_id}:{len(selected) + 1}", decision_id=decision_id,
-                ))
+                )
+                selected.append((tool_call, request))
             with activity.publication():
                 self._check_live(task_id)
+                inspection["reused_evidence_ids"] = reused_evidence_ids
                 state["inspection"] = inspection
                 if len(selected) > available_tools:
                     inspection["stop"] = "The requested batch exceeds the remaining shared tool budget."
                     self._persist(task_id, state)
                     return
-                self._transition(task_id, state, Phase.INVESTIGATING, "Reading evidence for the next coding decision")
+                summary = "Reading evidence for the next coding decision" if selected else "Reusing saved repository observations"
+                self._transition(task_id, state, Phase.INVESTIGATING, summary)
 
-            fingerprints = {observation_fingerprint(row) for row in evidence}
+            fingerprints = {observation_fingerprint(row) for row in evidence} if selected else set()
             new_evidence = False
-            for tool_call, request in zip(selected, decision.requests, strict=True):
+            for tool_call, request in selected:
                 with activity.publication():
                     self._check_live(task_id)
                     self._charge_tool(task_id, state)
@@ -633,7 +655,8 @@ class ModeWorkflow:
                 inspection["no_progress"] = 0 if new_evidence else inspection["no_progress"] + 1
                 if inspection["no_progress"] >= self.gateway._autonomous_controller.config.max_no_progress_cycles:
                     inspection["stop"] = "Repository reads stopped yielding new evidence."
-                self._transition(task_id, state, Phase.UNDERSTANDING, "Repository observations saved")
+                summary = "Repository observations saved" if selected else "Saved repository observations reused"
+                self._transition(task_id, state, Phase.UNDERSTANDING, summary)
 
     def _investigate(self, task_id: str, state: dict, service: PlanService, decision: InvestigateDecision) -> None:
         activity = current_activity_context()

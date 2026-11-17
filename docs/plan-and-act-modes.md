@@ -10,7 +10,7 @@ In AUTO and DEBUG, repository reads are Coding actions. Mana batches independent
 
 An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` or `repo_search` to inspect a selected directory.
 
-Inspection decisions also check for duplicate reads within the batch and against saved reads. The correction prompt identifies the matching requests or the saved evidence ID so the model can choose a different read or continue from existing observations.
+Inspection decisions reject duplicates within a batch. When a request exactly matches a successful read from the same task, Mana gives the model the existing observation and dispatches only new reads. Batches that only reuse saved results count toward the no-progress limit. The model receives the saved checkout layout alongside recent observations. A failed saved read is included as context if the model requests it again and needs to correct its decision.
 
 ## Implement a change
 

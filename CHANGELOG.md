@@ -4,6 +4,10 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-17
 
+- AUTO and DEBUG reuse a successful exact-match repository read from the same task. Mixed batches dispatch only new reads, and reuse-only batches count toward the existing no-progress limit. See [reuse of saved inspection results](docs/regressions/debug-plan-execution-contract.md#reuse-of-saved-inspection-results).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'reuses_saved_layout or repeated_repository_results or duplicate_inspection or over_budget_read_batch'`.
+- AUTO and DEBUG retain the shallow directory listing alongside recent observations and include the matching saved result when correcting a repeated inspection. See [saved evidence in duplicate corrections](docs/regressions/debug-plan-execution-contract.md#saved-evidence-in-duplicate-corrections).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py -k 'duplicate_inspection or compact_observation_bounds_saved_layout or mode_decision_repairs_semantic_failure or inspection_correction_rebuilds'`.
 - AUTO and DEBUG validate duplicate repository reads before the decision correction window closes. Diagnostics identify the matching request positions or saved evidence ID. See [duplicate inspection correction](docs/regressions/debug-plan-execution-contract.md#duplicate-inspection-correction).
 - User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection or deduplicates_aliases or investigation_batch_rejects or over_budget_read_batch or unjustified_expansion'`.
 - The model-facing `ls` decision now requires only the tool name, level 1, and a reason. Correction guidance shows the exact listing shape. See [directory listing decision schema](docs/regressions/debug-plan-execution-contract.md#directory-listing-decision-schema).
