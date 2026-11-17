@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
@@ -191,7 +191,7 @@ class FileListEvidence(RepositoryDiscoveryEvidence):
 @dataclass(frozen=True)
 class InvestigationScope:
     evidence_levels: dict[str, int]
-    completed_fingerprints: frozenset[str] = frozenset()
+    completed_reads: dict[str, str] = field(default_factory=dict)
     remaining_tool_calls: int | None = None
 
     @property
@@ -208,14 +208,25 @@ class InvestigationScope:
                 "mode_inspection_budget", "The number of operations must fit the remaining tool budget ({remaining}).",
                 {"remaining": self.remaining_tool_calls},
             )
-        seen = set(self.completed_fingerprints)
-        for request in requests:
+        seen: dict[str, int] = {}
+        for index, request in enumerate(requests, start=1):
             self.validate(request)
-            if request.fingerprint in seen:
+            fingerprint = request.fingerprint
+            if fingerprint in self.completed_reads:
                 raise PydanticCustomError(
-                    "mode_inspection_duplicate", "Choose distinct inspection operations that have not already run.",
+                    "mode_inspection_duplicate",
+                    "Inspection request {index} repeats the read saved as {evidence_id}. "
+                    "Review that result or select a different read.",
+                    {"index": index, "evidence_id": self.completed_reads[fingerprint]},
                 )
-            seen.add(request.fingerprint)
+            if fingerprint in seen:
+                raise PydanticCustomError(
+                    "mode_inspection_duplicate",
+                    "Inspection requests {first} and {index} select the same read. "
+                    "Include it once in the next decision.",
+                    {"first": seen[fingerprint], "index": index},
+                )
+            seen[fingerprint] = index
 
     def validate(self, request: EvidenceRequest) -> None:
         if not self.evidence_levels and request.initial_repository_scope:
@@ -373,8 +384,12 @@ class ModeDecision(ModeContract):
         }:
             raise PydanticCustomError("mode_inspection_action", "Use {action} for repository reads in this mode.",
                                       {"action": context["inspection_action"]})
-        if self.decision.action == "inspect" and context.get("inspection_available") is False:
-            raise PydanticCustomError("mode_inspection_unavailable", "Use the saved observations for the next decision.")
+        if isinstance(self.decision, InspectDecision):
+            if context.get("inspection_available") is False:
+                raise PydanticCustomError("mode_inspection_unavailable", "Use the saved observations for the next decision.")
+            scope = context.get("investigation_scope")
+            if scope is not None:
+                scope.validate_requests(self.decision.requests)
         if self.decision.action == "investigate" and context.get("investigation_available") is False:
             raise PydanticCustomError(
                 "mode_investigation_unavailable",
@@ -438,7 +453,8 @@ class PlanService:
             raise RuntimeError(f"Invalid or unavailable {schema.__name__} model decision ({type(exc).__name__})") from None
 
     def next_decision(self, mode: str, state: dict[str, Any], *,
-                      investigation_available: bool = True, inspection_available: bool = False) -> ModeAction:
+                      investigation_available: bool = True, inspection_available: bool = False,
+                      scope: InvestigationScope | None = None) -> ModeAction:
         correction_hint = (
             "If an inspection batch is rejected, none of its reads ran. Return a complete new decision. "
             "Use only the requests needed now. "
@@ -455,6 +471,7 @@ class PlanService:
             "Use explicit requirements, saved answers, and available evidence without asking for confirmation. "
             "In AUTO and DEBUG, choose inspect only when inspection_available is true and a repository fact "
             "is needed for the immediate decision. Batch independent requests within remaining_inspections. "
+            "Select each read once and reuse saved observations for reads that already ran. "
             "Wait for results before selecting dependent reads. Start with known locations or symbols. "
             f"{_INSPECTION_PATH_GUIDANCE}"
             "Levels above 1 require prior evidence IDs and can widen by one level at a time. "
@@ -502,6 +519,7 @@ class PlanService:
             correction_hint=correction_hint,
             validation_context={"investigation_available": investigation_available,
                                 "inspection_available": inspection_available,
+                                "investigation_scope": scope,
                                 "inspection_action": "investigate" if mode == "plan" else "inspect",
                                 "answered_field_ids": tuple(state.get("constraints", {}))},
         )

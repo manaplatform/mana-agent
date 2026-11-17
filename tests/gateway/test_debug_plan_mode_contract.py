@@ -883,6 +883,77 @@ def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_g
     assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1", "evidence-2"]
 
 
+@pytest.mark.parametrize(("saved_read", "corrected"), [(False, True), (True, True), (False, False)])
+def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch, saved_read, corrected):
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    gateway, workflow = mode_gateway
+    (gateway.root / "test_app.py").write_text("assert handler()\n")
+    read_app = inspection("app.py")
+    extra_reads = [evidence_call("new", paths=["test_app.py"])]
+    if not saved_read:
+        extra_reads.insert(0, evidence_call("duplicate", paths=["app.py"], reason="Double-check the source"))
+    invalid = inspection("app.py", *extra_reads)
+    conclusion = {"action": "diagnose", "reason": "The source explains the behavior",
+                  "root_cause": "Old handler value", "cause_evidence": ["evidence-1"]}
+    if saved_read:
+        scripted = [read_app, invalid, conclusion]
+    elif corrected:
+        scripted = [invalid, read_app, conclusion]
+    else:
+        scripted = [invalid, invalid]
+    decisions = iter(scripted)
+    requests, reads = [], []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append((request, tuple(reads)))
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(decisions)},
+            )])
+
+    real_inspect = PlanService.inspect
+
+    def inspect(service, request):
+        reads.append(request.paths[0])
+        return real_inspect(service, request)
+
+    monkeypatch.setattr(PlanService, "inspect", inspect)
+    facts = {name: observation(value, source="provider", confidence=1) for name, value in {
+        "input_text": True, "output_text": True, "tool_calling": True,
+        "context_window": 65536, "max_output_tokens": 1024,
+    }.items()}
+    model = NativeLLMEngine(provider="openrouter", model="deepseek/deepseek-v4.1-flash", api_key="fixture",
+                            base_url="https://example.invalid", endpoint="chat_completions", adapter=Adapter())
+    profile = ModelProfile(provider=model.provider, model_id=model.model, facts=facts)
+    monkeypatch.setattr(model, "profile", lambda *_: profile)
+
+    result = workflow.start("session", "Explain the old handler value", mode="debug", llm=model)
+
+    assert len(requests) == len(scripted)
+    first_attempt, _ = requests[1 if saved_read else 0]
+    correction, reads_at_correction = requests[2 if saved_read else 1]
+    assert correction.tools == first_attempt.tools
+    assert reads_at_correction == (("app.py",) if saved_read else ())
+    detail = ("Inspection request 1 repeats the read saved as evidence-1" if saved_read
+              else "Inspection requests 1 and 2 select the same read")
+    assert detail in correction.messages[-1].content
+    report = result.data["repository_observations"]
+    if corrected:
+        assert result.status == "success", result.message
+        assert reads == ["app.py"]
+        assert report["evidence_ids"] == ["evidence-1"]
+        assert report["workflow_tool_operations"] == 1
+    else:
+        assert result.data["phase"] == "blocked"
+        assert "Decision still invalid after one correction" in result.message
+        assert detail in result.message
+        assert not reads
+        assert not report["workflow_tool_operations"]
+
+
 def test_coding_inspection_can_exceed_the_former_investigator_caps(mode_gateway):
     gateway, workflow = mode_gateway
     decisions = []
@@ -966,7 +1037,8 @@ def test_cancel_during_coding_decision_discards_the_read_batch(mode_gateway, mon
 
 
 @pytest.mark.parametrize(("second", "tool_budget", "detail"), [
-    (evidence_call("second", paths=["app.py"], reason="A different reason"), 2, "Choose distinct inspection operations"),
+    (evidence_call("second", paths=["app.py"], reason="A different reason"), 2,
+     "Inspection requests 1 and 2 select the same read"),
     (evidence_call("second", paths=["test_app.py"], level=2, prior_evidence=["evidence-1"]), 2,
      "The next permitted level is 1"),
     (evidence_call("second", "list_files", paths=["tests/**/*.py"]), 2,
@@ -1039,7 +1111,7 @@ def test_investigation_list_files_deduplicates_aliases_before_dispatch(mode_gate
     result = workflow.start("session", "List the files", mode="debug", llm=model)
 
     assert result.data["phase"] == "blocked"
-    assert "Choose distinct inspection operations" in result.message
+    assert "Inspection requests 1 and 2 select the same read" in result.message
 
 
 def test_investigation_list_files_distinguishes_audit_from_shallow_scope():

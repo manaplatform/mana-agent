@@ -173,6 +173,16 @@ The `ls` branch inherited path, query, glob, and line-range fields from the gene
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or debug_can_find_an_error_with_no_reported_location or mode_decision_wire_schema or native_investigation_tool_schema'`. The fixtures cover strict schema decoding, rejection of extra arguments, fingerprint compatibility, and same-model correction followed by scoped discovery. The agent did not run the fixtures or resume the live task.
 
+## Duplicate inspection correction
+
+On 2026-11-17, DEBUG task `task_20261117_000006` using OpenRouter DeepSeek blocked on its first inspection decision with “Choose distinct inspection operations that have not already run.” TaskBoard recorded zero repository reads and zero observations, so the duplicate was within the proposed batch. The journal did not retain the rejected operations.
+
+The response passed typed decision validation. The gateway checked for duplicate requests only while preparing dispatch, after the model's correction window had closed. AUTO and DEBUG now validate inspection scope and read fingerprints against a snapshot of current TaskBoard evidence during decision validation. A duplicate within a batch identifies both request positions. A repeat of a saved read identifies its evidence ID. The same model gets the existing bounded correction and can select a different batch or another allowed action. The gateway still revalidates scope and fingerprints immediately before dispatch. Saved evidence retains its existing fingerprint format.
+
+**Do not reintroduce** dispatch-only duplicate validation for inspection decisions. Preserve all-or-nothing validation and require a corrected model decision before any read from the rejected batch can be selected again.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection or deduplicates_aliases or investigation_batch_rejects or over_budget_read_batch or unjustified_expansion'`. The fixtures cover correction of same-batch and saved-read duplicates, normalized aliases, and blocking after a repeated invalid selection. The agent did not run the fixtures or resume the live task.
+
 ## Verification result replies
 
 On 2026-11-17, AUTO task `task_20261117_000002` applied its version change to `pyproject.toml` and saved a patch receipt. Its first verification command could not start because the local Docker check could not find `python:3.12`. The blocked reply printed the raw command representation, eight evidence IDs, and the pre-edit research findings. The reply omitted the file already changed. Approval and clarification waits also appended the full plan when reading back a blocked or completed result.

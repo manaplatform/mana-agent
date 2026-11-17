@@ -10,6 +10,8 @@ In AUTO and DEBUG, repository reads are Coding actions. Mana batches independent
 
 An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` or `repo_search` to inspect a selected directory.
 
+Inspection decisions also check for duplicate reads within the batch and against saved reads. The correction prompt identifies the matching requests or the saved evidence ID so the model can choose a different read or continue from existing observations.
+
 ## Implement a change
 
 AUTO starts with scoped repository observations, records an internal plan and its verification requirements on TaskBoard, and executes the plan through the configured CodingAgent. The gateway projects the workflow on the same task through integration, testing, and review. Runtime capabilities require evidence from the existing feature integration coordinator before they are reported as complete. An internal plan has no separate PLAN approval step. Tool and action approvals still apply.

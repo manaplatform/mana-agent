@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-17
 
+- AUTO and DEBUG validate duplicate repository reads before the decision correction window closes. Diagnostics identify the matching request positions or saved evidence ID. See [duplicate inspection correction](docs/regressions/debug-plan-execution-contract.md#duplicate-inspection-correction).
+- User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection or deduplicates_aliases or investigation_batch_rejects or over_budget_read_batch or unjustified_expansion'`.
 - The model-facing `ls` decision now requires only the tool name, level 1, and a reason. Correction guidance shows the exact listing shape. See [directory listing decision schema](docs/regressions/debug-plan-execution-contract.md#directory-listing-decision-schema).
 - User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'inspection_correction_rebuilds or debug_can_find_an_error_with_no_reported_location or mode_decision_wire_schema or native_investigation_tool_schema'`.
 - Repository discovery tool schemas reject patterns in `paths`. The AUTO and DEBUG correction prompt shows how to use a scoped `glob` or request a shallow directory listing before a search. See [repeated invalid search paths](docs/regressions/debug-plan-execution-contract.md#repeated-invalid-search-paths).

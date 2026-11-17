@@ -74,7 +74,7 @@ def observation_fingerprint(row: dict) -> str | None:
 def investigation_scope(evidence: list[dict], remaining: int | None = None) -> InvestigationScope:
     return InvestigationScope(
         {row["id"]: row["level"] for row in evidence if _observed(row)},
-        frozenset(row["fingerprint"] for row in evidence),
+        {row["fingerprint"]: row["id"] for row in evidence},
         remaining,
     )
 

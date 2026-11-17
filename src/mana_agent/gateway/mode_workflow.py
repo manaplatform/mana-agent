@@ -448,7 +448,7 @@ class ModeWorkflow:
             "investigation_report": report,
             "revision_request": state.get("revision_request", ""),
             "repair_authorized": state["repair"],
-        }, investigation_available=can_investigate, inspection_available=can_inspect)
+        }, investigation_available=can_investigate, inspection_available=can_inspect, scope=scope)
         with current_activity_context().publication():
             self._check_live(task_id)
         allowed = {"investigate" if planning else "inspect", "clarify", "block"}
