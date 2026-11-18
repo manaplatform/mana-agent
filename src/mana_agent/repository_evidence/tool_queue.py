@@ -10,15 +10,28 @@ from mana_agent.repository_evidence.service import EvidenceConflict
 class ToolQueueStore:
     def __init__(self, db):
         self.db = db
+        self._instances: dict[str, Any] = {}
 
     def jobs(self):
         with self.db.connect() as conn:
             rows = conn.execute("SELECT payload FROM tool_queue_jobs WHERE kind='queue_job'").fetchall()
-        return {item.job_id: item for row in rows
-                if (payload := json.loads(row["payload"])).get("kind") == "queue_job"
-                for item in [queue_job_from_dict(payload["job"]) ]}
+        result = {}
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if payload.get("kind") == "queue_job":
+                item = queue_job_from_dict(payload["job"])
+                if item.job_id in self._instances:
+                    cached = self._instances[item.job_id]
+                    for k, v in item.__dict__.items():
+                        setattr(cached, k, v)
+                    result[item.job_id] = cached
+                else:
+                    self._instances[item.job_id] = item
+                    result[item.job_id] = item
+        return result
 
     def save(self, job):
+        self._instances[job.job_id] = job
         with self.db.transaction() as conn:
             prior = conn.execute("SELECT row_version FROM tool_queue_jobs WHERE job_id=?", (job.job_id,)).fetchone()
             current = int(prior["row_version"]) if prior else 0
@@ -42,9 +55,12 @@ class ToolQueueStore:
         job.row_version = current + 1
 
     def admit(self, job):
+        self._instances[job.job_id] = job
         with self.db.transaction() as conn:
-            row = conn.execute("SELECT job_id FROM tool_queue_jobs WHERE kind='queue_job' AND task_id=? AND fingerprint=? AND status IN ('pending','queued','claimed','running')",
-                               (job.task_id, job.fingerprint)).fetchone()
+            row = conn.execute(
+                "SELECT job_id FROM tool_queue_jobs WHERE kind='queue_job' AND task_id=? AND fingerprint=? AND status IN ('pending','queued','claimed','running')",
+                (job.task_id, job.fingerprint),
+            ).fetchone()
             if row:
                 return self.jobs()[row["job_id"]]
             self.save(job)

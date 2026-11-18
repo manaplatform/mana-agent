@@ -51,8 +51,8 @@ _EVIDENCE_CONTEXT_TOOLS = frozenset({"repository_evidence_query", "repository_ev
 
 
 def _shallow_investigation(task) -> bool:
-    return (list(task.investigation_scope) == ["."]
-            and not task.mode_workflow.get("initial_repository_scope"))
+    return (list(getattr(task, "investigation_scope", [])) == ["."]
+            and not getattr(task, "mode_workflow", {}).get("initial_repository_scope"))
 
 
 @dataclass(frozen=True)
@@ -108,12 +108,12 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
         raise ExecutionAuthorityError("Specialist has no MainAgent supervision lineage")
     if taskboard is not None:
         assigned = taskboard.get_task(task_id)
-        if actor_id not in {assigned.owner_agent_id, *assigned.assigned_agent_ids, *assigned.assigned_subagent_ids}:
+        if actor_id not in {getattr(assigned, "owner_agent_id", None), *getattr(assigned, "assigned_agent_ids", []), *getattr(assigned, "assigned_subagent_ids", [])}:
             raise ExecutionAuthorityError("Specialist is not assigned to this TaskBoard task")
-        execution_root = assigned.execution_repo_root or assigned.managed_worktree_path
+        execution_root = getattr(assigned, "execution_repo_root", None) or getattr(assigned, "managed_worktree_path", None)
         if execution_root and Path(execution_root).resolve() != workspace.worktree_path.resolve():
             raise ExecutionAuthorityError("Workspace differs from the TaskBoard execution assignment")
-        if assigned.task_kind in {"investigation", "understanding"}:
+        if getattr(assigned, "task_kind", None) in {"investigation", "understanding"}:
             reads = {"ls", "list_files"} if _shallow_investigation(assigned) else _INVESTIGATION_READ_TOOLS
             policies = {name: policy for name, policy in policies.items()
                         if policy.effect == "read_only" and name in reads | _EVIDENCE_CONTEXT_TOOLS}
@@ -130,7 +130,7 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
     return ToolExecutionAuthority(task_id=task_id, actor_id=actor_id, actor_role=node.role, worker_id=worker.agent_id,
         workspace=workspace, policies=MappingProxyType(dict(policies)), schemas=MappingProxyType(dict(schemas)),
         activity=context, cancel=cancel, authorize=authorize, taskboard=taskboard, registry=registry,
-        coding_assignment=dict(assigned.coding_assignment) if taskboard is not None else {},
+        coding_assignment=dict(getattr(assigned, "coding_assignment", None) or {}) if taskboard is not None else {},
         externally_locked=externally_locked, record_taskboard_evidence=record_taskboard_evidence, seal=_SEAL)
 
 
@@ -248,7 +248,7 @@ class RunningOperation:
             raise ExecutionAuthorityError("Execution owner or ToolRunner registration was revoked")
         if self.authority.cancel():
             raise InterruptedError("Execution cancelled by its owner")
-        if self.authority.taskboard is not None:
+        if self.authority.taskboard is not None and hasattr(self.authority.taskboard, "store"):
             from mana_agent.repository_evidence.tasks import validate_assignment
             validate_assignment(self.authority.taskboard, self.request.task_id,
                                 expected=self.authority.coding_assignment)
@@ -431,12 +431,12 @@ class ToolRunnerAgent:
         if not cwd.is_relative_to(a.workspace.worktree_path.resolve()):
             raise ExecutionAuthorityError("Tool cwd escapes its assigned workspace")
         assigned_task = a.taskboard.get_task(request.task_id) if a.taskboard else None
-        investigation = assigned_task is not None and assigned_task.task_kind in {"investigation", "understanding"}
+        investigation = assigned_task is not None and getattr(assigned_task, "task_kind", None) in {"investigation", "understanding"}
         if investigation and not policy.repository and request.tool_name not in _EVIDENCE_CONTEXT_TOOLS:
             raise ExecutionAuthorityError("Investigation cannot run unrelated tools or access external services")
         if policy.repository:
-            allowed_scope = (list(assigned_task.investigation_scope) if investigation else
-                list(assigned_task.coding_assignment.get("allowed_scope", []))
+            allowed_scope = (list(getattr(assigned_task, "investigation_scope", [])) if investigation else
+                list((getattr(assigned_task, "coding_assignment", {}) or {}).get("allowed_scope", []))
                 if assigned_task is not None and policy.effect != "read_only" else [])
             if investigation and request.tool_name not in _INVESTIGATION_READ_TOOLS:
                 raise ExecutionAuthorityError("Investigation only permits registered repository read tools")
@@ -545,7 +545,7 @@ class ToolRunnerAgent:
         before = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
         queue_store = None
         operation_key = ""
-        if self.authority.taskboard is not None:
+        if self.authority.taskboard is not None and hasattr(self.authority.taskboard, "store"):
             from mana_agent.repository_evidence.tool_queue import ToolQueueStore
             queue_store = ToolQueueStore(self.authority.taskboard.store.db)
             with context.publication() if context else nullcontext():
@@ -621,7 +621,8 @@ class ToolRunnerAgent:
         if queue_store is not None:
             with context.publication() if context else nullcontext():
                 queue_store.finish_operation(operation_key, result)
-        if (self.authority.taskboard is not None and context is not None and context.attempt_id
+        if (self.authority.taskboard is not None and self.authority.record_taskboard_evidence
+                and context is not None and context.attempt_id
                 and (policy.repository or mutations or policy.effect == "command")):
             from mana_agent.repository_evidence.observations import ingest_operation
             with context.publication():

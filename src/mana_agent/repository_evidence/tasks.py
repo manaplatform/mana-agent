@@ -28,7 +28,7 @@ def ensure_investigation(board, *, parent_task_id, objective, scope, requirement
                                    "requirements": [r.model_dump(mode="json", exclude={"evidence"}) for r in requirements]}, sort_keys=True).encode()).hexdigest()
     with board.transaction():
         board.refresh()
-        for task in board.list_tasks(root_task_id=parent.root_task_id):
+        for task in board.list_tasks(parent_task_id=parent.task_id):
             if task.decomposition_local_id == f"evidence:{signature}" and task.status != TaskStatus.CANCELLED:
                 if task.status == TaskStatus.DONE:
                     knowledge = board.evidence_board(root=Path(task.execution_repo_root or board.store.root), repository_id=task.primary_repository_id)
@@ -89,6 +89,8 @@ def assignment_for(board, task_id, *, backend, decision_id, plan_digest="", cons
 
 def validate_assignment(board, task_id, *, expected=None):
     """Reject semantic steering changes without treating progress as new authority."""
+    if not hasattr(board, "store"):
+        return
     task = board.store.repository.get_task(task_id)
     if not task.coding_assignment:
         if expected:
@@ -112,6 +114,13 @@ def evidence_context(board, task, *, query=""):
     return board.evidence_board(root=Path(task.execution_repo_root or board.store.root),
         repository_id=task.primary_repository_id).query(EvidenceQuery(
             paths=tuple(task.investigation_scope or task.files_to_inspect), query=query))
+
+
+def investigation_completion_contract(task):
+    from mana_agent.execution_supervisor.models import CompletionContract, CompletionContractType
+
+    return [CompletionContract(contract_type=CompletionContractType.CUSTOM_VERIFIER,
+        verifier_name="repository_evidence_requirements", metadata={"task_id": task.task_id, "workspace_id": task.workspace_id})]
 
 
 def verify_requirements(contract, root, payload):

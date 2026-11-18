@@ -326,10 +326,31 @@ class InvestigateDecision(_ModeAction):
     action: Literal["investigate"]
     objective: str = Field(pattern=r"\S", max_length=2000)
     scope: str = Field(pattern=r"\S", max_length=2000)
-    paths: tuple[str, ...] = Field(min_length=1, max_length=16)
+    paths: tuple[str, ...] = Field(default=(), max_length=16)
     task_kind: Literal["investigation", "understanding"] = "investigation"
     recovery: RecoveryDecision | None = None
     initial_repository_scope: Literal["", "explicit_audit", "architecture_wide"] = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_paths(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("paths"):
+                scope = data.get("scope")
+                if scope:
+                    data["paths"] = (scope,) if isinstance(scope, str) else tuple(scope)
+                else:
+                    data["paths"] = (".",)
+        return data
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = handler.resolve_ref_schema(handler(schema))
+        for field in ("paths", "task_kind", "recovery"):
+            json_schema.get("properties", {}).pop(field, None)
+            if "required" in json_schema and field in json_schema["required"]:
+                json_schema["required"].remove(field)
+        return json_schema
 
 
 InspectionRequest = Annotated[
@@ -555,6 +576,8 @@ class PlanService:
             "In any mode, use investigate to create an independently supervised investigation or understanding task "
             "when repository evidence is missing. Supply bounded literal paths, an objective, and task_kind. "
             "Use paths [\".\"] only for a shallow layout task unless an explicit repository-wide audit is authorized. "
+            "When saved_investigation matches an interrupted or blocked question, reuse its current evidence "
+            "and select the exact saved objective, paths, kind, and audit scope with a safe same-task RecoveryDecision. "
             "Investigation and understanding are tasks, never mandatory workflow stages. Reuse valid Evidence Board "
             "entries and do not create work for facts already known. "
             "Delegate the narrowest question and use the cited observations in the resulting report. "

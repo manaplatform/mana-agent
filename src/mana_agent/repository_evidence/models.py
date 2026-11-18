@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 class Contract(BaseModel):
@@ -30,10 +31,9 @@ class EvidenceRef(Contract):
     revision: int = Field(ge=1)
 
 
-class EvidenceSource(Contract):
+class SourceLocation(Contract):
     path: str
     source_kind: Literal["file", "directory"] = "file"
-    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     symbol: str = ""
     start_line: int | None = Field(default=None, ge=1)
     end_line: int | None = Field(default=None, ge=1)
@@ -51,23 +51,49 @@ class EvidenceSource(Contract):
         return self
 
 
+class EvidenceSource(SourceLocation):
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class InvestigationCitation(SourceLocation):
+    """Model-selected location, resolved to a versioned source by the host."""
+
+    sha256: SkipJsonSchema[str | None] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    revision: SkipJsonSchema[str] = ""
+
+    @model_validator(mode="after")
+    def identify_source(self):
+        if self.source_kind == "directory" and self.start_line is not None:
+            raise ValueError("Directory citations cannot specify line ranges")
+        if self.source_kind == "file" and self.sha256 is None and not self.excerpt.strip():
+            raise ValueError("File citations without a source hash require an exact excerpt")
+        return self
+
+
 class EvidenceRelation(Contract):
     relation: Literal["supports", "contradicts", "depends_on", "derived_from", "supersedes"]
     target: EvidenceRef
 
 
-class EvidenceCandidate(Contract):
+class Finding(Contract):
     category: str = Field(min_length=1, max_length=100)
     statement: str = Field(min_length=1, max_length=4000)
     classification: Literal["inferred", "hypothetical"]
     supporting_evidence: tuple[EvidenceRef, ...] = Field(default=(), max_length=32)
-    sources: tuple[EvidenceSource, ...] = Field(default=(), max_length=32)
     relationships: tuple[EvidenceRelation, ...] = ()
     dependencies: tuple[str, ...] = ()
     architecture_relationships: tuple[dict[str, str], ...] = ()
     limitations: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     confidence: float = Field(ge=0, le=1)
+
+
+class EvidenceCandidate(Finding):
+    sources: tuple[EvidenceSource, ...] = Field(default=(), max_length=32)
+
+
+class InvestigationFinding(Finding):
+    sources: tuple[InvestigationCitation, ...] = Field(default=(), max_length=32)
 
 
 class EvidenceProvenance(Contract):
@@ -180,7 +206,7 @@ class MissingEvidenceRequest(Contract):
 
 
 class InvestigationResult(Contract):
-    findings: tuple[EvidenceCandidate, ...] = Field(default=(), max_length=20)
+    findings: tuple[InvestigationFinding, ...] = Field(default=(), max_length=20)
     evidence: tuple[EvidenceRef, ...] = ()
     missing_evidence: tuple[MissingEvidenceRequest, ...] = ()
     limitations: tuple[str, ...] = ()

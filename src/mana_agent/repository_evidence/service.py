@@ -20,6 +20,10 @@ class EvidenceConflict(RuntimeError):
     """A concurrent writer advanced an evidence or task revision."""
 
 
+class StaleEvidenceSource(ValueError):
+    """A source changed after its read completed."""
+
+
 class RepositoryEvidenceBoard:
     def __init__(self, *, db, repository_id: str, root: Path, publication=None):
         self.db = db
@@ -137,8 +141,10 @@ class RepositoryEvidenceBoard:
     def record_observation(self, *, provenance: EvidenceProvenance, category: str,
                            statement: str, observation: dict[str, Any], sources: tuple[EvidenceSource, ...] = ()) -> EvidenceRecord:
         """Host ingestion only: callers must derive provenance from an actual receipt."""
-        if not provenance.result_digest or not all(self._source_current(s) for s in sources):
-            raise ValueError("Observation sources no longer match the executed read")
+        if not provenance.result_digest:
+            raise ValueError("Repository observation requires an executed result digest")
+        if not all(self._source_current(s) for s in sources):
+            raise StaleEvidenceSource("Observation sources no longer match the executed read")
         record = EvidenceRecord(
             evidence_id=f"repo_ev_{uuid.uuid4().hex}", revision=1, workspace_id=self.db.workspace_id,
             repository_id=self.repository_id, source_view=str(self.root), category=category, statement=statement,
@@ -234,7 +240,8 @@ class RepositoryEvidenceBoard:
                 continue
             summary = {key: value for key, value in record.model_dump(mode="json").items()
                        if key not in {"observation", "provenance"}}
-            summary["sources"] = [{"path": s.path, "symbol": s.symbol, "sha256": s.sha256, "excerpt": s.excerpt[:500]} for s in record.sources]
+            summary["sources"] = [{"path": s.path, "source_kind": s.source_kind, "symbol": s.symbol, "sha256": s.sha256,
+                                   "start_line": s.start_line, "end_line": s.end_line, "excerpt": s.excerpt[:500]} for s in record.sources]
             size = len(json.dumps(summary, ensure_ascii=False).encode())
             if used + size > budget:
                 if not records:

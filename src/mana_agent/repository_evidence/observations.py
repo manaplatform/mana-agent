@@ -4,10 +4,12 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
-from mana_agent.repository_evidence.models import EvidenceProvenance, EvidenceSource, relative_source
+from mana_agent.repository_evidence.models import EvidenceProvenance, EvidenceSource, InvestigationCitation, relative_source
 
 
 def read_directory(root: Path, path: str = ".") -> dict:
+    from mana_agent.tools.repository import _is_skipped_dir
+
     relative_source(path)
     root = Path(root).resolve()
     target = (root / path).resolve()
@@ -20,6 +22,8 @@ def read_directory(root: Path, path: str = ".") -> dict:
         if len(entries) >= 500:
             truncated = True
             break
+        if entry.name.startswith(".") or _is_skipped_dir(entry.name):
+            continue
         try:
             relative_source(entry.relative_to(root).as_posix())
         except ValueError:
@@ -35,7 +39,7 @@ def read_directory(root: Path, path: str = ".") -> dict:
     return {**result, "content": encoded, "source_evidence": source.model_dump(mode="json")}
 
 
-def validate_selected_source(runner, source: EvidenceSource, *, decision_id: str) -> dict:
+def validate_selected_source(runner, source: InvestigationCitation, *, decision_id: str) -> dict:
     from mana_agent.agent.plan_service import FileListEvidence, FileReadEvidence
     if source.source_kind == "directory":
         request = FileListEvidence(tool="list_files", paths=(source.path,), level=1,
@@ -52,7 +56,7 @@ def validate_selected_source(runner, source: EvidenceSource, *, decision_id: str
         arguments["path"] = source.path
     arguments = {key: value for key, value in arguments.items() if value is not None}
     invocation = runner.request(request.tool, arguments,
-        call_id=f"{decision_id}:source:{source.path}:{source.start_line}:{source.end_line}:{source.sha256}", decision_id=decision_id)
+        call_id=f"{decision_id}:source:{source.source_kind}:{source.path}:{source.start_line}:{source.end_line}", decision_id=decision_id)
     return runner.execute(invocation, implementation).result
 
 
@@ -110,11 +114,36 @@ def ingest_operation(authority, result) -> None:
         provenance=provenance, category=category,
         statement=f"{result.tool_name} returned {result.status}", sources=sources, observation=observation,
     )
-    refs = list(taskboard.get_task(result.task_id).evidence_refs)
-    ref = record.ref.model_dump(mode="json")
-    if ref not in refs:
-        taskboard.update_task(result.task_id, evidence_refs=[*refs, ref])
-    result.result["repository_evidence_refs"] = [ref]
+    produced = [record.ref.model_dump(mode="json")]
+    task = taskboard.get_task(result.task_id)
+    if (task.task_kind in {"investigation", "understanding"} and result.tool_name == "batch_read_files"
+            and result.status in {"success", "failed"}):
+        from mana_agent.repository_evidence.service import StaleEvidenceSource
+
+        # Each result row has the hash calculated from the bytes actually read.
+        # A truncated row has no reliable end-line boundary for its excerpt.
+        files = result.result.get("files", [])
+        for index, row in enumerate(files[:20]):
+            if not row.get("ok") or row.get("truncated") or not row.get("content") or row.get("file_size_bytes", 0) > 2_000_000:
+                continue
+            start = row.get("start_line", 1)
+            end = row.get("end_line", row["total_lines"])
+            if end < start:
+                continue
+            source = EvidenceSource(path=row["path"], sha256=row["sha256"], start_line=start, end_line=end,
+                                    excerpt=row["content"][:12000])
+            try:
+                file_record = board.record_observation(provenance=provenance, category="code_behavior",
+                    statement="batch_read_files returned a file", sources=(source,),
+                    observation={**observation, "status": "success"})
+            except StaleEvidenceSource:
+                continue
+            ref = file_record.ref.model_dump(mode="json")
+            files[index] = {"repository_evidence_refs": [ref], **row}
+            produced.append(ref)
+    refs = list(task.evidence_refs)
+    taskboard.update_task(result.task_id, evidence_refs=[*refs, *(ref for ref in produced if ref not in refs)])
+    result.result["repository_evidence_refs"] = produced
     for mutation in result.mutations:
         paths = [path for path in (mutation.path, mutation.old_path) if path]
         board.invalidate_sources(paths, reason="Observed repository mutation", task_id=result.task_id)

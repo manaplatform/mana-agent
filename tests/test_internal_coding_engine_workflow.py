@@ -221,8 +221,19 @@ def test_internal_coding_engine_batch_read_allowed_files(tmp_path: Path) -> None
     file_a.write_text("def fn_a(): return 1\n", encoding="utf-8")
     file_b.write_text("def fn_b(): return 2\n", encoding="utf-8")
 
+    def _batch_read_client(task, ws, tools, session):
+        if len(task.allowed_files) > 1 and engine.batch_operations_enabled:
+            session.handle_function_call({
+                "call_id": "call_batch_1",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
+                "caller": {"type": "program", "call_id": "prog_init"},
+            })
+        return f"Completed internal coding task: {task.goal}"
+
     engine = InternalCodingEngine(
         model="test-model",
+        llm_client=_batch_read_client,
         batch_operations_enabled=True,
     )
 

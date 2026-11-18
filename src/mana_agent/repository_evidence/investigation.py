@@ -4,8 +4,75 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
-from mana_agent.repository_evidence.models import EvidenceProvenance, EvidenceQuery, EvidenceRef, EvidenceSource, InvestigationResult
+from mana_agent.repository_evidence.models import (
+    EvidenceCandidate, EvidenceProvenance, EvidenceQuery, EvidenceRef, EvidenceSource,
+    InvestigationCitation, InvestigationResult,
+)
 from mana_agent.repository_evidence.tasks import assignment_for
+
+
+def _matches_citation(citation: InvestigationCitation, source: EvidenceSource, content: str) -> bool:
+    if citation.path != source.path or citation.source_kind != source.source_kind:
+        return False
+    if citation.sha256 is not None and citation.sha256 != source.sha256:
+        return False
+
+    excerpt = citation.excerpt.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    if citation.source_kind == "directory":
+        if not excerpt or excerpt in content:
+            return True
+        try:
+            entries = json.loads(content)
+        except json.JSONDecodeError:
+            return False
+        names = {name for name, _ in entries}
+        selected = {part.strip().removeprefix("- ").strip("`\"'")
+                    for line in excerpt.splitlines() for part in line.split(",") if part.strip()}
+        return bool(selected) and selected.issubset(names)
+
+    # File citation
+    if citation.start_line is not None:
+        if source.start_line is not None and source.start_line > citation.start_line:
+            return False
+        if source.end_line is not None and source.end_line < citation.end_line:
+            return False
+        if source.start_line is not None:
+            start = citation.start_line - source.start_line
+            end = citation.end_line - source.start_line + 1
+        else:
+            start = citation.start_line - 1
+            end = citation.end_line
+        lines = content.splitlines(keepends=True)
+        if end > len(lines):
+            return False
+        content = "".join(lines[start:end])
+
+    if not excerpt:
+        return True
+
+    c_norm = content.replace("\r\n", "\n").replace("\r", "\n")
+    if excerpt in c_norm:
+        return True
+
+    e_lines = [line.strip() for line in excerpt.splitlines() if line.strip()]
+    c_lines = [line.strip() for line in c_norm.splitlines() if line.strip()]
+    if not e_lines:
+        return True
+    if not c_lines:
+        return False
+
+    n = len(e_lines)
+    for i in range(len(c_lines) - n + 1):
+        if c_lines[i:i + n] == e_lines:
+            return True
+        if n == 1 and e_lines[0] in c_lines[i]:
+            return True
+        if (n > 1 and e_lines[0] in c_lines[i] and e_lines[-1] in c_lines[i + n - 1]
+                and c_lines[i + 1:i + n - 1] == e_lines[1:-1]):
+            return True
+
+    return False
 
 
 def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, validate_source, runtime=None):
@@ -24,8 +91,13 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "missing evidence if another scope is required. Do not edit files, run verification commands, "
         "or access the network. For a dot-only scope without an explicit audit, list immediate entries only. "
         "Return exactly an InvestigationResult JSON object matching the schema. Findings are inferences or "
-        "hypotheses, never verified observations. Cite existing evidence IDs with revisions, or name exact "
-        "source paths, SHA-256 hashes, symbols, ranges, and source excerpts. Bind each satisfied requirement "
+        "hypotheses, never verified observations. Prefer existing supporting_evidence IDs with revisions. "
+        "Use the repository_evidence_refs attached to each successful batch_read_files row as supporting_evidence. "
+        "Otherwise cite exact source paths, kinds and ranges. For files include a short verbatim excerpt "
+        "from the cited lines. For a directory cite a shallow listing with source_kind directory. "
+        "If you cite directory entries, use comma-separated exact names in excerpt. "
+        "The host captures the source version. A tool "
+        "output reference identifies the tool result and cannot be used as a source hash. Bind each satisfied requirement "
         "to the zero-based indexes of its supporting findings, or use evidence_bindings for existing "
         "evidence references. Report remaining gaps explicitly.\n"
         + json.dumps({"assignment": assignment.model_dump(mode="json"), "evidence": context,
@@ -47,6 +119,11 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     if raw is None:
         raise ValueError("The selected engine returned no typed investigation result")
     report = InvestigationResult.model_validate(raw)
+    if any(gap.task_id != task_id for gap in report.missing_evidence):
+        raise ValueError("Investigation gap belongs to another task")
+    requirement_ids = {requirement.requirement_id for requirement in assignment.requirements}
+    if (set(report.requirement_bindings) | set(report.evidence_bindings)) - requirement_ids:
+        raise ValueError("Investigation report referenced an unknown evidence requirement")
     from mana_agent.services.activity_context import current_activity_context
     activity = current_activity_context()
     if activity is None or activity.task_id != task_id:
@@ -62,24 +139,37 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     observations_by_finding = []
     for finding in report.findings:
         supporting = list(finding.supporting_evidence)
-        for source in finding.sources:
-            covered = [board.get(ref) for ref in supporting]
-            if any(record.freshness == "current" and record.validation == "supported" and any(
-                    saved.path == source.path and saved.sha256 == source.sha256
-                    and (saved.start_line is None or (source.start_line is not None and saved.start_line <= source.start_line
-                         and saved.end_line >= source.end_line)) for saved in record.sources) for record in covered):
-                continue
-            # The selected model supplied the exact source. This validates its
-            # bytes through the registered boundary; it does not select a search.
-            result = validate_source(source)
-            captured = EvidenceSource.model_validate(result["source_evidence"])
-            if captured.sha256 != source.sha256 or (source.excerpt and source.excerpt not in result["content"]):
-                raise ValueError("Investigation source citation does not match the observed source")
-            source_refs = result.get("repository_evidence_refs", [])
-            if not source_refs:
-                raise ValueError("Source validation returned no durable observation identity")
-            supporting.extend(EvidenceRef.model_validate(item) for item in source_refs)
-        submitted = board.submit_findings(finding.model_copy(update={"supporting_evidence": tuple(dict.fromkeys(supporting))}), provenance=provenance)
+        observed = []
+        for ref in supporting:
+            record = board.get(ref)
+            if record.classification == "observed" and record.freshness == "current" and record.validation == "supported":
+                observed.extend(record.sources)
+        sources = []
+        for citation in finding.sources:
+            captured = next((source for source in observed if _matches_citation(citation, source, source.excerpt)), None)
+            if captured is None:
+                # Execute only the exact scoped read selected by the model.
+                result = validate_source(citation)
+                stamp = result.get("source_evidence")
+                if not result.get("ok") or not stamp:
+                    raise ValueError("The selected source read returned no complete source version")
+                captured = EvidenceSource.model_validate(stamp)
+                if not _matches_citation(citation, captured, result["content"]):
+                    raise ValueError("Investigation source citation does not match the observed path, version, or excerpt")
+                source_refs = result.get("repository_evidence_refs", [])
+                if not source_refs:
+                    raise ValueError("Source validation returned no durable observation identity")
+                supporting.extend(EvidenceRef.model_validate(item) for item in source_refs)
+                observed.append(captured)
+            sources.append(captured.model_copy(update={
+                "symbol": citation.symbol or captured.symbol,
+                "start_line": citation.start_line if citation.start_line is not None else captured.start_line,
+                "end_line": citation.end_line if citation.end_line is not None else captured.end_line,
+                "excerpt": citation.excerpt,
+            }))
+        candidate = EvidenceCandidate(**finding.model_dump(exclude={"sources", "supporting_evidence"}),
+                                      sources=tuple(sources), supporting_evidence=tuple(dict.fromkeys(supporting)))
+        submitted = board.submit_findings(candidate, provenance=provenance)
         refs.append(submitted.ref)
         observations_by_finding.append(tuple(supporting))
     task = taskboard.get_task(task_id)

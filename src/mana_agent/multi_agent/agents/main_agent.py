@@ -554,8 +554,7 @@ class MainAgent:
                 "output": step_answer,
             }
 
-        runner = step_runner or (self._build_autonomous_step_runner(task.task_id, request, entrypoint, scope, git_intent, route=route)
-                                 if route.route_name in {"coding", "repo_search", "analyze"} and git_intent is None else specialist_runner)
+        runner = step_runner or specialist_runner
         exec_res = self.autonomous_controller.execute_goal(
             task_id=task.task_id,
             user_goal=request,
@@ -677,7 +676,7 @@ class MainAgent:
         from mana_agent.coding.selection import resolve_coding_backend
         from mana_agent.integrations.codex.config import CodexSettings
         from mana_agent.services.activity_context import ActivityContext, activity_scope, current_activity_context
-        from mana_agent.repository_evidence.tasks import assignment_for
+        from mana_agent.repository_evidence.tasks import assignment_for, investigation_completion_contract
         from mana_agent.repository_evidence.investigation import execute_investigation
         from mana_agent.coding.programmatic import ToolExecutionDispatcher
         if self.repository_lanes is None:
@@ -726,7 +725,7 @@ class MainAgent:
                 taskboard_task_id=child_id, parent_task_id=parent_id, session_id=child.session_id,
                 workspace_id=child.workspace_id, repository_id=child.primary_repository_id,
                 execution_workspace=root, target_files=[str(root / path) for path in child.investigation_scope if path != "."],
-                routing_decision_id=decision_id)
+                routing_decision_id=decision_id, completion_contract=investigation_completion_contract(child) if investigating else ())
         self.repository_lanes.start(reservation)
         execution = reservation.execution
         parent_activity = current_activity_context()

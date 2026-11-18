@@ -1,7 +1,8 @@
 # Repository Evidence Board and independently scheduled investigation
 
-Status: local implementation, uncommitted and unverified. Tests, linters, type
-checks, builds, provider calls, and deployment were not run by the agent.
+Status: implementation on the feature branch with uncommitted follow-up changes.
+Tests, linters, type checks, builds, provider calls, and deployment were not run
+by the agent.
 
 ## Symptoms and demonstrated mechanisms
 
@@ -18,6 +19,22 @@ still a frozen Pydantic model. The task facade now uses `model_copy(update=...)`
 to start in the checkout already assigned by the lane. Preserve the parent
 settings when constructing task workers. The facade fixture covers both engine
 selections, the child checkout, and cancellation by the parent.
+
+In the cancelled NetPeek investigation, the first OpenRouter request responded
+in 2.7 seconds and the next request showed no completion or error for 2 minutes
+46 seconds before cancellation. The native coding loop and inference engine
+both published a start event for the same provider request. The inference engine
+now owns that lifecycle, reports elapsed time and timeout, and the coding
+worker cancels its in-flight await when the user stops the task. A shallow
+layout assignment offers only the permitted layout and evidence tools.
+
+A later investigation returned an enclosing JSON fence and the coding engine
+rejected the response before checking the findings. Both engines now remove
+one optional enclosing fence at their typed result boundary. Rejected values
+stay out of user-facing validation errors. Existing child attempts preserve
+their evidence references and are described to the model for same-task recovery.
+Do not add a second activity entry for a native request, publish rejected provider
+input in a diagnosis, or retry an investigation under a new scope.
 
 Repository inspection found that AUTO/DEBUG saved inspection dictionaries on a
 parent workflow and PLAN ran a native investigation session on that parent.
@@ -136,6 +153,50 @@ through exact registered reads selected by the submitted citation, and retain
 their source revision. The finding remains an inference. Provider operation
 details are not relabeled as native ToolRunner receipts.
 
+### Source citation regression
+
+NetPeek investigation `task_20261118_000011` completed its model turn and several
+source reads, then failed during directory citation validation. The SHA-256
+submitted for `src` matched the retained `repo_search` output artifact. The
+registered listing of `src` produced a different digest. The old result schema
+required a digest on every citation and exposed artifact references alongside
+actual source stamps. Existing engine fixtures provided the correct digest in
+advance and missed this distinction.
+
+Both engines can now return exact source locations without a SHA-256. The host
+reuses a matching current observation or runs the precise, scope-checked read
+selected by the citation. File citations without a digest require a verbatim
+excerpt. The host checks the source kind, path, line range and excerpt, and
+validates any digest supplied by an earlier result contract. The stored source
+version comes from the observation. This change needs no database migration.
+
+Follow-up child attempts `task_20261118_000013`, `task_20261118_000015`, and
+`task_20261118_000016` also failed citation validation after successful model
+and tool calls. Their journals establish which selected reads finished. They
+do not retain the rejected excerpt needed to identify each mismatch.
+
+The advertised result schema leaves source hashes and revisions to the host.
+Native batches attach per-file references to the first 20 result rows when
+they contain complete, current, bounded reads. Each reference identifies the
+file observation and exact line coverage from the registered batch receipt.
+This allows a finding to reuse the same observation without reproducing file
+text or a digest. A direct source citation still checks its requested range.
+File matching allows indentation and blank-line differences while preserving
+spaces within lines. Directory citations accept a verbatim manifest excerpt
+or a list of observed entry names, with every named entry required to match.
+
+Mode, compound, and MainAgent investigation dispatch all register the same
+supervisor verifier for durable evidence requirements. Saved investigations keep
+their attempt identity and scope when recovered, while different parents can
+reuse evidence through Board references.
+
+Tests cover hash-free file and directory citations with both engines, reuse of a
+current observation, a search artifact hash in place of the source hash,
+wrong excerpts and out-of-range citations, and recovery with a changed scope.
+The original NetPeek task was cancelled after it saved its checkpoint. The
+later DEBUG parent `task_20261118_000014` is waiting with a saved checkpoint.
+A successful live run of the latest citation path remains unverified.
+
 MissingEvidenceRequest identifies the existing coding task, exact requirement,
 reason, and continuation reference. The existing controller can create focused
 work, retain completed patches/checkpoints, and resume the same authorized
@@ -182,6 +243,8 @@ dependency, release, or deployment.
 - Never let queue jobs create duplicate tasks or disregard declared dependencies.
 - Never overwrite another task from a stale whole-board cache.
 - Never turn an evidence update into permission to broaden an approved objective.
+- Keep artifact digests separate from source digests. Resolve source versions
+  from registered observations and validate any explicitly supplied digest.
 - Never insert Mana decisions into external Codex's inner tool loop or silently
   change the selected engine after failure.
 
@@ -191,6 +254,7 @@ Start with the new contracts and integration fixtures:
 
 ```sh
 venv/bin/python -m pytest -q tests/evidence/test_repository_evidence_board.py tests/coding/test_investigation_engines.py tests/gateway/test_evidence_driven_orchestration.py
+venv/bin/python -m pytest -q tests/llm/test_engine.py -k timeout_cancels_selected_request
 ```
 
 Then run the affected compatibility surfaces:

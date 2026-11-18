@@ -188,6 +188,7 @@ def test_direct_tool_calling_fallback_for_unsupported_models(tmp_path: Path) -> 
         model="deepseek-coder",
         provider="openrouter",
         supports_responses_api=False,
+        llm_client=lambda task, ws, tools, session: f"Completed internal direct tool coding task: {task.goal}",
     )
     assert engine._should_use_programmatic() is False
 

@@ -137,9 +137,12 @@ class WorkspaceRepository:
         with self.db.transaction() as conn:
             from mana_agent.repository_evidence.service import EvidenceConflict
             existing = conn.execute("SELECT row_version FROM tasks WHERE task_id=?", (task.task_id,)).fetchone()
-            current_version = int(existing["row_version"]) if existing else 0
-            if current_version != task.row_version:
-                raise EvidenceConflict(f"Task {task.task_id} changed; reload before updating")
+            if existing is not None:
+                current_version = int(existing["row_version"])
+                if current_version != task.row_version:
+                    raise EvidenceConflict(f"Task {task.task_id} changed; reload before updating")
+            else:
+                current_version = 0
             conn.execute(
                 """
                 INSERT OR REPLACE INTO tasks (

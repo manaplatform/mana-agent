@@ -139,6 +139,7 @@ class TaskBoard:
     def create_task(
         self,
         *,
+        task_id: str | None = None,
         title: str,
         user_request: str = "",
         description: str = "",
@@ -163,7 +164,7 @@ class TaskBoard:
         wiring_required: bool = False,
         wiring_reason: str | None = None,
     ) -> TaskBoardItem:
-        task_id = self._new_task_id()
+        task_id = task_id or self._new_task_id()
         req_text = str(user_request or description or title).strip()
         goal = normalized_goal or req_text
         duplicate_of = None
@@ -259,6 +260,7 @@ class TaskBoard:
         self,
         parent_task_id: str,
         *,
+        task_id: str | None = None,
         title: str,
         user_request: str = "",
         owner_agent_id: str | None = None,
@@ -275,7 +277,7 @@ class TaskBoard:
         integration_role: str = "",
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
-        task_id = self._new_task_id()
+        task_id = task_id or self._new_task_id()
         req_text = str(user_request or parent.user_request or title).strip()
         task = TaskBoardItem(
             task_id=task_id,
@@ -772,6 +774,7 @@ class TaskBoard:
         self._validate_feature_completion(task)
         validate_transition(task, TaskStatus.DONE, reason="supervisor completion projected")
         task.status = TaskStatus.DONE
+        task.crossed_off = True
         if not task.wiring_required and task.integration_role != "wiring":
             task.wiring_outcome = "not_required"
         elif task.wiring_outcome not in {"mutation_applied", "already_integrated"}:

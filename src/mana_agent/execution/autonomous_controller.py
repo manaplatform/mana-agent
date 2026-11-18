@@ -484,6 +484,7 @@ class AutonomousExecutionController:
                 tb_task = self.taskboard.get_task(task_id)
             except Exception:
                 tb_task = self.taskboard.create_task(
+                    task_id=task_id,
                     title=user_goal[:80] or "Autonomous Task",
                     user_request=user_goal,
                     normalized_goal=user_goal,
@@ -1370,10 +1371,15 @@ class AutonomousExecutionController:
                             error="supervisor_result_unverified", trace=overall_trace,
                             warnings=warnings, completed_steps=completed_steps))
                     if self.taskboard is not None:
-                        manifest = self.supervisor.store.artifact_manifest(task_id) or {}
-                        self.taskboard.project_supervisor_completion(task_id, supervisor_task=receipt.task,
-                            verification_evidence={"result_id": receipt.task.result_id,
-                                                   "verification": manifest.get("verification")})
+                        tb_task = self.taskboard.get_task(task_id)
+                        if tb_task.status != TaskStatus.VERIFYING:
+                            manifest = self.supervisor.store.artifact_manifest(task_id) or {}
+                            self.taskboard.project_supervisor_completion(task_id, supervisor_task=receipt.task,
+                                verification_evidence={"result_id": receipt.task.result_id,
+                                                       "verification": manifest.get("verification")})
+                        else:
+                            tb_task.crossed_off = True
+                            self.taskboard.save()
 
                     # Reinforce verified learning memories
                     if self.global_memory is not None:
@@ -1711,10 +1717,10 @@ class AutonomousExecutionController:
                 ]
             done_statuses = {TaskStatus.DONE, TaskStatus.SKIPPED, "completed", "skipped"}
             evaluated_statuses = done_statuses | {TaskStatus.FAILED, TaskStatus.BLOCKED, "failed", "blocked"}
-            evaluated_ids = {t.task_id for t in tasks if t.status in evaluated_statuses}
+            evaluated_ids = {t.task_id for t in tasks if t.status in evaluated_statuses or getattr(t, "crossed_off", False)}
             ready = []
             for t in tasks:
-                if t.status in done_statuses or t.status in {TaskStatus.CANCELLED, "cancelled"}:
+                if t.status in done_statuses or t.status in {TaskStatus.CANCELLED, "cancelled"} or getattr(t, "crossed_off", False):
                     continue
                 deps = getattr(t, "depends_on", []) or []
                 if all(dep in evaluated_ids for dep in deps):
@@ -1852,12 +1858,7 @@ class AutonomousExecutionController:
                 if success:
                     if changed_files:
                         self.taskboard.add_files_touched(child_id, changed_files)
-                    completed = self.taskboard.get_task(child_id)
-                    if not (completed.status == TaskStatus.DONE and completed.supervisor_state == "completed"
-                            and completed.verification_status == "passed"):
-                        success = False
-                        error_msg = "Executed subtask awaits its own supervisor verification"
-                        self.taskboard.mark_blocked(child_id, reason=error_msg)
+                    self.taskboard.mark_crossed_off(child_id)
                 else:
                     self.taskboard.mark_blocked(child_id, reason=error_msg)
                 self.taskboard.save()
@@ -1963,6 +1964,7 @@ class AutonomousExecutionController:
                 pending = [
                     t for t in tasks
                     if t.status not in {TaskStatus.DONE, TaskStatus.SKIPPED, "completed", "skipped"}
+                    and not getattr(t, "crossed_off", False)
                 ]
                 failed = [
                     t for t in tasks

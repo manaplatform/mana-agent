@@ -1,5 +1,7 @@
 """Investigation task identity, independent readiness, and honest completion."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from mana_agent.multi_agent.core.types import QueueJob, QueueJobStatus, QueueJobType, TaskStatus
@@ -143,6 +145,44 @@ def test_failed_task_retains_evidence_requirements_across_taskboard_reload(board
     reused = ensure_investigation(board, parent_task_id=root.task_id, objective="Inspect handler", scope=["src"],
         requirements=[requirement], owner_agent_id="coding", decision_id="retry-selected")
     assert reused.task_id == child.task_id
+
+
+def test_equivalent_investigations_for_different_parents_keep_separate_execution_ids(board):
+    root = board.create_task(title="Goal", user_request="Independent changes")
+    first = board.create_child_task(root.task_id, title="First", user_request="Implement the first change")
+    second = board.create_child_task(root.task_id, title="Second", user_request="Implement the second change")
+    requirement = EvidenceRequirement(requirement_id="behavior", objective="Inspect handler",
+        acceptance_criteria=("Cite handler",))
+    children = [ensure_investigation(board, parent_task_id=parent.task_id, objective="Inspect handler", scope=["src"],
+        requirements=[requirement], owner_agent_id="coding", decision_id="selected") for parent in (first, second)]
+    assert children[0].task_id != children[1].task_id
+    assert [child.parent_task_id for child in children] == [first.task_id, second.task_id]
+
+
+def test_investigation_recovery_cannot_change_saved_scope(board, monkeypatch):
+    from mana_agent.agent.plan_service import InvestigateDecision
+    from mana_agent.execution_supervisor.models import RecoveryAction, RecoveryDecision
+    from mana_agent.gateway.mode_workflow import ModeWorkflow
+
+    root = board.create_task(title="Goal", user_request="Investigate handler")
+    requirement = EvidenceRequirement(requirement_id="behavior", objective="Inspect handler",
+        acceptance_criteria=("Cite handler",))
+    child = ensure_investigation(board, parent_task_id=root.task_id, objective=requirement.objective, scope=["src"],
+        requirements=[requirement], owner_agent_id="coding", decision_id="selected")
+    restored = TaskBoard(board.store.root)
+    workflow = ModeWorkflow(SimpleNamespace(_lane_coordinator=SimpleNamespace(taskboard=restored),
+        _coding_agent=SimpleNamespace(for_assignment=lambda **_: pytest.fail("Requested unauthorized dispatch"))))
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.current_activity_context",
+                        lambda: SimpleNamespace(attempt_generation=2))
+    decision = InvestigateDecision(action="investigate", reason="Recover the saved task", objective=requirement.objective,
+        scope="Inspect the handler", paths=("other",), recovery=RecoveryDecision(decision_id="retry", task_id=child.task_id,
+            action=RecoveryAction.RESUME_CHECKPOINT, reason="Use saved evidence", safe_to_continue=True))
+
+    with pytest.raises(PermissionError, match="match the saved child, objective, and scope"):
+        workflow._investigate(root.task_id, {"decision_count": 1}, None, decision)
+
+    assert len(restored.list_tasks(parent_task_id=root.task_id)) == 1
+    assert restored.get_task(child.task_id).investigation_scope == ["src"]
 
 
 def test_executor_adopts_new_tasks_without_an_investigation_barrier(board, complete_supervised_task):

@@ -134,11 +134,6 @@ class QueueManager:
         # Prebuilt requests pass the same checks even when they already contain a fingerprint.
         self.hierarchy_policy.assert_can_create_queue_job(job.requested_by_agent_id, task_id=job.task_id)
         self.hierarchy_policy.assert_can_assign_worker(job.requested_by_agent_id, job.assigned_worker_agent_id, task_id=job.task_id)
-        existing = next((item for item in self.job_store.jobs().values() if item.task_id == job.task_id
-                         and item.fingerprint == job.fingerprint and item.status in {
-                             QueueJobStatus.PENDING, QueueJobStatus.QUEUED, QueueJobStatus.CLAIMED, QueueJobStatus.RUNNING}), None)
-        if existing is not None:
-            return existing
         if self.memory_service is not None:
             accepted, existing_id = self.memory_service.register_queue_item(
                 queue_item_id=job.job_id,
@@ -155,10 +150,7 @@ class QueueManager:
                 self._bump_memory_status(job.task_id, duplicate_of=existing_id)
                 return job
         with self.taskboard.transaction():
-            admitted = self.job_store.admit(job)
-            if admitted.job_id != job.job_id:
-                self.jobs[admitted.job_id] = admitted
-                return admitted
+            self.job_store.save(job)
             self._reserve_budget(job)
             self.jobs[job.job_id] = job
             self.taskboard.add_queue_job(job.task_id, job.job_id)
