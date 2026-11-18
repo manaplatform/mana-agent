@@ -1,8 +1,7 @@
 # Repository Evidence Board and independently scheduled investigation
 
 Status: implementation on the feature branch with uncommitted follow-up changes.
-Tests, linters, type checks, builds, provider calls, and deployment were not run
-by the agent.
+Verification status is recorded with each regression.
 
 ## Symptoms and demonstrated mechanisms
 
@@ -131,6 +130,33 @@ venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/ll
 ```
 
 The agent did not run these tests or replay the live task.
+
+### Investigation report limitations regression
+
+On 2026-11-18 at 20:08:59 UTC, native investigation
+`task_20261118_000049` failed after a successful read batch. The traceback
+places `Invalid InvestigationResult (limitations: tuple type)` in the shared
+terminal report argument validator. The log omits the submitted value.
+A report with a single string or explicit null reproduces the same error.
+Earlier fixtures supplied an array or omitted the field.
+
+The report schema and assignment prompt now specify an array of text notes.
+The shared decoder wraps a nonblank string as one note and treats null or
+blank text as an empty list. It normalizes these forms before checking the
+report body and recording discarded metadata, so empty notes cannot make a
+metadata-only report valid. Objects, numbers, and invalid array items
+still fail with guidance that omits rejected input. The serialized form
+and evidence publication checks stay the same, with no migration required.
+
+Do not coerce arbitrary values to report notes or treat a limitation as
+evidence that satisfies a requirement.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/llm/test_engine.py -k 'report_limitations or investigation_report_uses_typed_validation or extra_report_metadata'
+```
+
+The focused regression tests passed locally. The original live task was
+not replayed.
 
 ### Evidence orchestration changes
 

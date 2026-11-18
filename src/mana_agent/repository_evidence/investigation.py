@@ -113,7 +113,8 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "and cannot be used as a source hash. On each finding, list the exact requirement_id values from "
         "assignment.requirements that it supports. Use an empty requirement_ids array for an unbound finding. "
         "Use evidence_bindings to link existing evidence references under those same assigned IDs. "
-        "Report remaining gaps explicitly.\n"
+        "Report each limitation as a string in the limitations array. Use [] or omit the field when there are none. "
+        "Report remaining evidence gaps explicitly.\n"
         + json.dumps({"assignment": assignment.model_dump(mode="json"), "evidence": context,
                       "result_schema": investigation_result_schema(assignment)}, ensure_ascii=False)
     )

@@ -252,17 +252,23 @@ class InvestigationResult(Contract):
     findings: tuple[InvestigationFinding, ...] = Field(default=(), max_length=20)
     evidence: tuple[EvidenceRef, ...] = ()
     missing_evidence: tuple[MissingEvidenceRequest, ...] = ()
-    limitations: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = Field(
+        default=(), description="Array of text notes, one per limitation. Omit it or use [] if there are no notes.",
+    )
     # Accept positional bindings from older reports without advertising them to the engines.
     requirement_bindings: SkipJsonSchema[dict[str, tuple[int, ...]]] = Field(default_factory=dict)
     evidence_bindings: dict[str, tuple[EvidenceRef, ...]] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
-    def discard_extra_report_metadata(cls, value: Any) -> Any:
-        """Only the typed report fields carry evidence or execution meaning."""
+    def normalize_report_envelope(cls, value: Any) -> Any:
+        """Normalize optional report notes before checking for unsupported metadata."""
         if not isinstance(value, dict):
             return value
+        limitations = value.get("limitations", ())
+        if limitations is None or isinstance(limitations, str):
+            limitations = [limitations] if limitations and limitations.strip() else []
+            value = {**value, "limitations": limitations}
         extra_fields = value.keys() - cls.model_fields.keys()
         if not extra_fields:
             return value
@@ -274,7 +280,6 @@ class InvestigationResult(Contract):
         has_report_body = any(value.get(field) for field in ("findings", "evidence", "missing_evidence", "limitations"))
         if not has_report_body and not (isinstance(bindings, dict) and any(bindings.values())):
             return value
-        limitations = value.get("limitations", ())
         if not isinstance(limitations, (list, tuple)):
             return value
 

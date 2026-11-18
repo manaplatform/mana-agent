@@ -92,6 +92,8 @@ def parse_investigation_result(text: str) -> InvestigationResult:
         if any(issue["type"] == "extra_forbidden" and issue["loc"] == ("architecture_relationships",)
                for issue in issues):
             message += " Put architecture_relationships inside the finding it describes."
+        if any(issue["loc"][:1] == ("limitations",) for issue in issues):
+            message += " Use an array of strings for limitations."
         raise StructuredOutputError(message) from None
 
 

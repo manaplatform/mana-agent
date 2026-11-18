@@ -370,6 +370,9 @@ def test_native_investigation_report_uses_typed_validation(native_profile, monke
             assert "excerpt" not in file_citation["properties"]
             assert "start_line" not in directory_citation["properties"]
             assert report["parameters"]["additionalProperties"] is False
+            limitations = report["parameters"]["properties"]["limitations"]
+            assert limitations["type"] == "array"
+            assert limitations["items"]["type"] == "string"
             return ModelResponse(tool_calls=[ToolCall(id="report", name=INVESTIGATION_REPORT_TOOL, args={
                 "findings": [{
                     "category": "layout", "statement": "The app defines a value.", "confidence": 0.9,
@@ -377,6 +380,7 @@ def test_native_investigation_report_uses_typed_validation(native_profile, monke
                     "sources": [{"path": "app.py", "excerpt": "value = 1"}],
                     "architecture_relationships": [{"app": "defines value"}],
                 }],
+                "limitations": "Other files are outside the assigned scope.",
                 "architecture_relationships": [{"source": "PRIVATE_FIXTURE", "relation": "calls", "target": "app"}],
                 "PRIVATE_FIELD": {"task_id": "invented-task"},
             })])
@@ -401,7 +405,10 @@ def test_native_investigation_report_uses_typed_validation(native_profile, monke
         report = parse_investigation_result(asyncio.run(run()))
         assert report.findings[0].classification == "inferred"
         assert report.findings[0].sources[0].excerpt == "value = 1"
-        assert report.limitations == ("Ignored 2 unsupported top-level report fields.",)
+        assert report.limitations == (
+            "Other files are outside the assigned scope.",
+            "Ignored 2 unsupported top-level report fields.",
+        )
         assert "PRIVATE_" not in report.model_dump_json()
     assert len(requests) == 1
     assert session.state.tool_calls_executed == 0

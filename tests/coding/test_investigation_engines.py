@@ -516,6 +516,30 @@ def test_investigation_result_accepts_one_json_document_with_optional_fence(wrap
     assert report.limitations == ("No matching file",)
 
 
+@pytest.mark.parametrize(("value", "expected"), [
+    ("No matching file", ["No matching file"]),
+    (["No matching file", "Scope was limited"], ["No matching file", "Scope was limited"]),
+    (None, []),
+    (" \n", []),
+])
+def test_investigation_result_normalizes_report_limitations(value, expected):
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    report = parse_investigation_result(json.dumps({"limitations": value}))
+    assert report.limitations == tuple(expected)
+    assert report.model_dump(mode="json")["limitations"] == expected
+
+
+@pytest.mark.parametrize("value", [{"PRIVATE_FIXTURE": "unrelated"}, 123, [None]])
+def test_investigation_result_rejects_invalid_report_limitations(value):
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    with pytest.raises(ValueError, match=r"limitations(?:\.0)?: (?:tuple|string) type") as error:
+        parse_investigation_result(json.dumps({"limitations": value}))
+    assert "Use an array of strings for limitations" in str(error.value)
+    assert "PRIVATE_FIXTURE" not in str(error.value)
+
+
 def test_investigation_result_reports_incomplete_json_without_exposing_content():
     from mana_agent.repository_evidence.handoff import parse_investigation_result
 
@@ -676,6 +700,8 @@ def test_investigation_architecture_relationships_round_trip_through_the_parser(
 
 @pytest.mark.parametrize("fields,issue", [
     ({"findings": [], "evidence_bindings": {"value": []}}, "Put architecture_relationships inside the finding"),
+    ({"limitations": " \n"}, "Put architecture_relationships inside the finding"),
+    ({"limitations": None}, "Put architecture_relationships inside the finding"),
     ({"limitations": ["No source"], "supporting_evidence": []}, "supporting_evidence: extra forbidden"),
     ({"findings": [{"category": "layout", "statement": "A file exists.", "confidence": 0.9,
                    "classification": "inferred", "PRIVATE_NESTED_FIELD": "PRIVATE_VALUE"}]}, r"findings\.0\.<key>"),
