@@ -244,16 +244,20 @@ def test_native_chat_does_not_probe_unknown_features(native_profile, monkeypatch
     assert engine(native_profile, monkeypatch, Adapter()).generate_sync("hello").content == "answer"
 
 
-def test_model_response_rejects_unregistered_and_invalid_tool_calls(native_profile, monkeypatch):
+@pytest.mark.parametrize("args", [{"value": "wrong type"}, {"value": 1, "PRIVATE_FIXTURE": "unexpected property"}])
+def test_model_response_rejects_unregistered_and_invalid_tool_calls(native_profile, monkeypatch, args):
     from mana_agent.llm.messages import ToolCall
     class Adapter:
         async def generate(self, request):
-            return ModelResponse(tool_calls=[ToolCall(id="call", name="echo", args={"value": "wrong type"})])
+            return ModelResponse(tool_calls=[ToolCall(id="call", name="echo", args=args)])
     model = engine(native_profile, monkeypatch, Adapter()).with_tools([
-        {"name": "echo", "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}},
+        {"name": "echo", "parameters": {"type": "object", "properties": {"value": {"type": "integer"}},
+                                      "required": ["value"], "additionalProperties": False}},
     ])
-    with pytest.raises(InvalidResponseError, match="registered schema"):
+    with pytest.raises(InvalidResponseError, match="registered schema") as error:
         model.generate_sync("hello")
+    assert error.value.__suppress_context__
+    assert "PRIVATE_FIXTURE" not in str(error.value)
 
 
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])

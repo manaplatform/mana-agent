@@ -626,19 +626,37 @@ class InternalCodingEngine(CodingEngine):
         llm: Any,
     ) -> str:
         """Run iterative model-driven tool-calling loop until the task is complete."""
+        from mana_agent.llm.errors import StructuredOutputError
         from mana_agent.llm.messages import UserMessage, SystemMessage, ToolResultMessage
+        from mana_agent.repository_evidence.handoff import (
+            INVESTIGATION_REPORT_INSTRUCTION, INVESTIGATION_REPORT_TOOL, MISSING_EVIDENCE_INSTRUCTION,
+            investigation_result_schema,
+        )
+        from mana_agent.repository_evidence.models import CodingAssignment
 
+        investigation = task.context.get("repository_investigation")
         tool_defs = self._build_tool_definitions(session.dispatcher)
+        if investigation:
+            assignment = CodingAssignment.model_validate(investigation)
+            tool_defs.append({"type": "function", "function": {
+                "name": INVESTIGATION_REPORT_TOOL,
+                "description": INVESTIGATION_REPORT_INSTRUCTION,
+                "parameters": investigation_result_schema(assignment),
+            }})
 
         if self._should_use_programmatic():
             tool_defs = [{"type": "programmatic_tool_calling"}, *[
-                {"type": "function", **entry["function"], "allowed_callers": ["direct", "programmatic"]}
+                {"type": "function", **entry["function"], "allowed_callers":
+                 ["direct"] if entry["function"]["name"] == INVESTIGATION_REPORT_TOOL and investigation
+                 else ["direct", "programmatic"]}
                 for entry in tool_defs
             ]]
         if hasattr(llm, "with_tools"):
             model_with_tools = llm.with_tools(tool_defs)
         elif hasattr(llm, "bind_tools"):
             model_with_tools = llm.bind_tools(tool_defs)
+        elif investigation:
+            raise StructuredOutputError("The selected internal model cannot bind the investigation report tool")
         else:
             model_with_tools = llm
 
@@ -670,9 +688,10 @@ class InternalCodingEngine(CodingEngine):
             except Exception as gm_exc:
                 logger.debug("InternalCodingEngine memory retrieval failed safely: %s", gm_exc)
 
-        context_parts.append(CODING_DEBUGGING_HANDOFF_INSTRUCTION)
-        from mana_agent.repository_evidence.handoff import MISSING_EVIDENCE_INSTRUCTION
-        context_parts.append(MISSING_EVIDENCE_INSTRUCTION)
+        if investigation:
+            context_parts.append(INVESTIGATION_REPORT_INSTRUCTION)
+        else:
+            context_parts.extend((CODING_DEBUGGING_HANDOFF_INSTRUCTION, MISSING_EVIDENCE_INSTRUCTION))
         user_content = "\n\n".join(context_parts)
 
         messages: list[Any] = [
@@ -696,6 +715,8 @@ class InternalCodingEngine(CodingEngine):
         if saved_native.get("native_messages"):
             from mana_agent.llm.messages import messages_from_records
             messages = messages_from_records(saved_native["native_messages"])
+            if investigation:
+                messages.append(UserMessage(INVESTIGATION_REPORT_INSTRUCTION))
         elif continuation:
             raise RuntimeError("Native continuation has no matching saved history; receipt reconciliation is required")
         elif saved_native:
@@ -720,21 +741,38 @@ class InternalCodingEngine(CodingEngine):
                 for name, value in usage.model_dump().items():
                     if isinstance(value, int):
                         session.state.total_tokens[name] = session.state.total_tokens.get(name, 0) + value
+            raw_tool_calls = getattr(response, "tool_calls", None) or []
+            protocol_pending = getattr(response, "protocol_pending", False)
+            protocol_events = getattr(response, "protocol_events", ())
+            if investigation:
+                report_calls = [call for call in raw_tool_calls if call.get("name") == INVESTIGATION_REPORT_TOOL]
+                if report_calls:
+                    report_call = report_calls[0]
+                    caller = report_call.get("caller") or {}
+                    arguments = report_call.get("args")
+                    if (len(raw_tool_calls) != 1 or protocol_pending or protocol_events
+                            or caller.get("type") not in {None, "direct"}
+                            or not report_call.get("id") or not isinstance(arguments, dict)):
+                        raise StructuredOutputError(INVESTIGATION_REPORT_INSTRUCTION)
+                    session.state.native_continuation = None
+                    session.state.native_pending_calls = []
+                    return json.dumps(arguments, ensure_ascii=False)
+                if not raw_tool_calls and not protocol_pending:
+                    raise StructuredOutputError(INVESTIGATION_REPORT_INSTRUCTION)
             continuation = getattr(response, "continuation", None)
             session.state.native_continuation = continuation.model_dump(mode="json") if continuation else None
             session.state.native_messages = [message.model_dump(mode="json") if hasattr(message, "model_dump") else message for message in messages]
-            raw_tool_calls = getattr(response, "tool_calls", None) or []
             session.state.native_pending_calls = [
                 call.get("id") or call.get("tool_call_id")
                 for call in raw_tool_calls
                 if isinstance(call, dict) and (call.get("id") or call.get("tool_call_id"))
             ]
-            for item in getattr(response, "protocol_events", []):
+            for item in protocol_events:
                 if item.get("type") == "program":
                     session.handle_program_item(item)
                 elif item.get("type") == "program_output":
                     session.handle_program_output(item)
-            if getattr(response, "protocol_pending", False) and not response.tool_calls:
+            if protocol_pending and not raw_tool_calls:
                 response_msg = getattr(response, "message", None)
                 if response_msg is None:
                     from mana_agent.llm.messages import AssistantMessage
@@ -744,7 +782,7 @@ class InternalCodingEngine(CodingEngine):
                 turn += 1
                 continue
 
-            tool_calls = getattr(response, "tool_calls", None)
+            tool_calls = raw_tool_calls
             if not tool_calls:
                 content_val = getattr(response, "content", response)
                 if isinstance(content_val, list):

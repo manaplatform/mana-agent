@@ -450,6 +450,99 @@ def test_investigation_result_accepts_one_json_document_with_optional_fence(wrap
     assert report.limitations == ("No matching file",)
 
 
+def test_investigation_result_reports_incomplete_json_without_exposing_content():
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    with pytest.raises(ValueError, match="expected one complete JSON object") as error:
+        parse_investigation_result('{"limitations": ["PRIVATE_FIXTURE"')
+    assert "PRIVATE_FIXTURE" not in str(error.value)
+
+
+@pytest.mark.parametrize(("programmatic", "outcome"), [
+    (False, "report"), (True, "report"), (False, "resume"), (False, "text"), (False, "mixed"), (True, "hosted"),
+    (True, "pending"),
+])
+def test_native_investigation_completes_with_one_direct_report(tmp_path, monkeypatch, programmatic, outcome):
+    import asyncio
+
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CodingTask, WorkspaceContext
+    from mana_agent.coding.programmatic import ProgrammaticExecutionSession
+    from mana_agent.llm.errors import StructuredOutputError
+    from mana_agent.llm.messages import ToolCall, UserMessage
+    from mana_agent.llm.types import ModelResponse
+    from mana_agent.repository_evidence.handoff import INVESTIGATION_REPORT_TOOL, parse_investigation_result
+    from mana_agent.repository_evidence.models import CodingAssignment
+
+    assignment = CodingAssignment(
+        task_id="task", task_version=1, objective="Read the file", task_kind="investigation",
+        backend="internal", source_view=str(tmp_path), decision_id="selected",
+        allowed_scope=("app.py",), requirements=(EvidenceRequirement(
+            requirement_id="value", objective="Find the value", acceptance_criteria=("Cite a read",),
+        ),),
+    )
+    context = {"repository_investigation": assignment.model_dump(mode="json")}
+    if outcome == "resume":
+        context["coding_resume_context"] = {
+            "native_messages": [UserMessage("Use the saved assignment.").model_dump(mode="json")],
+        }
+    task = CodingTask(task_id="task", goal=assignment.objective, requires_repository_write=False, context=context)
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    read = ToolCall(id="read", name="read_file", args={"path": "app.py"})
+    result = {"limitations": ["No matching declaration"]}
+    report = ToolCall(id="report", name=INVESTIGATION_REPORT_TOOL, args=result)
+    terminal = {
+        "text": ModelResponse(content='{"limitations": ["PRIVATE_FIXTURE"'),
+        "mixed": ModelResponse(tool_calls=[report, read.model_copy(update={"id": "extra-read"})]),
+        "hosted": ModelResponse(tool_calls=[report.model_copy(update={"caller": {"type": "programmatic"}})]),
+        "pending": ModelResponse(tool_calls=[report], protocol_pending=True, protocol_events=[{"type": "program"}]),
+    }.get(outcome, ModelResponse(tool_calls=[report]))
+    responses = iter((ModelResponse(tool_calls=[read]), terminal))
+    dispatched = []
+
+    class Model:
+        def with_tools(self, tools):
+            definitions = [tool.get("function", tool) for tool in tools]
+            submitted = next(tool for tool in definitions if tool.get("name") == INVESTIGATION_REPORT_TOOL)
+            findings = submitted["parameters"]["$defs"]["InvestigationFinding"]["properties"]
+            assert findings["requirement_ids"]["items"]["enum"] == ["value"]
+            if programmatic:
+                assert submitted["allowed_callers"] == ["direct"]
+            return self
+
+        async def generate(self, messages, *, continuation):
+            assert any(INVESTIGATION_REPORT_TOOL in message.content for message in messages if message.role == "user")
+            if dispatched:
+                assert messages[-1].tool_call_id == "read"
+            return next(responses)
+
+    def dispatch(tool, arguments, *, call_id):
+        dispatched.append((tool, arguments, call_id))
+        return {"ok": True, "content": "value = 1"}
+
+    session = ProgrammaticExecutionSession(task_id="task", dispatcher=SimpleNamespace(dispatch=dispatch), max_tool_calls=5)
+    engine = InternalCodingEngine(model="fixture", provider="openai")
+    monkeypatch.setattr(engine, "_should_use_programmatic", lambda: programmatic)
+    monkeypatch.setattr(engine, "_workspace_instruction", lambda workspace: "Inspect the assigned source.")
+    monkeypatch.setattr(engine, "_build_tool_definitions", lambda dispatcher: [{
+        "type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}},
+    }])
+
+    async def run():
+        return await engine._run_model_tool_loop(task, workspace, session, asyncio.Event(), llm=Model())
+
+    if outcome in {"report", "resume"}:
+        parsed = parse_investigation_result(asyncio.run(run()))
+        assert parsed.limitations == ("No matching declaration",)
+        assert session.state.native_pending_calls == []
+    else:
+        with pytest.raises(StructuredOutputError, match="calling report_investigation exactly once") as error:
+            asyncio.run(run())
+        assert "PRIVATE_FIXTURE" not in str(error.value)
+    assert dispatched == [("read_file", {"path": "app.py"}, "read")]
+    assert session.state.tool_calls_executed == 1
+
+
 @pytest.mark.parametrize(("label", "canonical"), [
     ("inferred", "inferred"), (" Inferred ", "inferred"),
     ("hypothetical", "hypothetical"), (" HYPOTHETICAL ", "hypothetical"),

@@ -276,10 +276,10 @@ class NativeLLMEngine:
                     raise InvalidResponseError("Provider returned a reused call ID or a tool outside the offered set")
                 validate_arguments(call.args, offered[call.name])
                 seen.add(call.id)
-        except ValueError as exc:
+        except ValueError:
             error = StructuredOutputError("Provider tool arguments violate the registered schema")
             error.provider_usage, error.response_accepted = response.usage.model_dump(), True
-            raise error from exc
+            raise error from None
         except InvalidResponseError as exc:
             exc.provider_usage, exc.response_accepted = response.usage.model_dump(), True
             raise

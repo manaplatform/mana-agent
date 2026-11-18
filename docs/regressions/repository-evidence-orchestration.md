@@ -36,6 +36,40 @@ their evidence references and are described to the model for same-task recovery.
 Do not add a second activity entry for a native request, publish rejected provider
 input in a diagnosis, or retry an investigation under a new scope.
 
+### Native investigation report format regression
+
+On 2026-11-18 at 22:47, investigation `task_20261118_000032` completed
+`batch_read_files`, `repo_search`, and `read_file`. The provider returned
+successfully and Mana rejected the final report with
+`Invalid InvestigationResult (decision: json invalid)`. The journal omits
+the final text, so the exact syntax error is unknown.
+
+The native coding loop treated text without tool calls as a completion and
+passed it to the JSON parser. Describing the schema in the prompt did not
+constrain that text. The earlier JSON fence fixtures tested report decoding
+without exercising the native completion path.
+
+The native tool loop now accepts completion through one direct
+`report_investigation` call. Its argument schema comes from the admitted
+assignment. The terminal call uses the existing model budget, leaves no
+pending tool action, and goes through the typed report and publication
+checks. The loop rejects a report mixed with other calls or submitted by a
+hosted program. Codex and existing text-based adapters keep their JSON
+boundary. Malformed JSON reports explain the required format, and schema
+errors omit rejected provider data from the diagnostic traceback.
+
+Do not treat free-form text or successful repository reads as a native
+investigation report. Preserve the selected backend, scope, and validation
+when completing the report.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/llm/test_engine.py -k 'native_investigation_completes or investigation_result or rejects_unregistered_and_invalid_tool_calls'
+```
+
+The agent did not run the tests or replay the failed live task.
+
+### Evidence orchestration changes
+
 Repository inspection found that AUTO/DEBUG saved inspection dictionaries on a
 parent workflow and PLAN ran a native investigation session on that parent.
 `ModePhase.UNDERSTANDING` and `INVESTIGATING` coupled knowledge acquisition to

@@ -9,6 +9,13 @@ from mana_agent.llm.errors import StructuredOutputError, describe_decision_valid
 from mana_agent.repository_evidence.models import CodingAssignment, InvestigationResult, MissingEvidenceRequest
 
 
+INVESTIGATION_REPORT_TOOL = "report_investigation"
+INVESTIGATION_REPORT_INSTRUCTION = (
+    "Complete the investigation by calling report_investigation exactly once, directly and on its own. "
+    "Put the InvestigationResult fields in the tool arguments. Use the assigned task_id in any missing_evidence requests."
+)
+
+
 def investigation_result_schema(assignment: CodingAssignment) -> dict[str, Any]:
     """Expose the admitted assignment's requirement IDs to both engines."""
     schema = InvestigationResult.model_json_schema()
@@ -52,13 +59,16 @@ def parse_investigation_result(text: str) -> InvestigationResult:
     try:
         return InvestigationResult.model_validate_json(json_response_text(text))
     except ValidationError as exc:
+        issues = exc.errors(include_input=False, include_context=False, include_url=False)
+        if any(issue["type"] == "json_invalid" for issue in issues):
+            raise StructuredOutputError("Invalid InvestigationResult (expected one complete JSON object)") from None
         detail = describe_decision_validation(exc, InvestigationResult.model_json_schema())
         message = f"Invalid InvestigationResult ({detail})"
         if any(
             issue["type"] == "literal_error"
             and issue["loc"][:1] == ("findings",)
             and issue["loc"][-1:] == ("classification",)
-            for issue in exc.errors(include_input=False, include_context=False, include_url=False)
+            for issue in issues
         ):
             message += " Use 'inferred' or 'hypothetical' for finding classification."
         raise StructuredOutputError(message) from None

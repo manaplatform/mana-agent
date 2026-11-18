@@ -100,7 +100,7 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "never workflow stages. Reuse the supplied evidence. Inspect only the assigned scope; request "
         "missing evidence if another scope is required. Do not edit files, run verification commands, "
         "or access the network. "
-        "Return exactly an InvestigationResult JSON object matching the schema. Set each finding's classification "
+        "Complete the investigation with one InvestigationResult matching the JSON schema. Set each finding's classification "
         "to \"inferred\" for a source-backed conclusion or \"hypothetical\" for an unconfirmed explanation. "
         "The acceptable_classifications in the assignment apply to Evidence Board records. Cite existing host "
         "observations by evidence ID and revision in supporting_evidence or evidence_bindings. "
