@@ -1021,6 +1021,32 @@ def test_interrupted_turn_is_cancelled(tmp_path: Path) -> None:
     assert result.status == "cancelled"
 
 
+def test_codex_reports_safe_investigation_classification_error(tmp_path: Path) -> None:
+    import json
+
+    task = _task().model_copy(update={
+        "context": {"repository_investigation": True}, "requires_repository_write": False,
+    })
+    text = json.dumps({"findings": [{
+        "category": "layout", "statement": "The application calls its handler.",
+        "classification": "PRIVATE_FIXTURE", "confidence": 0.8,
+    }]})
+    result = parse_codex_result(
+        task=task, workspace=_workspace(tmp_path), worker_id="worker-1",
+        thread_id="thread-1", turn_id="turn-1", changed_files=[],
+        notifications=[
+            {"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": text}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    assert result.investigation_result is None
+    assert "CODING_INVESTIGATION_RESULT_INVALID" in result.errors
+    assert any("findings.0.classification" in error and "Use 'inferred' or 'hypothetical'" in error
+               for error in result.errors)
+    assert all("PRIVATE_FIXTURE" not in error for error in result.errors)
+
+
 def test_codex_preserves_continuation_for_missing_evidence(tmp_path: Path) -> None:
     import json
 

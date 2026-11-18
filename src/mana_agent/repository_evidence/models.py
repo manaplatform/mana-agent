@@ -86,7 +86,9 @@ class ArchitectureRelationship(Contract):
 class Finding(Contract):
     category: str = Field(min_length=1, max_length=100)
     statement: str = Field(min_length=1, max_length=4000)
-    classification: Literal["inferred", "hypothetical"]
+    classification: Literal["inferred", "hypothetical"] = Field(
+        description="Use inferred for a source-backed conclusion or hypothetical for an unconfirmed explanation.",
+    )
     supporting_evidence: tuple[EvidenceRef, ...] = Field(default=(), max_length=32)
     relationships: tuple[EvidenceRelation, ...] = ()
     dependencies: tuple[str, ...] = ()
@@ -108,6 +110,17 @@ class InvestigationFinding(Finding):
     # Earlier reports used arbitrary string maps. Keep decoding those without
     # advertising their shape to either coding engine.
     architecture_relationships: tuple[ArchitectureRelationship | SkipJsonSchema[dict[str, str]], ...] = ()
+
+    @field_validator("classification", mode="before")
+    @classmethod
+    def normalize_classification(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip().casefold()
+            # Only the host can record an observation. A model that reports one
+            # is submitting a conclusion subject to the usual evidence checks.
+            if value == "observed":
+                return "inferred"
+        return value
 
 
 class EvidenceProvenance(Contract):

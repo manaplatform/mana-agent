@@ -23,6 +23,7 @@ from mana_agent.multi_agent.core.types import RiskLevel, TaskBoardItem, TaskStat
     ("observed", "wrong_range"), ("observed", "reuse"), ("observed", "failed"), ("observed", "malformed"),
     ("inferred", "multiple_findings"), ("inferred", "legacy_binding"),
     ("inferred", "negative_index"), ("inferred", "past_last_finding"), ("inferred", "unknown_requirement"),
+    ("inferred", "observed_label"), ("observed", "observed_label"), ("inferred", "unbacked_observed_label"),
 ])
 def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp_path, monkeypatch, backend, classification, outcome_kind):
     (tmp_path / "src").mkdir()
@@ -81,6 +82,10 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             finding: dict[str, object] = {"category": "code_behavior", "statement": "The repository has an application file",
                 "classification": "inferred", "sources": [citation], "supporting_evidence": supporting,
                 "architecture_relationships": [architecture_link], "confidence": 0.9}
+            if outcome_kind in {"observed_label", "unbacked_observed_label"}:
+                finding["classification"] = "observed"
+            if outcome_kind == "unbacked_observed_label":
+                finding["sources"] = []
             findings = [finding]
             report: dict[str, object] = {"findings": findings}
             legacy_indexes = {"legacy_binding": [0], "negative_index": [-1], "past_last_finding": [1]}
@@ -120,9 +125,14 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             assert len(calls) == 2 and calls[-1] == "closed"
             assert knowledge.query(EvidenceQuery())["records"] == []
             return
-        if outcome_kind in {"negative_index", "past_last_finding", "unknown_requirement"}:
-            reason = ("unknown evidence requirement" if outcome_kind == "unknown_requirement"
-                      else "index outside the findings array")
+        rejected_before_publication = {
+            "negative_index": "index outside the findings array",
+            "past_last_finding": "index outside the findings array",
+            "unknown_requirement": "unknown evidence requirement",
+            "unbacked_observed_label": "Inferences require actual supporting observations",
+        }
+        if outcome_kind in rejected_before_publication:
+            reason = rejected_before_publication[outcome_kind]
             with pytest.raises(ValueError, match=reason):
                 execute_investigation(taskboard=Board(), task_id="task", coding_agent=engine,
                     decision_id="decision", validate_source=validate)
@@ -147,13 +157,20 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         assert task.task_kind == "investigation"
         assert (tmp_path / "src/app.py").read_bytes() == b"value = 1\r\n"
         assert len(reads) == (0 if outcome_kind == "reuse" else 1)
-        finding = knowledge.query(EvidenceQuery())["records"][0]
+        records = knowledge.query(EvidenceQuery())["records"]
+        finding = records[0]
         assert finding["classification"] == "inferred"
         assert finding["sources"][0]["sha256"] == source.sha256
         assert finding["architecture_relationships"] == [architecture_link]
         if outcome_kind == "multiple_findings":
             assert len(result["evidence_refs"]) == 2
             assert task.evidence_requirements[0]["evidence"] == [result["evidence_refs"][1]]
+        if outcome_kind == "observed_label" and classification == "observed":
+            observed = records[1]
+            assert observed["classification"] == "observed"
+            assert task.evidence_requirements[0]["evidence"] == [
+                {"evidence_id": observed["evidence_id"], "revision": observed["revision"]},
+            ]
     finally:
         db.close()
 
@@ -333,6 +350,44 @@ def test_investigation_result_accepts_one_json_document_with_optional_fence(wrap
 
     report = parse_investigation_result(wrapper.format('{"limitations": ["No matching file"]}'))
     assert report.limitations == ("No matching file",)
+
+
+@pytest.mark.parametrize(("label", "canonical"), [
+    ("inferred", "inferred"), (" Inferred ", "inferred"),
+    ("hypothetical", "hypothetical"), (" HYPOTHETICAL ", "hypothetical"),
+    ("observed", "inferred"), (" Observed ", "inferred"),
+])
+def test_investigation_classification_normalizes_known_labels(label, canonical):
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    report = parse_investigation_result(json.dumps({"findings": [{
+        "category": "layout", "statement": "The application calls its handler.",
+        "classification": label, "confidence": 0.8,
+    }]}))
+    assert report.findings[0].classification == canonical
+
+
+def test_investigation_classification_schema_advertises_only_model_labels():
+    from mana_agent.repository_evidence.models import InvestigationFinding
+
+    classification = InvestigationFinding.model_json_schema()["properties"]["classification"]
+    assert classification["enum"] == ["inferred", "hypothetical"]
+
+
+def test_investigation_classification_rejection_names_allowed_labels_and_redacts_values():
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    findings = [{
+        "category": "layout", "statement": "The application calls its handler.",
+        "classification": label, "confidence": 0.8,
+    } for label in ("PRIVATE_FIXTURE", ["inferred"])]
+    with pytest.raises(ValueError, match=r"findings\.0\.classification") as error:
+        parse_investigation_result(json.dumps({"findings": findings}))
+
+    message = str(error.value)
+    assert "findings.1.classification" in message
+    assert "Use 'inferred' or 'hypothetical'" in message
+    assert "PRIVATE_FIXTURE" not in message
 
 
 def test_investigation_architecture_relationships_use_a_closed_wire_record():

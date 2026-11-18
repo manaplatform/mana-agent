@@ -153,6 +153,40 @@ through exact registered reads selected by the submitted citation, and retain
 their source revision. The finding remains an inference. Provider operation
 details are not relabeled as native ToolRunner receipts.
 
+### Finding classification regression
+
+On 2026-11-18 at 22:15, internal investigation `task_20261118_000023`
+completed `batch_read_files` and received its final model response. The shared
+parser reported literal errors on the first two findings' `classification`
+fields. The child checkpointed before publishing findings. The logs preserve
+the affected fields and omit the submitted labels, so the exact inputs are
+unknown.
+
+The model saw two classification vocabularies in the assignment. A finding
+can be `inferred` or `hypothetical`, while an evidence requirement can also
+accept host-created `observed` records. The old prompt described the
+distinction in prose, the parser required exact enum spelling, and the error
+only said `literal error`. Existing decoder fixtures used exact valid labels.
+
+The prompt now states the exact finding labels and explains how to reference
+host observations. The shared investigation decoder handles whitespace and
+capitalization and interprets `observed` on a model finding as `inferred`.
+Normal citation and evidence checks still apply. Only registered host reads
+can produce observations that satisfy an observed-only requirement. Other
+invalid labels fail with the allowed choices and without the submitted values.
+Codex also surfaces this diagnostic when its investigation result is invalid.
+No data migration is needed.
+
+Do not admit model-supplied observations to the Evidence Board or classify
+unknown labels as inferences.
+
+User verification uses the following command. The agent did not run it or
+resume the affected live task.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/test_codex_integration.py -k 'investigation_classification or observed_label'
+```
+
 ### Architecture relationship output regression
 
 On 2026-11-18 at 21:55, investigation `task_20261118_000018` completed

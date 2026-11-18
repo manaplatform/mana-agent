@@ -21,6 +21,7 @@ from mana_agent.integrations.codex.text_cleanup import (
     sanitize_assistant_visible_text,
 )
 from mana_agent.coding_research_contracts import parse_debugging_envelope
+from mana_agent.llm.errors import StructuredOutputError
 
 
 # Codex item types that indicate a repository mutation was attempted.
@@ -64,6 +65,7 @@ def parse_codex_result(
     agent_message_text = ""
     patch_proposal = ""
     investigation_result = None
+    investigation_error = ""
     missing_evidence = []
     investigating = bool(task.context.get("repository_investigation"))
     proposing_patch = bool(task.context.get("mode_patch_proposal"))
@@ -110,9 +112,10 @@ def parse_codex_result(
                     try:
                         investigation_result = parse_investigation_result(text).model_dump(mode="json")
                         missing_evidence = investigation_result["missing_evidence"]
-                    except ValueError:
+                    except StructuredOutputError as exc:
                         investigation_result = None
                         missing_evidence = []
+                        investigation_error = str(exc)
                 elif text and proposing_patch:
                     from mana_agent.repository_evidence.handoff import json_response_text, missing_evidence_from_text
                     missing_evidence = missing_evidence_from_text(text)
@@ -237,6 +240,8 @@ def parse_codex_result(
     if investigating and status == "completed" and investigation_result is None:
         status = "failed"
         errors.append("CODING_INVESTIGATION_RESULT_INVALID")
+        if investigation_error:
+            errors.append(investigation_error)
     if proposing_patch and status == "completed" and not patch_proposal:
         status = "failed"
         errors.append("CODING_PATCH_PROPOSAL_INVALID")

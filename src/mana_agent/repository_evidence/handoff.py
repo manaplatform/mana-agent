@@ -27,7 +27,15 @@ def parse_investigation_result(text: str) -> InvestigationResult:
         return InvestigationResult.model_validate_json(json_response_text(text))
     except ValidationError as exc:
         detail = describe_decision_validation(exc, InvestigationResult.model_json_schema())
-        raise StructuredOutputError(f"Invalid InvestigationResult ({detail})") from None
+        message = f"Invalid InvestigationResult ({detail})"
+        if any(
+            issue["type"] == "literal_error"
+            and issue["loc"][:1] == ("findings",)
+            and issue["loc"][-1:] == ("classification",)
+            for issue in exc.errors(include_input=False, include_context=False, include_url=False)
+        ):
+            message += " Use 'inferred' or 'hypothetical' for finding classification."
+        raise StructuredOutputError(message) from None
 
 
 def missing_evidence_from_text(text: str) -> list[dict[str, Any]]:
