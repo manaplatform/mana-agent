@@ -74,6 +74,15 @@ def parse_investigation_result(text: str) -> InvestigationResult:
         raise StructuredOutputError(message) from None
 
 
+def validate_investigation_report_arguments(arguments: dict[str, Any]) -> None:
+    """Use the same typed decoder for native tool arguments as for saved reports."""
+    try:
+        parse_investigation_result(json.dumps(arguments, ensure_ascii=False))
+    except StructuredOutputError as exc:
+        exc.public_detail = str(exc)
+        raise
+
+
 def missing_evidence_from_text(text: str) -> list[dict[str, Any]]:
     if not isinstance(text, str) or len(text) > 250_000:
         return []

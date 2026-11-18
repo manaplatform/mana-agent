@@ -626,11 +626,12 @@ class InternalCodingEngine(CodingEngine):
         llm: Any,
     ) -> str:
         """Run iterative model-driven tool-calling loop until the task is complete."""
+        from mana_agent.llm.engine import NativeLLMEngine
         from mana_agent.llm.errors import StructuredOutputError
         from mana_agent.llm.messages import UserMessage, SystemMessage, ToolResultMessage
         from mana_agent.repository_evidence.handoff import (
             INVESTIGATION_REPORT_INSTRUCTION, INVESTIGATION_REPORT_TOOL, MISSING_EVIDENCE_INSTRUCTION,
-            investigation_result_schema,
+            investigation_result_schema, validate_investigation_report_arguments,
         )
         from mana_agent.repository_evidence.models import CodingAssignment
 
@@ -651,7 +652,11 @@ class InternalCodingEngine(CodingEngine):
                  else ["direct", "programmatic"]}
                 for entry in tool_defs
             ]]
-        if hasattr(llm, "with_tools"):
+        if investigation and isinstance(llm, NativeLLMEngine):
+            model_with_tools = llm.with_tools(
+                tool_defs, argument_validators={INVESTIGATION_REPORT_TOOL: validate_investigation_report_arguments},
+            )
+        elif hasattr(llm, "with_tools"):
             model_with_tools = llm.with_tools(tool_defs)
         elif hasattr(llm, "bind_tools"):
             model_with_tools = llm.bind_tools(tool_defs)

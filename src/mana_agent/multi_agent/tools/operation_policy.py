@@ -48,6 +48,7 @@ def builtin_policy(name: str) -> OperationPolicy | None:
 
 
 def validate_arguments(value: Any, schema: dict[str, Any], path: str = "arguments", *,
+                       redact_keys: bool = False,
                        _root: dict[str, Any] | None = None, _depth: int = 0) -> None:
     """Validate registry schemas without coercing types or fetching remote refs."""
     import math
@@ -56,7 +57,7 @@ def validate_arguments(value: Any, schema: dict[str, Any], path: str = "argument
         raise ValueError(f"{path}: registered schema exceeds validation depth")
     root = schema if _root is None else _root
     def validate(item, spec, location=path):
-        validate_arguments(item, spec, location, _root=root, _depth=_depth + 1)
+        validate_arguments(item, spec, location, redact_keys=redact_keys, _root=root, _depth=_depth + 1)
     if schema is False:
         raise ValueError(f"{path}: disallowed by the registered schema")
     if schema is True:
@@ -111,13 +112,16 @@ def validate_arguments(value: Any, schema: dict[str, Any], path: str = "argument
             raise ValueError(f"{path}: missing {', '.join(sorted(missing))}")
         props = schema.get("properties", {})
         additional = schema.get("additionalProperties", True)
-        if additional is False and set(value) - set(props):
-            raise ValueError(f"{path}: unregistered arguments {', '.join(sorted(set(value) - set(props)))}")
+        unknown = set(value) - set(props)
+        if additional is False and unknown:
+            detail = "" if redact_keys else f" {', '.join(sorted(unknown))}"
+            raise ValueError(f"{path}: unregistered arguments{detail}")
         for key, item in value.items():
             if key in props:
                 validate(item, props[key], f"{path}.{key}")
             elif isinstance(additional, dict):
-                validate(item, additional, f"{path}.{key}")
+                field = "<key>" if redact_keys else key
+                validate(item, additional, f"{path}.{field}")
     elif isinstance(value, list):
         if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", float("inf")):
             raise ValueError(f"{path}: outside registered array bounds")

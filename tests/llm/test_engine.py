@@ -244,20 +244,96 @@ def test_native_chat_does_not_probe_unknown_features(native_profile, monkeypatch
     assert engine(native_profile, monkeypatch, Adapter()).generate_sync("hello").content == "answer"
 
 
-@pytest.mark.parametrize("args", [{"value": "wrong type"}, {"value": 1, "PRIVATE_FIXTURE": "unexpected property"}])
-def test_model_response_rejects_unregistered_and_invalid_tool_calls(native_profile, monkeypatch, args):
+@pytest.mark.parametrize(("args", "issue"), [
+    ({"value": "wrong type"}, "arguments.value: expected integer"),
+    ({"value": 1, "PRIVATE_FIXTURE": "unexpected property"}, "arguments: unregistered arguments"),
+    ({"value": 1, "lookup": {"PRIVATE_FIXTURE": "wrong type"}}, "arguments.lookup.<key>: expected integer"),
+])
+def test_model_response_rejects_unregistered_and_invalid_tool_calls(native_profile, monkeypatch, args, issue):
     from mana_agent.llm.messages import ToolCall
     class Adapter:
         async def generate(self, request):
             return ModelResponse(tool_calls=[ToolCall(id="call", name="echo", args=args)])
     model = engine(native_profile, monkeypatch, Adapter()).with_tools([
-        {"name": "echo", "parameters": {"type": "object", "properties": {"value": {"type": "integer"}},
-                                      "required": ["value"], "additionalProperties": False}},
+        {"name": "echo", "parameters": {
+            "type": "object", "required": ["value"], "additionalProperties": False,
+            "properties": {
+                "value": {"type": "integer"},
+                "lookup": {"type": "object", "additionalProperties": {"type": "integer"}},
+            },
+        }},
     ])
     with pytest.raises(InvalidResponseError, match="registered schema") as error:
         model.generate_sync("hello")
     assert error.value.__suppress_context__
     assert "PRIVATE_FIXTURE" not in str(error.value)
+    assert "for echo" in str(error.value)
+    assert issue in error.value.public_detail
+
+
+@pytest.mark.parametrize("classification", [" Observed ", "PRIVATE_FIXTURE"])
+def test_native_investigation_report_uses_typed_validation(native_profile, monkeypatch, tmp_path, classification):
+    from types import SimpleNamespace
+
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CodingTask, WorkspaceContext
+    from mana_agent.coding.programmatic import ProgrammaticExecutionSession
+    from mana_agent.llm.errors import StructuredOutputError
+    from mana_agent.llm.messages import ToolCall
+    from mana_agent.repository_evidence.handoff import INVESTIGATION_REPORT_TOOL, parse_investigation_result
+    from mana_agent.repository_evidence.models import CodingAssignment
+
+    assignment = CodingAssignment(
+        task_id="task", task_version=1, objective="Inspect app.py", task_kind="investigation",
+        backend="internal", source_view=str(tmp_path), decision_id="selected", allowed_scope=("app.py",),
+    )
+    task = CodingTask(
+        task_id="task", goal=assignment.objective, requires_repository_write=False,
+        context={"repository_investigation": assignment.model_dump(mode="json")},
+    )
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            report = next(tool for tool in request.tools if tool["name"] == INVESTIGATION_REPORT_TOOL)
+            definitions = report["parameters"]["$defs"]
+            assert definitions["InvestigationFinding"]["properties"]["classification"]["enum"] == [
+                "inferred", "hypothetical",
+            ]
+            assert "excerpt" not in definitions["InvestigationCitation"]["properties"]
+            return ModelResponse(tool_calls=[ToolCall(id="report", name=INVESTIGATION_REPORT_TOOL, args={
+                "findings": [{
+                    "category": "layout", "statement": "The app defines a value.", "confidence": 0.9,
+                    "classification": classification,
+                    "sources": [{"path": "app.py", "excerpt": "value = 1"}],
+                    "architecture_relationships": [{"app": "defines value"}],
+                }],
+            })])
+
+    native = engine(native_profile, monkeypatch, Adapter())
+    coding = InternalCodingEngine(model="test-model", provider="openai", programmatic_tool_calling_enabled=False)
+    monkeypatch.setattr(coding, "_workspace_instruction", lambda workspace: "Inspect the assigned source.")
+    monkeypatch.setattr(coding, "_build_tool_definitions", lambda dispatcher: [])
+    session = ProgrammaticExecutionSession(task_id="task", dispatcher=SimpleNamespace(
+        dispatch=lambda *args, **kwargs: pytest.fail("A terminal report must never dispatch a tool"),
+    ))
+
+    async def run():
+        return await coding._run_model_tool_loop(task, workspace, session, asyncio.Event(), llm=native)
+
+    if classification == "PRIVATE_FIXTURE":
+        with pytest.raises(StructuredOutputError, match=r"findings\.0\.classification") as error:
+            asyncio.run(run())
+        assert "PRIVATE_FIXTURE" not in str(error.value)
+        assert error.value.public_detail == str(error.value)
+    else:
+        report = parse_investigation_result(asyncio.run(run()))
+        assert report.findings[0].classification == "inferred"
+        assert report.findings[0].sources[0].excerpt == "value = 1"
+    assert len(requests) == 1
+    assert session.state.tool_calls_executed == 0
 
 
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])

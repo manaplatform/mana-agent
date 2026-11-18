@@ -51,13 +51,24 @@ class NativeLLMEngine:
         self.adapter = adapter
         self.tools: list[dict[str, Any]] = []
         self.tool_choice: str | dict[str, Any] | None = None
+        self._tool_argument_validators: dict[str, Callable[[dict[str, Any]], None]] = {}
         self.context_cost_governor = None
         self._volatile_continuations: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
-    def with_tools(self, tools: list[Any], *, tool_choice: Any = None) -> NativeLLMEngine:
+    def with_tools(
+        self, tools: list[Any], *, tool_choice: Any = None,
+        argument_validators: dict[str, Callable[[dict[str, Any]], None]] | None = None,
+    ) -> NativeLLMEngine:
+        """Bind provider schemas and optional host-side argument contracts."""
         selected = copy.copy(self)
         selected.tools = [tool_specification(tool) for tool in tools]
         selected.tool_choice = tool_choice
+        selected._tool_argument_validators = dict(argument_validators or {})
+        names = {tool["name"] for tool in selected.tools if "name" in tool and "parameters" in tool}
+        if selected._tool_argument_validators.keys() - names:
+            raise ValueError("Argument validators must belong to offered function tools")
+        if not all(callable(validator) for validator in selected._tool_argument_validators.values()):
+            raise TypeError("Tool argument validators must be callable")
         return selected
 
     def update_model_assignment(self, provider: str, model: str, *, settings: Any,
@@ -274,12 +285,20 @@ class NativeLLMEngine:
             for call in response.tool_calls:
                 if call.id in seen or call.name not in offered:
                     raise InvalidResponseError("Provider returned a reused call ID or a tool outside the offered set")
-                validate_arguments(call.args, offered[call.name])
+                validator = self._tool_argument_validators.get(call.name)
+                try:
+                    if validator is not None:
+                        validator(call.args)
+                    else:
+                        validate_arguments(call.args, offered[call.name], redact_keys=True)
+                except StructuredOutputError:
+                    raise
+                except ValueError as exc:
+                    detail = f"Provider tool arguments violate the registered schema for {call.name}"
+                    if validator is None:
+                        detail += f" ({exc})"
+                    raise StructuredOutputError(detail, public_detail=detail) from None
                 seen.add(call.id)
-        except ValueError:
-            error = StructuredOutputError("Provider tool arguments violate the registered schema")
-            error.provider_usage, error.response_accepted = response.usage.model_dump(), True
-            raise error from None
         except InvalidResponseError as exc:
             exc.provider_usage, exc.response_accepted = response.usage.model_dump(), True
             raise

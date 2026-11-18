@@ -68,6 +68,40 @@ venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/ll
 
 The agent did not run the tests or replay the failed live task.
 
+### Native investigation report validation regression
+
+At 22:59 on 2026-11-18, investigation `task_20261118_000037` completed
+`batch_read_files` and `repo_search`. The next provider response failed
+argument validation before any operation from that response was dispatched.
+The journal reported `Provider tool arguments violate the registered schema`
+without identifying the tool or rejected field.
+
+The tool declaration used the model-facing report schema for local
+validation as well as generation. Its schema omits fields and shapes the
+typed decoder accepts for compatibility. For example, the generic schema
+rejects `Observed` and an explicit legacy source excerpt before the decoder
+can normalize the classification and preserve the excerpt for source
+validation. The existing completion fixtures simulated the model after the
+native inference validator, so they did not cover this boundary. The exact
+rejected arguments in the live incident remain unknown.
+
+Native inference now uses the same typed decoder for the registered terminal
+report call that the handoff uses for reports from other sources. The
+model-facing schema still guides generation. The publisher still checks
+task identity, assigned requirements, scope, and evidence before accepting
+findings. Executable tools retain strict schema checks. Their errors name
+the registered tool and failed check without exposing arbitrary provider
+property names or values.
+
+Do not use the reduced provider schema as the local decoder for a terminal
+report, or apply the report decoder to executable tool calls.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'investigation_report_uses_typed_validation or rejects_unregistered_and_invalid_tool_calls'
+```
+
+The agent did not run these tests or replay the live task.
+
 ### Evidence orchestration changes
 
 Repository inspection found that AUTO/DEBUG saved inspection dictionaries on a
