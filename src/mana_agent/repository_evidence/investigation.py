@@ -99,10 +99,11 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "Otherwise cite exact source paths, kinds and ranges. For files include a short verbatim excerpt "
         "from the cited lines. For a directory cite a shallow listing with source_kind directory. "
         "If you cite directory entries, use comma-separated exact names in excerpt. "
-        "The host captures the source version. A tool "
-        "output reference identifies the tool result and cannot be used as a source hash. Bind each satisfied requirement "
-        "to the zero-based indexes of its supporting findings, or use evidence_bindings for existing "
-        "evidence references. Report remaining gaps explicitly.\n"
+        "The host captures the source version. A tool output reference identifies the tool result "
+        "and cannot be used as a source hash. On each finding, list the exact IDs of the assigned "
+        "requirements it supports in requirement_ids. For example, use \"requirement_ids\": [\"entrypoints\"] "
+        "when the finding supports an assigned requirement with ID entrypoints. "
+        "Use evidence_bindings for existing evidence references. Report remaining gaps explicitly.\n"
         + json.dumps({"assignment": assignment.model_dump(mode="json"), "evidence": context,
                       "result_schema": InvestigationResult.model_json_schema()}, ensure_ascii=False)
     )
@@ -124,8 +125,14 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     report = InvestigationResult.model_validate(raw)
     if any(gap.task_id != task_id for gap in report.missing_evidence):
         raise ValueError("Investigation gap belongs to another task")
+    bindings = {requirement_id: list(indexes) for requirement_id, indexes in report.requirement_bindings.items()}
+    if any(not 0 <= index < len(report.findings) for indexes in bindings.values() for index in indexes):
+        raise ValueError("Legacy investigation requirement binding has an index outside the findings array")
+    for index, finding in enumerate(report.findings):
+        for requirement_id in finding.requirement_ids:
+            bindings.setdefault(requirement_id, []).append(index)
     requirement_ids = {requirement.requirement_id for requirement in assignment.requirements}
-    if (set(report.requirement_bindings) | set(report.evidence_bindings)) - requirement_ids:
+    if (bindings.keys() | report.evidence_bindings.keys()) - requirement_ids:
         raise ValueError("Investigation report referenced an unknown evidence requirement")
     from mana_agent.services.activity_context import current_activity_context
     activity = current_activity_context()
@@ -170,7 +177,7 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
                 "end_line": citation.end_line if citation.end_line is not None else captured.end_line,
                 "excerpt": citation.excerpt,
             }))
-        candidate = EvidenceCandidate(**finding.model_dump(exclude={"sources", "supporting_evidence"}),
+        candidate = EvidenceCandidate(**finding.model_dump(exclude={"sources", "supporting_evidence", "requirement_ids"}),
                                       sources=tuple(sources), supporting_evidence=tuple(dict.fromkeys(supporting)))
         submitted = board.submit_findings(candidate, provenance=provenance)
         refs.append(submitted.ref)
@@ -178,11 +185,8 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     task = taskboard.get_task(task_id)
     requirements = []
     for requirement in assignment.requirements:
-        indexes = report.requirement_bindings.get(requirement.requirement_id, ())
-        if any(index < 0 or index >= len(refs) for index in indexes):
-            raise ValueError("Investigation requirement references an unknown finding")
         selected = list(report.evidence_bindings.get(requirement.requirement_id, ()))
-        for index in indexes:
+        for index in bindings.get(requirement.requirement_id, ()):
             candidates = [refs[index], *observations_by_finding[index]]
             selected.extend(ref for ref in candidates if board.get(ref).classification in requirement.acceptable_classifications
                             and (not requirement.categories or board.get(ref).category in requirement.categories))

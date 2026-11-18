@@ -21,6 +21,8 @@ from mana_agent.multi_agent.core.types import RiskLevel, TaskBoardItem, TaskStat
     ("observed", "file_dedented"), ("inferred", "directory_location"), ("inferred", "directory_named"),
     ("inferred", "artifact_hash"), ("observed", "wrong_excerpt"), ("observed", "directory_wrong_excerpt"),
     ("observed", "wrong_range"), ("observed", "reuse"), ("observed", "failed"), ("observed", "malformed"),
+    ("inferred", "multiple_findings"), ("inferred", "legacy_binding"),
+    ("inferred", "negative_index"), ("inferred", "past_last_finding"), ("inferred", "unknown_requirement"),
 ])
 def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp_path, monkeypatch, backend, classification, outcome_kind):
     (tmp_path / "src").mkdir()
@@ -76,11 +78,22 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
                 return {"status": "failed", "error": "Selected backend unavailable"}
             if outcome_kind == "malformed":
                 return {"status": "completed", "investigation_result": {"unsupported": True}}
-            return {"status": "completed", "investigation_result": {
-                "findings": [{"category": "code_behavior", "statement": "The repository has an application file",
-                    "classification": "inferred", "sources": [citation], "supporting_evidence": supporting,
-                    "architecture_relationships": [architecture_link],
-                    "confidence": 0.9}], "requirement_bindings": {"value": [0]}}}
+            finding: dict[str, object] = {"category": "code_behavior", "statement": "The repository has an application file",
+                "classification": "inferred", "sources": [citation], "supporting_evidence": supporting,
+                "architecture_relationships": [architecture_link], "confidence": 0.9}
+            findings = [finding]
+            report: dict[str, object] = {"findings": findings}
+            legacy_indexes = {"legacy_binding": [0], "negative_index": [-1], "past_last_finding": [1]}
+            if outcome_kind in legacy_indexes:
+                report["requirement_bindings"] = {"value": legacy_indexes[outcome_kind]}
+            elif outcome_kind == "unknown_requirement":
+                finding["requirement_ids"] = ["value", "outside-assignment"]
+            else:
+                finding["requirement_ids"] = ["value"]
+            if outcome_kind == "multiple_findings":
+                findings.insert(0, {"category": "code_behavior", "statement": "There may be another module",
+                    "classification": "hypothetical", "confidence": 0.5})
+            return {"status": "completed", "investigation_result": report}
         def close(self):
             calls.append("closed")
     engine = SimpleNamespace(active_engine_mode=backend, for_assignment=lambda **_: Worker())
@@ -107,6 +120,17 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             assert len(calls) == 2 and calls[-1] == "closed"
             assert knowledge.query(EvidenceQuery())["records"] == []
             return
+        if outcome_kind in {"negative_index", "past_last_finding", "unknown_requirement"}:
+            reason = ("unknown evidence requirement" if outcome_kind == "unknown_requirement"
+                      else "index outside the findings array")
+            with pytest.raises(ValueError, match=reason):
+                execute_investigation(taskboard=Board(), task_id="task", coding_agent=engine,
+                    decision_id="decision", validate_source=validate)
+            assert reads == []
+            assert knowledge.query(EvidenceQuery(include_stale=True))["records"] == []
+            assert task.evidence_refs == []
+            assert task.evidence_requirements[0]["evidence"] == []
+            return
         if outcome_kind in {"artifact_hash", "wrong_excerpt", "wrong_range", "directory_wrong_excerpt"}:
             with pytest.raises(ValueError, match="does not match the observed path, version, or excerpt"):
                 execute_investigation(taskboard=Board(), task_id="task", coding_agent=engine,
@@ -127,6 +151,9 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         assert finding["classification"] == "inferred"
         assert finding["sources"][0]["sha256"] == source.sha256
         assert finding["architecture_relationships"] == [architecture_link]
+        if outcome_kind == "multiple_findings":
+            assert len(result["evidence_refs"]) == 2
+            assert task.evidence_requirements[0]["evidence"] == [result["evidence_refs"][1]]
     finally:
         db.close()
 
@@ -276,6 +303,17 @@ def test_investigation_wire_schema_keeps_source_versions_host_owned():
     assert "path" in properties
     assert "sha256" not in properties
     assert "revision" not in properties
+
+
+def test_investigation_wire_schema_binds_requirements_on_each_finding():
+    from mana_agent.repository_evidence.models import InvestigationResult
+
+    schema = InvestigationResult.model_json_schema()
+    assert "requirement_bindings" not in schema["properties"]
+    assert "evidence_bindings" in schema["properties"]
+    requirement_ids = schema["$defs"]["InvestigationFinding"]["properties"]["requirement_ids"]
+    assert requirement_ids["type"] == "array"
+    assert requirement_ids["items"]["type"] == "string"
 
 
 def test_missing_evidence_handoff_is_typed_and_preserves_task_identity():

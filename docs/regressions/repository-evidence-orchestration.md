@@ -184,6 +184,38 @@ resume the affected live task.
 venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k 'investigation_architecture_relationships or uses_selected_engine'
 ```
 
+### Finding requirement binding regression
+
+On 2026-11-18 at 22:08, investigation `task_20261118_000021` completed a
+`repo_search` and received a structured report. The session journal recorded
+five saved findings before the child checkpointed and blocked with
+`Investigation requirement references an unknown finding`. The journal does
+not retain the rejected index.
+
+The earlier response contract used a separate map of requirement IDs to
+zero-based finding positions. An out-of-range position passed type validation,
+and the publisher checked the bounds only after saving the findings. The
+selected-engine fixtures contained valid positions and missed the partial
+publication path.
+
+The shared schema now places `requirement_ids` on each finding. The publisher
+validates these IDs against the assigned requirements before resolving citations
+or saving findings, then applies the existing classification, category, and
+evidence checks. The IDs belong to the report and stay out of reusable evidence
+identity and storage. Existing evidence can still be bound by its board
+reference. Older reports with valid positions remain usable. Invalid positions
+are rejected before any report findings are published. No migration is needed.
+
+Do not expose finding positions as references in the model-facing schema or
+defer binding validation until after publishing the report.
+
+User verification uses the following command. The agent did not run it or
+resume the affected live task.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k 'uses_selected_engine or binds_requirements_on_each_finding'
+```
+
 ### Source citation regression
 
 NetPeek investigation `task_20261118_000011` completed its model turn and several

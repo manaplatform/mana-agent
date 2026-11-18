@@ -102,6 +102,9 @@ class EvidenceCandidate(Finding):
 
 class InvestigationFinding(Finding):
     sources: tuple[InvestigationCitation, ...] = Field(default=(), max_length=32)
+    requirement_ids: tuple[str, ...] = Field(
+        default=(), description="IDs from the assigned requirements that this finding supports.",
+    )
     # Earlier reports used arbitrary string maps. Keep decoding those without
     # advertising their shape to either coding engine.
     architecture_relationships: tuple[ArchitectureRelationship | SkipJsonSchema[dict[str, str]], ...] = ()
@@ -221,7 +224,8 @@ class InvestigationResult(Contract):
     evidence: tuple[EvidenceRef, ...] = ()
     missing_evidence: tuple[MissingEvidenceRequest, ...] = ()
     limitations: tuple[str, ...] = ()
-    requirement_bindings: dict[str, tuple[int, ...]] = Field(default_factory=dict)
+    # Accept positional bindings from older reports without advertising them to the engines.
+    requirement_bindings: SkipJsonSchema[dict[str, tuple[int, ...]]] = Field(default_factory=dict)
     evidence_bindings: dict[str, tuple[EvidenceRef, ...]] = Field(default_factory=dict)
 
 
