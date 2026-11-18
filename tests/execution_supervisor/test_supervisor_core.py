@@ -253,6 +253,64 @@ def test_concurrent_lease_acquisition_has_one_winner(runtime):
     assert rows.count("conflict") == 1
 
 
+def test_waiting_investigations_free_capacity_for_follow_up(runtime):
+    supervisor, _clock, tmp_path = runtime
+    parent = create(supervisor, tmp_path)
+    waiting_children = []
+    for _ in range(supervisor.config.max_concurrent_children):
+        child = create(supervisor, tmp_path, parent_task_id=parent.task_id)
+        attempt_id, token = running(supervisor, child)
+        checkpoint = supervisor.checkpoint(
+            child.task_id, attempt_id=attempt_id, lease_token=token, resume_payload={"reads_complete": True},
+        )
+        supervisor.transition(child.task_id, ExecutionState.WAITING, reason="Evidence requirements remain unsatisfied")
+        waiting_children.append((child.task_id, attempt_id, checkpoint.checkpoint_id))
+
+    follow_up = create(supervisor, tmp_path, parent_task_id=parent.task_id)
+    attempt_id, _ = running(supervisor, follow_up)
+    assert supervisor.get_task(follow_up.task_id).attempt_id == attempt_id
+    for task_id, attempt_id, checkpoint_id in waiting_children:
+        child = supervisor.get_task(task_id)
+        assert child.state is ExecutionState.WAITING
+        assert child.attempt_id == attempt_id
+        assert child.checkpoint_id == checkpoint_id
+
+
+@pytest.mark.parametrize("resume_method", ["resume_running", "start", "transition"])
+def test_waiting_child_must_reacquire_capacity(runtime, resume_method):
+    supervisor, _clock, tmp_path = runtime
+    parent = create(supervisor, tmp_path)
+    waiting = create(supervisor, tmp_path, parent_task_id=parent.task_id)
+    attempt_id, token = running(supervisor, waiting)
+    supervisor.transition(waiting.task_id, ExecutionState.WAITING, reason="Waiting for evidence")
+
+    active = [create(supervisor, tmp_path, parent_task_id=parent.task_id)
+              for _ in range(supervisor.config.max_concurrent_children)]
+    for child in active:
+        running(supervisor, child)
+
+    def resume():
+        if resume_method == "transition":
+            return supervisor.transition(waiting.task_id, ExecutionState.RUNNING, attempt_id=attempt_id)
+        return getattr(supervisor, resume_method)(waiting.task_id, attempt_id=attempt_id, lease_token=token)
+
+    overflow = create(supervisor, tmp_path, parent_task_id=parent.task_id)
+    supervisor.queue(overflow.task_id)
+    with pytest.raises(LeaseConflictError, match="maximum concurrent supervised children reached"):
+        supervisor.acquire_lease(overflow.task_id, owner="worker-b")
+    with pytest.raises(LeaseConflictError, match="maximum concurrent supervised children reached"):
+        resume()
+    assert supervisor.get_task(waiting.task_id).state is ExecutionState.WAITING
+    assert supervisor.get_task(overflow.task_id).state is ExecutionState.QUEUED
+
+    supervisor.transition(active[0].task_id, ExecutionState.WAITING, reason="Waiting for evidence")
+    resumed = resume()
+    assert resumed.state is ExecutionState.RUNNING
+    assert resumed.attempt_id == attempt_id
+    with pytest.raises(LeaseConflictError, match="maximum concurrent supervised children reached"):
+        supervisor.acquire_lease(overflow.task_id, owner="worker-b")
+
+
 def test_heartbeat_renews_lease_and_stale_token_is_rejected(runtime):
     supervisor, clock, tmp_path = runtime
     task = create(supervisor, tmp_path)

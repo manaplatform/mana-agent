@@ -87,6 +87,11 @@ VALID_CHECKPOINT_STATES = frozenset(
     }
 )
 
+_CHILD_SLOT_STATES = frozenset({
+    ExecutionState.LEASED,
+    ExecutionState.RUNNING,
+    ExecutionState.CHECKPOINTING,
+})
 
 
 @runtime_checkable
@@ -676,6 +681,7 @@ class ExecutionSupervisor:
                     "a human-waiting branch may resume only through its durable inbox claim"
                 )
             validate_transition(task.state, target)
+            self._check_child_capacity(task, target)
             task.state = target
             task.updated_at = self.clock()
             if target == ExecutionState.RUNNING and task.started_at is None:
@@ -1081,6 +1087,17 @@ class ExecutionSupervisor:
                 self.store.save_attempt(attempt)
         return task
 
+    def _check_child_capacity(self, task: TaskRecord, target: ExecutionState) -> None:
+        """Check slot admission inside the store write lock."""
+        if not task.parent_task_id or task.state in _CHILD_SLOT_STATES or target not in _CHILD_SLOT_STATES:
+            return
+        active_siblings = sum(
+            sibling.parent_task_id == task.parent_task_id and sibling.state in _CHILD_SLOT_STATES
+            for sibling in self.store.list_tasks(incomplete_only=True)
+        )
+        if active_siblings >= self.config.max_concurrent_children:
+            raise LeaseConflictError("maximum concurrent supervised children reached")
+
     def acquire_lease(self, task_id: str, *, owner: str, worker: str = "") -> tuple[TaskRecord, str]:
         if not owner.strip():
             raise ValueError("lease owner is required")
@@ -1103,25 +1120,7 @@ class ExecutionSupervisor:
                 raise LeaseConflictError(f"task is not leaseable from state {task.state.value}")
             if task.lease_token and task.lease_expires_at and task.lease_expires_at > now:
                 raise LeaseConflictError("task already holds an active lease")
-            if task.parent_task_id:
-                active_siblings = sum(
-                    item.parent_task_id == task.parent_task_id
-                    and item.task_id != task.task_id
-                    and (
-                        item.state in {
-                            ExecutionState.LEASED,
-                            ExecutionState.RUNNING,
-                            ExecutionState.CHECKPOINTING,
-                        }
-                        or (
-                            item.state is ExecutionState.WAITING
-                            and not item.waiting_inbox_item_id
-                        )
-                    )
-                    for item in self.store.list_tasks()
-                )
-                if active_siblings >= self.config.max_concurrent_children:
-                    raise LeaseConflictError("maximum concurrent supervised children reached")
+            self._check_child_capacity(task, ExecutionState.LEASED)
             attempt = AttemptRecord(
                 task_id=task.task_id,
                 number=len(task.attempt_ids) + 1,
@@ -1166,6 +1165,7 @@ class ExecutionSupervisor:
         def update(task: TaskRecord) -> None:
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             validate_transition(task.state, ExecutionState.RUNNING)
+            self._check_child_capacity(task, ExecutionState.RUNNING)
             task.state = ExecutionState.RUNNING
             task.started_at = task.started_at or self.clock()
             task.updated_at = self.clock()
@@ -1308,6 +1308,7 @@ class ExecutionSupervisor:
             if task.waiting_inbox_item_id:
                 raise LeaseConflictError("task is waiting for human inbox response")
             if task.state in {ExecutionState.WAITING, ExecutionState.QUEUED}:
+                self._check_child_capacity(task, ExecutionState.RUNNING)
                 # Re-acquire lease for the resuming attempt since it was released while waiting
                 task.lease_owner = task.lease_owner or f"resumed:{attempt_id}"
                 task.lease_token = _token_hash(lease_token)
@@ -1432,6 +1433,7 @@ class ExecutionSupervisor:
             if generation is not None and task.attempt_generation != generation:
                 raise StaleLeaseError("attempt generation no longer owns the task")
             validate_transition(task.state, ExecutionState.CHECKPOINTING)
+            self._check_child_capacity(task, ExecutionState.CHECKPOINTING)
             task.state = ExecutionState.CHECKPOINTING
             task.updated_at = self.clock()
 

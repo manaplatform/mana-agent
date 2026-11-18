@@ -158,6 +158,36 @@ venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/ll
 The focused regression tests passed locally. The original live task was
 not replayed.
 
+### Supervised child capacity regression
+
+On 2026-11-18 at 20:17:23 UTC, repository workflow `task_20261118_000050`
+stopped with `maximum concurrent supervised children reached`. Its four
+earlier investigations had finished their active work and were waiting
+with unresolved evidence requirements. The fifth child was queued and
+never acquired a lease.
+
+The supervisor counted every non-inbox `WAITING` sibling as active. This
+made a sequence of blocked investigations exhaust a concurrency limit
+after their workers had returned. Existing regression coverage exercised
+inbox waits.
+
+Only leased, running, and checkpointing siblings count toward the
+supervisor's concurrent-child limit. New claims and resumed attempts
+check capacity inside the supervisor's existing store lock. Waiting
+tasks retain their attempt and evidence state. Existing waiting records
+require no migration. Unresolved requirements still need supporting
+evidence before the workflow can complete.
+
+Do not count a waiting branch as active execution. Require a fresh slot
+check before re-entering an active state.
+
+```sh
+venv/bin/python -m pytest -q tests/execution_supervisor/test_supervisor_core.py -k 'waiting_investigations_free_capacity or waiting_child_must_reacquire_capacity'
+```
+
+The regression tests passed locally. The original workflow was not
+replayed.
+
 ### Evidence orchestration changes
 
 Repository inspection found that AUTO/DEBUG saved inspection dictionaries on a
