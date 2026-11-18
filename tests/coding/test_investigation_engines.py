@@ -28,6 +28,7 @@ from mana_agent.multi_agent.core.types import RiskLevel, TaskBoardItem, TaskStat
     ("observed", "shallow_root_citation"), ("inferred", "shallow_file_citation"),
     ("inferred", "shallow_nested_citation"), ("inferred", "audit_file_citation"),
     ("inferred", "extra_report_metadata"),
+    ("observed", "single_line_citation"),
 ])
 def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp_path, monkeypatch, backend, classification, outcome_kind):
     (tmp_path / "src").mkdir()
@@ -60,6 +61,8 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         citation["end_line"] = 2
     if outcome_kind == "shallow_root_citation":
         citation = {"path": ".", "source_kind": "directory"}
+    if outcome_kind == "single_line_citation":
+        citation = {"path": "src/app.py", "source_kind": "file", "start_line": 1}
     task = TaskBoardItem(task_id="task", parent_task_id=None, root_task_id="task", title="Understand value",
         user_request="Determine the value", normalized_goal="Determine the value", status=TaskStatus.NEW,
         priority=100, risk_level=RiskLevel.LOW, primary_repository_id="repo", task_kind="investigation",
@@ -94,14 +97,17 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             assert finding_ids["items"]["enum"] == ["value"]
             assert set(schema["properties"]["evidence_bindings"]["properties"]) == {"value"}
             assert '"entrypoints"' not in prompt
-            properties = schema["$defs"]["InvestigationCitation"]["properties"]
+            citation_schema = schema["$defs"]["InvestigationCitation"]
             if layout_only:
+                properties = citation_schema["properties"]
                 assert set(properties) == {"path", "source_kind"}
                 assert properties["path"]["const"] == "."
                 assert properties["source_kind"]["const"] == "directory"
                 assert "Request missing evidence if you need file content" in prompt
             else:
-                assert {"start_line", "end_line"} <= properties.keys()
+                file_citation, directory_citation = citation_schema["anyOf"]
+                assert {"start_line", "end_line"} <= set(file_citation["required"])
+                assert set(directory_citation["properties"]) == {"path", "source_kind"}
             if outcome_kind == "failed":
                 return {"status": "failed", "error": "Selected backend unavailable"}
             if outcome_kind == "malformed":
@@ -211,6 +217,9 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         assert finding["sources"][0]["sha256"] == source.sha256
         if outcome_kind == "file_location":
             assert finding["sources"][0]["excerpt"] == result_source["content"]
+        if outcome_kind == "single_line_citation":
+            assert reads[0].start_line == reads[0].end_line == 1
+            assert finding["sources"][0]["start_line"] == finding["sources"][0]["end_line"] == 1
         assert finding["architecture_relationships"] == [architecture_link]
         if outcome_kind == "extra_report_metadata":
             assert result["limitations"] == ["Ignored 2 unsupported top-level report fields."]
@@ -383,11 +392,62 @@ def test_investigation_wire_schema_keeps_source_versions_host_owned():
     assert "excerpt" not in properties
 
 
+@pytest.mark.parametrize("citation,valid", [
+    ({"path": "src/app.py", "source_kind": "file", "start_line": 2, "end_line": 3}, True),
+    ({"path": "src/app.py", "source_kind": "file", "start_line": 2}, False),
+    ({"path": "src/app.py", "source_kind": "file"}, False),
+    ({"path": "src", "source_kind": "directory"}, True),
+    ({"path": "src", "source_kind": "directory", "start_line": 1, "end_line": 2}, False),
+])
+def test_investigation_citation_wire_schema_distinguishes_files_and_directories(citation, valid):
+    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+    from mana_agent.repository_evidence.handoff import investigation_result_schema
+    from mana_agent.repository_evidence.models import CodingAssignment
+
+    assignment = CodingAssignment(
+        task_id="task", task_version=1, objective="Inspect source", task_kind="investigation",
+        backend="internal", source_view=".", decision_id="decision",
+    )
+    schema = investigation_result_schema(assignment)["$defs"]["InvestigationCitation"]
+    if valid:
+        validate_arguments(citation, schema)
+    else:
+        with pytest.raises(ValueError, match="registered schema"):
+            validate_arguments(citation, schema)
+
+
 def test_investigation_file_citation_requires_a_range_or_legacy_proof():
     from mana_agent.repository_evidence.models import InvestigationCitation
 
     with pytest.raises(ValueError, match="File citations require an exact line range"):
         InvestigationCitation.model_validate({"path": "src/app.py"})
+
+
+@pytest.mark.parametrize("boundary", ["start_line", "end_line"])
+def test_investigation_citation_decodes_a_single_boundary_as_one_line(boundary):
+    from mana_agent.repository_evidence.models import InvestigationCitation
+
+    citation = InvestigationCitation.model_validate({"path": "src/app.py", boundary: 5})
+    assert citation.start_line == citation.end_line == 5
+
+
+def test_investigation_citation_errors_name_each_failed_check_without_rejected_paths():
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    report = {"findings": [{
+        "category": "layout", "statement": "The app defines a handler.",
+        "classification": "inferred", "confidence": 0.9,
+        "sources": [
+            {"path": "src/PRIVATE_FILE.py"},
+            {"path": "src/app.py", "start_line": 9, "end_line": 3},
+            {"path": "src", "source_kind": "directory", "start_line": 1, "end_line": 2},
+        ],
+    }]}
+    with pytest.raises(ValueError, match=r"findings\.0\.sources\.0: File citations require an exact line range") as error:
+        parse_investigation_result(json.dumps(report))
+    assert "findings.0.sources.1: Source line range is reversed" in str(error.value)
+    assert "findings.0.sources.2: Directory citations cannot specify line ranges" in str(error.value)
+    assert "PRIVATE_FILE" not in str(error.value)
 
 
 def test_investigation_citation_rejects_unavailable_read_tool():

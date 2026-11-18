@@ -93,6 +93,7 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "For batch_read_files, use the evidence refs attached to individual rows. "
         "When a specific source location is needed, supply its repository-relative path and source_kind. "
         "For files supply start_line and end_line as 1-based inclusive line numbers. "
+        "Use the same number for a single line. Prefer an existing evidence reference when line numbers are unavailable. "
         "For a directory use source_kind directory and omit the line fields. "
     )
     prompt = (

@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
+from pydantic_core import PydanticCustomError
 
 
 class Contract(BaseModel):
@@ -45,9 +46,9 @@ class SourceLocation(Contract):
     @model_validator(mode="after")
     def line_range(self):
         if (self.start_line is None) != (self.end_line is None):
-            raise ValueError("Both source line boundaries are required")
+            raise PydanticCustomError("source_citation_boundaries", "Both source line boundaries are required")
         if self.end_line is not None and self.end_line < self.start_line:
-            raise ValueError("Source line range is reversed")
+            raise PydanticCustomError("source_citation_reversed_range", "Source line range is reversed")
         return self
 
 
@@ -62,12 +63,23 @@ class InvestigationCitation(SourceLocation):
     revision: SkipJsonSchema[str] = ""
     excerpt: SkipJsonSchema[str] = Field(default="", max_length=12000)
 
+    @model_validator(mode="before")
+    @classmethod
+    def complete_single_line(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("source_kind", "file") != "file":
+            return value
+        start, end = value.get("start_line"), value.get("end_line")
+        if (start is None) != (end is None):
+            line = start if start is not None else end
+            return {**value, "start_line": line, "end_line": line}
+        return value
+
     @model_validator(mode="after")
     def identify_source(self):
         if self.source_kind == "directory" and self.start_line is not None:
-            raise ValueError("Directory citations cannot specify line ranges")
+            raise PydanticCustomError("source_citation_directory_range", "Directory citations cannot specify line ranges")
         if self.source_kind == "file" and self.start_line is None and self.sha256 is None and not self.excerpt.strip():
-            raise ValueError("File citations require an exact line range")
+            raise PydanticCustomError("source_citation_file_range", "File citations require an exact line range")
         return self
 
 

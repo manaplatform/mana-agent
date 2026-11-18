@@ -302,7 +302,10 @@ def test_native_investigation_report_uses_typed_validation(native_profile, monke
             assert definitions["InvestigationFinding"]["properties"]["classification"]["enum"] == [
                 "inferred", "hypothetical",
             ]
-            assert "excerpt" not in definitions["InvestigationCitation"]["properties"]
+            file_citation, directory_citation = definitions["InvestigationCitation"]["anyOf"]
+            assert {"start_line", "end_line"} <= set(file_citation["required"])
+            assert "excerpt" not in file_citation["properties"]
+            assert "start_line" not in directory_citation["properties"]
             assert report["parameters"]["additionalProperties"] is False
             return ModelResponse(tool_calls=[ToolCall(id="report", name=INVESTIGATION_REPORT_TOOL, args={
                 "findings": [{

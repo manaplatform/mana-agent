@@ -476,6 +476,38 @@ venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k 'shal
 
 The agent did not run the tests or replay the live task.
 
+#### Citation shape regression
+
+At 23:16 on 2026-11-18, investigation `task_20261118_000042` saved four file
+reads and two searches. The terminal report failed validation at several
+source objects. The journal recorded each citation position with the same
+`value error` label. It omitted the submitted objects and the validator's
+reason, so the exact failed rule in that run remains unknown.
+
+The published source schema reused the legacy decoder's optional line
+fields for both files and directories. That schema allowed unbounded files,
+half-specified ranges, and directory ranges that the typed decoder rejected.
+The formatter hid the distinction between these failures. Existing fixtures
+checked for field presence and did not exercise the schema's range rules.
+
+The shared response schema now requires a file kind and two positive line
+boundaries for file citations, and excludes line fields from directory
+citations. The shallow schema still admits only the root directory. The
+decoder interprets a single supplied file boundary as that exact line and
+keeps the existing quote and digest checks for legacy reports. Missing file
+ranges without legacy proof, reversed ranges, and directory ranges receive
+specific messages. No change to stored source records or read scope is
+needed.
+
+Do not make a missing file boundary expand a read, or use the legacy
+decoder's optional fields as the model-facing file citation contract.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/llm/test_engine.py -k 'investigation_citation or single_line_citation or investigation_report_uses_typed_validation'
+```
+
+The agent did not run the tests or replay the live task.
+
 Mode, compound, and MainAgent investigation dispatch all register the same
 supervisor verifier for durable evidence requirements. Saved investigations keep
 their attempt identity and scope when recovered, while different parents can

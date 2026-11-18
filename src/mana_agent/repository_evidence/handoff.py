@@ -30,16 +30,33 @@ def investigation_result_schema(assignment: CodingAssignment) -> dict[str, Any]:
     reference_list = evidence_bindings["additionalProperties"]
     evidence_bindings["properties"] = {requirement_id: reference_list for requirement_id in requirement_ids}
     evidence_bindings["additionalProperties"] = False
+    definitions = schema["$defs"]
+    citation_properties = definitions["InvestigationCitation"]["properties"]
+    directory_citation = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "const": "."} if assignment.layout_only else citation_properties["path"],
+            "source_kind": {"type": "string", "const": "directory"},
+        },
+        "required": ["path", "source_kind"],
+        "additionalProperties": False,
+    }
     if assignment.layout_only:
-        schema["$defs"]["InvestigationCitation"] = {
+        definitions["InvestigationCitation"] = directory_citation
+    else:
+        file_citation = {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "const": "."},
-                "source_kind": {"type": "string", "const": "directory"},
+                "path": citation_properties["path"],
+                "source_kind": {"type": "string", "const": "file"},
+                "symbol": citation_properties["symbol"],
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
             },
-            "required": ["path", "source_kind"],
+            "required": ["path", "source_kind", "start_line", "end_line"],
             "additionalProperties": False,
         }
+        definitions["InvestigationCitation"] = {"anyOf": [file_citation, directory_citation]}
     return schema
 
 
