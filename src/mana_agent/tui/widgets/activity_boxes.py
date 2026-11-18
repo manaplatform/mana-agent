@@ -390,7 +390,8 @@ class MainActivityBox(_ActivityRendering, Vertical):
             elif is_sub:
                 st_icon = ""
             else:
-                st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗", "cancelled": "■"}.get(st, "◌") + " "
+                st_icon = {"success": "✓", "completed": "✓", "failed": "✗", "error": "✗",
+                           "rejected": "⚠", "cancelled": "■"}.get(st, "◌") + " "
 
             count_suffix = f" (x{item['count']})" if item["count"] > 1 else ""
             dur = item["latest_ev"].get("duration_ms")

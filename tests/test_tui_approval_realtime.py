@@ -24,6 +24,23 @@ from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.tui.widgets.tool_card import ToolCard
 
 
+def test_main_activity_box_shows_rejected_decision_and_successful_correction(monkeypatch) -> None:
+    monkeypatch.setattr("mana_agent.config.user_config.get_setting",
+                        lambda key, default=None: "normal" if key == "MANA_ACTIVITY_VISIBILITY" else default)
+    box = MainActivityBox(turn_id="turn-1")
+    box.update_event({
+        "event_type": "model.failed", "operation_id": "first", "agent_id": "main", "status": "rejected",
+        "title": "Decision needs correction", "summary": "Missing required routing fields",
+    })
+    box.update_event({
+        "event_type": "model.completed", "operation_id": "second", "agent_id": "main", "status": "success",
+        "title": "Model responded",
+    })
+    assert "⚠ main — Decision needs correction" in box.activity_log.text
+    assert "✓ main — Model responded" in box.activity_log.text
+    assert box._active_status != "failed"
+
+
 def test_main_activity_box_shows_pending_approval_row() -> None:
     box = MainActivityBox(turn_id="turn-1")
     box.update_event({

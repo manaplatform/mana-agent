@@ -543,7 +543,10 @@ memory_task_id must be empty string "" for all routes except memory. Only popula
 Every decision requires a nonblank top-level reason explaining why the selected route fits the request.
 This includes conversation and coding, even when public_summary or coding_workflow.reason is present.
 
-Return JSON only:
+Submit one complete routing decision through the supplied decision tool when available.
+For a JSON response, return one object.
+Include route, confidence, reason, and required_sources at the top level.
+The decision fields are illustrated below.
 {
   "route": "multi_task|conversation|coding|shell|mcp|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|api|canvas|unsupported|capability_error",
   "confidence": 0.0,

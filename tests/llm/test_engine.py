@@ -40,6 +40,69 @@ def test_invalid_native_structured_output_never_retries_as_text(native_profile, 
     assert adapter.calls == 1
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("corrected", [False, True])
+def test_entry_route_reports_schema_rejection_separately_from_request_failure(native_profile, monkeypatch, stream, corrected):
+    from mana_agent.gateway.entry_routing import (
+        EntryRouteContext,
+        EntryRouteRegistry,
+        EntryRouter,
+        EntryRoutingError,
+        RouteAvailability,
+        RouteRegistration,
+    )
+    from mana_agent.llm.messages import ToolCall
+    from mana_agent.llm.types import StreamEvent
+
+    native_profile.facts.pop("native_structured_output")
+    activity = []
+    requests = []
+
+    class Adapter:
+        def response(self, request):
+            requests.append(request)
+            args = {"reason": "Answer the greeting."}
+            if len(requests) == 2 and corrected:
+                args.update(route="conversation", confidence=0.9, required_sources=["none"])
+            return ModelResponse(tool_calls=[ToolCall(id=f"route-{len(requests)}", name="record_decision", args=args)])
+
+        async def generate(self, request):
+            return self.response(request)
+
+        async def stream(self, request):
+            yield StreamEvent(type="completed", request_id=request.request_id, sequence=1, response=self.response(request))
+
+    monkeypatch.setattr("mana_agent.llm.engine._emit_inference_activity",
+                        lambda event, **fields: activity.append((event, fields)))
+    model = engine(native_profile, monkeypatch, Adapter())
+    model.parameters["stream"] = stream
+    registry = EntryRouteRegistry()
+    registry.register(RouteRegistration(
+        "conversation", "Direct reply", lambda: RouteAvailability(available=True),
+    ))
+    router = EntryRouter(llm=model, registry=registry)
+    context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t")
+    if corrected:
+        assert router.route(user_prompt="Hello", context=context).route == "conversation"
+    else:
+        with pytest.raises(EntryRoutingError, match="Decision still invalid after one correction"):
+            router.route(user_prompt="Hello", context=context)
+
+    assert len(requests) == 2
+    assert requests[0].tools == requests[1].tools
+    assert "_decision_correction_available" not in requests[0].parameters
+    assert "Return JSON only" not in requests[0].messages[0].content
+    assert "Required top-level fields are route, confidence, reason, required_sources" in requests[0].messages[-1].content
+    assert "missing confidence, required_sources, route" in requests[1].messages[-1].content
+    rejected = next(fields for event, fields in activity if event == "model.failed")
+    assert rejected["operation_id"] == requests[0].request_id
+    assert rejected["title"] == "Decision needs correction"
+    assert rejected["status"] == "rejected"
+    event, last = activity[-1]
+    assert last["operation_id"] == requests[1].request_id
+    assert (event, last["status"]) == (("model.completed", "success") if corrected else ("model.failed", "failed"))
+
+
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])
 @pytest.mark.parametrize("corrected", [True, False])
 def test_entry_route_reason_correction_stays_on_selected_strategy(

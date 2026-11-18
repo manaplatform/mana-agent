@@ -133,6 +133,36 @@ OpenRouter's Messages path now uses a single ordinary `record_decision` client t
 
 Run `venv/bin/python -m pytest -q tests/llm/test_engine.py tests/gateway/test_entry_routing.py`. The SDK fixture covers both decision contracts with a valid tool response and an HTTP rejection. The fixture and live provider acceptance were not run by the agent.
 
+## Entry routing tool correction
+
+At 23:21 on 2026-11-18 the first entry-routing response omitted
+`route`, `confidence`, and `required_sources` from `record_decision`.
+The existing correction produced a valid coding route before TaskBoard
+started the task. The journal logged the rejected response as a failed
+model request, even though the provider returned successfully. It does
+not retain the rejected response body.
+
+The entry prompt called for JSON-only output, while the selected tool
+transport asked the model to put the decision in a function call. The
+prompt now follows the configured transport and states the required
+fields. The tool submission instruction names the required top-level
+arguments from its schema. The full typed decision still gates routing.
+
+When the existing correction is available, activity marks a provider
+response that fails schema validation as `Decision needs correction`.
+A second invalid response or a provider request failure still appears as
+a failure. The correction budget, transport, and provider remain the
+same.
+
+Do not reintroduce conflicting format instructions or synthesize missing
+routing fields.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_engine.py tests/test_tui_approval_realtime.py -k 'entry_route_reports_schema_rejection or rejected_decision_and_successful_correction'
+```
+
+The agent did not run the tests or replay the provider request.
+
 ## Action payload regression
 
 Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.

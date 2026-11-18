@@ -324,7 +324,10 @@ class NativeLLMEngine:
                     metadata={"summary_source": "provider", "summary_trusted": True, "summary_complete": True,
                         "provider": self.provider, "transport": "direct_responses" if self.endpoint == "responses" else self.endpoint})
 
-    def _failed(self, request: InferenceRequest, reservation: str, exc: BaseException, started: float) -> ProviderRequestError | None:
+    def _failed(
+        self, request: InferenceRequest, reservation: str, exc: BaseException, started: float,
+        *, decision_correction_available: bool = False,
+    ) -> ProviderRequestError | None:
         if reservation:
             if getattr(exc, "response_accepted", False):
                 self.context_cost_governor.record_model_call(reservation, usage=getattr(exc, "provider_usage", None),
@@ -347,7 +350,12 @@ class NativeLLMEngine:
                     "duration_ms": int((time.perf_counter() - started) * 1000)}
         title, status = "Model request failed", "failed"
         summary = error.public_detail if isinstance(error, (InvalidResponseError, ProviderRequestError)) else ""
-        if isinstance(error, asyncio.TimeoutError):
+        if isinstance(error, StructuredOutputError) and getattr(error, "response_accepted", False):
+            title = "Model response failed validation"
+            metadata["reason_code"] = "response_schema_invalid"
+            if decision_correction_available:
+                title, status = "Decision needs correction", "rejected"
+        elif isinstance(error, asyncio.TimeoutError):
             title = "Model request timed out"
             summary = f"The provider response did not complete within the {self.timeout:g}-second request deadline."
             metadata["reason_code"] = "inference_timeout"
@@ -383,10 +391,16 @@ class NativeLLMEngine:
             default_headers=self.headers, query_params=self.query)
         return self.profile(parameters)
 
-    async def generate(self, messages: Any, *, schema: Any = None, continuation: Any = None, **options: Any) -> ModelResponse:
+    async def generate(
+        self, messages: Any, *, schema: Any = None, continuation: Any = None,
+        _decision_correction_available: bool = False, **options: Any,
+    ) -> ModelResponse:
         if options.get("stream", self.parameters.get("stream", False)):
             result = None
-            async for event in self.stream(messages, schema=schema, continuation=continuation, **options):
+            async for event in self.stream(
+                messages, schema=schema, continuation=continuation,
+                _decision_correction_available=_decision_correction_available, **options,
+            ):
                 if event.type == "completed":
                     result = event.response
             if result is None:
@@ -416,7 +430,8 @@ class NativeLLMEngine:
                     if self.adapter is None:
                         await adapter.close()
         except BaseException as exc:
-            request_error = self._failed(request, reservation, exc, started)
+            request_error = self._failed(request, reservation, exc, started,
+                                         decision_correction_available=_decision_correction_available)
             if request_error is not None:
                 raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
@@ -466,12 +481,16 @@ class NativeLLMEngine:
         if tool_based:
             record_tool = {
                 "name": "record_decision",
-                "description": "Return the decision that matches this schema.",
+                "description": "Submit the complete decision in the tool arguments.",
                 "parameters": schema_dict,
             }
             choice = {"type": "function", "name": "record_decision"} if prof.supports_value("tool_choice", "function") else None
             model = self.with_tools([record_tool], tool_choice=choice)
-            decision_messages.append(UserMessage("Return exactly one record_decision call with the decision."))
+            instruction = "Return exactly one record_decision call with the complete decision in its arguments."
+            required_fields = schema_dict.get("required", [])
+            if required_fields:
+                instruction += f" Required top-level fields are {', '.join(required_fields)}."
+            decision_messages.append(UserMessage(instruction))
         if not native and not tool_based:
             if not (prof.supports("output_text") or prof.supports("input_text") or prof.supports("text_generation")):
                 prof.require("output_text")
@@ -482,7 +501,10 @@ class NativeLLMEngine:
         attempts = 2 if repair_decision or (not native and not tool_based) else 1
         for attempt in range(attempts):
             try:
-                response = await model.generate(decision_messages, schema=schema if native else None, **options)
+                response = await model.generate(
+                    decision_messages, schema=schema if native else None,
+                    _decision_correction_available=attempt + 1 < attempts, **options,
+                )
             except StructuredOutputError as exc:
                 failure = exc
             else:
@@ -541,7 +563,9 @@ class NativeLLMEngine:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mana-inference-decide-sync") as pool:
             return pool.submit(context.run, lambda: asyncio.run(self.decide(messages, schema, **options))).result()
 
-    async def stream(self, messages: Any, **options: Any) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, messages: Any, *, _decision_correction_available: bool = False, **options: Any,
+    ) -> AsyncIterator[StreamEvent]:
         await self._refresh_metadata()
         request = self._request(messages, **options)
         self.profile(request.parameters).require("streaming", *(["tool_call_streaming"] if request.tools else []))
@@ -579,7 +603,8 @@ class NativeLLMEngine:
             if not completed:
                 raise InvalidResponseError("Interrupted stream; reconcile checkpoint before continuing")
         except BaseException as exc:
-            request_error = self._failed(request, reservation, exc, started)
+            request_error = self._failed(request, reservation, exc, started,
+                                         decision_correction_available=_decision_correction_available)
             if request_error is not None:
                 raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
