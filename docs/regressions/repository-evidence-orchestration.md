@@ -102,6 +102,36 @@ venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'investigation_report_u
 
 The agent did not run these tests or replay the live task.
 
+### Investigation report metadata regression
+
+At 23:07 on 2026-11-18, investigation `task_20261118_000039` finished its
+listing and search calls. The terminal report was rejected because it put
+`architecture_relationships` and another unsupported field at the report
+root. The diagnostic redacted the second field name and both values.
+
+The schema defined links on each finding, but the prompt showed the link
+array without identifying its parent. The typed decoder treated all extra
+report-level data as a fatal validation error. Previous fixtures covered
+link shapes inside a finding and unknown fields without a report body.
+
+The prompts and schema description now place links inside the finding they
+describe. The decoder drops unsupported report-level metadata only when the
+response contains declared report content that passes validation. It records
+the number of omitted fields in the report limitations. Links without a
+finding association do not become repository evidence. A metadata-only report,
+misplaced evidence or finding fields, and invalid nested data still fail
+validation. The assignment, scope, and evidence checks still run before
+publication. No migration is needed.
+
+Do not infer finding associations from top-level metadata or give unknown
+fields authority to bind evidence, request tools, or satisfy requirements.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/llm/test_engine.py -k 'extra_report_metadata or investigation_report_uses_typed_validation or investigation_architecture_relationships'
+```
+
+The agent did not run these tests or replay the live task.
+
 ### Evidence orchestration changes
 
 Repository inspection found that AUTO/DEBUG saved inspection dictionaries on a

@@ -110,7 +110,9 @@ class InvestigationFinding(Finding):
     )
     # Earlier reports used arbitrary string maps. Keep decoding those without
     # advertising their shape to either coding engine.
-    architecture_relationships: tuple[ArchitectureRelationship | SkipJsonSchema[dict[str, str]], ...] = ()
+    architecture_relationships: tuple[ArchitectureRelationship | SkipJsonSchema[dict[str, str]], ...] = Field(
+        default=(), description="Architecture links described by this finding.",
+    )
 
     @field_validator("classification", mode="before")
     @classmethod
@@ -242,6 +244,33 @@ class InvestigationResult(Contract):
     # Accept positional bindings from older reports without advertising them to the engines.
     requirement_bindings: SkipJsonSchema[dict[str, tuple[int, ...]]] = Field(default_factory=dict)
     evidence_bindings: dict[str, tuple[EvidenceRef, ...]] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_extra_report_metadata(cls, value: Any) -> Any:
+        """Only the typed report fields carry evidence or execution meaning."""
+        if not isinstance(value, dict):
+            return value
+        extra_fields = value.keys() - cls.model_fields.keys()
+        if not extra_fields:
+            return value
+        misplaced_finding_fields = InvestigationFinding.model_fields.keys() - {"architecture_relationships"}
+        if extra_fields & misplaced_finding_fields:
+            return value
+
+        bindings = value.get("evidence_bindings")
+        has_report_body = any(value.get(field) for field in ("findings", "evidence", "missing_evidence", "limitations"))
+        if not has_report_body and not (isinstance(bindings, dict) and any(bindings.values())):
+            return value
+        limitations = value.get("limitations", ())
+        if not isinstance(limitations, (list, tuple)):
+            return value
+
+        report = {key: item for key, item in value.items() if key not in extra_fields}
+        report["limitations"] = [
+            *limitations, f"Ignored {len(extra_fields)} unsupported top-level report fields.",
+        ]
+        return report
 
 
 class PatchEvidenceResult(Contract):

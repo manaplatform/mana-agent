@@ -104,9 +104,8 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "to \"inferred\" for a source-backed conclusion or \"hypothetical\" for an unconfirmed explanation. "
         "The acceptable_classifications in the assignment apply to Evidence Board records. Cite existing host "
         "observations by evidence ID and revision in supporting_evidence or evidence_bindings. "
-        "For architecture_relationships, use one object per link with source, relation, and target as strings. "
-        "For example, [{\"source\": \"CLI\", \"relation\": \"calls\", \"target\": \"command handler\"}]. "
-        "Use separate objects when a component has several targets. Omit the field if no link is relevant. "
+        "Include architecture_relationships inside each finding it supports. Use one object per link with "
+        "source, relation, and target as strings. Omit the field when no link is relevant. "
         "Use repository_evidence_refs from successful reads as supporting_evidence. "
         + source_guidance
         + "The host captures the excerpt and source version from the read. A tool output reference identifies the tool result "

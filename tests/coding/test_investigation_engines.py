@@ -27,6 +27,7 @@ from mana_agent.multi_agent.core.types import RiskLevel, TaskBoardItem, TaskStat
     ("inferred", "observed_label"), ("observed", "observed_label"), ("inferred", "unbacked_observed_label"),
     ("observed", "shallow_root_citation"), ("inferred", "shallow_file_citation"),
     ("inferred", "shallow_nested_citation"), ("inferred", "audit_file_citation"),
+    ("inferred", "extra_report_metadata"),
 ])
 def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp_path, monkeypatch, backend, classification, outcome_kind):
     (tmp_path / "src").mkdir()
@@ -125,6 +126,9 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
                 finding["requirement_ids"] = ["value"]
             if outcome_kind == "unknown_evidence_requirement":
                 report["evidence_bindings"] = {"PRIVATE_REQUIREMENT_ID": []}
+            if outcome_kind == "extra_report_metadata":
+                report["architecture_relationships"] = [{"source": "PRIVATE_FIXTURE", "relation": "calls", "target": "app"}]
+                report["PRIVATE_FIELD"] = {"requirement_ids": ["outside-assignment"]}
             if outcome_kind == "multiple_findings":
                 findings.insert(0, {"category": "code_behavior", "statement": "There may be another module",
                     "classification": "hypothetical", "confidence": 0.5})
@@ -208,6 +212,8 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         if outcome_kind == "file_location":
             assert finding["sources"][0]["excerpt"] == result_source["content"]
         assert finding["architecture_relationships"] == [architecture_link]
+        if outcome_kind == "extra_report_metadata":
+            assert result["limitations"] == ["Ignored 2 unsupported top-level report fields."]
         if outcome_kind == "multiple_findings":
             assert len(result["evidence_refs"]) == 2
             assert task.evidence_requirements[0]["evidence"] == [result["evidence_refs"][1]]
@@ -606,6 +612,22 @@ def test_investigation_architecture_relationships_round_trip_through_the_parser(
         "classification": "inferred", "confidence": 0.9, "architecture_relationships": links,
     }]}))
     assert report.model_dump(mode="json")["findings"][0]["architecture_relationships"] == links
+
+
+@pytest.mark.parametrize("fields,issue", [
+    ({"findings": [], "evidence_bindings": {"value": []}}, "Put architecture_relationships inside the finding"),
+    ({"limitations": ["No source"], "supporting_evidence": []}, "supporting_evidence: extra forbidden"),
+    ({"findings": [{"category": "layout", "statement": "A file exists.", "confidence": 0.9,
+                   "classification": "inferred", "PRIVATE_NESTED_FIELD": "PRIVATE_VALUE"}]}, r"findings\.0\.<key>"),
+])
+def test_investigation_extra_report_metadata_cannot_replace_or_change_typed_content(fields, issue):
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    payload = {"architecture_relationships": [{"source": "CLI", "relation": "calls", "target": "handler"}],
+               "PRIVATE_FIELD": "PRIVATE_VALUE", **fields}
+    with pytest.raises(ValueError, match=issue) as error:
+        parse_investigation_result(json.dumps(payload))
+    assert "PRIVATE_" not in str(error.value)
 
 
 def test_investigation_architecture_relationships_reject_nested_values_without_leaking_them():

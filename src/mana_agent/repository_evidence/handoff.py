@@ -12,7 +12,8 @@ from mana_agent.repository_evidence.models import CodingAssignment, Investigatio
 INVESTIGATION_REPORT_TOOL = "report_investigation"
 INVESTIGATION_REPORT_INSTRUCTION = (
     "Complete the investigation by calling report_investigation exactly once, directly and on its own. "
-    "Put the InvestigationResult fields in the tool arguments. Use the assigned task_id in any missing_evidence requests."
+    "Use only the report's declared top-level fields in the tool arguments. Put architecture_relationships inside "
+    "the finding it describes. Use the assigned task_id in any missing_evidence requests."
 )
 
 
@@ -71,6 +72,9 @@ def parse_investigation_result(text: str) -> InvestigationResult:
             for issue in issues
         ):
             message += " Use 'inferred' or 'hypothetical' for finding classification."
+        if any(issue["type"] == "extra_forbidden" and issue["loc"] == ("architecture_relationships",)
+               for issue in issues):
+            message += " Put architecture_relationships inside the finding it describes."
         raise StructuredOutputError(message) from None
 
 

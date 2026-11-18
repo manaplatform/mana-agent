@@ -303,6 +303,7 @@ def test_native_investigation_report_uses_typed_validation(native_profile, monke
                 "inferred", "hypothetical",
             ]
             assert "excerpt" not in definitions["InvestigationCitation"]["properties"]
+            assert report["parameters"]["additionalProperties"] is False
             return ModelResponse(tool_calls=[ToolCall(id="report", name=INVESTIGATION_REPORT_TOOL, args={
                 "findings": [{
                     "category": "layout", "statement": "The app defines a value.", "confidence": 0.9,
@@ -310,6 +311,8 @@ def test_native_investigation_report_uses_typed_validation(native_profile, monke
                     "sources": [{"path": "app.py", "excerpt": "value = 1"}],
                     "architecture_relationships": [{"app": "defines value"}],
                 }],
+                "architecture_relationships": [{"source": "PRIVATE_FIXTURE", "relation": "calls", "target": "app"}],
+                "PRIVATE_FIELD": {"task_id": "invented-task"},
             })])
 
     native = engine(native_profile, monkeypatch, Adapter())
@@ -332,6 +335,8 @@ def test_native_investigation_report_uses_typed_validation(native_profile, monke
         report = parse_investigation_result(asyncio.run(run()))
         assert report.findings[0].classification == "inferred"
         assert report.findings[0].sources[0].excerpt == "value = 1"
+        assert report.limitations == ("Ignored 2 unsupported top-level report fields.",)
+        assert "PRIVATE_" not in report.model_dump_json()
     assert len(requests) == 1
     assert session.state.tool_calls_executed == 0
 
