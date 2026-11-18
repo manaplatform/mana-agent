@@ -1,5 +1,6 @@
 """Selected engine handoff, source validation, and no-fallback behavior."""
 
+import json
 from contextlib import nullcontext
 from hashlib import sha256
 from types import SimpleNamespace
@@ -67,6 +68,7 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
     monkeypatch.setattr("mana_agent.services.activity_context.emit_activity", lambda *args, **kwargs: None)
     calls = []
     supporting = []
+    architecture_link = {"source": "CLI", "relation": "calls", "target": "app"}
     class Worker:
         def generate(self, prompt, **arguments):
             calls.append(arguments)
@@ -77,6 +79,7 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             return {"status": "completed", "investigation_result": {
                 "findings": [{"category": "code_behavior", "statement": "The repository has an application file",
                     "classification": "inferred", "sources": [citation], "supporting_evidence": supporting,
+                    "architecture_relationships": [architecture_link],
                     "confidence": 0.9}], "requirement_bindings": {"value": [0]}}}
         def close(self):
             calls.append("closed")
@@ -123,6 +126,7 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         finding = knowledge.query(EvidenceQuery())["records"][0]
         assert finding["classification"] == "inferred"
         assert finding["sources"][0]["sha256"] == source.sha256
+        assert finding["architecture_relationships"] == [architecture_link]
     finally:
         db.close()
 
@@ -276,7 +280,6 @@ def test_investigation_wire_schema_keeps_source_versions_host_owned():
 
 def test_missing_evidence_handoff_is_typed_and_preserves_task_identity():
     from mana_agent.repository_evidence.handoff import missing_evidence_from_text
-    import json
     request = {"task_id": "coding-task", "requirement": {"requirement_id": "caller", "objective": "Identify the caller",
         "paths": ["src"], "acceptance_criteria": ["Cite a call site"]}, "reason": "The caller is unresolved",
         "continuation_reference": "saved-turn"}
@@ -292,6 +295,51 @@ def test_investigation_result_accepts_one_json_document_with_optional_fence(wrap
 
     report = parse_investigation_result(wrapper.format('{"limitations": ["No matching file"]}'))
     assert report.limitations == ("No matching file",)
+
+
+def test_investigation_architecture_relationships_use_a_closed_wire_record():
+    from mana_agent.repository_evidence.models import InvestigationResult
+
+    definitions = InvestigationResult.model_json_schema()["$defs"]
+    items = definitions["InvestigationFinding"]["properties"]["architecture_relationships"]["items"]
+    assert items == {"$ref": "#/$defs/ArchitectureRelationship"}
+    link = definitions["ArchitectureRelationship"]
+    assert link["additionalProperties"] is False
+    assert set(link["properties"]) == set(link["required"]) == {"source", "relation", "target"}
+    assert all(prop["type"] == "string" for prop in link["properties"].values())
+
+
+def test_investigation_architecture_relationships_round_trip_through_the_parser():
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    links = [
+        {"source": "CLI", "relation": "calls", "target": "handler"},
+        {"source": "CLI", "relation": "reads from", "target": "config"},
+        {"from": "handler", "calls": "store"},  # Valid under the earlier contract.
+    ]
+    report = parse_investigation_result(json.dumps({"findings": [{
+        "category": "architecture", "statement": "The CLI calls the handler.",
+        "classification": "inferred", "confidence": 0.9, "architecture_relationships": links,
+    }]}))
+    assert report.model_dump(mode="json")["findings"][0]["architecture_relationships"] == links
+
+
+def test_investigation_architecture_relationships_reject_nested_values_without_leaking_them():
+    from mana_agent.repository_evidence.handoff import parse_investigation_result
+
+    findings: list[dict[str, object]] = [{
+        "category": "architecture", "statement": "A component may call other components.",
+        "classification": "hypothetical", "confidence": 0.5,
+    } for _ in range(8)]
+    findings[7]["architecture_relationships"] = [
+        {"source": "CLI", "relation": "calls", "target": ["PRIVATE_FIXTURE"]},
+        {"source": "CLI", "relation": "calls", "target": {"private_key_fixture": "PRIVATE_FIXTURE"}},
+    ]
+    with pytest.raises(ValueError, match=r"findings\.7\.architecture_relationships\.0") as error:
+        parse_investigation_result(json.dumps({"findings": findings}))
+    assert "findings.7.architecture_relationships.1" in str(error.value)
+    assert "PRIVATE_FIXTURE" not in str(error.value)
+    assert "private_key_fixture" not in str(error.value)
 
 
 @pytest.mark.parametrize("response", [

@@ -75,6 +75,14 @@ class EvidenceRelation(Contract):
     target: EvidenceRef
 
 
+class ArchitectureRelationship(Contract):
+    """One directed relationship between named repository components."""
+
+    source: str = Field(min_length=1)
+    relation: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+
+
 class Finding(Contract):
     category: str = Field(min_length=1, max_length=100)
     statement: str = Field(min_length=1, max_length=4000)
@@ -82,7 +90,6 @@ class Finding(Contract):
     supporting_evidence: tuple[EvidenceRef, ...] = Field(default=(), max_length=32)
     relationships: tuple[EvidenceRelation, ...] = ()
     dependencies: tuple[str, ...] = ()
-    architecture_relationships: tuple[dict[str, str], ...] = ()
     limitations: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     confidence: float = Field(ge=0, le=1)
@@ -90,10 +97,14 @@ class Finding(Contract):
 
 class EvidenceCandidate(Finding):
     sources: tuple[EvidenceSource, ...] = Field(default=(), max_length=32)
+    architecture_relationships: tuple[dict[str, str], ...] = ()
 
 
 class InvestigationFinding(Finding):
     sources: tuple[InvestigationCitation, ...] = Field(default=(), max_length=32)
+    # Earlier reports used arbitrary string maps. Keep decoding those without
+    # advertising their shape to either coding engine.
+    architecture_relationships: tuple[ArchitectureRelationship | SkipJsonSchema[dict[str, str]], ...] = ()
 
 
 class EvidenceProvenance(Contract):

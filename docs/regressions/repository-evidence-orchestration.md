@@ -153,6 +153,37 @@ through exact registered reads selected by the submitted citation, and retain
 their source revision. The finding remains an inference. Provider operation
 details are not relabeled as native ToolRunner receipts.
 
+### Architecture relationship output regression
+
+On 2026-11-18 at 21:55, investigation `task_20261118_000018` completed
+`batch_read_files` and received a final model response. The result parser then
+rejected entries 0 and 1 in the eighth finding's `architecture_relationships`
+with string-type errors. The child checkpointed and blocked before publishing
+findings. The redacted journal preserves the field locations, so the exact
+rejected values are unknown.
+
+The earlier schema advertised each link as an open string map. The prompt
+supplied no field names or example for representing multiple targets. Runtime
+validation required string values and rejected the report when an entry used
+another type. Earlier parser fixtures omitted architecture links.
+
+The shared investigation prompt and schema now request one link per object with
+string fields `source`, `relation`, and `target`. The local parser still accepts
+earlier flat string maps and rejects nested values. Both shapes serialize to
+the existing evidence format, so existing records need no migration. The
+fixtures cover schema shape, round-trip parsing, publication, and redaction.
+
+Do not reintroduce an open map in the model-facing architecture relationship
+schema. Send multiple targets as separate links and keep invalid relationship
+values out of public errors.
+
+User verification uses the following command. The agent did not run it or
+resume the affected live task.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k 'investigation_architecture_relationships or uses_selected_engine'
+```
+
 ### Source citation regression
 
 NetPeek investigation `task_20261118_000011` completed its model turn and several
