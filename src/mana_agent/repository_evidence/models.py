@@ -60,13 +60,14 @@ class InvestigationCitation(SourceLocation):
 
     sha256: SkipJsonSchema[str | None] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     revision: SkipJsonSchema[str] = ""
+    excerpt: SkipJsonSchema[str] = Field(default="", max_length=12000)
 
     @model_validator(mode="after")
     def identify_source(self):
         if self.source_kind == "directory" and self.start_line is not None:
             raise ValueError("Directory citations cannot specify line ranges")
-        if self.source_kind == "file" and self.sha256 is None and not self.excerpt.strip():
-            raise ValueError("File citations without a source hash require an exact excerpt")
+        if self.source_kind == "file" and self.start_line is None and self.sha256 is None and not self.excerpt.strip():
+            raise ValueError("File citations require an exact line range")
         return self
 
 
@@ -216,6 +217,7 @@ class CodingAssignment(Contract):
     evidence: tuple[EvidenceRef, ...] = ()
     requirements: tuple[EvidenceRequirement, ...] = ()
     allowed_scope: tuple[str, ...] = ()
+    layout_only: bool = False
     dependencies: tuple[str, ...] = ()
     constraints: tuple[str, ...] = ()
     expected_changes: tuple[str, ...] = ()

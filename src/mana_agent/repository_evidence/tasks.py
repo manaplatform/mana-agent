@@ -4,8 +4,13 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
-from mana_agent.multi_agent.core.types import TaskStatus
+from mana_agent.multi_agent.core.types import TaskBoardItem, TaskStatus
 from mana_agent.repository_evidence.models import CodingAssignment, EvidenceQuery, EvidenceRef, EvidenceRequirement
+
+
+def is_shallow_investigation(task: TaskBoardItem) -> bool:
+    return (list(getattr(task, "investigation_scope", [])) == ["."]
+            and not getattr(task, "mode_workflow", {}).get("initial_repository_scope"))
 
 
 def reusable_evidence(board, task, requirement):
@@ -77,6 +82,7 @@ def assignment_for(board, task_id, *, backend, decision_id, plan_digest="", cons
     assignment = CodingAssignment(task_id=task_id, task_version=task.row_version + 1,
         objective=task.user_request, task_kind=task.task_kind, backend=backend,
         source_view=str(evidence_board.root), evidence=refs, requirements=requirements,
+        layout_only=task.task_kind in {"investigation", "understanding"} and is_shallow_investigation(task),
         allowed_scope=tuple(task.investigation_scope or task.files_to_inspect), dependencies=tuple(task.depends_on),
         constraints=tuple(constraints) + tuple(str(value) for value in (
             task.mode_workflow.get("investigation_context"), task.mode_workflow.get("initial_repository_scope")) if value),

@@ -9,35 +9,40 @@ from mana_agent.repository_evidence.models import (
     EvidenceCandidate, EvidenceProvenance, EvidenceQuery, EvidenceRef, EvidenceSource,
     InvestigationCitation, InvestigationResult,
 )
-from mana_agent.repository_evidence.tasks import assignment_for
+from mana_agent.repository_evidence.tasks import assignment_for, is_shallow_investigation
 
 
-def _matches_citation(citation: InvestigationCitation, source: EvidenceSource, content: str) -> bool:
+def _citation_excerpt(
+    citation: InvestigationCitation, source: EvidenceSource, content: str,
+) -> tuple[str | None, str]:
+    """Resolve the citation against a host read and report safe mismatch reasons."""
     if citation.path != source.path or citation.source_kind != source.source_kind:
-        return False
+        return None, "source path or kind differs from the read"
     if citation.sha256 is not None and citation.sha256 != source.sha256:
-        return False
+        return None, "source digest differs from the read"
 
     excerpt = citation.excerpt.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     if citation.source_kind == "directory":
         if not excerpt or excerpt in content:
-            return True
+            return citation.excerpt, ""
         try:
             entries = json.loads(content)
         except json.JSONDecodeError:
-            return False
+            return None, "directory manifest is incomplete"
         names = {name for name, _ in entries}
         selected = {part.strip().removeprefix("- ").strip("`\"'")
                     for line in excerpt.splitlines() for part in line.split(",") if part.strip()}
-        return bool(selected) and selected.issubset(names)
+        if selected and selected.issubset(names):
+            return citation.excerpt, ""
+        return None, "directory excerpt contains unobserved entries"
 
     # File citation
     if citation.start_line is not None:
         if source.start_line is not None and source.start_line > citation.start_line:
-            return False
+            return None, "line range starts before the read"
         if source.end_line is not None and source.end_line < citation.end_line:
-            return False
+            return None, "line range ends after the read"
         if source.start_line is not None:
             start = citation.start_line - source.start_line
             end = citation.end_line - source.start_line + 1
@@ -46,34 +51,29 @@ def _matches_citation(citation: InvestigationCitation, source: EvidenceSource, c
             end = citation.end_line
         lines = content.splitlines(keepends=True)
         if end > len(lines):
-            return False
+            return None, "read content does not cover the line range"
         content = "".join(lines[start:end])
 
     if not excerpt:
-        return True
+        return content[:12000], ""
 
     c_norm = content.replace("\r\n", "\n").replace("\r", "\n")
     if excerpt in c_norm:
-        return True
+        return citation.excerpt, ""
 
     e_lines = [line.strip() for line in excerpt.splitlines() if line.strip()]
     c_lines = [line.strip() for line in c_norm.splitlines() if line.strip()]
-    if not e_lines:
-        return True
-    if not c_lines:
-        return False
-
     n = len(e_lines)
     for i in range(len(c_lines) - n + 1):
         if c_lines[i:i + n] == e_lines:
-            return True
+            return citation.excerpt, ""
         if n == 1 and e_lines[0] in c_lines[i]:
-            return True
+            return citation.excerpt, ""
         if (n > 1 and e_lines[0] in c_lines[i] and e_lines[-1] in c_lines[i + n - 1]
                 and c_lines[i + 1:i + n - 1] == e_lines[1:-1]):
-            return True
+            return citation.excerpt, ""
 
-    return False
+    return None, "file excerpt does not occur in the selected lines"
 
 
 def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, validate_source, runtime=None):
@@ -86,11 +86,20 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     board = taskboard.evidence_board(root=root, repository_id=task.primary_repository_id)
     context = board.query(EvidenceQuery(paths=tuple(path for path in assignment.allowed_scope if path != "."),
                                       task_id=task_id if assignment.allowed_scope == (".",) else ""))
+    source_guidance = (
+        'For this shallow layout assignment, cite only the immediate root listing. The only source location is '
+        '{"path":".","source_kind":"directory"}. Request missing evidence if you need file content. '
+        if assignment.layout_only else
+        "For batch_read_files, use the evidence refs attached to individual rows. "
+        "When a specific source location is needed, supply its repository-relative path and source_kind. "
+        "For files supply start_line and end_line as 1-based inclusive line numbers. "
+        "For a directory use source_kind directory and omit the line fields. "
+    )
     prompt = (
         "Execute only this assigned read-only repository task. Investigation and understanding are tasks, "
         "never workflow stages. Reuse the supplied evidence. Inspect only the assigned scope; request "
         "missing evidence if another scope is required. Do not edit files, run verification commands, "
-        "or access the network. For a dot-only scope without an explicit audit, list immediate entries only. "
+        "or access the network. "
         "Return exactly an InvestigationResult JSON object matching the schema. Set each finding's classification "
         "to \"inferred\" for a source-backed conclusion or \"hypothetical\" for an unconfirmed explanation. "
         "The acceptable_classifications in the assignment apply to Evidence Board records. Cite existing host "
@@ -98,11 +107,9 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "For architecture_relationships, use one object per link with source, relation, and target as strings. "
         "For example, [{\"source\": \"CLI\", \"relation\": \"calls\", \"target\": \"command handler\"}]. "
         "Use separate objects when a component has several targets. Omit the field if no link is relevant. "
-        "Use the repository_evidence_refs attached to each successful batch_read_files row as supporting_evidence. "
-        "Otherwise cite exact source paths, kinds and ranges. For files include a short verbatim excerpt "
-        "from the cited lines. For a directory cite a shallow listing with source_kind directory. "
-        "If you cite directory entries, use comma-separated exact names in excerpt. "
-        "The host captures the source version. A tool output reference identifies the tool result "
+        "Use repository_evidence_refs from successful reads as supporting_evidence. "
+        + source_guidance
+        + "The host captures the excerpt and source version from the read. A tool output reference identifies the tool result "
         "and cannot be used as a source hash. On each finding, list the exact requirement_id values from "
         "assignment.requirements that it supports. Use an empty requirement_ids array for an unbound finding. "
         "Use evidence_bindings to link existing evidence references under those same assigned IDs. "
@@ -128,6 +135,12 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     report = InvestigationResult.model_validate(raw)
     if any(gap.task_id != task_id for gap in report.missing_evidence):
         raise ValueError("Investigation gap belongs to another task")
+    if assignment.layout_only and any(
+        source.source_kind != "directory" or source.path != "."
+        for finding in report.findings for source in finding.sources
+    ):
+        raise PermissionError("Shallow layout investigations can cite only the root directory. "
+                              "Request a scoped investigation for file contents or nested directories.")
     assigned_ids = {requirement.requirement_id for requirement in assignment.requirements}
     binding_fields = (
         ("findings[].requirement_ids",
@@ -150,7 +163,8 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     if activity is None or activity.task_id != task_id:
         raise PermissionError("Investigation publication requires its active supervisor attempt")
     current = taskboard.get_task(task_id)
-    if current.user_request != assignment.objective or tuple(current.investigation_scope) != assignment.allowed_scope:
+    if (current.user_request != assignment.objective or tuple(current.investigation_scope) != assignment.allowed_scope
+            or is_shallow_investigation(current) != assignment.layout_only):
         raise PermissionError("The investigation objective or scope changed during execution")
     provenance = EvidenceProvenance(task_id=task_id, attempt_id=activity.attempt_id,
         attempt_generation=activity.attempt_generation, decision_id=decision_id,
@@ -158,7 +172,7 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         result_digest=sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest())
     refs = []
     observations_by_finding = []
-    for finding in report.findings:
+    for finding_index, finding in enumerate(report.findings):
         supporting = list(finding.supporting_evidence)
         observed = []
         for ref in supporting:
@@ -166,17 +180,22 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
             if record.classification == "observed" and record.freshness == "current" and record.validation == "supported":
                 observed.extend(record.sources)
         sources = []
-        for citation in finding.sources:
-            captured = next((source for source in observed if _matches_citation(citation, source, source.excerpt)), None)
-            if captured is None:
+        for source_index, citation in enumerate(finding.sources):
+            for captured in observed:
+                excerpt, _ = _citation_excerpt(citation, captured, captured.excerpt)
+                if excerpt is not None:
+                    break
+            else:
                 # Execute only the exact scoped read selected by the model.
                 result = validate_source(citation)
                 stamp = result.get("source_evidence")
                 if not result.get("ok") or not stamp:
                     raise ValueError("The selected source read returned no complete source version")
                 captured = EvidenceSource.model_validate(stamp)
-                if not _matches_citation(citation, captured, result["content"]):
-                    raise ValueError("Investigation source citation does not match the observed path, version, or excerpt")
+                excerpt, reason = _citation_excerpt(citation, captured, result["content"])
+                if excerpt is None:
+                    raise ValueError(f"Investigation source citation failed at findings[{finding_index}]."
+                                     f"sources[{source_index}] ({reason})")
                 source_refs = result.get("repository_evidence_refs", [])
                 if not source_refs:
                     raise ValueError("Source validation returned no durable observation identity")
@@ -186,7 +205,7 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
                 "symbol": citation.symbol or captured.symbol,
                 "start_line": citation.start_line if citation.start_line is not None else captured.start_line,
                 "end_line": citation.end_line if citation.end_line is not None else captured.end_line,
-                "excerpt": citation.excerpt,
+                "excerpt": excerpt,
             }))
         candidate = EvidenceCandidate(**finding.model_dump(exclude={"sources", "supporting_evidence", "requirement_ids"}),
                                       sources=tuple(sources), supporting_evidence=tuple(dict.fromkeys(supporting)))

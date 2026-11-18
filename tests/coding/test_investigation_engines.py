@@ -25,19 +25,26 @@ from mana_agent.multi_agent.core.types import RiskLevel, TaskBoardItem, TaskStat
     ("inferred", "negative_index"), ("inferred", "past_last_finding"), ("inferred", "unknown_requirement"),
     ("inferred", "unknown_evidence_requirement"), ("inferred", "unknown_legacy_requirement"),
     ("inferred", "observed_label"), ("observed", "observed_label"), ("inferred", "unbacked_observed_label"),
+    ("observed", "shallow_root_citation"), ("inferred", "shallow_file_citation"),
+    ("inferred", "shallow_nested_citation"), ("inferred", "audit_file_citation"),
 ])
 def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp_path, monkeypatch, backend, classification, outcome_kind):
     (tmp_path / "src").mkdir()
     (tmp_path / "src/app.py").write_bytes(b"value = 1\r\n")
-    db = WorkspaceDatabase("engine-test", db_path=tmp_path / "state.db")
+    db = WorkspaceDatabase("engine-test", db_path=tmp_path / ".state.db")
     knowledge = RepositoryEvidenceBoard(db=db, repository_id="repo", root=tmp_path)
-    directory = outcome_kind in {"directory_location", "directory_named", "directory_wrong_excerpt", "artifact_hash"}
-    result_source = read_directory(tmp_path, "src") if directory else read_source(tmp_path, "src/app.py")
+    layout_only = outcome_kind.startswith("shallow_")
+    directory = outcome_kind in {"directory_location", "directory_named", "directory_wrong_excerpt",
+                                  "artifact_hash", "shallow_root_citation", "shallow_nested_citation"}
+    directory_path = "." if outcome_kind == "shallow_root_citation" else "src"
+    result_source = read_directory(tmp_path, directory_path) if directory else read_source(tmp_path, "src/app.py")
     source = EvidenceSource.model_validate(result_source["source_evidence"])
     citation = source.model_dump(mode="json")
     if outcome_kind in {"file_location", "file_dedented", "directory_location", "directory_named", "directory_wrong_excerpt", "wrong_excerpt", "wrong_range", "reuse"}:
         citation.pop("sha256")
         citation["excerpt"] = "" if directory else "value = 1\n"
+    if outcome_kind in {"file_location", "wrong_range"}:
+        citation.pop("excerpt")
     if outcome_kind == "file_dedented":
         citation["excerpt"] = "value = 1"
     if outcome_kind == "directory_named":
@@ -50,11 +57,16 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         citation["excerpt"] = "value = 2"
     if outcome_kind == "wrong_range":
         citation["end_line"] = 2
+    if outcome_kind == "shallow_root_citation":
+        citation = {"path": ".", "source_kind": "directory"}
     task = TaskBoardItem(task_id="task", parent_task_id=None, root_task_id="task", title="Understand value",
         user_request="Determine the value", normalized_goal="Determine the value", status=TaskStatus.NEW,
         priority=100, risk_level=RiskLevel.LOW, primary_repository_id="repo", task_kind="investigation",
-        investigation_scope=["src"], evidence_requirements=[EvidenceRequirement(requirement_id="value", objective="Determine the value",
+        investigation_scope=["."] if layout_only or outcome_kind == "audit_file_citation" else ["src"],
+        evidence_requirements=[EvidenceRequirement(requirement_id="value", objective="Determine the value",
             acceptable_classifications=(classification,), acceptance_criteria=("Cite current source",)).model_dump(mode="json")])
+    if outcome_kind == "audit_file_citation":
+        task.mode_workflow["initial_repository_scope"] = "explicit_audit"
 
     class Board:
         store = SimpleNamespace(root=tmp_path)
@@ -81,6 +93,14 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             assert finding_ids["items"]["enum"] == ["value"]
             assert set(schema["properties"]["evidence_bindings"]["properties"]) == {"value"}
             assert '"entrypoints"' not in prompt
+            properties = schema["$defs"]["InvestigationCitation"]["properties"]
+            if layout_only:
+                assert set(properties) == {"path", "source_kind"}
+                assert properties["path"]["const"] == "."
+                assert properties["source_kind"]["const"] == "directory"
+                assert "Request missing evidence if you need file content" in prompt
+            else:
+                assert {"start_line", "end_line"} <= properties.keys()
             if outcome_kind == "failed":
                 return {"status": "failed", "error": "Selected backend unavailable"}
             if outcome_kind == "malformed":
@@ -142,10 +162,12 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             "unknown_evidence_requirement": "unknown evidence requirement in evidence_bindings",
             "unknown_legacy_requirement": "unknown evidence requirement in requirement_bindings",
             "unbacked_observed_label": "Inferences require actual supporting observations",
+            "shallow_file_citation": "Shallow layout investigations can cite only the root directory",
+            "shallow_nested_citation": "Shallow layout investigations can cite only the root directory",
         }
         if outcome_kind in rejected_before_publication:
             reason = rejected_before_publication[outcome_kind]
-            with pytest.raises(ValueError, match=reason) as error:
+            with pytest.raises((ValueError, PermissionError), match=reason) as error:
                 execute_investigation(taskboard=Board(), task_id="task", coding_agent=engine,
                     decision_id="decision", validate_source=validate)
             assert "PRIVATE_REQUIREMENT_ID" not in str(error.value)
@@ -154,10 +176,18 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             assert task.evidence_refs == []
             assert task.evidence_requirements[0]["evidence"] == []
             return
-        if outcome_kind in {"artifact_hash", "wrong_excerpt", "wrong_range", "directory_wrong_excerpt"}:
-            with pytest.raises(ValueError, match="does not match the observed path, version, or excerpt"):
+        citation_failures = {
+            "artifact_hash": "source digest differs from the read",
+            "wrong_excerpt": "file excerpt does not occur in the selected lines",
+            "wrong_range": "line range ends after the read",
+            "directory_wrong_excerpt": "directory excerpt contains unobserved entries",
+        }
+        if outcome_kind in citation_failures:
+            with pytest.raises(ValueError, match=citation_failures[outcome_kind]) as error:
                 execute_investigation(taskboard=Board(), task_id="task", coding_agent=engine,
                     decision_id="decision", validate_source=validate)
+            assert "findings[0].sources[0]" in str(error.value)
+            assert "value = 2" not in str(error.value)
             assert len(reads) == 1
             assert [record["classification"] for record in knowledge.query(EvidenceQuery())["records"]] == ["observed"]
             return
@@ -165,6 +195,7 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             decision_id="decision", validate_source=validate)
         assert result["goal_satisfied"]
         assert calls[0]["repository_investigation"]["backend"] == backend
+        assert calls[0]["repository_investigation"]["layout_only"] is layout_only
         assert calls[0]["execution_mode"] == "read_only"
         assert calls[-1] == "closed"
         assert task.task_kind == "investigation"
@@ -174,6 +205,8 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         finding = records[0]
         assert finding["classification"] == "inferred"
         assert finding["sources"][0]["sha256"] == source.sha256
+        if outcome_kind == "file_location":
+            assert finding["sources"][0]["excerpt"] == result_source["content"]
         assert finding["architecture_relationships"] == [architecture_link]
         if outcome_kind == "multiple_findings":
             assert len(result["evidence_refs"]) == 2
@@ -188,7 +221,8 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         db.close()
 
 
-def test_investigation_matches_multiline_code_citation_with_dedented_whitespace_and_blank_lines(tmp_path, monkeypatch):
+@pytest.mark.parametrize("include_excerpt", [False, True])
+def test_investigation_matches_multiline_code_citation(tmp_path, monkeypatch, include_excerpt):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     code = (
@@ -231,14 +265,14 @@ def test_investigation_matches_multiline_code_citation_with_dedented_whitespace_
         task_id="task", attempt_id="attempt", attempt_generation=1, protected_text=(), publication=nullcontext
     ))
 
-    # Citation covers lines 3 to 5 (line 3 is blank) with dedented 4-space body
     citation = {
         "path": "src/cli_recon.c",
         "source_kind": "file",
         "start_line": 3,
         "end_line": 5,
-        "excerpt": "if (rc == NP_OK)\n    rc = np_recon_persist_flush(ctx);",
     }
+    if include_excerpt:
+        citation["excerpt"] = "if (rc == NP_OK)\n    rc = np_recon_persist_flush(ctx);"
     class Worker:
         def generate(self, prompt, **arguments):
             return {"status": "completed", "investigation_result": {
@@ -302,6 +336,13 @@ def test_investigation_matches_multiline_code_citation_with_dedented_whitespace_
         decision_id="decision", validate_source=validate)
     assert result_reuse["goal_satisfied"]
     assert len(reads) == 0
+    if not include_excerpt:
+        from mana_agent.repository_evidence.models import EvidenceRef
+
+        reused = knowledge.get(EvidenceRef.model_validate(result_reuse["evidence_refs"][0]))
+        assert reused.sources[0].excerpt == "".join(code.splitlines(keepends=True)[2:5])
+        assert reused.sources[0].start_line == 3
+        assert reused.sources[0].end_line == 5
 
     # Wrong excerpt raises ValueError
     wrong_citation = dict(citation, excerpt="rc = np_wrong_call(ctx);")
@@ -319,7 +360,7 @@ def test_investigation_matches_multiline_code_citation_with_dedented_whitespace_
             pass
 
     engine_wrong = SimpleNamespace(active_engine_mode="internal", for_assignment=lambda **_: WorkerWrong())
-    with pytest.raises(ValueError, match="does not match the observed path, version, or excerpt"):
+    with pytest.raises(ValueError, match="file excerpt does not occur in the selected lines"):
         execute_investigation(taskboard=Board(), task_id="task", coding_agent=engine_wrong,
             decision_id="decision", validate_source=validate)
 
@@ -330,9 +371,30 @@ def test_investigation_wire_schema_keeps_source_versions_host_owned():
     from mana_agent.repository_evidence.models import InvestigationCitation
 
     properties = InvestigationCitation.model_json_schema()["properties"]
-    assert "path" in properties
+    assert {"path", "start_line", "end_line"} <= properties.keys()
     assert "sha256" not in properties
     assert "revision" not in properties
+    assert "excerpt" not in properties
+
+
+def test_investigation_file_citation_requires_a_range_or_legacy_proof():
+    from mana_agent.repository_evidence.models import InvestigationCitation
+
+    with pytest.raises(ValueError, match="File citations require an exact line range"):
+        InvestigationCitation.model_validate({"path": "src/app.py"})
+
+
+def test_investigation_citation_rejects_unavailable_read_tool():
+    from mana_agent.repository_evidence.models import InvestigationCitation
+    from mana_agent.repository_evidence.observations import validate_selected_source
+
+    runner = SimpleNamespace(
+        authority=SimpleNamespace(schemas={"list_files": {"properties": {}}}),
+        request=lambda *args, **kwargs: pytest.fail("Requested a tool outside the bound scope"),
+    )
+    citation = InvestigationCitation(path="src/app.py", start_line=1, end_line=1)
+    with pytest.raises(PermissionError, match="read_file.*unavailable in the assigned scope"):
+        validate_selected_source(runner, citation, decision_id="decision")
 
 
 def test_investigation_wire_schema_binds_requirements_on_each_finding():

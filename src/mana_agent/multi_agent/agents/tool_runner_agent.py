@@ -31,6 +31,7 @@ from mana_agent.multi_agent.queue.locks import LockTable
 from mana_agent.multi_agent.tools.operation_policy import OperationPolicy, validate_arguments
 from mana_agent.multi_agent.tools.tool_request import ToolOperationRequest
 from mana_agent.multi_agent.tools.tool_result import FileMutationEvidence, ToolOperationResult
+from mana_agent.repository_evidence.tasks import is_shallow_investigation
 from mana_agent.services.activity_context import activity_scope, current_activity_context
 
 logger = logging.getLogger(__name__)
@@ -48,11 +49,6 @@ _INVESTIGATION_READ_TOOLS = frozenset({
     "list_files", "repo_search", "find_symbols", "call_graph",
 })
 _EVIDENCE_CONTEXT_TOOLS = frozenset({"repository_evidence_query", "repository_evidence_get"})
-
-
-def _shallow_investigation(task) -> bool:
-    return (list(getattr(task, "investigation_scope", [])) == ["."]
-            and not getattr(task, "mode_workflow", {}).get("initial_repository_scope"))
 
 
 @dataclass(frozen=True)
@@ -114,7 +110,7 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
         if execution_root and Path(execution_root).resolve() != workspace.worktree_path.resolve():
             raise ExecutionAuthorityError("Workspace differs from the TaskBoard execution assignment")
         if getattr(assigned, "task_kind", None) in {"investigation", "understanding"}:
-            reads = {"ls", "list_files"} if _shallow_investigation(assigned) else _INVESTIGATION_READ_TOOLS
+            reads = {"ls", "list_files"} if is_shallow_investigation(assigned) else _INVESTIGATION_READ_TOOLS
             policies = {name: policy for name, policy in policies.items()
                         if policy.effect == "read_only" and name in reads | _EVIDENCE_CONTEXT_TOOLS}
             schemas = {name: schemas[name] for name in policies}
@@ -440,7 +436,7 @@ class ToolRunnerAgent:
                 if assigned_task is not None and policy.effect != "read_only" else [])
             if investigation and request.tool_name not in _INVESTIGATION_READ_TOOLS:
                 raise ExecutionAuthorityError("Investigation only permits registered repository read tools")
-            if investigation and _shallow_investigation(assigned_task):
+            if investigation and is_shallow_investigation(assigned_task):
                 paths = request.arguments.get("paths") or []
                 if (request.tool_name not in {"ls", "list_files"} or request.arguments.get("repository_reason")
                         or any(path != "." for path in paths)):

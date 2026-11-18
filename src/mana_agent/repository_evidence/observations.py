@@ -50,8 +50,12 @@ def validate_selected_source(runner, source: InvestigationCitation, *, decision_
             reason="Validate the selected source citation", start_line=source.start_line or 1, end_line=source.end_line)
         implementation = lambda _: read_source(runner.authority.workspace.worktree_path, source.path,
                                                start_line=source.start_line, end_line=source.end_line)
-    arguments = request.model_dump(mode="json", include=set(runner.authority.schemas[request.tool]["properties"]))
-    properties = runner.authority.schemas[request.tool]["properties"]
+    schema = runner.authority.schemas.get(request.tool)
+    if schema is None:
+        raise PermissionError(f"Source citation requires {request.tool}, which is unavailable in the assigned scope. "
+                              "Cite an authorized observation or request a scoped investigation.")
+    properties = schema["properties"]
+    arguments = request.model_dump(mode="json", include=set(properties))
     if "path" in properties:
         arguments["path"] = source.path
     arguments = {key: value for key, value in arguments.items() if value is not None}

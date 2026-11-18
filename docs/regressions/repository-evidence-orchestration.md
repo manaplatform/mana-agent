@@ -294,12 +294,13 @@ required a digest on every citation and exposed artifact references alongside
 actual source stamps. Existing engine fixtures provided the correct digest in
 advance and missed this distinction.
 
-Both engines can now return exact source locations without a SHA-256. The host
-reuses a matching current observation or runs the precise, scope-checked read
-selected by the citation. File citations without a digest require a verbatim
-excerpt. The host checks the source kind, path, line range and excerpt, and
-validates any digest supplied by an earlier result contract. The stored source
-version comes from the observation. This change needs no database migration.
+Both engines can return exact source locations without a SHA-256 or an
+excerpt. The host reuses a matching current observation or runs the precise,
+scope-checked read selected by the citation. New file citations specify
+1-based inclusive start and end lines. The stored source version and bounded
+excerpt come from the read. Earlier reports can still submit a digest or
+excerpt, which the host validates against the selected source. No database
+migration is needed.
 
 Follow-up child attempts `task_20261118_000013`, `task_20261118_000015`, and
 `task_20261118_000016` also failed citation validation after successful model
@@ -311,10 +312,71 @@ Native batches attach per-file references to the first 20 result rows when
 they contain complete, current, bounded reads. Each reference identifies the
 file observation and exact line coverage from the registered batch receipt.
 This allows a finding to reuse the same observation without reproducing file
-text or a digest. A direct source citation still checks its requested range.
-File matching allows indentation and blank-line differences while preserving
-spaces within lines. Directory citations accept a verbatim manifest excerpt
-or a list of observed entry names, with every named entry required to match.
+text or a digest. New directory citations use the location and directory kind.
+Matching legacy file excerpts allows indentation and blank-line differences
+while preserving spaces within lines. Legacy directory excerpts can be
+manifest text or a list of observed entry names, with every name required to
+match.
+
+#### Host-captured excerpts
+
+At 22:30 on 2026-11-18, investigation `task_20261118_000028` stopped after a
+successful validation reread of `scanner.c` lines 846–867. The saved initial
+read covered lines 840–875. Both reads have the same file digest, and the
+overlapping content is identical. The session retained the selected line range
+but omitted the submitted excerpt and digest. The exact rejected value is
+therefore unknown.
+
+The result schema had still advertised model-written excerpts, and its
+validator required an excerpt for hash-free file citations even when the
+model supplied a complete range. This made exact source selection depend on
+reproducing source text. The schema now leaves excerpt capture to the host.
+The publisher saves the text from the selected lines and reports the failing
+finding, source index, and safe reason on a mismatch. Earlier tests populated
+the excerpt when testing hash-free citations. The updated fixtures cover a
+range-only read, reuse of a broader observation, and rejection of a bad range
+or invalid legacy quote or digest.
+
+Do not require a model-written quote to resolve an exact source location.
+Validate the path, source kind, line coverage, and any supplied legacy proof.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k 'uses_selected_engine or matches_multiline_code_citation or source_versions_host_owned or file_citation_requires'
+```
+
+The agent did not run this command or resume the failed live task.
+
+#### Shallow layout citation regression
+
+At 22:39 on 2026-11-18, investigation `task_20261118_000030` completed a
+root listing, then stopped after the model returned its report. The transcript
+and the parent execution journal recorded the failure as `'read_file'`.
+The saved child assignment allowed only shallow root discovery. There was
+no external file-read call or registered citation read in the journal.
+
+ToolRunner correctly excluded `read_file` from shallow authority. The
+report schema still advertised file citations, and the source validator
+indexed the missing tool schema when resolving one. That lookup failed before
+a ToolRunner request could enforce the scope. Earlier citation fixtures used
+file-capable assignments.
+
+The assignment now carries the shallow-layout restriction derived from the
+same TaskBoard predicate as ToolRunner. The shared report schema and prompt
+permit a direct citation only to the immediate root listing for that scope.
+Report validation rejects file and nested directory citations before any
+source validation read or finding publication. Citation resolution reports
+a scope error if a required tool is unavailable. Explicit audit and scoped
+file assignments retain their existing capabilities. No data migration is
+needed.
+
+Do not advertise file citations in a shallow-only assignment or register
+a file-read capability to recover from an invalid citation.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k 'shallow or audit_file_citation or unavailable_read_tool'
+```
+
+The agent did not run the tests or replay the live task.
 
 Mode, compound, and MainAgent investigation dispatch all register the same
 supervisor verifier for durable evidence requirements. Saved investigations keep

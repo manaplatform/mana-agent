@@ -22,6 +22,16 @@ def investigation_result_schema(assignment: CodingAssignment) -> dict[str, Any]:
     reference_list = evidence_bindings["additionalProperties"]
     evidence_bindings["properties"] = {requirement_id: reference_list for requirement_id in requirement_ids}
     evidence_bindings["additionalProperties"] = False
+    if assignment.layout_only:
+        schema["$defs"]["InvestigationCitation"] = {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "const": "."},
+                "source_kind": {"type": "string", "const": "directory"},
+            },
+            "required": ["path", "source_kind"],
+            "additionalProperties": False,
+        }
     return schema
 
 
