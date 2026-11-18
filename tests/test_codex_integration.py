@@ -268,6 +268,33 @@ def test_plan_proposal_turn_is_read_only_even_with_an_existing_thread(tmp_path: 
     assert turn["outputSchema"]["required"] == ["patch"]
 
 
+def test_codex_investigation_schema_uses_assigned_requirement_ids(tmp_path: Path) -> None:
+    from mana_agent.repository_evidence.models import CodingAssignment, EvidenceRequirement
+
+    workspace = _workspace(tmp_path).model_copy(update={"sandbox": "readOnly"})
+    fake = _FakeClient(("codex", "app-server"))
+    backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=lambda _: fake)
+    assignment = CodingAssignment(
+        task_id="task-1", task_version=1, objective="Locate the caller", task_kind="investigation",
+        backend="external", source_view=str(workspace.worktree_path), decision_id="decision",
+        requirements=(EvidenceRequirement(requirement_id="caller", objective="Find the caller",
+                                          acceptance_criteria=("Cite a call site",)),),
+    )
+    task = _task().model_copy(update={
+        "requires_repository_write": False,
+        "context": {"repository_investigation": assignment.model_dump(mode="json")},
+    })
+
+    asyncio.run(backend.execute(task, workspace))
+
+    turn = next(payload for method, payload in fake.requests if method == "turn/start")
+    schema = turn["outputSchema"]
+    finding_ids = schema["$defs"]["InvestigationFinding"]["properties"]["requirement_ids"]
+    assert finding_ids["items"]["enum"] == ["caller"]
+    assert set(schema["properties"]["evidence_bindings"]["properties"]) == {"caller"}
+    assert schema["properties"]["evidence_bindings"]["additionalProperties"] is False
+
+
 def test_codex_backend_reports_turn_started_only_after_turn_start_accepts(
     tmp_path: Path,
 ) -> None:

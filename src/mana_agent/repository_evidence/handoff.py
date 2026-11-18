@@ -6,7 +6,23 @@ from typing import Any
 from pydantic import ValidationError
 
 from mana_agent.llm.errors import StructuredOutputError, describe_decision_validation
-from mana_agent.repository_evidence.models import InvestigationResult, MissingEvidenceRequest
+from mana_agent.repository_evidence.models import CodingAssignment, InvestigationResult, MissingEvidenceRequest
+
+
+def investigation_result_schema(assignment: CodingAssignment) -> dict[str, Any]:
+    """Expose the admitted assignment's requirement IDs to both engines."""
+    schema = InvestigationResult.model_json_schema()
+    requirement_ids = list(dict.fromkeys(requirement.requirement_id for requirement in assignment.requirements))
+    finding_ids = schema["$defs"]["InvestigationFinding"]["properties"]["requirement_ids"]
+    if requirement_ids:
+        finding_ids["items"]["enum"] = requirement_ids
+    else:
+        finding_ids["maxItems"] = 0
+    evidence_bindings = schema["properties"]["evidence_bindings"]
+    reference_list = evidence_bindings["additionalProperties"]
+    evidence_bindings["properties"] = {requirement_id: reference_list for requirement_id in requirement_ids}
+    evidence_bindings["additionalProperties"] = False
+    return schema
 
 
 def json_response_text(text: str) -> str:

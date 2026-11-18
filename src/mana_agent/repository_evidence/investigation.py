@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
+from mana_agent.repository_evidence.handoff import investigation_result_schema
 from mana_agent.repository_evidence.models import (
     EvidenceCandidate, EvidenceProvenance, EvidenceQuery, EvidenceRef, EvidenceSource,
     InvestigationCitation, InvestigationResult,
@@ -102,12 +103,12 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
         "from the cited lines. For a directory cite a shallow listing with source_kind directory. "
         "If you cite directory entries, use comma-separated exact names in excerpt. "
         "The host captures the source version. A tool output reference identifies the tool result "
-        "and cannot be used as a source hash. On each finding, list the exact IDs of the assigned "
-        "requirements it supports in requirement_ids. For example, use \"requirement_ids\": [\"entrypoints\"] "
-        "when the finding supports an assigned requirement with ID entrypoints. "
-        "Use evidence_bindings for existing evidence references. Report remaining gaps explicitly.\n"
+        "and cannot be used as a source hash. On each finding, list the exact requirement_id values from "
+        "assignment.requirements that it supports. Use an empty requirement_ids array for an unbound finding. "
+        "Use evidence_bindings to link existing evidence references under those same assigned IDs. "
+        "Report remaining gaps explicitly.\n"
         + json.dumps({"assignment": assignment.model_dump(mode="json"), "evidence": context,
-                      "result_schema": InvestigationResult.model_json_schema()}, ensure_ascii=False)
+                      "result_schema": investigation_result_schema(assignment)}, ensure_ascii=False)
     )
     if taskboard.get_task(task_id).row_version != assignment.task_version:
         raise PermissionError("The investigation assignment changed before dispatch")
@@ -127,15 +128,23 @@ def execute_investigation(*, taskboard, task_id, coding_agent, decision_id, vali
     report = InvestigationResult.model_validate(raw)
     if any(gap.task_id != task_id for gap in report.missing_evidence):
         raise ValueError("Investigation gap belongs to another task")
+    assigned_ids = {requirement.requirement_id for requirement in assignment.requirements}
+    binding_fields = (
+        ("findings[].requirement_ids",
+         (requirement_id for finding in report.findings for requirement_id in finding.requirement_ids)),
+        ("evidence_bindings", report.evidence_bindings.keys()),
+        ("requirement_bindings", report.requirement_bindings.keys()),
+    )
+    invalid_fields = [field for field, ids in binding_fields if set(ids) - assigned_ids]
+    if invalid_fields:
+        raise ValueError("Investigation report referenced an unknown evidence requirement in "
+                         + ", ".join(invalid_fields) + ". Use only IDs from assignment.requirements.")
     bindings = {requirement_id: list(indexes) for requirement_id, indexes in report.requirement_bindings.items()}
     if any(not 0 <= index < len(report.findings) for indexes in bindings.values() for index in indexes):
         raise ValueError("Legacy investigation requirement binding has an index outside the findings array")
     for index, finding in enumerate(report.findings):
         for requirement_id in finding.requirement_ids:
             bindings.setdefault(requirement_id, []).append(index)
-    requirement_ids = {requirement.requirement_id for requirement in assignment.requirements}
-    if (bindings.keys() | report.evidence_bindings.keys()) - requirement_ids:
-        raise ValueError("Investigation report referenced an unknown evidence requirement")
     from mana_agent.services.activity_context import current_activity_context
     activity = current_activity_context()
     if activity is None or activity.task_id != task_id:

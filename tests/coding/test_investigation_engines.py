@@ -23,6 +23,7 @@ from mana_agent.multi_agent.core.types import RiskLevel, TaskBoardItem, TaskStat
     ("observed", "wrong_range"), ("observed", "reuse"), ("observed", "failed"), ("observed", "malformed"),
     ("inferred", "multiple_findings"), ("inferred", "legacy_binding"),
     ("inferred", "negative_index"), ("inferred", "past_last_finding"), ("inferred", "unknown_requirement"),
+    ("inferred", "unknown_evidence_requirement"), ("inferred", "unknown_legacy_requirement"),
     ("inferred", "observed_label"), ("observed", "observed_label"), ("inferred", "unbacked_observed_label"),
 ])
 def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp_path, monkeypatch, backend, classification, outcome_kind):
@@ -75,6 +76,11 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
     class Worker:
         def generate(self, prompt, **arguments):
             calls.append(arguments)
+            schema = json.loads(prompt.rsplit("\n", 1)[-1])["result_schema"]
+            finding_ids = schema["$defs"]["InvestigationFinding"]["properties"]["requirement_ids"]
+            assert finding_ids["items"]["enum"] == ["value"]
+            assert set(schema["properties"]["evidence_bindings"]["properties"]) == {"value"}
+            assert '"entrypoints"' not in prompt
             if outcome_kind == "failed":
                 return {"status": "failed", "error": "Selected backend unavailable"}
             if outcome_kind == "malformed":
@@ -91,10 +97,14 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
             legacy_indexes = {"legacy_binding": [0], "negative_index": [-1], "past_last_finding": [1]}
             if outcome_kind in legacy_indexes:
                 report["requirement_bindings"] = {"value": legacy_indexes[outcome_kind]}
+            elif outcome_kind == "unknown_legacy_requirement":
+                report["requirement_bindings"] = {"PRIVATE_REQUIREMENT_ID": [0]}
             elif outcome_kind == "unknown_requirement":
-                finding["requirement_ids"] = ["value", "outside-assignment"]
+                finding["requirement_ids"] = ["value", "PRIVATE_REQUIREMENT_ID"]
             else:
                 finding["requirement_ids"] = ["value"]
+            if outcome_kind == "unknown_evidence_requirement":
+                report["evidence_bindings"] = {"PRIVATE_REQUIREMENT_ID": []}
             if outcome_kind == "multiple_findings":
                 findings.insert(0, {"category": "code_behavior", "statement": "There may be another module",
                     "classification": "hypothetical", "confidence": 0.5})
@@ -128,14 +138,17 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
         rejected_before_publication = {
             "negative_index": "index outside the findings array",
             "past_last_finding": "index outside the findings array",
-            "unknown_requirement": "unknown evidence requirement",
+            "unknown_requirement": r"unknown evidence requirement in findings\[\]\.requirement_ids",
+            "unknown_evidence_requirement": "unknown evidence requirement in evidence_bindings",
+            "unknown_legacy_requirement": "unknown evidence requirement in requirement_bindings",
             "unbacked_observed_label": "Inferences require actual supporting observations",
         }
         if outcome_kind in rejected_before_publication:
             reason = rejected_before_publication[outcome_kind]
-            with pytest.raises(ValueError, match=reason):
+            with pytest.raises(ValueError, match=reason) as error:
                 execute_investigation(taskboard=Board(), task_id="task", coding_agent=engine,
                     decision_id="decision", validate_source=validate)
+            assert "PRIVATE_REQUIREMENT_ID" not in str(error.value)
             assert reads == []
             assert knowledge.query(EvidenceQuery(include_stale=True))["records"] == []
             assert task.evidence_refs == []
@@ -331,6 +344,29 @@ def test_investigation_wire_schema_binds_requirements_on_each_finding():
     requirement_ids = schema["$defs"]["InvestigationFinding"]["properties"]["requirement_ids"]
     assert requirement_ids["type"] == "array"
     assert requirement_ids["items"]["type"] == "string"
+
+
+@pytest.mark.parametrize("ids", [("repository_finding", "caller"), ("other-task-requirement",), ()])
+def test_investigation_schema_scopes_requirement_ids_to_assignment(ids):
+    from mana_agent.repository_evidence.handoff import investigation_result_schema
+    from mana_agent.repository_evidence.models import CodingAssignment
+
+    assignment = CodingAssignment(
+        task_id="task", task_version=1, objective="Find entrypoints", task_kind="investigation",
+        backend="internal", source_view=".", decision_id="decision",
+        requirements=tuple(EvidenceRequirement(requirement_id=requirement_id, objective="Trace a call",
+                          acceptance_criteria=("Find a caller",)) for requirement_id in ids),
+    )
+    schema = investigation_result_schema(assignment)
+    finding_ids = schema["$defs"]["InvestigationFinding"]["properties"]["requirement_ids"]
+    if ids:
+        assert finding_ids["items"]["enum"] == list(ids)
+    else:
+        assert finding_ids["maxItems"] == 0
+    bindings = schema["properties"]["evidence_bindings"]
+    assert set(bindings["properties"]) == set(ids)
+    assert bindings["additionalProperties"] is False
+    assert all(prop["items"] == {"$ref": "#/$defs/EvidenceRef"} for prop in bindings["properties"].values())
 
 
 def test_missing_evidence_handoff_is_typed_and_preserves_task_identity():

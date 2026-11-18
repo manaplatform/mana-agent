@@ -250,6 +250,40 @@ resume the affected live task.
 venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py -k 'uses_selected_engine or binds_requirements_on_each_finding'
 ```
 
+### Unknown evidence requirement regression
+
+The 2026-11-18 session at 22:22 reported
+`Investigation report referenced an unknown evidence requirement`.
+TaskBoard's admitted assignments for children `task_20261118_000025` and
+`task_20261118_000026` each contained only `repository_finding`. The response
+passed structural validation and failed the assignment membership check. The
+session does not retain the rejected ID or the binding field that supplied it.
+
+The response schema allowed arbitrary strings in `findings[].requirement_ids`
+and arbitrary keys in `evidence_bindings`. The prompt also showed
+`entrypoints` as a sample ID even when the assignment had no such
+requirement. That example could have been copied. Earlier fixtures used known
+IDs for successful responses and did not check the schema against the
+assignment.
+
+The prompt now refers to the assignment directly. The shared schema builder
+lists the admitted IDs as the enum for each finding's requirement list and
+as the only keys in `evidence_bindings`. Codex receives the same schema through
+its output schema parameter. Native text responses still pass through the
+publisher's exact membership check before citation reads or finding
+publication. Valid legacy positional reports remain supported. Errors
+identify the binding field and omit the rejected ID. No migration is needed.
+
+Do not put sample requirement IDs into the prompt or accept arbitrary
+binding IDs. Keep requirement selection tied to the admitted assignment.
+
+User verification uses the following command. The agent did not run it or
+replay the affected session.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_investigation_engines.py tests/test_codex_integration.py -k 'uses_selected_engine or investigation_schema'
+```
+
 ### Source citation regression
 
 NetPeek investigation `task_20261118_000011` completed its model turn and several
