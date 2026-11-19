@@ -43,12 +43,23 @@ def describe_decision_validation(error: ValidationError, schema: dict[str, Any])
                 collect(value)
 
     collect(schema)
+    errors = error.errors(include_input=False, include_context=False, include_url=False)
+    inspection_requests = ("decision", "inspect", "requests")
+    invalid_inspection_item = any(issue["loc"][:3] == inspection_requests and len(issue["loc"]) > 3
+                                  for issue in errors)
     issues = []
-    for issue in error.errors(include_input=False, include_context=False, include_url=False)[:4]:
+    for issue in errors:
+        if len(issues) == 4:
+            break
         path = ".".join(str(part) if isinstance(part, int) or part in fields else "<key>"
                         for part in issue["loc"])
         code = issue["type"]
-        if code.startswith(("mode_", "source_citation_")) or code in {"entry_route_media_request", "media_operation_input"}:
+        if code == "too_short" and issue["loc"] == inspection_requests:
+            # A failed item can leave the validated tuple empty even when the model supplied a request.
+            if invalid_inspection_item:
+                continue
+            message = "Include at least one inspection request or select another allowed action."
+        elif code.startswith(("mode_", "source_citation_")) or code in {"entry_route_media_request", "media_operation_input"}:
             message = issue["msg"]
         elif code in {"union_tag_invalid", "union_tag_not_found"}:
             message = "Select an action or tool declared in the schema."

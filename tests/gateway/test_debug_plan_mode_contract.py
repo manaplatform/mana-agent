@@ -1255,6 +1255,82 @@ def test_inspection_correction_rebuilds_invalid_reads_as_scoped_discovery(mode_g
     assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1", "evidence-2"]
 
 
+@pytest.mark.parametrize("corrected", [True, False])
+def test_unscoped_inspection_search_correction_uses_saved_layout(mode_gateway, monkeypatch, corrected):
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    gateway, workflow = mode_gateway
+    component = gateway.root / "handlers"
+    component.mkdir()
+    (component / "handler.py").write_text("value = 'before'\n")
+    layout = inspection(None, evidence_call("layout", "ls"))
+    invalid = inspection(None, evidence_call("search", "repo_search", paths=[], glob="**/*", query="before"))
+    scoped = inspection(None, evidence_call("search", "repo_search", paths=["handlers"], query="before"))
+    diagnosis = {"action": "diagnose", "reason": "Use the matched line", "root_cause": "The handler uses the old value",
+                 "cause_evidence": ["evidence-2"]}
+    decisions = iter([layout, invalid, scoped, diagnosis] if corrected else [layout, invalid, invalid])
+    requests, reads = [], []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            if len(requests) == 3:
+                assert reads == [("ls", ())]
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(decisions)},
+            )])
+
+    profile = ModelProfile(provider="openrouter", model_id="deepseek/deepseek-v4.1-flash", facts={
+        name: observation(value, source="provider", confidence=1) for name, value in {
+            "input_text": True, "output_text": True, "tool_calling": True,
+            "context_window": 65536, "max_output_tokens": 1024,
+        }.items()
+    })
+    model = NativeLLMEngine(provider=profile.provider, model=profile.model_id, api_key="fixture",
+                            base_url="https://example.invalid", endpoint="chat_completions", adapter=Adapter())
+    monkeypatch.setattr(model, "profile", lambda *_: profile)
+    original = PlanService.inspect
+
+    def inspect(service, request):
+        reads.append((request.tool, request.paths))
+        return original(service, request)
+
+    monkeypatch.setattr(PlanService, "inspect", inspect)
+    result = workflow.start("session", "Find where the old value comes from", mode="debug", llm=model)
+
+    assert requests[1].tools == requests[2].tools
+    correction = requests[2].messages[-1].content
+    assert "A query with an empty path list and a broad default glob has no search scope" in correction
+    assert "too short" not in correction
+    assert "choose the next permitted action from allowed_actions" in correction
+    example = next(json.loads(line) for line in correction.splitlines() if line.startswith('{"decision":'))
+    assert example["decision"]["requests"][0]["paths"] == ["handlers"]
+    if corrected:
+        assert result.status == "success", result.message
+        assert len(requests) == 4
+        assert reads == [("ls", ()), ("repo_search", ("handlers",))]
+    else:
+        assert result.data["phase"] == "blocked", result.message
+        assert len(requests) == 3
+        assert reads == [("ls", ())]
+        assert "has no search scope" in result.message
+        assert "too short" not in result.message
+        assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1"]
+
+
+def test_empty_inspection_requests_report_the_required_batch():
+    from pydantic import ValidationError
+    from mana_agent.agent.plan_service import ModeDecision
+    from mana_agent.llm.errors import describe_decision_validation
+
+    with pytest.raises(ValidationError) as rejected:
+        ModeDecision.model_validate({"decision": inspection()})
+    detail = describe_decision_validation(rejected.value, ModeDecision.model_json_schema())
+    assert "decision.inspect.requests: Include at least one inspection request or select another allowed action" in detail
+
+
 @pytest.mark.parametrize(("saved_read", "corrected", "older"), [
     (False, True, False), (True, True, False), (False, False, False), (True, True, True), (True, False, True),
 ])

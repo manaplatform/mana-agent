@@ -473,6 +473,44 @@ On 2026-11-17, DEBUG task `task_20261117_000009` using OpenRouter DeepSeek saved
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'repo_search_requires_nonblank_query or inspection_correction_rebuilds or native_investigation_tool_schema or mode_decision_wire_schema'`. The fixtures cover schema and runtime validation, query preservation, query-free discovery, and same-model correction of a batch containing a valid read and a blank search. The agent did not run the fixtures or resume the live task.
 
+## Search scope correction from saved layout
+
+On 2026-11-20, an inspection was still invalid after the single model
+correction. The terminal diagnostic reported an unscoped `repo_search` and
+said the request list was too short. An inspection containing one level-1
+text search with empty `paths` and the broad `**/*` glob reproduces both
+diagnostics on the previous code. The transcript does not show the exact
+arguments that the live model supplied.
+
+A nonblank query supplies the text to find. The search also needs a literal
+path, a targeted glob, or the existing authorization for repository-wide
+discovery. The scope check correctly rejected the item. Pydantic then
+reported the invalid item and the minimum length of the resulting validated
+tuple. The second message made a supplied request look like an empty batch.
+The correction also gave generic scope examples without using the layout
+already saved on the task.
+
+The scope error now gives the existing correction a specific reason and a
+complete scoped decision example using eligible paths from current saved
+observations. If the layout is unknown, the model can choose a single
+shallow listing. It can also select another allowed action when it already
+has enough information. The diagnostic keeps the real item error and still
+explains the minimum when the model submits an empty batch. The gateway
+validates the whole batch before dispatch and retains the existing scope
+and authorization checks.
+
+**Do not reintroduce** treating a query as a scope, echoing rejected values
+in recovery guidance, or retrying a rejected batch without a new model
+decision.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'unscoped_inspection_search or empty_inspection_requests or inspection_correction_rebuilds or inspection_path_correction'
+```
+
+The fixtures cover the saved-layout correction, a repeated unscoped search
+that dispatches no reads, and a genuinely empty batch. Test execution and
+live replay remain pending.
+
 ## Verification result replies
 
 On 2026-11-17, AUTO task `task_20261117_000002` applied its version change to `pyproject.toml` and saved a patch receipt. Its first verification command could not start because the local Docker check could not find `python:3.12`. The blocked reply printed the raw command representation, eight evidence IDs, and the pre-edit research findings. The reply omitted the file already changed. Approval and clarification waits also appended the full plan when reading back a blocked or completed result.
