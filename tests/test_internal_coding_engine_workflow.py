@@ -205,8 +205,8 @@ class _MockTaskBoard:
     def add_files_touched(self, task_id, paths):
         self.get_task(task_id).files_touched.extend(paths)
 
-    def update_task(self, task_id: str, progress_summary: str, changed_files: list[str]) -> None:
-        self.updates.append({"task_id": task_id, "summary": progress_summary, "files": changed_files})
+    def update_task(self, task_id: str, *, progress: str) -> None:
+        self.updates.append({"task_id": task_id, "progress": progress})
 
 
 class _MockGlobalMemory:
@@ -287,15 +287,14 @@ def test_internal_coding_engine_parallel_workflow(tmp_path: Path) -> None:
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 100\n"
     assert (tmp_path / "b.py").read_text(encoding="utf-8") == "y = 200\n"
 
-    # Verify event stream contained parallel groups and phase tracking
     event_types = [e.event_type for e in events_emitted]
     assert "parallel.group.started" in event_types
     assert "parallel.group.completed" in event_types
     assert "turn.completed" in event_types
 
-    # Verify supervisor & taskboard integrations
-    assert len(supervisor.recorded_actions) > 0
-    assert len(taskboard.updates) > 0
+    assert supervisor.recorded_actions
+    assert [update["task_id"] for update in taskboard.updates] == [task.task_id, task.task_id]
+    assert all(update["progress"] for update in taskboard.updates)
 
 
 def test_internal_coding_engine_global_memory_recording_on_error(tmp_path: Path) -> None:

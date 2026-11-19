@@ -2410,15 +2410,7 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """E2E P0.1-P0.4: AgentChatGateway.process_turn executes full feature integration lifecycle.
-
-    - runtime_capability_change is True
-    - coding agent fake has NO queue_manager attribute
-    - coding result has NO 'integration' key
-    - NO injected feature_integration_decision, decision_provider, or authority
-    - Gateway constructs FeatureIntegrationDecisionProvider and MultiAgentVerificationExecutor
-    - Validates core complete -> WiringDecision -> verification -> provenance -> reachability -> Reviewer
-    """
+    """The Coding decision and its isolated check satisfy runtime integration review."""
     from mana_agent.multi_agent.core.types import TaskStatus
 
     class _CodexLikeCodingAgent:
@@ -2449,11 +2441,25 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
             return None
 
     class _StructuredEntryModel(FileInvestigator):
-        investigation_path = "README.md"
+        investigation_path = "src/main.py"
 
         def decide_sync(self, messages, schema, **kwargs):
             if isinstance(schema, dict):
-                return _mode_decision_fixture(messages, schema, "src/provider.py", operation="add")
+                result = _mode_decision_fixture(messages, schema, "src/provider.py", operation="add")
+                decision = result.get("decision", {})
+                if decision.get("action") == "inspect":
+                    return {"decision": inspection(self.investigation_path)}
+                if decision.get("action") == "draft":
+                    decision["draft"]["findings"] = "src/main.py reaches Provider through route and build_provider"
+                    decision["runtime_wiring"] = {
+                        "reason": "The entry point reaches the provider constructor",
+                        "edges": [
+                            {"source": "main", "target": "route", "relation": "calls", "path": "src/main.py", "line": 8},
+                            {"source": "route", "target": "build_provider", "relation": "calls", "path": "src/main.py", "line": 6},
+                            {"source": "build_provider", "target": "Provider", "relation": "constructs", "path": "src/main.py", "line": 4},
+                        ],
+                    }
+                return result
             raw = self.generate_sync(messages, **kwargs)
             if isinstance(raw, schema):
                 return raw
@@ -2463,25 +2469,6 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
 
         def generate_sync(self, messages, **_kwargs):
             payload = json.loads(messages[-1].content)
-            if "feature integration decision layer" in str(messages[0].content).lower() or "wiring_targets" in str(payload):
-                return SimpleNamespace(
-                    content=json.dumps(
-                        {
-                            "outcome": "already_integrated",
-                            "patch": "",
-                            "wiring_targets": ["src/provider.py"],
-                            "runtime_entrypoints": ["src/main.py"],
-                            "configuration_targets": [],
-                            "edges": [
-                                {"from": "ChatGateway", "to": "ModelRouter", "relation": "calls", "source_reference": "src/gateway.py:10"},
-                                {"from": "ModelRouter", "to": "ProviderFactory", "relation": "selects", "source_reference": "src/router.py:20"},
-                                {"from": "ProviderFactory", "to": "NewProvider", "relation": "constructs", "source_reference": "src/factory.py:30"},
-                            ],
-                            "verification_commands": ["python -m pytest tests/test_provider.py"],
-                            "reason": "Feature is wired into production entrypoint",
-                        }
-                    )
-                )
             if "recovery_candidates" in payload:
                 return SimpleNamespace(
                     content=json.dumps(
@@ -2594,20 +2581,24 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
 
     session_id = gw.create_session(frontend="test")
 
-    # Mock tool execution in queue manager for verification shell commands so they pass
-    from mana_agent.multi_agent.tools.tool_manager import ToolsManager
     monkeypatch.setattr(
-        ToolsManager,
-        "execute_job",
-        lambda self, job: SimpleNamespace(ok=True, result={"stdout": "1 passed"}, error=None),
+        gw, "_feature_integration_decision_provider",
+        lambda **_: pytest.fail("Integration must use the wiring supplied by Coding"),
     )
 
     (tmp_path / "README.md").write_text("Provider entry point is src/main.py\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/main.py").write_text(
+        "from .provider import Provider\n\n"
+        "def build_provider():\n    return Provider()\n"
+        "def route():\n    return build_provider()\n"
+        "def main():\n    return route()\n"
+    )
     _mock_verified_command(monkeypatch)
     result = gw.process_turn(session_id, "add new provider runtime capability")
 
-    # Verify P0.1-P0.4 results:
-    assert result.error is None
+    assert result.error is None, result.answer
+    assert result.changed_files == ["src/provider.py"]
     taskboard = gw._lane_coordinator.taskboard
     # Find the wiring child task
     wiring_child = next(
@@ -2619,14 +2610,17 @@ def test_gateway_process_turn_runtime_capability_feature_integration_e2e(
     assert len(wiring_child.reachability_edges) == 3
     assert len(wiring_child.verification_results) >= 1
     assert wiring_child.verification_results[-1].passed is True
-    assert len(wiring_child.verification_queue_job_ids) >= 1
+    assert not wiring_child.verification_queue_job_ids
     assert wiring_child.verification_provenance is not None
+    parent = taskboard.get_task(wiring_child.parent_task_id)
+    operation_ids = [receipt["operation_id"] for receipt in parent.mode_workflow["verification"] if receipt["passed"]]
+    assert operation_ids
+    assert wiring_child.verification_provenance["isolated_operation_ids"] == operation_ids
     assert wiring_child.runtime_reachability_verified is True
     assert wiring_child.reviewed_by_agent_id != ""
     assert wiring_child.status is TaskStatus.DONE
     assert wiring_child.implementation_verified is True
     assert wiring_child.integration_verified is True
-    assert wiring_child.runtime_reachability_verified is True
     assert wiring_child.supervisor_execution_id
     assert wiring_child.supervisor_state == "completed"
     assert wiring_child.verification_status == "passed"

@@ -471,15 +471,20 @@ class InvestigateDecision(_ModeAction):
         if not self.requests:
             return self  # Saved recovery envelopes may omit a new selection.
         if self.recovery is not None:
-            raise ValueError("Import the saved investigation before selecting new reads")
-        paths = tuple(PurePosixPath(relative_source(path)) for path in self.paths)
+            raise _mode_error(self, "mode_investigation_recovery_batch",
+                              "Import the saved investigation before selecting new reads.")
+        try:
+            paths = tuple(PurePosixPath(relative_source(path)) for path in self.paths)
+        except ValueError:
+            raise _mode_error(self, "mode_investigation_paths",
+                              "Select canonical, accessible repository-relative paths for the investigation.") from None
         if PurePosixPath(".") in paths:
-            raise ValueError("Select specific paths for a scoped investigation")
+            raise _mode_error(self, "mode_investigation_paths", "Select specific paths for a scoped investigation.")
         for request in self.requests:
             if request.level == 4 or not request.paths or any(
                 not any(PurePosixPath(path).is_relative_to(scope) for scope in paths) for path in request.paths
             ):
-                raise ValueError("Investigation reads must stay inside the selected paths")
+                raise _mode_error(self, "mode_investigation_scope", "Investigation reads must stay inside the selected paths.")
         return self
 
 

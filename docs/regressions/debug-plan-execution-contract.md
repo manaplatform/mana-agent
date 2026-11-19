@@ -674,6 +674,49 @@ venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k '
 
 Test execution and replay of the live incident remain pending.
 
+### Blocked repair reports and Coding decision fixtures
+
+On 2026-11-20, the reported regression run showed a traceback when an
+automatic repair declined to defer an unavailable pre-patch check or tried to
+drop a required passing check. Opening a revision had explicitly set the saved
+plan to `null`. The blocked-result formatter handled a missing key but treated
+that explicit value as a plan. It now reports the blocker with the retained
+observations while the revision has no plan.
+
+An investigation containing a repository-wide search also lost its scope
+diagnostic because the decision formatter redacts plain validation exceptions.
+The scoped validator now emits a safe typed diagnostic. The batch remains
+atomic and no read runs when one selection is outside the authorized scope.
+
+The same run exposed fixtures written for earlier contracts. Strict provider
+responses now include the scoped request array and the schema tests cover
+the runtime-wiring field for Coding proposals. The gateway integration test
+supplies wiring in the Coding decision and checks that the wiring review
+records the exact operation ID from the approved check. The Internal engine
+fixture uses the current TaskBoard progress interface. Reviewer coverage
+continues to reject verification plans without execution receipts.
+
+**Do not reintroduce** blocked-result formatting that assumes a saved plan
+exists, rejection diagnostics that echo model data, or integration completion
+based on planned verification.
+
+Run the following cases to verify the reported failures.
+
+```sh
+venv/bin/python -m pytest -q \
+  tests/gateway/test_chat_gateway.py::test_gateway_process_turn_runtime_capability_feature_integration_e2e \
+  tests/gateway/test_debug_plan_mode_contract.py::test_investigation_batch_rejects_all_reads_if_any_selection_is_invalid \
+  tests/gateway/test_debug_plan_mode_contract.py::test_unavailable_pre_patch_verification_allows_model_directed_repair \
+  tests/gateway/test_evidence_driven_orchestration.py::test_investigation_recovery_checks_saved_assignment_at_dispatch \
+  tests/llm/test_engine.py::test_anthropic_mode_decision_uses_messages_and_preserves_validation \
+  tests/llm/test_providers.py::test_openrouter_claude_mode_schema_preserves_local_constraints \
+  tests/llm/test_providers.py::test_mode_decision_wire_schema_exposes_only_the_selected_action_fields \
+  tests/test_internal_coding_engine_workflow.py::test_internal_coding_engine_parallel_workflow \
+  tests/test_multi_agent_core.py::test_reviewer_rejects_planned_verification_without_queue_job
+```
+
+The agent did not run these tests or replay the live incident.
+
 ## Text search query contract
 
 On 2026-11-17, DEBUG task `task_20261117_000009` using OpenRouter DeepSeek saved 96 observations before decision validation rejected the second request in a proposed batch. The corrected `repo_search` request lacked a nonblank query. The journal retained the validation failure and the saved observations. It did not retain the rejected argument.

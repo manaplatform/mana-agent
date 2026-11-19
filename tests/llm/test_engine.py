@@ -1032,7 +1032,11 @@ def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path
             objective = "x" * 2001 if len(requests) == 1 else "Trace the return value"
             decision = {"action": "investigate", "reason": "Read the caller",
                         "objective": objective, "scope": "app.py", "initial_repository_scope": "",
-                        "paths": ["app.py"], "task_kind": "investigation", "recovery": None}
+                        "paths": ["app.py"], "task_kind": "investigation", "recovery": None,
+                        "requests": [{"tool": "read_file", "level": 1, "paths": ["app.py"], "query": "",
+                                      "glob": "**/*", "start_line": 1, "end_line": None,
+                                      "reason": "Read the named file", "prior_evidence": [],
+                                      "initial_repository_scope": ""}]}
             return {"stop_reason": "end_turn", "content": [
                 {"type": "text", "text": json.dumps({"decision": decision})},
             ]}
@@ -1050,6 +1054,7 @@ def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path
 
     assert model.endpoint == "anthropic_messages"
     assert decision.objective == "Trace the return value"
+    assert [request.paths for request in decision.requests] == [("app.py",)]
     assert len(requests) == 2
     for body in requests:
         assert body["model"] == "claude-haiku-5-5"
@@ -1059,6 +1064,7 @@ def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path
         assert output_format["type"] == "json_schema"
         investigate = output_format["schema"]["$defs"]["InvestigateDecision"]
         assert investigate["properties"]["action"]["const"] == "investigate"
+        assert "requests" in investigate["required"]
         objective = investigate["properties"]["objective"]
         assert "maxLength" not in objective
         assert "maxLength: 2000" in objective["description"]

@@ -1,6 +1,5 @@
 """Investigation task identity, independent readiness, and honest completion."""
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -185,38 +184,56 @@ def test_equivalent_investigations_for_different_parents_keep_separate_execution
 @pytest.mark.parametrize("case", ["paths", "scope", "checkpoint", "other_parent", "resume", "retry"])
 def test_investigation_recovery_checks_saved_assignment_at_dispatch(board, monkeypatch, case):
     from mana_agent.agent.plan_service import InvestigateDecision
+    from mana_agent.config.autonomous_config import AutonomousExecutionConfig
     from mana_agent.execution_supervisor.models import ExecutionState, RecoveryAction, RecoveryDecision
     from mana_agent.gateway.mode_workflow import ModeWorkflow
+    from mana_agent.repository_evidence.models import EvidenceProvenance, EvidenceQuery, EvidenceSource
+    from mana_agent.repository_evidence.observations import read_source
+    from mana_agent.services.activity_context import ActivityContext
 
     root = board.create_task(title="Goal", user_request="Investigate handler")
     requirement = EvidenceRequirement(requirement_id="behavior", objective="Inspect handler",
         acceptance_criteria=("Cite handler",))
     child = ensure_investigation(board, parent_task_id=root.task_id, objective=requirement.objective, scope=["src"],
         requirements=[requirement], owner_agent_id="coding", decision_id="selected")
+    repo = board.store.root
+    (repo / "src").mkdir()
+    knowledge = board.evidence_board(root=repo)
+    observations = []
+    for name in ("handler.py", "stale.py"):
+        path = f"src/{name}"
+        (repo / path).write_text("observed = True\n")
+        read = read_source(repo, path)
+        source = EvidenceSource.model_validate(read["source_evidence"])
+        observations.append(knowledge.record_observation(
+            provenance=EvidenceProvenance(task_id=child.task_id, attempt_id="saved-attempt", attempt_generation=1,
+                decision_id="selected", invocation_id=name, agent_id="coding", backend="internal",
+                result_digest=source.sha256),
+            category="code_behavior", statement="The source sets observed", observation=read, sources=(source,),
+        ))
+    (repo / "src/stale.py").write_text("observed = False\n")
+    current, stale = observations
+    board.update_task(child.task_id, evidence_refs=[record.ref.model_dump(mode="json") for record in observations])
+    child = board.get_task(child.task_id)
     child.mode_workflow["investigation_context"] = "Inspect the handler"
     board.save()
-    restored = TaskBoard(board.store.root)
-    durable = SimpleNamespace(state=ExecutionState.FAILED, checkpoint_id="checkpoint-saved")
-    selected = []
-
-    class DispatchObserved(Exception):
-        pass
-
-    def dispatch(action):
-        def schedule(task_id, *, decision, session_id):
-            selected.append((action, task_id, decision))
-            raise DispatchObserved
-        return schedule
-
+    restored = TaskBoard(repo)
+    durable = SimpleNamespace(state=ExecutionState.WAITING if case == "resume" else ExecutionState.FAILED,
+                              checkpoint_id="checkpoint-saved")
+    retired = []
     lane = SimpleNamespace(taskboard=restored,
         execution_supervisor=SimpleNamespace(store=SimpleNamespace(get_task_or_none=lambda _: durable)),
-        workflow_step_capacity=lambda *_: nullcontext(), resume_checkpoint=dispatch(RecoveryAction.RESUME_CHECKPOINT),
-        retry_task=dispatch(RecoveryAction.RETRY))
+        ensure_recoverable_execution=lambda task_id: restored.get_task(task_id),
+        cancel_task=lambda task_id, **kwargs: retired.append((task_id, kwargs["source"])),
+        resume_checkpoint=lambda *args, **kwargs: pytest.fail("Recovery restarted the investigation backend"),
+        retry_task=lambda *args, **kwargs: pytest.fail("Recovery restarted the investigation backend"))
     workflow = ModeWorkflow(SimpleNamespace(_lane_coordinator=lane,
+        _autonomous_controller=SimpleNamespace(config=AutonomousExecutionConfig()),
         _coding_agent=SimpleNamespace(for_assignment=lambda **_: pytest.fail("Requested unauthorized dispatch"))))
-    monkeypatch.setattr("mana_agent.gateway.mode_workflow.current_activity_context",
-                        lambda: SimpleNamespace(attempt_generation=2))
-    monkeypatch.setattr(workflow, "_workspace_root", lambda _: board.store.root)
+    activity = ActivityContext(conversation_id="fixture", execution_id="turn", task_id=root.task_id, attempt_generation=2)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.current_activity_context", lambda: activity)
+    monkeypatch.setattr(workflow, "_workspace_root", lambda _: repo)
+    monkeypatch.setattr(workflow, "_check_live", lambda task_id: restored.get_task(task_id))
     recovery = RecoveryDecision(decision_id="recover", task_id=child.task_id,
         action=RecoveryAction.RETRY if case == "retry" else RecoveryAction.RESUME_CHECKPOINT,
         resume_checkpoint_id={"retry": "", "checkpoint": "checkpoint-old"}.get(case, "checkpoint-saved"),
@@ -225,16 +242,29 @@ def test_investigation_recovery_checks_saved_assignment_at_dispatch(board, monke
         scope="Change the saved question" if case == "scope" else "Inspect the handler",
         paths=("other",) if case == "paths" else ("src",), recovery=recovery)
 
-    parent_id = "different-parent" if case == "other_parent" else root.task_id
+    parent_id = (restored.create_task(title="Other task", user_request="Read different code").task_id
+                 if case == "other_parent" else root.task_id)
+    state = {"mode": "auto", "phase": "active", "revision": 1, "decision_count": 1, "evidence": []}
+    query = EvidenceQuery(task_id=parent_id, include_stale=True)
     if case in {"resume", "retry"}:
-        with pytest.raises(DispatchObserved):
-            workflow._investigate(parent_id, {"decision_count": 1}, None, decision)
-        assert selected == [(recovery.action, child.task_id, recovery)]
+        workflow._investigate(parent_id, state, None, decision)
+        assert retired == [(child.task_id, "coding_evidence_migration")]
+        saved = TaskBoard(repo).get_task(parent_id)
+        assert saved.evidence_refs == [current.ref.model_dump(mode="json")]
+        assert saved.mode_workflow["investigation"]["report"]["evidence_ids"] == [current.evidence_id]
+        assert saved.mode_workflow["evidence_accounting"]["reused_evidence"] == 1
+        assert saved.mode_workflow.get("tool_operations", 0) == 0
+        assert [record["evidence_id"] for record in knowledge.query(query)["records"]] == [current.evidence_id]
+        assert knowledge.get(current.ref).provenance.task_id == child.task_id
+        assert knowledge.get(stale.ref).freshness == "stale"
     else:
-        expected = {"checkpoint": "exact nonempty saved_investigation.checkpoint_id", "other_parent": "no saved child"}
+        expected = {"checkpoint": r"exact nonempty saved_investigation\.checkpoint_id",
+                    "other_parent": "No saved child investigation belongs to this Coding task"}
         with pytest.raises(PermissionError, match=expected.get(case, "match the saved child, objective, and scope")):
-            workflow._investigate(parent_id, {"decision_count": 1}, None, decision)
-        assert not selected
+            workflow._investigate(parent_id, state, None, decision)
+        assert not retired
+        assert not knowledge.query(query)["records"]
+        assert not restored.get_task(parent_id).evidence_refs
 
     assert len(restored.list_tasks(parent_task_id=root.task_id)) == 1
     assert restored.get_task(child.task_id).investigation_scope == ["src"]

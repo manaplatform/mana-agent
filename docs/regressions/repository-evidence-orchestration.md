@@ -587,22 +587,30 @@ context offers no saved child with a durable attempt, the single correction
 can select another allowed action or submit a fresh investigation with
 `recovery` set to `null`. When a child exists, correction guidance identifies
 which fields differ without echoing rejected values. The gateway reads the
-saved assignment again before dispatch and uses the lane operation named by
-the recovery decision. The supervisor still checks checkpoint eligibility.
-Recovery retains the saved assignment. Older tasks without saved scope text
-continue to use their saved objective, paths, kind, and audit scope.
+saved assignment again before importing evidence and reports any changed
+scope or checkpoint as a permission error. Older tasks without saved scope
+text continue to use their saved objective, paths, kind, and audit scope.
+
+Under the Coding-owned evidence workflow, an eligible recovery selection
+links current, supported observations from the legacy child to its parent.
+The evidence retains the child's provenance. The gateway requests
+cancellation of the old execution where applicable and Coding can select
+fresh reads for unresolved questions. The supervisor completion gate still
+requires a verified child result when an old supervised child remains
+attached to its parent.
 
 **Do not reintroduce** gateway-only investigation recovery validation,
-observation IDs as recovery targets, or dispatch of a checkpoint resume via
-the plain retry entry point.
+observation IDs as recovery targets, or rerunning an investigation backend
+while importing its saved evidence.
 
 ```sh
 venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/gateway/test_evidence_driven_orchestration.py -k 'corrects_investigation_recovery or investigation_recovery_checks_saved_assignment'
 ```
 
 The fixtures cover correction into a draft after direct inspection,
-cross-parent and stale checkpoint rejection, and explicit retry and resume
-dispatch. Test execution and live replay remain pending.
+cross-parent and stale checkpoint rejection, and source freshness when
+importing evidence through saved retry and resume decisions. Test execution
+and live replay remain pending.
 
 #### Citation shape regression
 

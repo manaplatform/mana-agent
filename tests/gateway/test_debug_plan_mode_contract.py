@@ -2334,6 +2334,7 @@ def test_unavailable_pre_patch_verification_allows_model_directed_repair(mode_ga
         assert result.data["phase"] == "blocked"
         assert operations == ["baseline.py"]
         assert result.data["changed_files"] == []
+        assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1"]
         expected = {"lost_required_check": "required regression checks", "requires_pre_patch": "before editing",
                     "repeats_pre_patch": "Put the required isolated checks after the changes"}
         assert expected[revised_outcome] in result.message

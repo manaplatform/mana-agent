@@ -72,6 +72,7 @@ def test_openrouter_claude_mode_schema_preserves_local_constraints():
     investigate = wire["$defs"]["InvestigateDecision"]
     assert investigate["properties"]["action"]["const"] == "investigate"
     assert "objective" in investigate["required"]
+    assert "requests" in investigate["required"]
     objective = investigate["properties"]["objective"]
     assert "maxLength" not in objective
     assert "maxLength: 2000" in objective["description"]
@@ -84,10 +85,15 @@ def test_openrouter_claude_mode_schema_preserves_local_constraints():
     def normalize(objective):
         content = json.dumps({"decision": {"action": "investigate", "reason": "Read the caller",
             "objective": objective, "scope": "app.py", "initial_repository_scope": "",
-            "paths": ["app.py"], "task_kind": "investigation", "recovery": None}})
+            "paths": ["app.py"], "task_kind": "investigation", "recovery": None,
+            "requests": [{"tool": "read_file", "level": 1, "paths": ["app.py"], "query": "",
+                          "glob": "**/*", "start_line": 1, "end_line": None, "reason": "Read the named file",
+                          "prior_evidence": [], "initial_repository_scope": ""}]}})
         return adapter.normalize({"choices": [{"message": {"content": content}}]}, selected).content
 
-    assert ModeDecision.model_validate_json(normalize("Trace the return value"), strict=True).decision.action == "investigate"
+    decision = ModeDecision.model_validate_json(normalize("Trace the return value"), strict=True).decision
+    assert decision.action == "investigate"
+    assert [request.paths for request in decision.requests] == [("app.py",)]
     with pytest.raises(StructuredOutputError):
         normalize("x" * 2001)
 
@@ -202,11 +208,11 @@ def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
 
 @pytest.mark.parametrize("action,fields", [
     ("inspect", {"requests"}),
-    ("investigate", {"objective", "scope", "initial_repository_scope", "paths", "task_kind", "recovery"}),
+    ("investigate", {"objective", "scope", "initial_repository_scope", "paths", "task_kind", "recovery", "requests"}),
     ("clarify", {"questions"}),
-    ("draft", {"draft"}),
+    ("draft", {"draft", "runtime_wiring"}),
     ("diagnose", {"root_cause", "cause_evidence", "uncertainty"}),
-    ("repair", {"draft", "root_cause", "cause_evidence", "uncertainty"}),
+    ("repair", {"draft", "root_cause", "cause_evidence", "uncertainty", "runtime_wiring"}),
     ("research", {"debugging_report"}),
     ("block", set()),
 ])

@@ -1207,7 +1207,10 @@ def test_reviewer_rejects_planned_verification_without_queue_job(tmp_path):
     assert isinstance(verifier, VerifierAgent)
     verifier.verify_no_mutation(task.task_id, ["python -m compileall src"])
     assert reviewer.review_evidence(task.task_id, route_name="simple", requires_verification=True) is False
-    assert any("verification lacks executed queue job evidence" in item for item in main.taskboard.get_task(task.task_id).blockers)
+    saved = main.taskboard.get_task(task.task_id)
+    assert saved.verification_results[-1].passed is False
+    assert not saved.verification_queue_job_ids
+    assert any("verification lacks executed operation evidence" in item for item in saved.blockers)
 
 
 def test_main_agent_routes_chat_analyze_and_plan(tmp_path):

@@ -22,6 +22,8 @@ from tempfile import TemporaryDirectory
 import time
 from typing import Any, TYPE_CHECKING
 
+from pydantic_core import PydanticCustomError
+
 from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
 from mana_agent.agent.plan_service import (
     InspectDecision, InvestigateDecision, MAX_INSPECTION_BATCH, ModeDecisionContext, PlanService, SavedInvestigation,
@@ -993,9 +995,12 @@ class ModeWorkflow:
         if decision.recovery is not None:
             saved = self._saved_investigation(task_id, decision.recovery.task_id)
             if saved is None:
-                raise PermissionError("The legacy investigation does not belong to this Coding task")
+                raise PermissionError("No saved child investigation belongs to this Coding task.")
             child, execution, recovery_target = saved
-            validate_investigation_recovery(decision, recovery_target)
+            try:
+                validate_investigation_recovery(decision, recovery_target)
+            except PydanticCustomError as exc:
+                raise PermissionError(str(exc)) from None
             knowledge = self.board.evidence_board(root=root)
             refs = []
             for raw in child.evidence_refs:
@@ -2393,7 +2398,7 @@ class ModeWorkflow:
         if not stop and inspection and (self._remaining_tools(state) <= 0 or self._remaining_decisions(state) <= 0):
             stop = "The shared workflow budget was exhausted."
         native_report = state.get("investigation", {}).get("report", {})
-        plan_findings = state.get("plan", {}).get("draft", {}).get("findings")
+        plan_findings = (state.get("plan") or {}).get("draft", {}).get("findings")
         findings = state.get("root_cause") or plan_findings or native_report.get("findings", "")
         return {"evidence_ids": list(investigation_scope(state["evidence"]).evidence_levels)[-12:],
                 "findings": findings, "gaps": state.get("uncertainty") or native_report.get("gaps", ""),
