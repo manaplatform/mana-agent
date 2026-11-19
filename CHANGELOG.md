@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-19
 
+- Require an output marker in the `ModeDecision` schema for checks that expect failure. Give repair drafts explicit field and verification guidance during the existing correction, including after inspection stops. Use the [repair draft regression commands](docs/regressions/debug-plan-execution-contract.md#repair-draft-verification-regression) for verification. The agent did not run them.
 - Show safe diagnostics when Anthropic-compatible Messages rejects a mode response. Allow one same-format correction for a missing, unoffered, or repeated `record_decision` call. See the [Messages response regression](docs/regressions/debug-plan-execution-contract.md#messages-mode-response-regression) for verification.
 - Require a saved supervisor record for same-task recovery and explain when a task was archived. Retry reads the original session for the linked request. See the [archived task recovery regression](docs/regressions/batch-and-followup-context.md#archived-task-recovery-regression) for verification.
 - Advertise investigation paths, task kind, and recovery in the closed `ModeDecision` schema. Keep decisions nested under the single `decision` argument and give same-format corrections redacted field diagnostics. See the [decision argument regression](docs/regressions/debug-plan-execution-contract.md#mode-decision-tool-argument-regression) for verification.

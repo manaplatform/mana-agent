@@ -47,3 +47,5 @@ Verification commands run with the reviewed argv against a disposable source cop
 ## Debug a failure
 
 Describe the failure in ordinary chat. A stack trace, failing command, or affected file and line helps Mana select the first observation. Ask it to diagnose the problem or to diagnose and fix it. A repair starts with causal evidence and ends with focused verification. External dependency research uses the existing coding research settings and tool permissions. The Activity panels show the current investigation, justified scope expansions, patch work, and verification results.
+
+A reproduction command that expects failure requires a literal output marker that identifies the intended failure. If the evidence cannot establish that diagnostic, the repair plan can record the uncertainty and use a regression check that expects to pass. The same decision rules apply when repository inspection reaches its no-progress limit and the workflow must use saved observations.

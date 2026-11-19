@@ -540,6 +540,71 @@ def test_mode_decision_repairs_semantic_failure_on_selected_strategy(tmp_path, n
     assert "recommended_choice must be an exact key in choices" in request_log[1].messages[-1].content
 
 
+@pytest.mark.parametrize("known_diagnostic", [False, True])
+def test_mode_decision_corrects_repair_draft_after_inspection_stops(
+    tmp_path, native_profile, monkeypatch, known_diagnostic,
+):
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.messages import ToolCall
+
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            passing_check = {"argv": ["pytest", "tests/test_handler.py"]}
+            reproduction = {"argv": ["./check-handler"], "expected": "fail"}
+            draft = {
+                "objectives": ["Fix the handler"], "findings": "The caller drops the error.", "scope": ["app.py"],
+                "steps": [{
+                    "step_id": "repair", "instruction": "Propagate the error.",
+                    "changes": [{"path": "app.py", "operations": ["update"]}],
+                    "verification": [passing_check], "acceptance_criteria": ["The caller reports the error."],
+                }],
+            }
+            if len(requests) == 1:
+                draft["steps"][0]["verification"].append(reproduction)
+                draft["PRIVATE_EXTRA"] = "PRIVATE_VALUE"
+            elif known_diagnostic:
+                draft["steps"][0]["verification"].append({**reproduction, "output_marker": "handler rejected input"})
+            decision = {
+                "action": "repair", "reason": "The saved read identifies the caller.",
+                "root_cause": "The caller drops the error.", "cause_evidence": ["evidence-1"], "draft": draft,
+                "uncertainty": "" if known_diagnostic else "The failure output has not been observed.",
+            }
+            return ModelResponse(tool_calls=[ToolCall(id="repair", name="record_decision", args={"decision": decision})])
+
+    model = NativeLLMEngine(provider="openrouter", model="anthropic/claude-haiku-5.5", api_key="fixture",
+                            base_url="https://provider.example/api/v1", endpoint="anthropic_messages", adapter=Adapter())
+    monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
+
+    decision = PlanService(tmp_path, llm=model).next_decision("debug", {
+        "inspection_stop": "Repository reads stopped yielding new evidence.",
+        "evidence": [{"id": "evidence-1"}],
+    }, inspection_available=False)
+
+    assert len(requests) == 2
+    assert requests[0].tools == requests[1].tools
+    prompt = requests[0].messages[0].content
+    correction = requests[1].messages[-1].content
+    for instructions in (prompt, correction):
+        assert "use only these keys inside draft" in instructions
+        assert "provide a nonempty output_marker" in instructions
+        assert "omit that optional reproduction check" in instructions
+    assert "decision.repair.draft.steps.0.verification.1: verification expecting failure requires an output_marker" in correction
+    assert "decision.repair.draft.<key>: extra forbidden" in correction
+    assert "PRIVATE_" not in correction
+    assert decision.action == "repair"
+    assert decision.cause_evidence == ("evidence-1",)
+    checks = decision.draft.steps[0].verification
+    assert checks[0].expected == "pass"
+    if known_diagnostic:
+        assert checks[1].output_marker == "handler rejected input"
+    else:
+        assert len(checks) == 1
+        assert decision.uncertainty
+
+
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])
 def test_mode_decision_corrects_an_unavailable_coding_inspection(tmp_path, native_profile, monkeypatch, strategy):
     import json

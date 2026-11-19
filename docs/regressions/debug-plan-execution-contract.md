@@ -216,6 +216,22 @@ venv/bin/python -m pytest -q tests/llm/test_engine.py tests/llm/test_providers.p
 
 The focused regression tests passed locally. Live provider behavior remains unverified.
 
+## Repair draft verification regression
+
+On 2026-11-19, a DEBUG workflow reached its repository inspection no-progress limit with the reported non-root result still unconfirmed. Its `record_decision` correction was rejected because a repair check expected failure without an `output_marker` and the draft had an undeclared field. The error redacts the field name and rejected values.
+
+The decision schema advertised `output_marker` as optional for every verification command. The DEBUG prompt encouraged a reproduction without explaining the required diagnostic or what to do when it was unknown. The existing correction supplied a redacted error, and after inspection stopped it gave no draft-specific guidance. Earlier draft fixtures covered successful commands and did not exercise this combination.
+
+The validation schema now has separate shapes for passing and failing checks. A failing check requires a nonempty literal marker. Initial and correction prompts name the allowed draft fields and explain that a markerless reproduction can be omitted while preserving uncertainty and a passing regression check. The same model still gets one correction. Saved plans and approval digests require no migration.
+
+**Do not reintroduce** markerless expected failures or accept extra draft fields. Preserve the application's diagnostic check, redaction, and the no-progress limit.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_engine.py tests/llm/test_providers.py -k 'corrects_repair_draft_after_inspection_stops or uses_typed_records_and_preserves_plan_digest'
+```
+
+The fixtures cover bounded tool-response correction with and without a known diagnostic, rejection of missing or empty markers through the native provider adapters, and round-tripping a saved plan. The agent did not run the fixtures or replay the live task.
+
 ## Messages mode response regression
 
 On 2026-11-19 at 23:00 Tehran time, the Debug workflow for

@@ -70,6 +70,14 @@ _INSPECTION_CORRECTION = (
     "Use existing observations when they suffice, and avoid repeating a completed listing."
 )
 
+_DRAFT_GUIDANCE = (
+    f"For draft or repair, use only these keys inside draft: {', '.join(PlanDraft.model_fields)}. "
+    "Write supporting context in the declared text fields. "
+    "For each verification with expected='fail', provide a nonempty output_marker with the exact text "
+    "that identifies the intended failure. If the evidence does not support a specific marker, omit that "
+    "optional reproduction check, preserve the uncertainty, and include a verification that expects to pass."
+)
+
 
 def _inspection_correction_hint(
     error: ValueError, lookup_observation: Callable[[str], dict[str, Any] | None] | None,
@@ -536,7 +544,9 @@ class PlanService:
                       scope: InvestigationScope | None = None,
                       lookup_observation: Callable[[str], dict[str, Any] | None] | None = None) -> ModeAction:
         def correction_hint(error: ValueError) -> str:
-            return _inspection_correction_hint(error, lookup_observation) if inspection_available else ""
+            if inspection_available:
+                return f"{_DRAFT_GUIDANCE}\n{_inspection_correction_hint(error, lookup_observation)}"
+            return _DRAFT_GUIDANCE
 
         envelope = self.decide(
             ModeDecision,
@@ -594,6 +604,7 @@ class PlanService:
             "steps. A draft needs explicit step IDs with dependencies on earlier steps and a "
             "passing verification check (argv is an array of individual command arguments). Each step "
             "must have file operations or a verification command and clear acceptance criteria. "
+            f"{_DRAFT_GUIDANCE} "
             "Auto mode may investigate, clarify, draft or block. Draft from observed repository evidence. "
             "The draft is an execution plan, so list production entry point changes and relevant checks "
             "as concrete steps. If the goal already holds, use a verification-only draft and cite observed evidence. "
@@ -603,9 +614,9 @@ class PlanService:
             "within the same authorized scope. Include the current task_id and observed evidence_ids. "
             "Debug mode may investigate, clarify, diagnose, repair, research or block. "
             "Keep diagnostics-only requests read-only and use diagnose to report the finding. Repair requires an "
-            "evidence-backed hypothesis, the smallest fix, and goal-specific verification. If possible "
-            "include a verification-only step expecting reproduction failure before repair, then a "
-            "passing regression check after repair. Report remaining uncertainty. For an unfamiliar "
+            "evidence-backed hypothesis, the smallest fix, and goal-specific verification. If the intended "
+            "failure diagnostic is known, include a verification-only reproduction step before repair. "
+            "Include a passing regression check after repair. Report remaining uncertainty. For an unfamiliar "
             "external dependency, research may submit a debugging report citing existing local "
             "observations and identifying the specific gap that authoritative sources may resolve. "
             "List dependency_versions and runtime_environment as records with name and value.",

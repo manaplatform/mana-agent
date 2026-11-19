@@ -363,7 +363,9 @@ def test_native_mode_decision_uses_typed_records_and_preserves_plan_digest(endpo
             {"step_id": "fix", "instruction": "Fix the handler", "changes": {"app.py": ["update"]},
              "acceptance_criteria": ["Return the expected value"]},
             {"step_id": "verify", "instruction": "Run focused test", "depends_on": ["fix"],
-             "verification": [{"argv": ["pytest"]}], "acceptance_criteria": ["The test passes"]},
+             "verification": [{"argv": ["pytest"]}, {"argv": ["./check-handler"],
+                              "expected": "fail", "output_marker": "handler rejected input"}],
+             "acceptance_criteria": ["The test passes and the handler rejects invalid input"]},
         ]},
     })
     selected = request(response_schema=ModeDecision.model_json_schema())
@@ -399,6 +401,18 @@ def test_native_mode_decision_uses_typed_records_and_preserves_plan_digest(endpo
     saved = revision.model_dump_json()
     assert json.loads(saved)["draft"]["steps"][0]["changes"] == {"app.py": ["update"]}
     assert PlanRevision.model_validate_json(saved, strict=True).digest == revision.digest
+
+    negative_check = verify["verification"][-1]
+    for marker in (None, ""):
+        invalid_check = negative_check.copy()
+        if marker is None:
+            del invalid_check["output_marker"]
+        else:
+            invalid_check["output_marker"] = marker
+        verify["verification"][-1] = invalid_check
+        with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):
+            normalize(wire)
+    verify["verification"][-1] = negative_check
 
     fix["changes"] = '{"app.py":"update"}'
     with pytest.raises(StructuredOutputError, match="did not match the requested structured-output schema"):

@@ -154,6 +154,34 @@ class VerificationCommand(ModeContract):
     output_marker: str = ""
     image: str = ""
 
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        command = handler.resolve_ref_schema(handler(schema))
+        if handler.mode != "validation":
+            return command
+
+        # Advertise the conditional diagnostic requirement without changing saved commands.
+        fields = command["properties"]
+        passing = {
+            **command,
+            "properties": {**fields, "expected": {"type": "string", "const": "pass", "default": "pass"}},
+        }
+        failing = {
+            **command,
+            "properties": {
+                **fields,
+                "expected": {"type": "string", "const": "fail"},
+                "output_marker": {
+                    "type": "string", "minLength": 1,
+                    "description": "Literal text the failing command must emit for the intended reason.",
+                },
+            },
+            "required": [*command["required"], "expected", "output_marker"],
+        }
+        return {"anyOf": [passing, failing]}
+
     @model_validator(mode="after")
     def validate_command(self):
         if self.cwd != ".":
