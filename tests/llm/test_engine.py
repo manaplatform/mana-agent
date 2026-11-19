@@ -103,6 +103,69 @@ def test_entry_route_reports_schema_rejection_separately_from_request_failure(na
     assert (event, last["status"]) == (("model.completed", "success") if corrected else ("model.failed", "failed"))
 
 
+@pytest.mark.parametrize("corrected_flag", [True, False, None])
+def test_entry_route_corrects_nested_runtime_capability_change(native_profile, monkeypatch, corrected_flag):
+    from mana_agent.gateway.entry_routing import (
+        EntryRouteContext,
+        EntryRouteRegistry,
+        EntryRouter,
+        EntryRoutingError,
+        RouteAvailability,
+        RouteRegistration,
+    )
+    from mana_agent.llm.messages import ToolCall
+
+    native_profile.facts.pop("native_structured_output")
+    requests = []
+    workflow = {
+        "mode": "debug",
+        "objective": "Fix the parser failure",
+        "reason": "The user reported a failure and requested a repair.",
+        "investigation_scope": "The parser and its callers",
+        "expected_result": "Valid input parses successfully",
+        "risk_and_uncertainty": "The failing parser branch needs investigation",
+        "verification_requirements": ["Replay the failing input"],
+        "requested_effect": "write",
+    }
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            args = {
+                "route": "coding", "confidence": 0.9, "reason": "Repair the parser.",
+                "required_sources": ["repository"], "source_message_ids": ["user-1"],
+                "coding_workflow": dict(workflow),
+            }
+            if len(requests) == 1:
+                args["coding_workflow"]["runtime_capability_change"] = True
+            elif corrected_flag is not None:
+                args["runtime_capability_change"] = corrected_flag
+            return ModelResponse(tool_calls=[ToolCall(id=f"route-{len(requests)}", name="record_decision", args=args)])
+
+    registry = EntryRouteRegistry()
+    registry.register(RouteRegistration("coding", "Repository coding", lambda: RouteAvailability(available=True)))
+    router = EntryRouter(llm=engine(native_profile, monkeypatch, Adapter()), registry=registry)
+    context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t", user_message_id="user-1")
+
+    if corrected_flag is None:
+        with pytest.raises(EntryRoutingError, match=r"Decision still invalid.*runtime_capability_change: missing"):
+            router.route(user_prompt="The parser failed. Fix it.", context=context)
+    else:
+        decision = router.route(user_prompt="The parser failed. Fix it.", context=context)
+        assert decision.runtime_capability_change is corrected_flag
+        assert decision.coding_workflow.mode == "debug"
+        assert decision.source_message_ids == ("user-1",)
+
+    assert len(requests) == 2
+    assert requests[0].tools == requests[1].tools
+    schema = requests[0].tools[0]["parameters"]
+    assert "Top-level flag beside coding_workflow" in schema["properties"]["runtime_capability_change"]["description"]
+    assert "top-level runtime_capability_change beside coding_workflow" in requests[0].messages[0].content
+    correction = requests[1].messages[-1].content
+    assert "coding_workflow.runtime_capability_change: extra forbidden" in correction
+    assert "runtime_capability_change at the top level beside coding_workflow" in correction
+
+
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])
 @pytest.mark.parametrize("corrected", [True, False])
 def test_entry_route_reason_correction_stays_on_selected_strategy(

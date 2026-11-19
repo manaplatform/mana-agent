@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Annotated, Any, Callable, Literal, Mapping, Sequence, get_args
 
 from mana_agent.llm.messages import UserMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 from mana_agent.agent.mode import CodingWorkflowDecision
 from mana_agent.context_cost.accounting import ModelContextLimitError
 from mana_agent.context_cost.models import ContextBudgetExceeded
@@ -279,8 +279,15 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     automation_operation: Literal[
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
-    runtime_capability_change: bool = False
-    coding_workflow: CodingWorkflowDecision | None = None
+    runtime_capability_change: bool = Field(
+        default=False,
+        description="Top-level flag beside coding_workflow. On coding routes, explicitly set true for changes "
+                    "to production capabilities and false otherwise.",
+    )
+    coding_workflow: CodingWorkflowDecision | None = Field(
+        default=None,
+        description="AUTO or DEBUG workflow details. Set runtime_capability_change at the decision root.",
+    )
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
     resolved_request: str = ""
     source_message_ids: list[str] = Field(default_factory=list)
@@ -289,6 +296,15 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     response_kind: Literal["task", "status", "clarification"] = "task"
     public_summary: str = Field(default="", max_length=240)
     context_request: EntryContextRequest | None = None
+
+    @model_validator(mode="after")
+    def require_coding_capability_flag(self) -> EntryRoutingOutput:
+        if self.route == "coding" and "runtime_capability_change" not in self.model_fields_set:
+            raise ValidationError.from_exception_data(
+                type(self).__name__,
+                [{"type": "missing", "loc": ("runtime_capability_change",), "input": None}],
+            )
+        return self
 
 
 class EntryRoutingError(RuntimeError):
@@ -562,7 +578,7 @@ Examples:
 - Every coding route requires coding_workflow with mode (auto or debug), objective, reason,
   investigation_scope, expected_result, risk_and_uncertainty, verification_requirements
   (a list of criteria), and requested_effect (read or write). The objective summarizes the task.
-  Explicitly set runtime_capability_change to true for changes to production capabilities and false otherwise.
+  Set top-level runtime_capability_change beside coding_workflow: true for production capability changes, false otherwise.
   Once you can select the coding workflow, route it as a task and let the workflow evaluate any
   missing implementation details. Leave clarification_question empty on a coding route. Use
   debug with read for diagnosis alone and debug with write for a requested repair. Set
@@ -1487,7 +1503,13 @@ def _invoke_routing_model(llm: Any, messages: list[Any]) -> tuple[Any, dict[str,
     from mana_agent.llm.engine import NativeLLMEngine
 
     if isinstance(llm, NativeLLMEngine):
-        response = llm.decide_sync(messages, EntryRoutingOutput, complex_schema=True, repair_decision=True)
+        response = llm.decide_sync(
+            messages, EntryRoutingOutput, complex_schema=True, repair_decision=True,
+            correction_hint=(
+                "For a coding route, explicitly set runtime_capability_change at the top level beside "
+                "coding_workflow. Use true for changes to production capabilities and false otherwise."
+            ),
+        )
         return response, response.model_dump()
     if callable(getattr(llm, "decide_sync", None)) and not type(llm).__name__.endswith("Mock"):
         try:

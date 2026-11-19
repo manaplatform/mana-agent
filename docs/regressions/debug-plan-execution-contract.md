@@ -163,6 +163,31 @@ venv/bin/python -m pytest -q tests/llm/test_engine.py tests/test_tui_approval_re
 
 The agent did not run the tests or replay the provider request.
 
+## Coding route capability flag regression
+
+On 2026-11-19, a `record_decision` response placed `runtime_capability_change`
+inside `coding_workflow`. The closed workflow schema rejected the field and
+the activity panel reported `Decision needs correction`. The entry prompt
+listed the capability flag next to workflow details without specifying its
+level in the response. Typed decoding also filled in `false` when the model
+omitted the flag, hiding the omission from gateway validation.
+
+The routing prompt, tool schema descriptions, and same-format correction
+now place `runtime_capability_change` at the decision root beside
+`coding_workflow`. Coding routes require an explicit boolean, and the nested
+workflow still rejects extra fields. Saved decisions require no migration.
+
+**Do not reintroduce** the flag as a nested workflow field or treat an omitted
+coding capability classification as an explicit `false`.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_engine.py -k nested_runtime_capability_change
+```
+
+The fixture reproduces the rejected tool call, checks recovery with either
+boolean, and checks that an omitted flag exhausts the existing correction.
+The agent did not run the tests or replay the provider request.
+
 ## Entry routing prompt budget regression
 
 `test_context_compactor_metrics` reported a 51-token deficit after
