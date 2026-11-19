@@ -156,6 +156,83 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
     assert not task.mode_workflow.get("inbox_id")
 
 
+@pytest.mark.parametrize("case", ["corrected", "malformed", "out_of_scope", "model_budget", "tool_budget"])
+def test_realtime_patch_format_correction_is_bounded(mode_gateway, monkeypatch, case):
+    import mana_agent.gateway.mode_workflow as mode_module
+    from mana_agent.approval.policy import set_approval_mode
+
+    gateway, workflow = mode_gateway
+    set_approval_mode("full_access")
+    gateway._autonomous_controller.config = AutonomousExecutionConfig(
+        max_model_turns=3 if case == "model_budget" else 4,
+        max_tool_calls=3 if case == "tool_budget" else 4,
+    )
+    decisions = Decisions(draft(), {"disposition": "in_scope", "reason": "Only app.py differs"})
+    gateway._entry_router.llm = decisions
+    valid = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+    malformed = valid + "\n@@\n+unexpected\n*** End Patch"
+    replacement = {
+        "corrected": valid,
+        "malformed": malformed,
+        "out_of_scope": valid.replace("app.py", "other.py"),
+    }.get(case)
+    proposals = []
+    original_apply = mode_module.safe_apply_patch
+    writes = []
+    checks = []
+
+    def propose(prompt, **kwargs):
+        assert (gateway.root / "app.py").read_text() == "before\n"
+        assert kwargs["execution_mode"] == "read_only"
+        assert kwargs["coding_mode_files"] == ["app.py"]
+        if proposals:
+            assert len(proposals) == 1 and replacement is not None
+            assert kwargs["gateway_task_id"] == proposals[0]["gateway_task_id"]
+            assert kwargs["turn_id"] != proposals[0]["turn_id"]
+            assert kwargs["execution_runtime"]["remaining_model_turns"] == 1
+            assert kwargs["execution_runtime"]["remaining_tool_calls"] == 0
+            assert "premature *** End Patch at patch line 6" in prompt
+        patch = replacement if proposals else malformed
+        proposals.append(kwargs)
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    def observe_apply(**kwargs):
+        if not kwargs.get("check_only"):
+            writes.append(kwargs["patch"])
+        return original_apply(**kwargs)
+
+    async def verify(root, command, **kwargs):
+        assert (root / "app.py").read_text() == "after\n"
+        checks.append(command.argv)
+        return {"passed": True, "exit_code": 0, "output": "focused check passed"}
+
+    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode="internal")
+    monkeypatch.setattr(mode_module, "safe_apply_patch", observe_apply)
+    monkeypatch.setattr(mode_module, "run_isolated_verification", verify)
+    result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
+                            workflow=workflow_choice())
+
+    reviewed = [entry["patch"] for entry in decisions.inputs if "patch" in entry]
+    assert len(proposals) == (1 if replacement is None else 2)
+    if case == "corrected":
+        assert result.status == "success", result.message
+        assert reviewed == writes == [valid]
+        assert checks == [("python", "app.py")]
+        assert result.data["repository_observations"]["workflow_model_decisions"] == 4
+        assert result.data["repository_observations"]["workflow_tool_operations"] == 4
+    else:
+        assert result.data["phase"] == "blocked", result.message
+        assert not reviewed and not writes and not checks
+        assert (gateway.root / "app.py").read_text() == "before\n"
+        assert not (gateway.root / "other.py").exists()
+        if case == "out_of_scope":
+            assert "outside step fix" in result.message
+        else:
+            assert "premature *** End Patch at patch line 6" in result.message
+            assert "patch_context_not_found" not in result.message
+            assert ("workflow budget" if replacement is None else "Patch correction failed") in result.message
+
+
 def test_verification_history_is_reopened_with_checkout_versions(mode_gateway, monkeypatch):
     from mana_agent.approval.policy import set_approval_mode
     from mana_agent.human_inbox.models import canonical_digest
@@ -2458,7 +2535,8 @@ def test_resuming_failed_verification_does_not_replay_a_completed_patch(mode_gat
     assert proposals == [patch]
 
 
-def test_batch_proposal_wakes_only_the_bound_step(mode_gateway, monkeypatch):
+@pytest.mark.parametrize("malformed", [False, True])
+def test_batch_proposal_wakes_only_the_bound_step(mode_gateway, monkeypatch, malformed):
     from datetime import datetime, timedelta, timezone
     from mana_agent.approval.policy import set_approval_mode
 
@@ -2474,17 +2552,21 @@ def test_batch_proposal_wakes_only_the_bound_step(mode_gateway, monkeypatch):
         )),
     )
     driver = {}
+    proposals = []
     monkeypatch.setattr("mana_agent.batch.watcher.ensure_batch_watcher", lambda *_a: None)
     monkeypatch.setattr("mana_agent.batch.operations.BatchOperationStore",
                         lambda _store: SimpleNamespace(load_run=lambda task_id: driver[task_id]))
 
     def propose(_prompt, *, gateway_task_id, batch_resume, **kwargs):
+        proposals.append(gateway_task_id)
         if gateway_task_id not in driver:
             workflow.lane.checkpoint(gateway_task_id, boundary="before_batch")
             operation = {"task_id": gateway_task_id, "operation_id": "operation", "batch_id": "provider-job"}
             driver[gateway_task_id] = {"resume": batch_resume, "pending_operation": operation}
             return {"status": "waiting", "pending_operation": operation}
         patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+        if malformed:
+            patch += "\n@@\n+unexpected\n*** End Patch"
         return {"status": "completed", "output": json.dumps({"patch": patch})}
 
     gateway._coding_agent = SimpleNamespace(_internal_engine=SimpleNamespace(model="fixture", provider="fixture"),
@@ -2512,8 +2594,15 @@ def test_batch_proposal_wakes_only_the_bound_step(mode_gateway, monkeypatch):
     with pytest.raises(PermissionError):
         workflow.resume_batch(task_id, child_id, "another operation", driver[child_id])
     workflow.resume_batch(task_id, child_id, "operation", driver[child_id])
-    assert workflow.board.get_task(task_id).mode_workflow["phase"] == "completed"
-    assert (gateway.root / "app.py").read_text() == "after\n"
+    assert proposals == [child_id, child_id]
+    state = workflow.board.get_task(task_id).mode_workflow
+    if malformed:
+        assert state["phase"] == "blocked"
+        assert "premature *** End Patch at patch line 6" in state["result"]
+        assert (gateway.root / "app.py").read_text() == "before\n"
+    else:
+        assert state["phase"] == "completed"
+        assert (gateway.root / "app.py").read_text() == "after\n"
 
 
 def test_checkout_change_blocks_execution_even_when_target_content_matches(mode_gateway):

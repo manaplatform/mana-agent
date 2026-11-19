@@ -25,8 +25,8 @@ Codex app-server patch proposals also use a private result field. The ordinary
 assistant summary cleanup collapses repeated spaces, which can change
 indentation inside a patch encoded in JSON. The proposal parser validates the
 envelope and forwards its original patch text to the scoped review and
-mutation gate. Invalid proposals block the step. The proposal field is excluded
-from ordinary result serialization.
+mutation gate after syntax validation. The proposal field is excluded from
+ordinary result serialization.
 
 **Do not reintroduce** text-based mode selection, an inferred PLAN entry,
 parent write locks that conflict with child leases, or prose cleanup on exact
@@ -40,6 +40,34 @@ auto-execute pipeline and for its response rendering and flow state. Review
 those failures with `venv/bin/python -m pytest -q tests/test_cli_smoke.py`
 before using the full suite as a release check. Keep the gateway as the
 entry point when migrating those fixtures.
+
+## Premature patch terminator
+
+In the November 20 NetPeek coding task, child `task_20261120_000015` returned a
+patch with `*** End Patch` on lines 248 and 275 and an update hunk between
+them. The gateway extracted the file operation and sent the proposal for
+review. Patch preview then treated the first terminator as an unsigned hunk
+line. The result carried `invalid_patch_format` internally, while its
+message told the user that no unique context anchor existed. Preview stopped
+before any write.
+
+The shared parser now validates syntax before matching source context or
+exposing file operations to review. An early terminator reports its patch
+line, and signed lines containing the same text remain valid file content.
+The mutation worker uses the structured failure code to keep syntax errors
+out of stale-context recovery. A fresh realtime proposal gets at most one
+read-only correction on the same coding assignment when the shared budget
+can cover the correction, review, apply, and a focused check. The corrected
+proposal goes through the ordinary validation and mutation gates. Batch
+results and stored patch approvals report syntax failures without
+regenerating the proposal.
+
+**Do not reintroduce** anchor recovery for malformed patch syntax or drop
+an early terminator and apply part of the rejected proposal.
+
+User verification from the Mana-Agent checkout is
+`venv/bin/python -m pytest -q tests/test_apply_patch_json_only.py tests/test_apply_patch_context_recovery.py tests/test_agent_work_queue.py tests/gateway/test_debug_plan_mode_contract.py`.
+The agent did not run the tests.
 
 ## Symptom and cause
 

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mana_agent.tools.apply_patch import extract_patch_touched_files, safe_apply_patch
+import pytest
+
+from mana_agent.tools.apply_patch import (
+    PatchFormatError,
+    extract_patch_operations,
+    extract_patch_touched_files,
+    safe_apply_patch,
+)
 
 
 def test_apply_patch_accepts_codex_patch_without_line_numbers(tmp_path: Path) -> None:
@@ -30,6 +37,63 @@ def test_apply_patch_rejects_non_codex_patch_text(tmp_path: Path) -> None:
     assert result["error_code"] == "invalid_patch_format"
     assert "Codex patch format" in str(result.get("error", ""))
     assert "perl" not in str(result.get("error", ""))
+
+
+@pytest.mark.parametrize(
+    ("bad_line", "diagnostic"),
+    [
+        ("*** End Patch", "premature *** End Patch at patch line 6"),
+        ("missing a hunk prefix", "invalid patch hunk line at patch line 6"),
+    ],
+)
+def test_apply_patch_rejects_bad_syntax_before_matching_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_line: str, diagnostic: str,
+) -> None:
+    target = tmp_path / "example.txt"
+    target.write_text("different\n", encoding="utf-8")
+    patch = (
+        "*** Begin Patch\n*** Update File: example.txt\n@@\n-old\n+new\n"
+        f"{bad_line}\n@@\n-different\n+replacement\n*** End Patch\n"
+    )
+    read_bytes = Path.read_bytes
+
+    def forbid_target_read(path: Path) -> bytes:
+        if path == target:
+            pytest.fail("Malformed patches must fail before reading the target")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", forbid_target_read)
+    with pytest.raises(PatchFormatError) as error:
+        extract_patch_operations(patch)
+    assert diagnostic in str(error.value)
+    assert not extract_patch_touched_files(patch)["ok"]
+
+    for check_only in (True, False):
+        result = safe_apply_patch(repo_root=tmp_path, patch=patch, check_only=check_only)
+        assert not result["ok"]
+        assert result["error_code"] == "invalid_patch_format"
+        assert diagnostic in result["error"]
+        assert not result["attempts"]
+        assert not result.get("action_id")
+        assert target.read_text(encoding="utf-8") == "different\n"
+
+
+def test_apply_patch_preserves_signed_terminators_inside_a_hunk(tmp_path: Path) -> None:
+    target = tmp_path / "example.txt"
+    target.write_text("*** End Patch\nbefore\n", encoding="utf-8")
+    body = (
+        "*** Begin Patch\n*** Update File: example.txt\n@@\n"
+        " *** End Patch\n-before\n+*** End Patch\n"
+    )
+    patch = body + "*** End Patch\n"
+    result = safe_apply_patch(repo_root=tmp_path, patch=patch)
+    assert result["ok"], result["error"]
+    assert target.read_text(encoding="utf-8") == "*** End Patch\n*** End Patch\n"
+
+    missing_terminator = body + " *** End Patch\n"
+    result = safe_apply_patch(repo_root=tmp_path, patch=missing_terminator, check_only=True)
+    assert result["error_code"] == "invalid_patch_format"
+    assert "patch must end with *** End Patch" in result["error"]
 
 
 def test_apply_patch_rejects_json_hunks_with_old_start(tmp_path: Path) -> None:
