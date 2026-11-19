@@ -1540,6 +1540,83 @@ def test_duplicate_inspection_correction_preserves_evidence_levels(mode_gateway,
         assert len(rejections) == 1
 
 
+@pytest.mark.parametrize("invalid_audit", [False, True])
+def test_duplicate_inspection_after_saved_layout(mode_gateway, monkeypatch, invalid_audit):
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    gateway, workflow = mode_gateway
+    (gateway.root / "runtime").mkdir()
+    (gateway.root / "runtime" / "handler.py").write_text("return_value = 'before'\n")
+    layout = evidence_call("layout", "ls")
+    duplicate = inspection(None, layout, evidence_call("another-directory", "ls", reason="Find the tests"))
+    diagnosis = {"action": "diagnose", "reason": "The search found the source", "root_cause": "Old handler value",
+                 "cause_evidence": ["evidence-2"]}
+    requests, reads = [], []
+
+    class Adapter:
+        async def generate(self, request):
+            index = len(requests)
+            requests.append(request)
+            if index in (0, 3):
+                decision = duplicate
+            elif index in (1, 2):
+                assert reads == ([] if index == 1 else [("ls", ())])
+                decision = inspection(None, layout)
+            elif index == 4:
+                assert reads == [("ls", ())]
+                decision = json.loads(request.messages[-1].content.splitlines()[-1])["decision"]
+                search, = decision["requests"]
+                assert search["tool"] == "repo_search" and search["paths"] == ["runtime"]
+                assert search["level"] == 1 and "initial_repository_scope" not in search
+                search["query"] = "return_value"
+                if invalid_audit:
+                    search["initial_repository_scope"] = "explicit_audit"
+                    decision["requests"].insert(0, inspection("app.py")["requests"][0])
+            else:
+                assert index == 5 and not invalid_audit
+                decision = diagnosis
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{index}", name="record_decision", args={"decision": decision},
+            )])
+
+    profile = ModelProfile(provider="openrouter", model_id="deepseek/deepseek-v4.1-flash", facts={
+        name: observation(value, source="provider", confidence=1) for name, value in {
+            "input_text": True, "output_text": True, "tool_calling": True,
+            "context_window": 65536, "max_output_tokens": 1024,
+        }.items()
+    })
+    model = NativeLLMEngine(provider=profile.provider, model=profile.model_id, api_key="fixture",
+                            base_url="https://example.invalid", endpoint="chat_completions", adapter=Adapter())
+    monkeypatch.setattr(model, "profile", lambda *_: profile)
+    original = PlanService.inspect
+
+    def inspect(service, request):
+        reads.append((request.tool, request.paths))
+        return original(service, request)
+
+    monkeypatch.setattr(PlanService, "inspect", inspect)
+    result = workflow.start("session", "Find where the old handler value comes from", mode="debug", llm=model)
+
+    assert len(requests) == (5 if invalid_audit else 6), result.message
+    assert requests[3].tools == requests[4].tools
+    feedback = requests[4].messages[-1].content
+    assert "Inspection requests 1 and 2 select the same read" in feedback
+    assert 'For bounded inspection, omit initial_repository_scope or use ""' in feedback
+    assert '"id": "evidence-1"' in feedback
+    assert '"directories": ["runtime"]' in feedback
+    if invalid_audit:
+        assert result.data["phase"] == "blocked"
+        assert "Decision still invalid after one correction" in result.message
+        assert "initial_repository_scope requires level 4" in result.message
+        assert reads == [("ls", ())]
+    else:
+        assert result.status == "success", result.message
+        assert reads == [("ls", ()), ("repo_search", ("runtime",))]
+    assert result.data["repository_observations"]["workflow_tool_operations"] == len(reads)
+
+
 def test_compact_observation_bounds_saved_layout():
     from mana_agent.agent.repository_investigation import compact_observation
 

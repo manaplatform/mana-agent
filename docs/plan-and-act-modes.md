@@ -10,9 +10,9 @@ Repository investigation and understanding are independently supervised TaskBoar
 
 Investigation uses the configured coding engine in read-only mode, including external Codex when selected. Native reads use the registered ToolRunner boundary; Codex retains its inner loop and provider-owned provenance. Findings remain inferences or hypotheses until supported by actual observations. Scoped source validation, content hashes, and task/attempt identities accompany persisted evidence. There is no mandatory investigation stage. See [evidence contracts and recovery](regressions/repository-evidence-orchestration.md).
 
-An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` to find files by path or glob. Use `repo_search` with a nonblank literal `query` to find text in the selected files.
+An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` with a directory path or targeted glob to inspect a subdirectory. Use `repo_search` with a nonblank literal `query` to find text in the selected files. A bounded `inspect` request at levels 1–3 leaves `initial_repository_scope` empty. An audit value is reserved for an initial level-4 discovery for an explicit user-requested audit or architecture-wide investigation.
 
-AUTO and DEBUG execute `inspect` batches through the parent task's read-only tools. Source-backed results are saved to the Evidence Board, and exact reads reuse current observations. The Autonomous Loop retains its no-progress and budget limits. An explicit `investigate` decision creates a separate supervised assignment when the question needs delegated analysis.
+AUTO and DEBUG execute `inspect` batches through the parent task's read-only tools. Source-backed results are saved to the Evidence Board, and exact reads reuse current observations. A duplicate within one batch gets a correction. If the repeated read is the saved root listing, the model gets the layout and an example scoped to an observed directory. The Autonomous Loop retains its no-progress and budget limits. An explicit `investigate` decision creates a separate supervised assignment when the question needs delegated analysis.
 
 ## Implement a change
 

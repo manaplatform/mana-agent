@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- Restrict the initial audit marker to level-4 inspection discovery and cite the saved layout when correcting a duplicate root listing. See the [bounded search regression and user verification command](docs/regressions/debug-plan-execution-contract.md#bounded-search-after-a-duplicate-layout-read).
 - Reject an empty `required_sources` array during native entry-routing validation. Give legacy routing a bounded correction for absent or malformed source arrays. See the [entry source regression and user verification command](docs/regressions/debug-plan-execution-contract.md#empty-required-sources-in-entry-routing).
 - Explain the level-4 authorization requirement when rejecting an unscoped search. Fix regression fixtures to read labeled saved observations and register both the coding route and its required repository source. User verification is `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py -k 'duplicate_inspection or investigation_batch_rejects_all_reads or unscoped_inspection_search or nested_runtime_capability_change'`.
 - Give the model a bounded one-request example when correcting an in-batch duplicate read. See the [retained-read regression and user verification command](docs/regressions/debug-plan-execution-contract.md#duplicate-correction-with-a-retained-read).

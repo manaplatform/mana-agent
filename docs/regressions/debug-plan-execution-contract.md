@@ -456,6 +456,42 @@ The scripted model now builds its corrected response from the supplied
 example. Coverage also checks that search text is omitted and that a second
 duplicate blocks without dispatch. Test execution and live replay remain pending.
 
+### Bounded search after a duplicate layout read
+
+On 2026-11-20, DEBUG task `task_20261120_000006` used OpenRouter DeepSeek V4.1 Flash.
+The first duplicate inspection batch was corrected, and the journal records one
+successful checkout-root `ls` and a later reuse of that result. After a second
+duplicate-batch rejection, the correction put a nonempty `initial_repository_scope`
+on a `repo_search` below level 4. Validation stopped the turn before dispatch.
+The journal records the rejected field and reason. The raw responses are unavailable.
+
+The provider schema declared the audit marker and the discovery level independently.
+This let a bounded search with an audit marker pass the registered JSON schema and
+then fail the typed decision check. The duplicate feedback already had positions and
+a retained-read example, but it did not identify a current saved observation when a
+duplicate occurred within a batch that was eligible for saved-read reuse.
+
+`InspectDecision` now advertises separate discovery shapes for levels 1–3 and level 4.
+Levels 1–3 accept only an empty audit marker, including in strict provider schemas.
+The level-4 shape uses the existing audit and evidence-expansion checks. The schema
+change applies to `InspectDecision`. Native PLAN takes its audit scope from the
+coordinator's investigation decision. For an in-batch duplicate with a current saved
+root layout, the same model gets that observation and a scoped search example. It
+chooses the query and next action, and validation covers the complete replacement batch.
+
+**Do not reintroduce** a nonempty audit marker in a bounded discovery schema or
+offer another root listing as the example when a current saved layout is available.
+Keep the single correction and all-or-nothing dispatch checks.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_providers.py tests/gateway/test_debug_plan_mode_contract.py -k 'mode_decision_wire_schema or duplicate_inspection or repository_audit'
+```
+
+The scripted DEBUG replay covers a single root listing, reuse, and a corrected
+scoped search. A second case includes a valid read alongside the invalid audit
+marker and asserts that the entire correction is rejected before dispatch.
+Test execution and live replay remain pending.
+
 ## Saved evidence in duplicate corrections
 
 On 2026-11-17, DEBUG task `task_20261117_000007` saved 11 observations and then blocked after its model requested the same `ls` operation twice, including during correction. TaskBoard had the layout under `evidence-1`. The model prompt included evidence IDs for the full history but only showed the latest eight observations. The correction identified `evidence-1` without supplying its result.

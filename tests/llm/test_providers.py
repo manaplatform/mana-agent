@@ -232,8 +232,9 @@ def test_mode_decision_wire_schema_preserves_inspection_tool_alternatives():
     items = wire["$defs"]["InspectDecision"]["properties"]["requests"]["items"]
     assert set(items) == {"anyOf"}
     tools = set()
-    for ref in items["anyOf"]:
-        branch = wire["$defs"][ref["$ref"].rsplit("/", 1)[-1]]
+    for branch in items["anyOf"]:
+        if "$ref" in branch:
+            branch = wire["$defs"][branch["$ref"].rsplit("/", 1)[-1]]
         tag = branch["properties"]["tool"]
         tools.update(tag.get("enum", [tag.get("const")]))
     assert tools == {"read_file", "ls", "list_files", "repo_search", "find_symbols", "call_graph"}
@@ -288,6 +289,48 @@ def test_mode_decision_wire_schema_repo_search_requires_nonblank_query():
     assert isinstance(result, RepositorySearchEvidence)
     assert result.query == " handler "
     assert result.fingerprint == EvidenceRequest.model_validate(search).fingerprint
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("repo_search", {"query": "handler"}), ("list_files", {}),
+    ("find_symbols", {"query": "handler"}), ("call_graph", {"query": "handler"}),
+])
+@pytest.mark.parametrize("audit", ["explicit_audit", "architecture_wide"])
+def test_mode_decision_wire_schema_limits_initial_audit_scope(tool, arguments, audit):
+    from pydantic import ValidationError
+
+    from mana_agent.agent.plan_service import EvidenceRequest, InvestigationScope, ModeDecision
+    from mana_agent.llm.providers.openai import decode_structured, strict_schema
+    from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+
+    schema = ModeDecision.model_json_schema()
+    context = {"investigation_scope": InvestigationScope({})}
+    request = {"tool": tool, "level": 1, "paths": ["runtime"], "reason": "Locate the handler", **arguments}
+    decision = {"action": "inspect", "reason": "Find the implementation"}
+    payload = {"decision": {**decision, "requests": [request]}}
+    validate_arguments(payload, schema)
+    selected = ModeDecision.model_validate(payload, context=context)
+    encoded = selected.model_dump_json()
+    assert ModeDecision.model_validate_json(decode_structured(encoded, schema), strict=True,
+                                            context=context) == selected
+
+    request["initial_repository_scope"] = audit
+    with pytest.raises(ValueError):
+        validate_arguments(payload, schema)
+    with pytest.raises(ValidationError, match="initial_repository_scope requires level 4"):
+        ModeDecision.model_validate(payload, context=context)
+    invalid_wire = json.loads(encoded)
+    invalid_wire["decision"]["requests"][0]["initial_repository_scope"] = audit
+    with pytest.raises(ValueError):
+        validate_arguments(invalid_wire, strict_schema(schema))
+
+    request["level"] = 4
+    validate_arguments(payload, schema)
+    selected = ModeDecision.model_validate(payload, context=context)
+    decoded = decode_structured(selected.model_dump_json(), schema)
+    accepted, = ModeDecision.model_validate_json(decoded, strict=True, context=context).decision.requests
+    assert accepted.level == 4 and accepted.initial_repository_scope == audit
+    assert accepted.fingerprint == EvidenceRequest.model_validate(request).fingerprint
 
 
 @pytest.mark.parametrize("payload", [
