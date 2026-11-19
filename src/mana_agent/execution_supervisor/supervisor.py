@@ -549,7 +549,7 @@ class ExecutionSupervisor:
             cursor = self.store.get_task(cursor.parent_task_id) if cursor.parent_task_id else None
         if depth > self.config.max_child_depth:
             raise ValueError("maximum supervised child depth exceeded")
-        if parent and len(parent.child_task_ids) >= self.config.max_children_per_task:
+        if parent and not self._remaining_child_tasks(parent):
             raise ValueError("maximum supervised children per task exceeded")
         if parent:
             root_subtasks = sum(
@@ -1053,6 +1053,13 @@ class ExecutionSupervisor:
 
     def get_task(self, task_id: str) -> TaskRecord:
         return self.store.get_task(task_id)
+
+    def _remaining_child_tasks(self, parent: TaskRecord) -> int:
+        return max(0, self.config.max_children_per_task - len(parent.child_task_ids))
+
+    def remaining_child_tasks(self, task_id: str) -> int:
+        """Return remaining lifetime child admissions, independent of concurrent leases."""
+        return self._remaining_child_tasks(self.store.get_task(task_id))
 
     def inspect_task(self, task_id: str) -> TaskRecord:
         return self.store.get_task(task_id)

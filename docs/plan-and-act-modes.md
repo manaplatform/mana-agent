@@ -12,7 +12,7 @@ Investigation uses the configured coding engine in read-only mode, including ext
 
 An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` to find files by path or glob. Use `repo_search` with a nonblank literal `query` to find text in the selected files.
 
-Compatibility inspection decisions become scoped investigation tasks. The selected engine receives their scope and requested observations, along with reusable board evidence. Existing run caches can avoid repeated reads. The Autonomous Loop retains its no-progress and budget limits; a saved failed read cannot satisfy an evidence requirement.
+AUTO and DEBUG execute `inspect` batches through the parent task's read-only tools. Source-backed results are saved to the Evidence Board, and exact reads reuse current observations. The Autonomous Loop retains its no-progress and budget limits. An explicit `investigate` decision creates a separate supervised assignment when the question needs delegated analysis.
 
 ## Implement a change
 

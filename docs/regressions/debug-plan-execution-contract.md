@@ -308,11 +308,10 @@ For investigation latency, run `venv/bin/python -m pytest -q tests/gateway/test_
 
 ## Repository Evidence Board task architecture
 
-The repository-evidence implementation supersedes the embedded native investigator
-and understanding/investigating phase descriptions above. AUTO, DEBUG, and PLAN
-now materialize investigation and understanding as supervised TaskBoard tasks,
-using the selected coding engine in read-only mode. The existing controller
-advances decisions and the existing approval, scope, verification, and integration
-gates remain authoritative. See [current contracts, migration, and user-owned
-verification](repository-evidence-orchestration.md). Legacy observations without
-source provenance remain diagnostic context rather than verified board entries.
+AUTO and DEBUG execute typed `inspect` batches through the parent workflow's
+read-only ToolRunner. Explicit investigation and understanding requests use
+supervised TaskBoard children and the selected coding engine in read-only mode.
+The existing controller advances decisions, and the approval, scope,
+verification, and integration gates remain authoritative. See the
+[inspection latency regression and evidence contracts](repository-evidence-orchestration.md#inspection-fan-out-and-latency-regression).
+Legacy observations without source provenance remain diagnostic context.

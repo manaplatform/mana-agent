@@ -81,14 +81,27 @@ def read_source(root: Path, path: str, *, start_line=None, end_line=None, max_ch
     end = min(int(end_line or len(lines)), len(lines))
     if end_line is not None and int(end_line) < start:
         raise ValueError("Source range is reversed")
-    content = "".join(lines[start - 1:end])
-    if max_chars is not None:
+    selected_lines = lines[start - 1:end]
+    content = "".join(selected_lines)
+    content_truncated = max_chars is not None and len(content) > max_chars
+    excerpt_length = len(content)
+    if content_truncated:
         content = content[:max_chars]
+        excerpt_length = 0
+        end = start - 1
+        for line in selected_lines:
+            if excerpt_length + len(line) > max_chars:
+                break
+            excerpt_length += len(line)
+            end += 1
     source = EvidenceSource(path=path, sha256=sha256(data).hexdigest(),
                             start_line=start if end >= start else None,
-                            end_line=end if end >= start else None, excerpt=content[:12000])
-    return {"ok": True, "path": path, "content": content, "start_line": start,
-            "end_line": end, "total_lines": len(lines), "source_evidence": source.model_dump(mode="json")}
+                            end_line=end if end >= start else None, excerpt=content[:min(excerpt_length, 12000)])
+    result = {"ok": True, "path": path, "content": content, "start_line": start,
+              "end_line": end, "total_lines": len(lines), "source_evidence": source.model_dump(mode="json")}
+    if content_truncated:
+        result["content_truncated"] = True
+    return result
 
 
 def ingest_operation(authority, result) -> None:

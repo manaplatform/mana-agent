@@ -64,7 +64,7 @@ def observation_fingerprint(row: dict) -> str | None:
     if not isinstance(result, dict):
         return canonical_digest(result) if result else None
     payload = {key: value for key, value in result.items()
-               if key not in {"ok", "execution", "mutations", "limit", "truncated"}}
+               if key not in {"ok", "execution", "mutations", "limit", "truncated", "repository_evidence_refs"}}
     # Empty results remain available as negative evidence but do not justify more rounds.
     if not any(payload.get(key) for key in ("content", "files", "directories", "matches", "symbols", "edges", "nodes")):
         return None
@@ -74,7 +74,7 @@ def observation_fingerprint(row: dict) -> str | None:
 def investigation_scope(evidence: list[dict], remaining: int | None = None) -> InvestigationScope:
     return InvestigationScope(
         {row["id"]: row["level"] for row in evidence if _observed(row)},
-        {row["fingerprint"]: row["id"] for row in evidence},
+        {row["fingerprint"]: row["id"] for row in evidence if not row.get("stale")},
         remaining,
     )
 
@@ -82,7 +82,8 @@ def investigation_scope(evidence: list[dict], remaining: int | None = None) -> I
 def compact_observation(row: dict) -> dict:
     result = row["result"]
     if row["level"] > 0 and isinstance(result, dict):
-        result = {key: value for key, value in result.items() if key not in {"execution", "mutations"}}
+        result = {key: value for key, value in result.items()
+                  if key not in {"execution", "mutations", "source_evidence"}}
         if isinstance(result.get("content"), str) and len(result["content"]) > 6000:
             result["content"] = result["content"][:6000]
             result["content_truncated"] = True

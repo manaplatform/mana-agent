@@ -188,6 +188,42 @@ venv/bin/python -m pytest -q tests/execution_supervisor/test_supervisor_core.py 
 The regression tests passed locally. The original workflow was not
 replayed.
 
+### Inspection fan-out and latency regression
+
+At 00:15 on 2026-11-19 Tehran time, DEBUG workflow `task_20261118_000056`
+reported `maximum supervised children per task exceeded` after 20 minutes
+34 seconds. Its 21 workflow decisions selected exact tool batches through
+`inspect`. The gateway converted them into supervised investigations.
+Twenty children made 63 extra model requests before the supervisor
+refused the next child. Earlier direct-read fixtures used a gateway
+without an assignment-capable coding engine and skipped the conversion.
+
+AUTO and DEBUG now run the model-selected `inspect` batch through the
+parent's read-only ToolRunner. The whole batch is validated before
+dispatch. Source-backed results get versioned Evidence Board references.
+An exact read of a current source reuses the saved result under its
+existing ID. A changed source requires a new read. The next decision sees
+actual line coverage and truncation, so it can select only the remaining
+range. Reuse-only batches still count toward the no-progress threshold.
+
+Explicit `investigate` requests continue to use the configured engine.
+The workflow exposes the remaining lifetime child count and checks it
+before adding a new investigation to TaskBoard. Existing investigations
+retain their reuse and recovery paths. Existing saved tasks and evidence
+require no migration.
+
+Do not turn an already specified inspection batch into a new
+investigation assignment. Keep each selected read subject to the parent
+workflow's scope, authority, and budget.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/coding/test_investigation_engines.py tests/gateway/test_evidence_driven_orchestration.py tests/evidence/test_repository_evidence_board.py tests/execution_supervisor
+```
+
+The scripted replay completed 21 batches at zero available child slots in
+6.45 seconds locally. It recorded 22 workflow decisions, 63 read operations,
+and zero child backend requests. Live provider timing remains unverified.
+
 ### Evidence orchestration changes
 
 Repository inspection found that AUTO/DEBUG saved inspection dictionaries on a

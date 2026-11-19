@@ -21,7 +21,7 @@ def reusable_evidence(board, task, requirement):
 
 
 def ensure_investigation(board, *, parent_task_id, objective, scope, requirements, owner_agent_id,
-                         decision_id, task_kind="investigation"):
+                         decision_id, task_kind="investigation", supervisor=None):
     """Materialize only a model-selected requirement, deduplicated in the workspace transaction."""
     if task_kind not in {"investigation", "understanding"} or not decision_id:
         raise ValueError("Investigation requires an explicit kind and decision identity")
@@ -33,13 +33,22 @@ def ensure_investigation(board, *, parent_task_id, objective, scope, requirement
                                    "requirements": [r.model_dump(mode="json", exclude={"evidence"}) for r in requirements]}, sort_keys=True).encode()).hexdigest()
     with board.transaction():
         board.refresh()
+        child = None
         for task in board.list_tasks(parent_task_id=parent.task_id):
             if task.decomposition_local_id == f"evidence:{signature}" and task.status != TaskStatus.CANCELLED:
                 if task.status == TaskStatus.DONE:
                     knowledge = board.evidence_board(root=Path(task.execution_repo_root or board.store.root), repository_id=task.primary_repository_id)
                     if not task.evidence_requirements or not all(knowledge.satisfies(EvidenceRequirement.model_validate(r)) for r in task.evidence_requirements):
                         continue
-                return task
+                if supervisor is None or supervisor.store.get_task_or_none(task.task_id) is not None:
+                    return task
+                child = task
+                break
+        if supervisor is not None and not supervisor.remaining_child_tasks(parent_task_id):
+            raise PermissionError("This workflow has no remaining slots for new investigation tasks. "
+                                  "Use saved evidence or select scoped reads in AUTO or DEBUG.")
+        if child is not None:
+            return child
         child = board.create_child_task(parent_task_id, title=objective[:200], user_request=objective,
             owner_agent_id=owner_agent_id, acceptance_criteria=[criterion for r in requirements for criterion in r.acceptance_criteria],
             decomposition_local_id=f"evidence:{signature}")

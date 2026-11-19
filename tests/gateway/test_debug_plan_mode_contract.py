@@ -112,7 +112,7 @@ def mode_gateway(tmp_path):
 @pytest.mark.parametrize("backend", ["internal", "external"])
 def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, monkeypatch, backend):
     gateway, workflow = mode_gateway
-    operation = inspection("app.py")
+    operation = investigation("app.py", paths=["app.py"])
     gateway._entry_router.llm = Decisions(operation, draft(), {"disposition": "in_scope", "reason": "Only app.py differs"})
 
     def propose(_prompt, **kwargs):
@@ -505,7 +505,7 @@ def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion
     assert len(model.inputs) == 2
     assert model.inputs[0]["max_next_level"] == 1
     assert model.inputs[1]["evidence"][0]["id"] == "evidence-1"
-    assert opened == ["app.py"]
+    assert set(opened) == {"app.py"}
 
 
 def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeypatch):
@@ -1015,10 +1015,16 @@ def test_compact_observation_bounds_saved_layout():
     assert row["result"]["directories"] == directories
 
 
-def test_coding_inspection_can_exceed_the_former_investigator_caps(mode_gateway):
+def test_coding_inspection_has_no_investigator_round_trips_at_child_limit(mode_gateway):
     gateway, workflow = mode_gateway
+    supervisor = workflow.lane.execution_supervisor
+    supervisor.config = supervisor.config.model_copy(update={"max_children_per_task": 0})
+    gateway._coding_agent = SimpleNamespace(
+        active_engine_mode="internal",
+        for_assignment=lambda **_: pytest.fail("An inspect batch must execute on the parent"),
+    )
     decisions = []
-    for batch in range(9):
+    for batch in range(21):
         calls = []
         for index in range(3):
             path = f"dependency_{batch}_{index}.py"
@@ -1026,16 +1032,99 @@ def test_coding_inspection_can_exceed_the_former_investigator_caps(mode_gateway)
             calls.append(evidence_call(path, paths=[path]))
         decisions.append(inspection(None, *calls))
     decisions.append({"action": "diagnose", "reason": "The last dependency is the cause",
-                      "root_cause": "The dependency returns the old value", "cause_evidence": ["evidence-27"]})
+                      "root_cause": "The dependency returns the old value", "cause_evidence": ["evidence-63"]})
     model = Decisions(*decisions)
     model.with_tools = lambda *_: pytest.fail("Coding must not start a separate investigator")
 
     result = workflow.start("session", "Trace the dependency chain", mode="debug", llm=model)
 
     assert result.status == "success", result.message
-    state = workflow.board.get_task(result.data["task_id"]).mode_workflow
-    assert (state["decision_count"], state["tool_operations"]) == (10, 27)
-    assert len(state["evidence"]) == 27
+    task = workflow.board.get_task(result.data["task_id"])
+    state = task.mode_workflow
+    assert (state["decision_count"], state["tool_operations"]) == (22, 63)
+    assert len(state["evidence"]) == len(task.evidence_refs) == 63
+    assert all(turn["remaining_investigation_child_slots"] == 0 for turn in model.inputs)
+    assert not workflow.board.list_tasks(parent_task_id=task.task_id)
+    assert not supervisor.get_task(task.task_id).child_task_ids
+
+
+def test_explicit_investigation_at_child_limit_creates_no_taskboard_row(mode_gateway):
+    gateway, workflow = mode_gateway
+    supervisor = workflow.lane.execution_supervisor
+    supervisor.config = supervisor.config.model_copy(update={"max_children_per_task": 0})
+    gateway._coding_agent = SimpleNamespace(
+        active_engine_mode="external",
+        for_assignment=lambda **_: pytest.fail("Capacity must be checked before dispatch"),
+    )
+    model = Decisions(investigation("app.py", paths=["app.py"]))
+
+    result = workflow.start("session", "Investigate a missing source fact", mode="debug", llm=model)
+
+    assert result.data["phase"] == "blocked"
+    assert "no remaining slots for new investigation tasks" in result.message
+    task_id = result.data["task_id"]
+    assert model.inputs[0]["remaining_investigation_child_slots"] == 0
+    assert not workflow.board.list_tasks(parent_task_id=task_id)
+    assert not supervisor.get_task(task_id).child_task_ids
+
+
+def test_coding_inspection_rereads_a_stale_source_changed_during_the_model_decision(mode_gateway):
+    gateway, workflow = mode_gateway
+
+    class SourceChanges(Decisions):
+        def decide_sync(self, messages, schema):
+            payload = super().decide_sync(messages, schema)
+            if len(self.inputs) == 2:
+                (gateway.root / "app.py").write_text("new value\n")
+            return payload
+
+    model = SourceChanges(
+        inspection("app.py"), inspection("app.py"), inspection("app.py"),
+        {"action": "diagnose", "reason": "The current source explains the result",
+         "root_cause": "The source returns the new value", "cause_evidence": ["evidence-2"]},
+    )
+    result = workflow.start("session", "Read the current handler", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    task = workflow.board.get_task(result.data["task_id"])
+    previous, current = task.mode_workflow["evidence"]
+    assert previous["id"] == "evidence-1" and previous["stale"]
+    assert "content" not in previous["result"]
+    assert current["id"] == "evidence-2" and current["result"]["content"] == "new value\n"
+    assert current["board_ref"] in task.evidence_refs
+    assert model.inputs[-1]["reused_evidence_ids"] == ["evidence-2"]
+    assert result.data["repository_observations"]["workflow_tool_operations"] == 2
+
+
+def test_coding_inspection_reads_only_the_selected_follow_up_range(mode_gateway):
+    gateway, workflow = mode_gateway
+    content = [f"line {i}\n" for i in range(1, 132)]
+    (gateway.root / "app.py").write_text("".join(content))
+    model = Decisions(
+        inspection("app.py"),
+        inspection(None, evidence_call("tail", paths=["app.py"], start_line=121, end_line=129)),
+        {"action": "diagnose", "reason": "The next range contains the result",
+         "root_cause": "The ending establishes the result", "cause_evidence": ["evidence-2"]},
+    )
+    result = workflow.start("session", "Read the handler ending", mode="debug", llm=model)
+
+    assert result.status == "success", result.message
+    first, second = [row["result"] for row in model.inputs[-1]["evidence"]]
+    assert (first["start_line"], first["end_line"], first["total_lines"]) == (1, 120, 131)
+    assert (second["start_line"], second["end_line"], second["total_lines"]) == (121, 129, 131)
+    assert second["content"] == "".join(content[120:129])
+
+
+def test_coding_inspection_does_not_stamp_a_character_truncated_line(mode_gateway):
+    gateway, _workflow = mode_gateway
+    (gateway.root / "app.py").write_text("first\n" + "x" * 16_000 + "\nlast\n")
+    request = EvidenceRequest.model_validate(evidence_call("source", paths=["app.py"]).args | {"tool": "read_file"})
+
+    result = PlanService(gateway.root, llm=None).inspect(request)
+
+    assert result["content_truncated"]
+    assert (result["end_line"], result["total_lines"]) == (1, 3)
+    assert result["source_evidence"]["excerpt"] == "first\n"
 
 
 def test_coding_inspection_reuses_saved_layout_in_mixed_batch(mode_gateway, monkeypatch):

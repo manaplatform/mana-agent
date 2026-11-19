@@ -2,6 +2,10 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased — 2026-11-19
+
+- Execute AUTO and DEBUG inspection batches on the parent task, reuse versioned reads, and surface the lifetime child limit for explicit investigations. The scripted 21-batch replay uses 22 workflow decisions and zero child backend requests. See the [investigation latency regression](docs/regressions/repository-evidence-orchestration.md#inspection-fan-out-and-latency-regression) for verification.
+
 ## Unreleased — 2026-11-18
 
 - Release supervised child capacity when an attempt waits for evidence. Check the same limit when a waiting child resumes. See the [supervised child capacity regression](docs/regressions/repository-evidence-orchestration.md#supervised-child-capacity-regression) for the verification command.

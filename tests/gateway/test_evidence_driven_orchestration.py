@@ -36,6 +36,28 @@ def test_empty_knowledge_creates_a_deduplicated_real_task(board, kind):
     assert len(board.list_tasks(parent_task_id=root.task_id)) == 1
 
 
+def test_child_limit_allows_reselection_of_an_admitted_investigation(board, tmp_path):
+    from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+    from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+
+    supervisor = ExecutionSupervisor(ExecutionSupervisorConfig(root=tmp_path / "execution", max_children_per_task=1))
+    root = board.create_task(title="Goal", user_request="Inspect the handler")
+    supervisor.create_task(task_id=root.task_id)
+    requirement = EvidenceRequirement(requirement_id="behavior", objective="Inspect handler",
+                                      acceptance_criteria=("Cite handler evidence",))
+    kwargs = dict(parent_task_id=root.task_id, objective=requirement.objective, scope=["src"],
+                  requirements=[requirement], owner_agent_id="coding", decision_id="selected",
+                  supervisor=supervisor)
+    first = ensure_investigation(board, **kwargs)
+    supervisor.create_task(task_id=first.task_id, parent_task_id=root.task_id)
+
+    assert supervisor.remaining_child_tasks(root.task_id) == 0
+    assert ensure_investigation(board, **kwargs).task_id == first.task_id
+    with pytest.raises(PermissionError, match="no remaining slots"):
+        ensure_investigation(board, **{**kwargs, "objective": "Inspect another component"})
+    assert [child.task_id for child in board.list_tasks(parent_task_id=root.task_id)] == [first.task_id]
+
+
 def job(identifier, *, dependencies=(), worker="runner"):
     return QueueJob(job_id=identifier, task_id="task", requested_by_agent_id="coding", job_type=QueueJobType.REPO_READ,
         payload={"path": "src/app.py"}, assigned_worker_agent_id=worker, depends_on=list(dependencies))

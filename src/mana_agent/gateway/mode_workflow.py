@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from contextlib import contextmanager, nullcontext
 from copy import copy
 from dataclasses import asdict, replace
@@ -17,7 +18,7 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
 from mana_agent.agent.plan_service import InspectDecision, InvestigateDecision, MAX_INSPECTION_BATCH, PlanService
@@ -44,6 +45,9 @@ from mana_agent.services.activity_context import (
 from mana_agent.tools.apply_patch import extract_patch_operations, safe_apply_patch
 from mana_agent.utils.redaction import redact_secrets
 from mana_agent.repository_evidence.models import MissingEvidenceRequest
+
+if TYPE_CHECKING:
+    from mana_agent.repository_evidence.service import RepositoryEvidenceBoard
 
 _OWNER = "autonomous_loop"
 logger = logging.getLogger(__name__)
@@ -89,6 +93,20 @@ _TRANSITIONS = {
 
 def _investigation_context(evidence: list[dict]) -> list[dict]:
     return [compact_observation(item) for item in evidence]
+
+
+def _refresh_evidence_rows(rows: Iterable[dict], knowledge: RepositoryEvidenceBoard) -> None:
+    from mana_agent.repository_evidence.models import EvidenceRef
+
+    for row in rows:
+        if not row.get("board_ref"):
+            continue
+        record = knowledge.get(EvidenceRef.model_validate(row["board_ref"]))
+        if record.freshness != "current":
+            # Keep the ID reserved so a later observation cannot inherit it.
+            row.pop("board_ref")
+            row["stale"] = True
+            row["result"] = {"ok": False, "error": "Repository source changed. Select a fresh read if needed."}
 
 
 def _code_span(value: str) -> str:
@@ -430,18 +448,27 @@ class ModeWorkflow:
         knowledge = self.board.evidence_board(root=self._workspace_root(state))
         root_task = self.board.get_task(task_id)
         knowledge_context = knowledge.query(EvidenceQuery.model_validate(state.get("evidence_query") or {"task_id": task_id}))
-        state["evidence"] = [row for row in state["evidence"] if not row.get("board_ref") or
-                             knowledge.get(EvidenceRef.model_validate(row["board_ref"])).freshness == "current"]
-        known = {row["id"] for row in state["evidence"]}
+        evidence = state["evidence"]
+        _refresh_evidence_rows(evidence, knowledge)
+        known = {
+            (row.get("board_ref") or {}).get("evidence_id", row["id"]): row for row in evidence
+        }
         for record in knowledge_context["records"]:
             if record.get("detail_required"):
                 continue
-            if record["evidence_id"] not in known:
-                ref = {"evidence_id": record["evidence_id"], "revision": record["revision"]}
-                state["evidence"].append({"id": record["evidence_id"], "level": 1, "board_ref": ref,
-                    "fingerprint": canonical_digest(ref), "result": {"ok": record["validation"] == "supported", "content": record["statement"],
-                    "classification": record["classification"], "sources": record["sources"]}})
-        evidence = state["evidence"]
+            evidence_id = record["evidence_id"]
+            previous = known.get(evidence_id)
+            if previous is not None and not previous.get("stale"):
+                continue
+            ref = {"evidence_id": evidence_id, "revision": record["revision"]}
+            summary = {"id": evidence_id, "level": 1, "board_ref": ref, "fingerprint": canonical_digest(ref),
+                       "result": {"ok": record["validation"] == "supported", "content": record["statement"],
+                                  "classification": record["classification"], "sources": record["sources"]}}
+            if previous is None:
+                evidence.append(summary)
+            else:
+                previous.clear()
+                previous.update(summary)
         scope = investigation_scope(evidence)
         handoff = state.get("investigation", {})
         saved_investigation = None
@@ -500,6 +527,7 @@ class ModeWorkflow:
             "remaining_inspections": min(remaining_tools, MAX_INSPECTION_BATCH) if can_inspect else 0,
             "remaining_workflow_decisions": max(0, remaining_decisions),
             "remaining_workflow_tools": max(0, remaining_tools),
+            "remaining_investigation_child_slots": self.lane.execution_supervisor.remaining_child_tasks(task_id),
             "inspection_stop": stop or ("Shared workflow budget" if not planning and not can_inspect else ""),
             "investigation_report": report,
             "saved_investigation": saved_investigation,
@@ -627,7 +655,7 @@ class ModeWorkflow:
         return state["revision"], state.get("investigation_epoch", 0)
 
     @contextmanager
-    def _repository_reader(self, task_id: str, service: PlanService):
+    def _repository_reader(self, task_id: str, service: PlanService, *, record_inspections: bool = False):
         from mana_agent.coding.models import WorkspaceContext
         from mana_agent.gateway.lanes import validate_tool_permission
         from mana_agent.multi_agent.agents.tool_runner_agent import ToolRunnerAgent, bind_tool_authority
@@ -670,7 +698,7 @@ class ModeWorkflow:
                 workspace=WorkspaceContext(repository_path=self.gateway.root, worktree_path=service.repo_root,
                                            sandbox="readOnly"),
                 policies=policies, schemas=schemas, taskboard=self.board, authorize=authorize,
-                record_taskboard_evidence=task.task_kind in {"investigation", "understanding"},
+                record_taskboard_evidence=record_inspections or task.task_kind in {"investigation", "understanding"},
             )
             yield ToolRunnerAgent(authority)
 
@@ -712,18 +740,6 @@ class ModeWorkflow:
     def _inspect(self, task_id, state, service, decision, available_tools):
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
 
-        coding = self.gateway._coding_agent
-        if coding is not None and callable(getattr(coding, "for_assignment", None)):
-            paths = list(dict.fromkeys(path for request in decision.requests for path in request.paths))
-            if not paths:
-                paths = ["."]
-            selected = InvestigateDecision(
-                action="investigate", reason=decision.reason, objective=decision.reason,
-                scope=json.dumps([r.model_dump(mode="json") for r in decision.requests]),
-                paths=tuple(paths),
-            )
-            return self._investigate(task_id, state, service, selected)
-
         activity = current_activity_context()
         if not decision.reason.strip():
             raise ValueError("Repository inspection must explain what the next coding decision needs.")
@@ -737,7 +753,14 @@ class ModeWorkflow:
         if previous.get("boundary") == boundary:
             inspection["no_progress"] = previous.get("no_progress", 0)
 
-        with self._repository_reader(task_id, service) as runner:
+        requested_reads = {request.fingerprint for request in decision.requests}
+        prior_evidence = {ref for request in decision.requests for ref in request.prior_evidence}
+        knowledge = self.board.evidence_board(root=service.repo_root)
+        _refresh_evidence_rows(
+            (row for row in evidence if row["fingerprint"] in requested_reads or row["id"] in prior_evidence),
+            knowledge,
+        )
+        with self._repository_reader(task_id, service, record_inspections=True) as runner:
             schemas = runner.authority.schemas
             saved_reads = investigation_scope(evidence).validate_requests(decision.requests, reuse_saved_reads=True)
             selected = []
@@ -779,6 +802,9 @@ class ModeWorkflow:
                     self._check_live(task_id)
                     row = {"id": f"evidence-{len(evidence) + 1}", "level": request.level,
                            "fingerprint": request.fingerprint, "result": result}
+                    refs = result.get("repository_evidence_refs")
+                    if result.get("source_evidence") and refs:
+                        row["board_ref"] = refs[0]
                     evidence.append(row)
                     fingerprint = observation_fingerprint(row)
                     new_evidence |= fingerprint is not None and fingerprint not in fingerprints
@@ -815,7 +841,7 @@ class ModeWorkflow:
             else:
                 child = ensure_investigation(self.board, parent_task_id=task_id, objective=decision.objective,
                     scope=list(decision.paths), requirements=[requirement], owner_agent_id="coding_agent",
-                    decision_id=decision_id, task_kind=decision.task_kind)
+                    decision_id=decision_id, task_kind=decision.task_kind, supervisor=self.lane.execution_supervisor)
             root = self._workspace_root(state)
             child.execution_repo_root = str(root)
             child.mode_workflow["initial_repository_scope"] = decision.initial_repository_scope
