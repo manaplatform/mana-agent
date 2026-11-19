@@ -163,6 +163,28 @@ venv/bin/python -m pytest -q tests/llm/test_engine.py tests/test_tui_approval_re
 
 The agent did not run the tests or replay the provider request.
 
+## Entry routing prompt budget regression
+
+`test_context_compactor_metrics` reported a 51-token deficit after
+compaction against an 8,000-token window. The response format clarification
+increased the fixed system prompt estimate to 7,572 tokens. Removing
+historical context left too little space for the routing data.
+
+Entry routing now uses the source rules already present in the request
+and a single example with fields relevant to its selected route. The
+prompt still names the four required decision fields and honors the
+selected response format. The fixture estimates 7,844 tokens with full
+route availability. Its assertions require a positive deficit before
+compaction and zero afterward.
+
+Do not duplicate the source rules or list unrelated route fields in the
+response example. Keep the bounded fixture within its fixed window using
+the full route availability estimate.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_context_budget_retention.py tests/gateway/test_astra_entry_route_budget.py tests/gateway/test_entry_routing.py tests/llm/test_engine.py
+```
+
 ## Action payload regression
 
 Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.

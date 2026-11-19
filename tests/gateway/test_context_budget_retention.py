@@ -338,5 +338,7 @@ def test_context_compactor_metrics() -> None:
     assert metrics.stale_records_pruned == 3
     assert metrics.workspace_records_pruned == 1
     assert metrics.repository_records_compacted == 2
-    assert metrics.routing_context_deficit_before_compaction >= 0
+    assert metrics.routing_context_deficit_before_compaction > 0
+    assert metrics.breakdown.route_availability == metrics.diagnostic_details["raw_tokens_by_category"]["route_availability"]
+    assert metrics.is_valid
     assert metrics.routing_context_deficit_after_compaction == 0

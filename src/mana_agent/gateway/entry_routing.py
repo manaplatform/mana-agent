@@ -397,7 +397,8 @@ Route semantics:
   `managed_worker_available` is false, provider MUST be `remote-ssh` and
   worker_id MUST be "". Use reverse-worker only when it is true; use its
   managed_worker_id rather than "auto". The remote_request must be valid JSON:
-  use an argv array of plain strings and never place shell syntax in JSON keys.
+  include target, authentication, read_only, and a plain string array in command.argv.
+  Never place shell syntax in JSON keys.
   For an approved analysis request, choose a bounded command that emits the
   requested concise findings (counts, top entries, and relevant samples) rather
   than streaming an entire log; its stdout is shown back in chat after approval.
@@ -490,7 +491,8 @@ browser—for the user's current installed browser page or tabs. Do not choose c
 availability fallback for a cloud calendar or isolated public-browser request.
 
 Use previous_route and conversation_summary only for continuity. Reuse the active route for a true
-follow-up; reroute when the user's intent changes. Do not route by isolated keywords alone.
+follow-up by setting reuse_active_route=true. Reroute when the user's intent changes.
+Do not route by isolated keywords alone.
 Read conversation_context.messages including assistant replies before resolving references such as
 "yes, I want it", "fix this", or "do that". Return resolved_request containing the user's intended action and
 source_message_ids containing the exact "message_id" strings of the observed messages that support it
@@ -532,59 +534,35 @@ opportunities) must select search with required_sources=["search"]. Browser is o
 one or more explicit direct URLs supplied by the user or selected in target_urls; never select a
 browser source without at least one target URL.
 
-required_sources is required for every decision and must never be omitted or empty. Use exactly
-["none"] for conversation and unsupported. Use the route's corresponding source for ordinary
-single-source decisions: coding/shell/repository/automation -> ["repository"], api -> ["api"], server -> ["server"], gmail -> ["gmail"],
-calendar -> ["calendar"], browser -> ["browser"], search -> ["search"], github -> ["github"],
-canvas -> ["canvas"], media -> ["media"],
-memory -> ["memory"], and mcp -> ["mcp"]. capability_error must name the unavailable tool source. Do not use an
-empty array for a request that needs no external information.
+required_sources is required for every decision and must never be omitted or empty.
+Use ["none"] when required_source_rules specifies it.
 memory_task_id must be empty string "" for all routes except memory. Only populate memory_task_id when route="memory" and memory_capsules_enabled is true.
 Every decision requires a nonblank top-level reason explaining why the selected route fits the request.
 This includes conversation and coding, even when public_summary or coding_workflow.reason is present.
 
 Submit one complete routing decision through the supplied decision tool when available.
 For a JSON response, return one object.
-Include route, confidence, reason, and required_sources at the top level.
-The decision fields are illustrated below.
+Include route, confidence, reason, and required_sources at the top level. Include the fields
+required by the selected route. For example:
 {
-  "route": "multi_task|conversation|coding|shell|mcp|remote_execution|server|artifact|media|command|gmail|calendar|computer|browser|search|github|repository|memory|automation|api|canvas|unsupported|capability_error",
-  "confidence": 0.0,
-  "public_summary": "Optional short user-facing explanation; omit private reasoning, prompts, and secrets",
-  "reason": "short routing reason",
+  "route": "browser",
+  "confidence": 0.95,
+  "reason": "The user asked to inspect a specific page.",
   "required_sources": ["browser"],
   "target_urls": ["https://example.com"],
-  "memory_task_id": "",
-  "requires_live_data": true,
-  "reason_code": "DIRECT_PAGE_INSPECTION",
-  "error_code": "",
-  "reuse_active_route": false,
-  "command_name": "sessions",
-  "command_arguments": ["list"],
-  "remote_request": {"provider": "remote-ssh", "profile": "", "worker_id": "", "target": {"host": "example.com", "port": 22, "user": "root"}, "authentication": {"mode": "key_path", "key_path": "~/.ssh/id_ed25519"}, "command": {"argv": ["true"]}, "read_only": true},
-  "server_request": null,
-  "mcp_request": null,
-  "artifact_family": "",
-  "media_request": null,
-  "automation_operation": "",
-  "runtime_capability_change": false,
-  "resolved_request": "",
-  "source_message_ids": [],
-  "related_task_id": "",
-  "clarification_question": "",
-  "coding_workflow": null,
-  "response_kind": "task",
-  "context_request": null
+  "requires_live_data": true
 }
+Keep public_summary brief and omit private reasoning, prompts, and secrets.
 
 Examples:
 - “ping” -> conversation, ["none"].
 - “What can you do?” -> conversation, ["none"].
-- “check what is this?” (with attached image) -> conversation, ["none"] (visual question answering / inspection of an attached image using the model's native multimodal capabilities).
+- “check what is this?” (attached image) -> conversation, ["none"].
 - “Change this function and run its tests” -> coding, ["repository"], coding_workflow.mode=auto.
 - Every coding route requires coding_workflow with mode (auto or debug), objective, reason,
   investigation_scope, expected_result, risk_and_uncertainty, verification_requirements
   (a list of criteria), and requested_effect (read or write). The objective summarizes the task.
+  Explicitly set runtime_capability_change to true for changes to production capabilities and false otherwise.
   Once you can select the coding workflow, route it as a task and let the workflow evaluate any
   missing implementation details. Leave clarification_question empty on a coding route. Use
   debug with read for diagnosis alone and debug with write for a requested repair. Set
@@ -610,10 +588,6 @@ Examples:
 - “Improve metadata in this repository” -> coding, ["repository"].
 - “Find where AgentDecision is defined in this repository without changing files” -> repository,
   ["repository"].
-- “Review the current repository architecture without changing files” -> repository, ["repository"].
-- “Read pyproject.toml and do not use mutation tools” -> repository, ["repository"].
-- “Inspect a local source file without changing it” -> repository, ["repository"] (workspace source;
-  not computer desktop control).
 - “Start a distinct repository review while another coding flow is active” -> repository,
   ["repository"] (new read-only repository task; do not select conversation clarification alone).
 - “Create an image of a lunar greenhouse” -> media, ["media"], media_request.operation=image.generate with the exact prompt.
