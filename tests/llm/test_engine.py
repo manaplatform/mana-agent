@@ -240,6 +240,90 @@ def test_entry_route_refreshes_capability_evidence(tmp_path, native_profile, mon
         assert calls == ["metadata", "inference"]
 
 
+@pytest.mark.parametrize("case", ["newer_bound_cache", "expired_tools", "tools_missing_after_refresh"])
+def test_entry_route_refreshes_required_tool_calling(tmp_path, native_profile, monkeypatch, case):
+    import hashlib
+    from datetime import datetime, timedelta, timezone
+
+    from mana_agent.config.user_config import save_model_cache
+    from mana_agent.gateway.entry_routing import _invoke_routing_model
+    from mana_agent.llm.capabilities import ModelProfile, metadata_facts
+    from mana_agent.llm.discovery import ModelDiscoveryService
+    from mana_agent.llm.messages import ToolCall
+    from mana_agent.llm.registry import GLOBAL_CAPABILITY_REGISTRY, metadata_binding
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path))
+    model = NativeLLMEngine(
+        provider="openrouter", model="anthropic/claude-haiku-5.5", api_key="fixture-key",
+        base_url="https://provider.example/api/v1", endpoint="anthropic_messages",
+    )
+    empty_revision = hashlib.sha256(b"{}").hexdigest()
+    binding = metadata_binding(model.provider, model.base_url, hashlib.sha256(b"fixture-key").hexdigest(),
+                               empty_revision, empty_revision)
+    record = {
+        "id": model.model,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "context_length": 65536,
+        "top_provider": {"max_completion_tokens": 8192},
+        "supported_parameters": ["tools", "structured_outputs"],
+    }
+    facts = metadata_facts(record, source="provider", scope=binding)
+    expired = datetime.now(timezone.utc) - timedelta(hours=1)
+    for name, fact in facts.items():
+        if case == "newer_bound_cache" or name == "tool_calling":
+            fact.observed_at = expired - timedelta(days=1)
+            fact.expires_at = expired
+    GLOBAL_CAPABILITY_REGISTRY.merge(ModelProfile(
+        provider=model.provider, model_id=model.model, endpoint=model.base_url, configuration_fingerprint=binding,
+    ), facts)
+    if case == "newer_bound_cache":
+        save_model_cache(model.provider, model.base_url, [{**record, "_mana_catalog_binding": binding}])
+    else:
+        assert model.profile().is_stale("tool_calling")
+        assert model.profile().supports("output_text")
+        assert model.profile().supports("max_output_tokens")
+
+    calls = []
+
+    async def fetch_records(self, **connection):
+        calls.append("metadata")
+        assert connection["provider"] == model.provider
+        assert connection["base_url"] == model.base_url
+        if case == "tools_missing_after_refresh":
+            return [{**record, "supported_parameters": ["structured_outputs"]}]
+        return [record]
+
+    async def public_catalog(self):
+        return {}
+
+    class Adapter:
+        async def generate(self, request):
+            calls.append("inference")
+            assert (request.provider, request.model) == (model.provider, model.model)
+            assert [tool["name"] for tool in request.tools] == ["record_decision"]
+            assert request.response_schema is None
+            return ModelResponse(tool_calls=[ToolCall(id="route", name="record_decision", args={
+                "route": "conversation", "confidence": 0.95, "reason": "Answer directly.",
+                "required_sources": ["none"],
+            })])
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(ModelDiscoveryService, "fetch_records", fetch_records)
+    monkeypatch.setattr(ModelDiscoveryService, "catalog", public_catalog)
+    monkeypatch.setattr(model, "_adapter", Adapter)
+
+    if case == "tools_missing_after_refresh":
+        with pytest.raises(CapabilityError, match="tool_calling=UNKNOWN"):
+            _invoke_routing_model(model, [UserMessage("Hello")])
+        assert calls == ["metadata"]
+    else:
+        _, decision = _invoke_routing_model(model, [UserMessage("Hello")])
+        assert decision["route"] == "conversation"
+        assert calls == (["inference"] if case == "newer_bound_cache" else ["metadata", "inference"])
+
+
 def test_timeout_cancels_selected_request_without_other_backend(native_profile, monkeypatch):
     from mana_agent.coding.internal_engine import InternalCodingEngine
 

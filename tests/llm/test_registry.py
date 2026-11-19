@@ -29,6 +29,24 @@ def test_field_precedence_retains_conflicts_and_expiry(tmp_path):
     assert profile.fact("tool_calling").source == "provider"
     assert not profile.supports("tool_calling")
 
+
+def test_older_equivalent_observations_do_not_replace_newer_metadata(tmp_path):
+    registry = ModelCapabilityRegistry(tmp_path / "registry.json")
+    profile = ModelProfile(provider="custom", model_id="model")
+    fresh = observation(True, source="provider")
+    older = fresh.model_copy(update={
+        "observed_at": fresh.observed_at - timedelta(days=2),
+        "expires_at": fresh.expires_at - timedelta(days=2),
+    })
+
+    registry.merge(profile, {"tool_calling": fresh})
+    merged = registry.merge(profile, {"tool_calling": older}, persist=True)
+
+    assert merged.observations["tool_calling"] == [fresh]
+    assert merged.supports("tool_calling")
+    assert ModelCapabilityRegistry(tmp_path / "registry.json").get("custom", "model").supports("tool_calling")
+
+
 def test_probe_scope_includes_endpoint_version_configuration_and_account_revision():
     base = dict(provider="custom", model="model", endpoint="https://example.org/v1")
     first = scope_key(**base)

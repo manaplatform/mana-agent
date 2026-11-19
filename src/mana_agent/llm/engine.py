@@ -367,9 +367,11 @@ class NativeLLMEngine:
             operation_id=request.request_id, metadata=metadata, summary=summary)
         return request_error
 
-    async def _refresh_metadata(self, parameters: dict[str, Any] | None = None) -> ModelProfile:
+    async def _refresh_metadata(
+        self, parameters: dict[str, Any] | None = None, *, required_capabilities: tuple[str, ...] = (),
+    ) -> ModelProfile:
         selected = self.profile(parameters)
-        required = ("input_text", "output_text", "context_window", "max_output_tokens")
+        required = ("input_text", "output_text", "context_window", "max_output_tokens", *required_capabilities)
         if self.adapter is not None or all(selected.supports(name) for name in required):
             return selected
         from mana_agent.llm.discovery import ModelDiscoveryService
@@ -461,18 +463,15 @@ class NativeLLMEngine:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
 
-        # Generation refreshes the catalog too, but decisions can fail before
-        # reaching generation or choose a format using outdated evidence.
-        prof = await self._refresh_metadata(options.get("parameters", {}))
         require_native = options.pop("require_native_structured_output", False)
-        if require_native:
-            prof.require("native_structured_output")
         # Use Claude's ordinary client tool for composite workflow decisions.
         # Local validation retains the full contract without compiling a provider grammar.
         use_tool = (complex_schema and not require_native and self.provider == "openrouter"
                     and self.endpoint == "anthropic_messages")
-        if use_tool:
-            prof.require("tool_calling")
+        required = ("native_structured_output",) if require_native else ("tool_calling",) if use_tool else ()
+        # Refresh capability evidence before choosing or validating the request format.
+        prof = await self._refresh_metadata(options.get("parameters"), required_capabilities=required)
+        prof.require(*required)
         schema_dict = schema if isinstance(schema, dict) else schema.model_json_schema()
         decision_messages = messages_from_records(messages)
         native = not use_tool and prof.supports("native_structured_output")

@@ -123,3 +123,33 @@ The [native inference engine](../../src/mana_agent/llm/engine.py) now runs its e
 **Do not reintroduce** decision capability checks ahead of metadata refresh, or treat a cached token limit as current solely because it has a numerical value.
 
 Run `venv/bin/python -m pytest -q tests/llm/test_engine.py -k entry_route_refreshes_capability_evidence` to check same-model recovery, expired token limits, and failure before inference when text output is still unverified. Restart Mana and resend the original request to verify the live provider path. To recover on an older build, open `mana-agent --configure`, select OpenRouter, then use **Model capabilities → Refresh metadata** for `deepseek/deepseek-v4.1-flash`. The agent did not run the tests or replay the live request.
+
+## Stale tool calling with a fresh catalog
+
+At 22:18 Tehran time on 2026-11-19, entry routing stopped before inference
+with `openrouter/anthropic/claude-haiku-5.5: tool_calling=STALE`. The model
+catalog already advertised tools and matched the configured connection. The
+registry merged those fresh facts first, then imported equivalent expired
+facts from its saved connection profile. Deduplication kept the last copy
+merged. The refresh skipped fetching another catalog because the cache was
+recent. In addition, the preflight considered only text and token limits,
+so a separately expired tool capability could skip refresh as well.
+
+The registry now keeps the newest observation for equivalent facts. The
+native decision preflight includes the required response capability, such
+as tool calling for a composite decision on OpenRouter Messages. A fresh
+cache can recover the same model without another catalog request. If
+current metadata still does not confirm a required capability, routing
+stops before inference. No cache migration is needed.
+
+Do not let import order replace a newer capability fact. Include the
+capability required by the decision format in preflight freshness checks.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_registry.py tests/llm/test_engine.py -k 'older_equivalent_observations or refreshes_required_tool_calling or entry_route_refreshes_capability_evidence'
+```
+
+The saved catalog reproduced the failure before the fix. After the fix,
+the same cache reported current support and entry routing succeeded with a
+mock inference response on the configured model. Live inference remains
+unverified.
