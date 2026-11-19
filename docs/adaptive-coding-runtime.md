@@ -1,12 +1,52 @@
 # Adaptive Coding Runtime
 
+## Supervised AUTO and DEBUG
+
+The gateway starts AUTO and DEBUG with a typed decision for the current request.
+AUTO can record a scoped implementation plan on the first decision. Known files
+can be read directly through ToolRunner or during a read-only patch proposal.
+The model can also select saved evidence, a scoped investigation assignment, or
+research for an unresolved dependency. The Autonomous Execution Controller
+drives decisions and execution for the same parent task. PLAN retains approval
+of the exact reviewed revision.
+
+An implementation step that needs evidence saves its continuation on the
+existing supervisor checkpoint and releases its child capacity. The model must
+bind current evidence to the exact requirement and select that task and
+checkpoint to resume. An independently selected investigation may wait while
+unrelated work progresses. Supervisor completion still requires resolution of
+admitted children and consequential actions.
+
+Checks run through the existing isolated verifier. A failed check returns its
+command, exit code, bounded output, and attempt receipt to the next decision.
+The model can inspect, research, or submit a scoped repair. The repair retains
+prior writes and must run the failed command and the required regression checks
+against the resulting revision. Repeated identical failures stop within the
+configured no-progress limit. Switching strategy preserves the original user
+mode and permissions.
+
+The Repository Evidence Board ranks bounded results by checkout and support,
+then checks source hashes and supporting references before reuse. Configuration
+and architecture findings from investigation retain their citations and
+classification. Executed verification results are kept on TaskBoard, and
+enabled Coding Memory records them as historical receipts with checkout and
+file versions. A historical receipt cannot complete a later coding task.
+
+Coding Activity shows scoped evidence reads, reuse, implementation, verification
+commands and strategy changes. Provider waits, tool execution, and evidence
+progress have separate events and timing. See the
+[optional evidence regression](regressions/repository-evidence-orchestration.md#optional-evidence-and-verification-recovery)
+for the traced failures and replay commands.
+
 ## Unresolved bugs and external evidence
 
 The Main Model can select research at coding turn/yield boundaries after evaluating a typed debugging report, local evidence, attempted fixes and installed versions. Both engines return a report as pending work. Research uses the existing autonomous controller and search providers, then returns an untrusted, sourced recommendation to the same task/backend. A fixed number of failures never triggers a search.
 
 Default task limits are 12 search requests in four rounds, with at most three queries and three source inspections per round. Queries are sanitized; task-scoped results, consumed counters and delivery receipts survive recovery. Missing permissions or provider availability are reported to the Main Model without fallback searches. The existing integration and independent completion gates still apply. Configuration, recovery boundaries, limitations and user-owned verification are documented in [the regression note](regressions/coding-bug-research.md).
 
-Coding turns begin with one validated `ExecutionScopeDecision`. The model owns
+## Queue-based coding turns
+
+Queue-based coding turns begin with one validated `ExecutionScopeDecision`. The model owns
 semantic choices: intent, scope level, mutation targets, read-only related
 files, evidence needs, tool families, budgets, mutation strategy, verification,
 delegation, and stop conditions. Runtime code canonicalizes paths and enforces

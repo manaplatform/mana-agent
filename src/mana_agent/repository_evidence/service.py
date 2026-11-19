@@ -227,8 +227,11 @@ class RepositoryEvidenceBoard:
             clauses.append("instr(lower(e.payload), lower(?))>0")
             args.append(query.query)
         with self.db.connect() as conn:
-            rows = conn.execute("SELECT e.evidence_id, e.revision FROM repository_evidence e WHERE " + " AND ".join(clauses) + " ORDER BY e.rowid DESC LIMIT ? OFFSET ?",
-                                (*args, query.limit, query.offset)).fetchall()
+            rows = conn.execute(
+                "SELECT e.evidence_id, e.revision FROM repository_evidence e WHERE " + " AND ".join(clauses)
+                + " ORDER BY (e.source_view=?) DESC, (e.validation='supported') DESC, e.rowid DESC LIMIT ? OFFSET ?",
+                (*args, str(self.root), query.limit, query.offset),
+            ).fetchall()
         records, used, consumed = [], 0, 0
         # Four UTF-8 bytes per token is deliberately not assumed: bound by bytes,
         # a conservative upper bound for these context envelopes.

@@ -439,6 +439,16 @@ class QueryEvidenceDecision(_ModeAction):
     action: Literal["query_evidence"]
     query: EvidenceQuery
 
+    @model_validator(mode="after")
+    def validate_question(self):
+        query = self.query
+        if not self.reason.strip() or not (
+            query.paths or query.symbols or query.query.strip() or query.task_id
+            or query.evidence_ids or query.related_to or query.dependencies
+        ):
+            raise ValueError("Specify the missing fact and a bounded evidence selector")
+        return self
+
 
 class UseEvidenceDecision(_ModeAction):
     action: Literal["use_evidence"]
@@ -576,8 +586,9 @@ class PlanService:
             "When pending_repository_evidence is present, preserve the approved plan and completed steps. "
             "If current evidence satisfies the request, select use_evidence with the exact requirement_id. "
             "Create only the investigation tasks required by the gap, then use resume_implementation with an "
-            "explicit safe same-task RecoveryDecision after its evidence requirements are satisfied. "
-            "Before creating repository tasks, query_evidence with bounded paths/symbols or a specific literal query. "
+            "explicit safe same-task resume_checkpoint RecoveryDecision and pending_coding_checkpoint_id after its evidence "
+            "requirements are satisfied. "
+            "When additional knowledge is needed, query_evidence by bounded paths, symbols, or a specific literal. "
             "Use use_evidence to reuse current Evidence Board references without reading files again. "
             "In any mode, use investigate to create an independently supervised investigation or understanding task "
             "when the missing question needs delegated analysis. Use inspect for reads you can already specify in AUTO or DEBUG. "
@@ -605,13 +616,16 @@ class PlanService:
             "passing verification check (argv is an array of individual command arguments). Each step "
             "must have file operations or a verification command and clear acceptance criteria. "
             f"{_DRAFT_GUIDANCE} "
-            "Auto mode may investigate, clarify, draft or block. Draft from observed repository evidence. "
+            "AUTO can draft immediately when the request and available context establish a safe scope. "
+            "A separate investigation, evidence query, or preliminary read is optional. "
             "The draft is an execution plan, so list production entry point changes and relevant checks "
             "as concrete steps. If the goal already holds, use a verification-only draft and cite observed evidence. "
-            "If recheck_required is present, rerun that exact check after the repair. Use fresh step IDs "
-            "only for new work and do not repeat completed steps. "
-            "Auto and Debug may use switch_workflow only when new evidence changes the needed workflow "
-            "within the same authorized scope. Include the current task_id and observed evidence_ids. "
+            "On verification_failure, use the executed receipt to select targeted inspection, research, repair, "
+            "a verification-only draft, or a blocker as appropriate. Rerun recheck_required and place all "
+            "required_verification checks at or after the last change. Preserve remaining work and use fresh "
+            "step IDs only for new work. Do not repeat completed steps. "
+            "AUTO and DEBUG can use switch_workflow when new evidence changes the needed coding strategy. "
+            "It preserves the user mode and permissions. Include the current task_id and observed evidence_ids. "
             "Debug mode may investigate, clarify, diagnose, repair, research or block. "
             "Keep diagnostics-only requests read-only and use diagnose to report the finding. Repair requires an "
             "evidence-backed hypothesis, the smallest fix, and goal-specific verification. If the intended "

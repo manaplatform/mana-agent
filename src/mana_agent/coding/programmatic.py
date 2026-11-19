@@ -57,6 +57,9 @@ class ProgrammaticExecutionState:
     native_continuation: dict[str, Any] | None = None
     native_messages: list[dict[str, Any]] = field(default_factory=list)
     native_pending_calls: list[str] = field(default_factory=list)
+    native_model_requests: int = 0
+    native_model_wait_ms: int = 0
+    native_evidence_elapsed_ms: int = 0
     active: bool = True
 
 

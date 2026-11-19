@@ -245,6 +245,8 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
                 setattr(engine, name, runtime[name])
         engine.max_tool_calls = min(engine.max_tool_calls, int(runtime.get("remaining_tool_calls", engine.max_tool_calls)))
         engine.max_model_turns = int(runtime.get("remaining_model_turns", 120))
+        if "max_no_progress_cycles" in runtime:
+            engine.max_no_progress_cycles = runtime["max_no_progress_cycles"]
         from mana_agent.llm.engine import NativeLLMEngine
         if isinstance(engine.llm_client, NativeLLMEngine) and (engine.llm_client.provider, engine.llm_client.model) != (engine.provider, engine.model):
             engine.llm_client = None
@@ -345,6 +347,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             "commands_run": res.commands_run,
             "tests_run": res.tests_run,
             "tests_passed": res.tests_passed,
+            "duration_breakdown": res.duration_breakdown,
             "error_code": "INTERNAL_EXECUTION_FAILED" if res.status in {"failed", "cancelled"} else None,
             "warnings": res.warnings,
             "errors": res.errors,

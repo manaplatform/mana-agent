@@ -645,6 +645,50 @@ The existing Activity and Coding Activity surfaces receive correlated updates.
 This change adds no standalone board dashboard, scheduler, external service,
 dependency, release, or deployment.
 
+### Optional evidence and verification recovery
+
+The reported native coding turn spent roughly 300 seconds gathering evidence.
+The recorded NetPeek trace separates a provider wait from executed reads and
+failed report citations. The earlier 21-batch replay also demonstrated child
+fan-out, which the base branch already removed from direct inspection. The
+specific 300-second run has no reproduced provider timing.
+
+A first-decision AUTO draft for a named file exposed a separate remaining
+defect. ModeWorkflow rejected it when its observation list was empty, before
+the scoped worker could propose a patch or read the file. Repeated Evidence
+Board queries also consumed workflow decisions without sharing the inspection
+no-progress threshold. A failed verification could trigger a single revision,
+after which the presence of the repair scope forced a terminal block. A
+resumed native worker restored its old message history and dropped the newly
+supplied observations.
+
+AUTO now records the validated scoped plan immediately when selected. The
+existing controller advances the same task through implementation, evidence
+decisions, and verification recovery. Recovery saves exact checkpoint IDs,
+keeps completed patches, and supplies current evidence to the resumed worker.
+Passing regression checks from the failed revision remain required after the
+last repair. The configured no-progress threshold stops repeated evidence
+requests and repeated verification diagnostics. Native provider time is
+measured separately and a task deadline caps an in-flight native request.
+No stored-task or evidence migration is needed.
+
+Do not reintroduce an observation-count gate on AUTO drafts, a one-repair
+limit, or a recovery path that discards newly bound evidence. Keep exact
+approval, durable action receipts, and independently executed verification
+authoritative.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/test_internal_coding_engine_workflow.py tests/coding/test_investigation_engines.py tests/evidence/test_repository_evidence_board.py
+venv/bin/python -m pytest -q tests/gateway tests/coding tests/execution tests/execution_supervisor tests/evidence tests/persistence tests/memory tests/test_coding_memory_service.py
+node --test tests/dashboard/live_chat_reducer.test.mjs tests/dashboard/live_chat_approval_ui.test.mjs
+```
+
+The broader local run passed 1,340 Python tests, and the dashboard run passed
+47 tests. A Docker smoke test used the locally available Alpine image and
+recorded a failing command at exit 7 and the same command passing at exit 0
+after a fixture edit. Each run returned its own sandbox receipt. The exact
+reported live-provider turn remains unverified.
+
 ## Do not reintroduce
 
 - Never implement `INVESTIGATE → UNDERSTAND → PLAN → CODE` as required stages.

@@ -110,19 +110,21 @@ def mode_gateway(tmp_path):
 
 
 @pytest.mark.parametrize("backend", ["internal", "external"])
-def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, monkeypatch, backend):
+@pytest.mark.parametrize("investigate", [False, True])
+def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, monkeypatch, backend, investigate):
     gateway, workflow = mode_gateway
     operation = investigation("app.py", paths=["app.py"])
-    gateway._entry_router.llm = Decisions(operation, draft(), {"disposition": "in_scope", "reason": "Only app.py differs"})
+    gateway._entry_router.llm = Decisions(*([operation] if investigate else []),
+                                        draft(), {"disposition": "in_scope", "reason": "Only app.py differs"})
 
     def propose(_prompt, **kwargs):
         task = next(row for row in workflow.board.list_tasks() if row.mode_workflow.get("mode") == "auto")
         assert task.mode_workflow["plan"]["draft"]["steps"][0]["step_id"] == "fix"
         assert task.mode_workflow["phase"] == "executing"
         assert task.owning_lane == "coding"
-        assert task.evidence_refs
+        assert bool(task.evidence_refs) is investigate
         assert any(child.task_kind == "investigation" and child.status == TaskStatus.DONE
-                   for child in workflow.board.list_tasks(parent_task_id=task.task_id))
+                   for child in workflow.board.list_tasks(parent_task_id=task.task_id)) is investigate
         assert kwargs["execution_mode"] == "read_only"
         assert (Path(kwargs["coding_mode_root"]) / "app.py").read_text() == "before\n"
         assert kwargs["execution_mode"] == "read_only"
@@ -162,9 +164,47 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
     assert result.message == "Changed `app.py`. All required verification checks passed."
     assert result.data["repository_observations"]["findings"] == "The handler returns the wrong value."
     task = workflow.board.get_task(result.data["task_id"])
-    assert task.mode_workflow["evidence"][0]["board_ref"] in task.evidence_refs
+    if investigate:
+        assert task.mode_workflow["evidence"][0]["board_ref"] in task.evidence_refs
+    else:
+        assert task.mode_workflow["evidence"] == []
+        assert result.data["repository_observations"]["workflow_model_decisions"] == 3
     assert task.mode_workflow["approved_digest"] == ""
     assert not task.mode_workflow.get("inbox_id")
+
+
+def test_verification_history_is_reopened_with_checkout_versions(mode_gateway, monkeypatch):
+    from mana_agent.approval.policy import set_approval_mode
+    from mana_agent.human_inbox.models import canonical_digest
+    from mana_agent.services.coding_memory_service import CodingMemoryService
+
+    gateway, workflow = mode_gateway
+    gateway.config = SimpleNamespace(coding_memory=True)
+    set_approval_mode("full_access")
+    gateway._entry_router.llm = Decisions(draft(), {"disposition": "in_scope", "reason": "Only app.py changes"})
+    patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+    gateway._coding_agent = SimpleNamespace(
+        generate=lambda *_args, **_kwargs: {"status": "completed", "output": json.dumps({"patch": patch})},
+    )
+
+    async def verify(*_args, **_kwargs):
+        return {"passed": True, "exit_code": 0, "output": "observed check"}
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    result = workflow.start("session", "Verify the named entrypoint", mode="auto", repair=True,
+                            workflow=workflow_choice())
+    assert result.status == "success", result.message
+    task = workflow.board.get_task(result.data["task_id"])
+    history = CodingMemoryService(project_root=gateway.root, session_id="session")
+    flow_id = canonical_digest([task.workspace_id, task.primary_repository_id, str(gateway.root), task.task_id])
+    with history._connect() as connection:
+        rows = connection.execute("SELECT results_json FROM coding_flow_verification_results WHERE flow_id=?",
+                                  (flow_id,)).fetchall()
+    receipt, = [json.loads(row["results_json"]) for row in rows]
+    assert receipt["checkout"] == task.mode_workflow["plan"]["base_checkout"]
+    assert receipt["operation_id"] == result.data["verification"][0]["operation_id"]
+    assert receipt["source_versions"] == {"app.py": workflow._file_digest(gateway.root, "app.py")}
+    assert history.get_active_flow_id() != flow_id
 
 
 def test_auto_switches_to_debug_on_the_same_task_with_observed_evidence(mode_gateway):
@@ -186,10 +226,13 @@ def test_auto_switches_to_debug_on_the_same_task_with_observed_evidence(mode_gat
     result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
                             workflow=workflow_choice(), source_message_ids=("user-1",))
     assert result.status == "error"
-    assert result.data["mode"] == "debug"
+    assert result.data["mode"] == "auto"
+    assert result.data["strategy"] == "debug"
     inputs = gateway._entry_router.llm.inputs
     assert {item["task_id"] for item in inputs} == {result.data["task_id"]}
     assert inputs[-1]["evidence"] == inputs[-2]["evidence"]
+    assert inputs[-1]["user_mode"] == "auto"
+    assert inputs[-1]["mode"] == "debug"
     assert (gateway.root / "app.py").read_text() == "before\n"
 
 
@@ -243,23 +286,26 @@ def test_auto_repairs_failed_verification_without_repeating_completed_patch(mode
     second["draft"]["steps"][0]["step_id"] = "repair"
     second["draft"]["steps"][1]["depends_on"] = ["repair"]
     review = {"disposition": "in_scope", "reason": "Only app.py changes"}
-    model = Decisions(
-        inspection("app.py"),
-        draft(), review, second, review,
-    )
+    third = draft()
+    third["draft"]["steps"][0]["step_id"] = "repair_again"
+    third["draft"]["steps"][1]["depends_on"] = ["repair_again"]
+    third.update(action="repair", root_cause="The revised handler still returns a wrong value",
+                 cause_evidence=["evidence-2"])
+    model = Decisions(draft(), review, second, review, third, review)
     gateway._entry_router.llm = model
     writes = []
 
     def propose(_prompt, **kwargs):
         prior = (gateway.root / "app.py").read_text().strip()
-        new = {"before": "after", "after": "repaired"}[prior]
+        new = {"before": "after", "after": "partially repaired", "partially repaired": "repaired"}[prior]
         writes.append((prior, new))
         patch = f"*** Begin Patch\n*** Update File: app.py\n@@\n-{prior}\n+{new}\n*** End Patch"
         return {"status": "completed", "output": json.dumps({"patch": patch})}
 
     async def verify(root, command, **kwargs):
-        passed = (root / "app.py").read_text() == "repaired\n"
-        return {"passed": passed, "exit_code": 0 if passed else 1, "output": "observed handler behavior"}
+        state = (root / "app.py").read_text().strip()
+        passed = state == "repaired"
+        return {"passed": passed, "exit_code": 0 if passed else 1, "output": f"handler behavior: {state}"}
 
     gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode="internal")
     set_approval_mode(ApprovalMode.FULL_ACCESS)
@@ -267,9 +313,194 @@ def test_auto_repairs_failed_verification_without_repeating_completed_patch(mode
     result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
                             workflow=workflow_choice(), source_message_ids=("user-1",))
     assert result.status == "success", result.message
-    assert writes == [("before", "after"), ("after", "repaired")]
-    assert [result["passed"] for result in result.data["verification"]] == [False, True]
+    assert writes == [("before", "after"), ("after", "partially repaired"), ("partially repaired", "repaired")]
+    assert [row["passed"] for row in result.data["verification"]] == [False, False, True]
+    assert len({row["operation_id"] for row in result.data["verification"]}) == 3
+    assert all(row["argv"] == ["python", "app.py"] and row["attempt_id"] for row in result.data["verification"])
     assert len({row["task_id"] for row in model.inputs if "task_id" in row}) == 1
+    assert [item["verification_failure"]["result"]["exit_code"] for item in model.inputs
+            if item.get("verification_failure")] == [1, 1]
+
+
+def test_equivalent_evidence_queries_stop_without_using_the_tool_budget(mode_gateway):
+    gateway, workflow = mode_gateway
+    gateway._autonomous_controller.config = AutonomousExecutionConfig(max_no_progress_cycles=2)
+    query = {"action": "query_evidence", "reason": "Find saved handler behavior", "query": {"paths": ["app.py"]}}
+    model = Decisions(query, {**query, "reason": "Look for the handler result"}, query)
+    gateway._entry_router.llm = model
+    result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
+                            workflow=workflow_choice())
+    assert result.status == "error"
+    assert "Repeated evidence queries" in result.message
+    assert result.data["repository_observations"]["workflow_model_decisions"] == 3
+    assert result.data["repository_observations"]["workflow_tool_operations"] == 0
+    assert "no new current knowledge" in model.inputs[-1]["evidence_discovery_stop"]
+
+
+def test_repeated_verification_failure_retains_patches_and_blocks_completion(mode_gateway, monkeypatch):
+    from mana_agent.approval.policy import set_approval_mode
+
+    gateway, workflow = mode_gateway
+    set_approval_mode("full_access")
+    gateway._autonomous_controller.config = AutonomousExecutionConfig(max_no_progress_cycles=2)
+    review = {"disposition": "in_scope", "reason": "Only app.py changes"}
+    repair = draft()
+    repair["draft"]["steps"][0]["step_id"] = "retry_handler"
+    repair["draft"]["steps"][1]["depends_on"] = ["retry_handler"]
+    gateway._entry_router.llm = Decisions(draft(), review, repair, review)
+    patches = iter([("before", "after"), ("after", "repaired")])
+
+    def propose(*_args, **_kwargs):
+        before, after = next(patches)
+        patch = f"*** Begin Patch\n*** Update File: app.py\n@@\n-{before}\n+{after}\n*** End Patch"
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    async def verify(*_args, **_kwargs):
+        return {"passed": False, "exit_code": 1, "output": "same failing assertion"}
+
+    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode="internal")
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    result = workflow.start("session", "Fix the handler", mode="auto", repair=True, workflow=workflow_choice())
+    assert result.status == "error"
+    assert "same verification failure recurred" in result.message
+    assert len(result.data["verification"]) == 2
+    assert not result.data["goal_satisfied"]
+    assert (gateway.root / "app.py").read_text() == "repaired\n"
+    assert workflow.board.get_task(result.data["task_id"]).mode_workflow["plan"]
+
+
+def test_implementation_resumes_exact_step_after_reusing_evidence_from_another_session(mode_gateway, monkeypatch):
+    from mana_agent.approval.policy import set_approval_mode
+    from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+    from mana_agent.repository_evidence.models import EvidenceQuery
+
+    gateway, workflow = mode_gateway
+    (gateway.root / "config.py").write_text("ENABLED = True\n")
+    (gateway.root / "other.py").write_text("before\n")
+    set_approval_mode("full_access")
+    gateway._entry_router.llm = Decisions(inspection("config.py"), {
+        "action": "diagnose", "reason": "Read the named option", "root_cause": "The option is enabled",
+        "cause_evidence": ["evidence-1"],
+    })
+    seed = workflow.start("old-session", "Read the named option", mode="debug",
+                          workflow=workflow_choice(mode="debug", effect="read"))
+    assert seed.status == "success", seed.message
+    reopened = TaskBoard(gateway.root)
+    saved, = reopened.evidence_board().query(EvidenceQuery(paths=("config.py",)))["records"]
+    ref = {key: saved[key] for key in ("evidence_id", "revision")}
+
+    proposed_steps = draft()
+    proposed_steps["draft"]["steps"].insert(1, {
+        "step_id": "consumer", "instruction": "Update consumer", "depends_on": ["fix"],
+        "changes": {"other.py": ["update"]}, "acceptance_criteria": ["Consumer handles the option"],
+    })
+    proposed_steps["draft"]["steps"][-1]["depends_on"] = ["consumer"]
+    review = {"disposition": "in_scope", "reason": "Matches the scoped change"}
+    proposed = []
+    gap_task_id = ""
+    continuation = {"executed_operations": [{"tool": "read_file", "call_id": "before-wait"}]}
+
+    class AdaptiveDecisions(Decisions):
+        def decide_sync(self, messages, schema):
+            response = super().decide_sync(messages, schema)
+            selected = response.get("decision", {})
+            if selected.get("action") == "resume_implementation":
+                assert self.inputs[-1]["completed_step_ids"] == ["fix"]
+                assert self.inputs[-1]["pending_repository_evidence"]["task_id"] == gap_task_id
+                saved_task = workflow.lane.execution_supervisor.get_task(gap_task_id)
+                assert saved_task.checkpoint_id == self.inputs[-1]["pending_coding_checkpoint_id"]
+                checkpoint = workflow.lane.execution_supervisor.store.get_checkpoint(saved_task.checkpoint_id)
+                assert checkpoint.resume_payload["continuation"] == continuation
+                selected["recovery"] = {
+                    "decision_id": "resume-consumer", "task_id": gap_task_id, "action": "resume_checkpoint",
+                    "retry_category": "model", "reason": "The exact requirement is satisfied",
+                    "resume_checkpoint_id": saved_task.checkpoint_id,
+                    "same_task_retry_authorized": True, "safe_to_continue": True,
+                }
+            return response
+
+    gateway._entry_router.llm = AdaptiveDecisions(
+        proposed_steps, review,
+        {"action": "query_evidence", "reason": "Find the observed option", "query": {"paths": ["config.py"]}},
+        {"action": "use_evidence", "reason": "Reuse the observed option", "evidence": [ref], "requirement_id": "option"},
+        {"action": "resume_implementation", "reason": "The exact requirement is satisfied"}, review,
+    )
+
+    def propose(_prompt, *, gateway_task_id, coding_mode_files, coding_resume_context, **kwargs):
+        nonlocal gap_task_id
+        path, = coding_mode_files
+        proposed.append((gateway_task_id, path))
+        if path == "other.py" and not gap_task_id:
+            assert (gateway.root / "app.py").read_text() == "after\n"
+            gap_task_id = gateway_task_id
+            return {"status": "waiting", "continuation_context": continuation, "missing_evidence": [{
+                "task_id": gap_task_id, "reason": "Need the configuration option",
+                "requirement": {"requirement_id": "option", "objective": "Read the option",
+                                "paths": ["config.py"], "acceptance_criteria": ["Current config is observed"]},
+            }]}
+        if path == "other.py":
+            assert coding_resume_context == continuation
+            assert gateway_task_id == gap_task_id
+            assert ref in workflow.board.get_task(gateway_task_id).evidence_refs
+        patch = f"*** Begin Patch\n*** Update File: {path}\n@@\n-before\n+after\n*** End Patch"
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    async def verify(*_args, **_kwargs):
+        assert (gateway.root / "other.py").read_text() == "after\n"
+        return {"passed": True, "exit_code": 0, "output": "Both changes verified"}
+
+    monkeypatch.setattr("mana_agent.agent.plan_service.PlanService.inspect",
+                        lambda *_args: pytest.fail("Current evidence should not require a new inspection"))
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode="internal")
+    result = workflow.start("new-session", "Implement handler and consumer", mode="auto", repair=True,
+                            workflow=workflow_choice())
+    assert result.status == "success", result.message
+    assert [path for _, path in proposed] == ["app.py", "other.py", "other.py"]
+    children = workflow.board.list_tasks(parent_task_id=result.data["task_id"])
+    assert [child.task_kind for child in children] == ["implementation", "implementation"]
+    assert result.data["repository_observations"]["evidence_accounting"]["reused_evidence"] == 1
+
+
+def test_waiting_optional_investigation_does_not_block_independent_implementation(mode_gateway, monkeypatch):
+    from mana_agent.approval.policy import set_approval_mode
+    from mana_agent.gateway.lanes import LaneTaskState
+
+    gateway, workflow = mode_gateway
+    (gateway.root / "integration").mkdir()
+    set_approval_mode("full_access")
+    gateway._entry_router.llm = Decisions(investigation("integration", paths=["integration"]), draft(),
+                                        {"disposition": "in_scope", "reason": "Only app.py changes"})
+    investigation_id = ""
+
+    def assign(*, root, **_kwargs):
+        def generate(_prompt, *, gateway_task_id, **kwargs):
+            nonlocal investigation_id
+            if kwargs.get("repository_investigation"):
+                investigation_id = gateway_task_id
+                return {"status": "waiting", "investigation_result": {"missing_evidence": [{
+                    "task_id": gateway_task_id, "reason": "The client version must be confirmed",
+                    "requirement": {"requirement_id": "version", "objective": "Confirm the client version",
+                                    "acceptance_criteria": ["Version is observed"]},
+                }]}}
+            assert root == gateway.root
+            assert workflow.lane.inspect_task(investigation_id).state == LaneTaskState.WAITING
+            patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+            return {"status": "completed", "output": json.dumps({"patch": patch})}
+        return SimpleNamespace(generate=generate, close=lambda: None)
+
+    async def verify(*_args, **_kwargs):
+        return {"passed": True, "exit_code": 0, "output": "Independent check passed"}
+
+    gateway._coding_agent = SimpleNamespace(active_engine_mode="internal", for_assignment=assign)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
+                            workflow=workflow_choice())
+    assert result.status == "error"
+    assert "child results or consequential actions remain unresolved" in result.message
+    assert result.data["verification"][-1]["passed"]
+    assert workflow.lane.execution_supervisor.get_task(investigation_id).checkpoint_id
+    assert (gateway.root / "app.py").read_text() == "after\n"
 
 
 def test_draft_waits_for_exact_approval_and_executes_ordered_steps(mode_gateway, monkeypatch):

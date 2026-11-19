@@ -14,6 +14,90 @@ from mana_agent.coding.models import AgentEvent, CodingTask, WorkspaceContext
 from mana_agent.coding.live_events import coding_event_scope
 
 
+def test_native_resume_adds_refreshed_evidence_to_saved_history(tmp_path):
+    class Model:
+        async def generate(self, messages, *, continuation):
+            text = [message.content for message in messages]
+            assert "Previous scoped read" in text
+            assert "Fresh config evidence" in text[-1]
+            assert "same assignment" in text[-1]
+            return SimpleNamespace(tool_calls=[], content="Use the confirmed option.")
+
+    task = CodingTask(task_id="resumed", goal="Change the consumer", relevant_context="Fresh config evidence",
+                      requires_repository_write=False, context={
+                          "coding_continuation_id": "checkpoint",
+                          "coding_resume_context": {"native_messages": [
+                              {"role": "system", "content": "Work within scope"},
+                              {"role": "user", "content": "Previous scoped read"},
+                          ]},
+                      })
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(InternalCodingEngine(llm_client=Model()).execute(task, workspace))
+    assert result.status == "completed", result.errors
+
+
+def test_slow_native_provider_is_measured_separately_from_duplicate_reads(tmp_path, monkeypatch):
+    from mana_agent.coding import internal_engine
+
+    (tmp_path / "a.py").write_text("value = True\n")
+    clock = [0.0]
+    monkeypatch.setattr(internal_engine, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    lifecycle = []
+    monkeypatch.setattr("mana_agent.services.activity_context.emit_activity",
+                        lambda kind, **fields: lifecycle.append((kind, fields)))
+
+    class Model:
+        turns = 0
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            clock[0] += 300 if self.turns == 1 else 0.001
+            return SimpleNamespace(tool_calls=[
+                {"id": f"read-{self.turns}", "name": "read_file", "args": {"path": "a.py"}},
+            ])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model)
+    engine.max_no_progress_cycles = 2
+    task = CodingTask(task_id="slow", goal="Decide from the current file", requires_repository_write=False)
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+    assert result.status == "failed"
+    assert "Repeated repository reads" in result.errors[0]
+    assert model.turns == 4
+    assert len(result.continuation_context["executed_operations"]) == 3
+    durations = [fields["duration_ms"] for kind, fields in lifecycle if kind == "model.completed"]
+    assert durations == [300_000, 1, 1, 1]
+    assert result.duration_breakdown["provider_execution_time_ms"] == 300_003
+
+
+def test_cancelling_provider_wait_retains_completed_tool_result(tmp_path):
+    (tmp_path / "a.py").write_text("value = True\n")
+    task = CodingTask(task_id="cancel-after-read", goal="Inspect a.py", requires_repository_write=False)
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+
+    async def exercise():
+        pending = asyncio.Event()
+
+        class Model:
+            async def generate(self, messages, *, continuation):
+                if len(messages) == 2:
+                    return SimpleNamespace(tool_calls=[{"id": "read", "name": "read_file", "args": {"path": "a.py"}}])
+                pending.set()
+                await asyncio.Event().wait()
+
+        engine = InternalCodingEngine(llm_client=Model())
+        execution = asyncio.create_task(engine.execute(task, workspace))
+        await asyncio.wait_for(pending.wait(), timeout=5)
+        await engine.cancel(task.task_id)
+        return await asyncio.wait_for(execution, timeout=5)
+
+    result = asyncio.run(exercise())
+    assert result.status == "cancelled"
+    read, = result.continuation_context["executed_operations"]
+    assert read["call_id"] == "read" and read["ok"]
+
+
 class _FakeMultiToolLLM:
     """Simulates an LLM returning multiple parallel tool calls on turn 1, then completing on turn 2."""
 

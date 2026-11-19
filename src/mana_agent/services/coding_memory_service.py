@@ -345,9 +345,9 @@ class CodingMemoryService:
             return None
         return str(row["flow_id"])
 
-    def ensure_flow(self, *, flow_id: str | None, request: str) -> str:
-        """Resume an existing flow or create a new active flow for a request."""
-        existing = flow_id or self.get_active_flow_id()
+    def ensure_flow(self, *, flow_id: str | None, request: str, activate: bool = True) -> str:
+        """Ensure the flow exists. Historical task records can remain closed."""
+        existing = flow_id or (self.get_active_flow_id() if activate else None)
         now = _utc_now()
         if existing:
             with self._connect() as conn:
@@ -356,10 +356,11 @@ class CodingMemoryService:
                     (existing,),
                 ).fetchone()
                 if row is not None:
-                    conn.execute(
-                        "UPDATE coding_flows SET updated_at = ?, status = 'active' WHERE flow_id = ?",
-                        (now, existing),
-                    )
+                    if activate:
+                        conn.execute(
+                            "UPDATE coding_flows SET updated_at = ?, status = 'active' WHERE flow_id = ?",
+                            (now, existing),
+                        )
                     return existing
         created = flow_id or uuid.uuid4().hex[:12]
         objective = self._objective_from_request(request)
@@ -370,13 +371,14 @@ class CodingMemoryService:
                 """
                 INSERT INTO coding_flows (
                     flow_id, project_root, created_at, updated_at, status, objective, constraints_json, acceptance_json
-                ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created,
                     str(self.project_root),
                     now,
                     now,
+                    "active" if activate else "closed",
                     objective,
                     json.dumps(constraints),
                     json.dumps(acceptance),

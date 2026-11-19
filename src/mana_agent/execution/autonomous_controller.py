@@ -345,16 +345,19 @@ class AutonomousExecutionController:
         self,
         *,
         advance: Callable[[], StageResult | None],
-        decisions_used: Callable[[], int],
         check_attempt: Callable[[], Any],
     ) -> StageResult:
-        """Run typed repository decisions to a terminal result or durable wait."""
-        while decisions_used() < self.config.max_model_turns:
+        """Drive repository decisions and their fenced execution in one loop.
+
+        Call sites charge the relevant budget before requesting a model or
+        executing a tool. Reaching a model limit cannot suppress an already
+        selected verification or receipt reconciliation.
+        """
+        while True:
             check_attempt()
             result = advance()
             if result is not None:
                 return result
-        raise RuntimeError("The configured model decision budget was exhausted.")
 
     def advance_batch_task(self, **kwargs: Any) -> dict[str, Any]:
         """Advance the shared durable Batch loop under this controller's authority."""

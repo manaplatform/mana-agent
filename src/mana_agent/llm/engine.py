@@ -322,6 +322,7 @@ class NativeLLMEngine:
             "model": request.model, "task_id": request.task_id, "request_id": request.request_id,
             "usage": response.usage.model_dump(), "latency_seconds": time.perf_counter() - started})
         _emit_inference_activity("model.completed", title="Model responded", status="success", operation_id=request.request_id,
+                      duration_ms=int((time.perf_counter() - started) * 1000),
                       metadata={"provider": request.provider, "model": request.model,
                                 "duration_ms": int((time.perf_counter() - started) * 1000)})
         if response.public_summaries and self.profile().supports("public_reasoning_summaries"):
@@ -377,7 +378,7 @@ class NativeLLMEngine:
         if isinstance(error, ProviderRequestError) and error.failure is not None:
             metadata["reason_code"] = error.failure.error_code
         _emit_inference_activity("model.failed", title=title, status=status,
-            operation_id=request.request_id, metadata=metadata, summary=summary)
+            operation_id=request.request_id, duration_ms=metadata["duration_ms"], metadata=metadata, summary=summary)
         return request_error
 
     async def _refresh_metadata(

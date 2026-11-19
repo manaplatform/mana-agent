@@ -679,6 +679,7 @@ class MainAgent:
         from mana_agent.repository_evidence.tasks import assignment_for, investigation_completion_contract
         from mana_agent.repository_evidence.investigation import execute_investigation
         from mana_agent.coding.programmatic import ToolExecutionDispatcher
+        from mana_agent.execution_supervisor.models import RecoveryAction
         if self.repository_lanes is None:
             self.repository_lanes = LaneCoordinator(self.root, taskboard=self.taskboard, execution_supervisor=self.execution_supervisor)
         if self.coding_engine is None:
@@ -719,7 +720,10 @@ class MainAgent:
         if recovery is not None:
             if recovery.task_id != child_id:
                 raise PermissionError("Recovery belongs to a different task")
-            reservation = self.repository_lanes.retry_task(child_id, decision=recovery, session_id=child.session_id)
+            if recovery.action == RecoveryAction.RESUME_CHECKPOINT:
+                reservation = self.repository_lanes.resume_checkpoint(child_id, decision=recovery, session_id=child.session_id)
+            else:
+                reservation = self.repository_lanes.retry_task(child_id, decision=recovery, session_id=child.session_id)
         else:
             reservation = self.repository_lanes.reserve(normalized_intent=child.user_request, lane_id=lane_id,
                 taskboard_task_id=child_id, parent_task_id=parent_id, session_id=child.session_id,
@@ -769,18 +773,19 @@ class MainAgent:
                     import json
                     knowledge = self.taskboard.evidence_board(root=root, repository_id=child.primary_repository_id)
                     context = knowledge.query(EvidenceQuery(evidence_ids=tuple(ref.evidence_id for ref in assignment.evidence))) if assignment.evidence else {"records": []}
-                    checkpoint = self.execution_supervisor.store.get_checkpoint(child.resume_checkpoint_id) if child.resume_checkpoint_id else None
+                    checkpoint_id = recovery.resume_checkpoint_id if recovery and recovery.action == RecoveryAction.RESUME_CHECKPOINT else ""
+                    checkpoint = self.execution_supervisor.store.get_checkpoint(checkpoint_id) if checkpoint_id else None
                     resume = checkpoint.resume_payload.get("continuation", {}) if checkpoint else {}
                     prompt = child.user_request + "\n\nAuthoritative coding assignment and current repository evidence:\n" + json.dumps({
                         "assignment": assignment.model_dump(mode="json"), "evidence": context,
-                        "resume_checkpoint": child.resume_checkpoint_id}, ensure_ascii=False)
+                        "resume_checkpoint": checkpoint_id}, ensure_ascii=False)
                     worker = self.coding_engine.for_assignment(root=root)
                     try:
                         result = worker.generate_auto_execute(prompt, gateway_task_id=child_id,
                             execution_mode="read_only" if child.task_kind == "verification" else "auto",
                             relevant_context=assignment.model_dump_json(), execution_runtime=runtime,
                             coding_resume_context=resume,
-                            coding_continuation_id=child.resume_checkpoint_id if resume else "")
+                            coding_continuation_id=checkpoint_id if resume else "")
                         if child.task_kind == "verification" and not (result.get("tests_run") and result.get("tests_passed")):
                             raise PermissionError("Verification task returned no executed passing check")
                     finally:
@@ -794,10 +799,13 @@ class MainAgent:
                     if any(gap.task_id != child_id for gap in gaps):
                         raise ValueError("Missing evidence belongs to a different task")
                     self.taskboard.update_task(child_id, missing_evidence=[g.model_dump(mode="json") for g in gaps])
-                    self.repository_lanes.checkpoint(child_id, boundary="missing_repository_evidence",
+                    checkpoint_id = self.repository_lanes.checkpoint(child_id, boundary="missing_repository_evidence",
                         resume_payload={"assignment": child.coding_assignment, "missing_evidence": result["missing_evidence"],
                                         "continuation": result.get("continuation_context", {})})
-                    result["goal_satisfied"] = False
+                    self.repository_lanes.transition(child_id, LaneTaskState.WAITING, reason="Waiting for repository evidence")
+                    self.repository_lanes.lock_manager.release_task(child_id)
+                    return {**result, "goal_satisfied": False, "verification_passed": False,
+                            "checkpoint_id": checkpoint_id}
                 if result.get("goal_satisfied") and child.task_kind in {"implementation", "integration"} and route.runtime_capability_change:
                     plan = self._agent(AgentRole.PLANNER, PlannerAgent).plan(child_id, child.user_request,
                         route.route_name, runtime_capability_change=True)

@@ -49,6 +49,10 @@ def coordinate_step(main, root_id, request, route, ctx):
     query = EvidenceQuery.model_validate(ctx.get("repository_evidence_query") or {"task_id": root_id})
     evidence = knowledge.query(query)
     children = board.list_tasks(root_task_id=root_id)
+    saved_tasks = {
+        task.task_id: main.execution_supervisor.store.get_task_or_none(task.task_id)
+        for task in children[:100]
+    }
     llm = main.routing_llm
     if llm is None:
         raise RuntimeError("Repository coordination requires its selected decision model")
@@ -72,7 +76,8 @@ def coordinate_step(main, root_id, request, route, ctx):
                        "version": t.row_version, "status": t.status.value, "depends_on": t.depends_on,
                        "evidence_requirements": t.evidence_requirements, "evidence_refs": t.evidence_refs,
                        "blockers": t.blockers, "missing_evidence": t.missing_evidence,
-                       "checkpoint_id": t.resume_checkpoint_id} for t in children[:100]]}, default=str))], RepositoryCoordinationDecision)
+                       "checkpoint_id": saved_tasks[t.task_id].checkpoint_id if saved_tasks[t.task_id] else ""}
+                      for t in children[:100]]}, default=str))], RepositoryCoordinationDecision)
     decision = RepositoryCoordinationDecision.model_validate(selected)
     from mana_agent.multi_agent.core.types import AgentRole, TaskStatus
     from mana_agent.human_inbox.models import canonical_digest
