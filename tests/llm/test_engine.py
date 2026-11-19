@@ -579,20 +579,28 @@ def test_mode_decision_corrects_an_unavailable_coding_inspection(tmp_path, nativ
     assert decision.action == "block"
 
 
-def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path, native_profile, monkeypatch):
+@pytest.mark.parametrize("strategy", ["native", "tool"])
+def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path, native_profile, monkeypatch, strategy):
     import json
 
     from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.messages import ToolCall
+
+    if strategy == "tool":
+        native_profile.facts.pop("native_structured_output")
 
     request_log = []
 
     class Adapter:
         async def generate(self, request):
             request_log.append(request)
-            return ModelResponse(content=json.dumps({"decision": {
+            arguments = {"decision": {
                 "action": "investigate", "reason": "Inspect evidence", "objective": "Explain the behavior",
                 "scope": "a.py", "unknown-private-key": "rejected-private-value",
-            }}))
+            }}
+            if strategy == "tool":
+                return ModelResponse(tool_calls=[ToolCall(id="decision", name="record_decision", args=arguments)])
+            return ModelResponse(content=json.dumps(arguments))
 
     model = engine(native_profile, monkeypatch, Adapter())
     with pytest.raises(RuntimeError, match=r"ModeDecision.*decision\..*extra forbidden") as exc:
@@ -601,6 +609,82 @@ def test_mode_decision_reports_only_safe_fields_after_correction_fails(tmp_path,
     assert "unknown-private-key" not in str(exc.value)
     assert "rejected-private-value" not in str(exc.value)
     assert "rejected-private-value" not in request_log[1].messages[-1].content
+    assert "decision.investigate.<key>: extra forbidden" in request_log[1].messages[-1].content
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_mode_decision_tool_accepts_scoped_investigation_and_recovery(tmp_path, native_profile, monkeypatch, recover):
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.messages import ToolCall
+
+    decision = {
+        "action": "investigate", "reason": "Trace the handler and its caller.",
+        "objective": "Explain the dispatch path.", "scope": "Trace two known files.",
+        "paths": ["app.py", "src/caller.py"], "task_kind": "understanding",
+    }
+    if recover:
+        decision["recovery"] = {
+            "decision_id": "retry-saved", "task_id": "task-1", "action": "retry",
+            "reason": "Continue the same investigation.", "same_task_retry_authorized": True,
+            "safe_to_continue": True,
+        }
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            tool, = request.tools
+            assert tool["name"] == "record_decision"
+            assert request.response_schema is None
+            fields = tool["parameters"]["$defs"]["InvestigateDecision"]["properties"]
+            assert set(decision) <= set(fields)
+            return ModelResponse(tool_calls=[ToolCall(id="decision", name="record_decision", args={"decision": decision})])
+
+    model = NativeLLMEngine(provider="openrouter", model="anthropic/claude-haiku-5.5", api_key="fixture",
+                            base_url="https://provider.example/api/v1", endpoint="anthropic_messages", adapter=Adapter())
+    monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
+
+    selected = PlanService(tmp_path, llm=model).next_decision("debug", {"request": "Explain dispatch"})
+
+    assert len(requests) == 1
+    assert selected.paths == ("app.py", "src/caller.py")
+    assert selected.task_kind == "understanding"
+    if recover:
+        assert selected.recovery.task_id == "task-1"
+    else:
+        assert selected.recovery is None
+
+
+@pytest.mark.parametrize("corrected", [False, True])
+def test_mode_decision_tool_rejects_extra_top_level_arguments(tmp_path, native_profile, monkeypatch, corrected):
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.messages import ToolCall
+
+    native_profile.facts.pop("native_structured_output")
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            args = {"decision": {"action": "block", "reason": "More evidence is required."}}
+            if len(requests) == 1 or not corrected:
+                args["PRIVATE_EXTRA"] = "PRIVATE_VALUE"
+            return ModelResponse(tool_calls=[ToolCall(id="decision", name="record_decision", args=args)])
+
+    service = PlanService(tmp_path, llm=engine(native_profile, monkeypatch, Adapter()))
+    if corrected:
+        assert service.next_decision("debug", {"request": "Explain dispatch"}).action == "block"
+    else:
+        with pytest.raises(RuntimeError, match=r"arguments: unregistered arguments.*<key>: extra forbidden") as error:
+            service.next_decision("debug", {"request": "Explain dispatch"})
+        assert "PRIVATE_" not in str(error.value)
+
+    assert len(requests) == 2
+    assert requests[0].tools == requests[1].tools
+    assert "only top-level field is decision" in requests[0].messages[0].content
+    assert "Use only those top-level fields" in requests[0].messages[-1].content
+    assert "arguments: unregistered arguments" in requests[1].messages[-1].content
+    assert "PRIVATE_" not in requests[1].messages[-1].content
 
 
 @pytest.mark.parametrize(("finish_reason", "detail"), [
@@ -712,7 +796,8 @@ def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path
             requests.append(body)
             objective = "x" * 2001 if len(requests) == 1 else "Trace the return value"
             decision = {"action": "investigate", "reason": "Read the caller",
-                        "objective": objective, "scope": "app.py", "initial_repository_scope": ""}
+                        "objective": objective, "scope": "app.py", "initial_repository_scope": "",
+                        "paths": ["app.py"], "task_kind": "investigation", "recovery": None}
             return {"stop_reason": "end_turn", "content": [
                 {"type": "text", "text": json.dumps({"decision": decision})},
             ]}

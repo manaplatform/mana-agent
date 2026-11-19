@@ -83,7 +83,8 @@ def test_openrouter_claude_mode_schema_preserves_local_constraints():
 
     def normalize(objective):
         content = json.dumps({"decision": {"action": "investigate", "reason": "Read the caller",
-            "objective": objective, "scope": "app.py", "initial_repository_scope": ""}})
+            "objective": objective, "scope": "app.py", "initial_repository_scope": "",
+            "paths": ["app.py"], "task_kind": "investigation", "recovery": None}})
         return adapter.normalize({"choices": [{"message": {"content": content}}]}, selected).content
 
     assert ModeDecision.model_validate_json(normalize("Trace the return value"), strict=True).decision.action == "investigate"
@@ -201,7 +202,7 @@ def test_schema_wire_encoding_restores_freeform_maps_without_schema_weakening():
 
 @pytest.mark.parametrize("action,fields", [
     ("inspect", {"requests"}),
-    ("investigate", {"objective", "scope", "initial_repository_scope"}),
+    ("investigate", {"objective", "scope", "initial_repository_scope", "paths", "task_kind", "recovery"}),
     ("clarify", {"questions"}),
     ("draft", {"draft"}),
     ("diagnose", {"root_cause", "cause_evidence", "uncertainty"}),

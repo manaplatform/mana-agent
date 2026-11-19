@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-19
 
+- Advertise investigation paths, task kind, and recovery in the closed `ModeDecision` schema. Keep decisions nested under the single `decision` argument and give same-format corrections redacted field diagnostics. See the [decision argument regression](docs/regressions/debug-plan-execution-contract.md#mode-decision-tool-argument-regression) for verification.
 - Shorten the entry router prompt so the 8,000-token compaction fixture fits with complete route availability. Keep the required decision fields and response format instructions. See the [routing prompt budget regression](docs/regressions/debug-plan-execution-contract.md#entry-routing-prompt-budget-regression) for verification.
 - Preserve newer capability observations when resolving an older copy of the same fact. Entry routing includes required tool-calling or structured-output support in its metadata refresh. See the [stale tool-calling regression](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md#stale-tool-calling-with-a-fresh-catalog) for verification.
 - Execute AUTO and DEBUG inspection batches on the parent task, reuse versioned reads, and surface the lifetime child limit for explicit investigations. The scripted 21-batch replay uses 22 workflow decisions and zero child backend requests. See the [investigation latency regression](docs/regressions/repository-evidence-orchestration.md#inspection-fan-out-and-latency-regression) for verification.

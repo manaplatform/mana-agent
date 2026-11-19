@@ -478,17 +478,32 @@ class NativeLLMEngine:
         tool_based = not native and prof.supports("tool_calling")
         model = self
         if tool_based:
+            def validate_decision_arguments(arguments: dict[str, Any]) -> None:
+                try:
+                    validate_arguments(arguments, schema_dict, redact_keys=True)
+                except ValueError as exc:
+                    detail = f"Provider tool arguments violate the registered schema for record_decision ({exc})"
+                    if isinstance(schema, type) and issubclass(schema, BaseModel):
+                        try:
+                            schema.model_validate_json(json.dumps(arguments), strict=True, context=validation_context)
+                        except ValidationError as error:
+                            detail += ". " + describe_decision_validation(error, schema_dict)
+                    raise StructuredOutputError(detail, public_detail=detail) from None
+
             record_tool = {
                 "name": "record_decision",
                 "description": "Submit the complete decision in the tool arguments.",
                 "parameters": schema_dict,
             }
             choice = {"type": "function", "name": "record_decision"} if prof.supports_value("tool_choice", "function") else None
-            model = self.with_tools([record_tool], tool_choice=choice)
+            model = self.with_tools([record_tool], tool_choice=choice,
+                                    argument_validators={"record_decision": validate_decision_arguments})
             instruction = "Return exactly one record_decision call with the complete decision in its arguments."
             required_fields = schema_dict.get("required", [])
             if required_fields:
                 instruction += f" Required top-level fields are {', '.join(required_fields)}."
+                if schema_dict.get("additionalProperties") is False and set(required_fields) == set(schema_dict.get("properties", {})):
+                    instruction += " Use only those top-level fields."
             decision_messages.append(UserMessage(instruction))
         if not native and not tool_based:
             if not (prof.supports("output_text") or prof.supports("input_text") or prof.supports("text_generation")):

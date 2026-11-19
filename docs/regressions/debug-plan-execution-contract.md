@@ -185,6 +185,37 @@ the full route availability estimate.
 venv/bin/python -m pytest -q tests/gateway/test_context_budget_retention.py tests/gateway/test_astra_entry_route_budget.py tests/gateway/test_entry_routing.py tests/llm/test_engine.py
 ```
 
+## Mode decision tool argument regression
+
+On 2026-11-19 at 22:30 Tehran time, workflow `task_20261119_000017`
+stopped after successful repository reads. The first mode response
+failed validation inside `arguments.decision`. The correction had
+unregistered fields at the tool argument root. The journal omits both
+payloads, so the original action and rejected fields are unknown.
+
+The prompt instructed the model to send `paths`, `task_kind`, and
+`recovery` for investigations. The application model supported those
+fields, but its generated schema excluded them. A scoped investigation
+using those fields reproduces the first rejection. Generic union
+validation also masked the selected action's failing field.
+
+The provider schema now includes those typed fields, and the application
+decodes JSON path arrays into tuples before strict validation. The
+application still reads earlier decisions that derive the path from scope. The prompt names
+`decision` as the only top-level field. A schema rejection uses the typed
+contract to add field diagnostics while redacting unknown names and
+rejected values. The same model and format still get one correction.
+Scope, recovery, and authorization checks remain in force.
+
+Do not hide fields that the decision prompt asks the model to return or
+accept extra fields beside the `decision` envelope.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_engine.py tests/llm/test_providers.py -k 'mode_decision or entry_route_reports_schema_rejection or openrouter_claude'
+```
+
+The focused regression tests passed locally. Live provider behavior remains unverified.
+
 ## Action payload regression
 
 Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.
