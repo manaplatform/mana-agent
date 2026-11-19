@@ -59,6 +59,11 @@ RequiredSource = Literal[
 
 REQUIRED_SOURCES: set[str] = set(get_args(RequiredSource))
 TOOL_SOURCES = REQUIRED_SOURCES - {"internal_knowledge", "none"}
+_REQUIRED_SOURCES_ERROR = "entry_route_required_sources"
+_REQUIRED_SOURCES_CORRECTION = (
+    'Provide a nonempty top-level required_sources array using required_source_rules for your selected route. '
+    'Use ["none"] for tool-free routes and explicit source identifiers for executable routes.'
+)
 
 
 def _render_repository_guidance(context: Any) -> str:
@@ -265,7 +270,9 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] = Field(
         description="A brief, nonblank explanation of why this route fits the request."
     )
-    required_sources: list[str]
+    required_sources: list[str] = Field(
+        min_length=1, description='Explicit source identifiers for this route. Use ["none"] for tool-free routes.',
+    )
     target_urls: list[str] = Field(default_factory=list)
     requires_live_data: bool = False
     reason_code: str = ""
@@ -637,8 +644,10 @@ Examples:
 """
 
 
-def _routing_correction(validation_error: str) -> str:
+def _routing_correction(validation_error: str, *, code: str = "") -> str:
     """Return model-only correction guidance for a bounded invalid-decision retry."""
+    if code == _REQUIRED_SOURCES_ERROR:
+        return _REQUIRED_SOURCES_CORRECTION
     if "routing reason is required" in validation_error:
         return ("Return a complete routing decision with a nonblank top-level reason explaining "
                 "why the selected route fits the request.")
@@ -997,12 +1006,15 @@ class EntryRouter:
             except EntryRoutingError as validation_error:
                 # This is a bounded correction request, not a static reroute:
                 # the model must supply a new, fully validated decision.
-                correction = _routing_correction(str(validation_error))
+                correction = _routing_correction(str(validation_error), code=validation_error.code)
                 if not correction:
                     raise
+                previous = decision_payload
+                if validation_error.code == _REQUIRED_SOURCES_ERROR:
+                    previous = {"route": validation_error.details["route"]}
                 repair_payload = {
                     **payload,
-                    "previous_invalid_decision": decision_payload,
+                    "previous_invalid_decision": previous,
                     "validation_error": str(validation_error),
                     "correction": correction,
                 }
@@ -1114,7 +1126,9 @@ class EntryRouter:
         if not isinstance(raw_sources, list) or not raw_sources:
             raise EntryRoutingError(
                 "Model decision failed: entry_route. No response was generated. "
-                "Reason: required_sources must be a non-empty list."
+                "Reason: required_sources must be a non-empty list.",
+                code=_REQUIRED_SOURCES_ERROR,
+                details={"route": route},
             )
         sources = tuple(str(item).strip() for item in raw_sources)
         unknown_sources = sorted({source for source in sources if source not in REQUIRED_SOURCES})
@@ -1522,6 +1536,7 @@ def _invoke_routing_model(llm: Any, messages: list[Any]) -> tuple[Any, dict[str,
         response = llm.decide_sync(
             messages, EntryRoutingOutput, complex_schema=True, repair_decision=True,
             correction_hint=(
+                f"{_REQUIRED_SOURCES_CORRECTION} "
                 "For a coding route, explicitly set runtime_capability_change at the top level beside "
                 "coding_workflow. Use true for changes to production capabilities and false otherwise. "
                 "Set media_request to null unless route=media. Image and video generation require prompt, "

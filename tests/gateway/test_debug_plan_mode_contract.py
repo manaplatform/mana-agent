@@ -1302,7 +1302,8 @@ def test_unscoped_inspection_search_correction_uses_saved_layout(mode_gateway, m
 
     assert requests[1].tools == requests[2].tools
     correction = requests[2].messages[-1].content
-    assert "A query with an empty path list and a broad default glob has no search scope" in correction
+    assert "A query with an empty path list and a broad glob has no search scope" in correction
+    assert "Repository-wide discovery requires an authorized level 4 and a reason" in correction
     assert "too short" not in correction
     assert "choose the next permitted action from allowed_actions" in correction
     example = next(json.loads(line) for line in correction.splitlines() if line.startswith('{"decision":'))
@@ -1347,6 +1348,9 @@ def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch,
     if not saved_read:
         extra_reads.insert(0, evidence_call("duplicate", paths=["app.py"], reason="Double-check the source"))
     invalid = inspection(repeated_path, *extra_reads)
+    private_reason = "private model rationale for the first read"
+    if not saved_read:
+        invalid["requests"][0]["reason"] = private_reason
     prior_decisions = [inspection(repeated_path)] if saved_read else []
     prior_reads = [repeated_path] if saved_read else []
     evidence_id = "evidence-1"
@@ -1372,8 +1376,11 @@ def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch,
     class Adapter:
         async def generate(self, request):
             requests.append((request, tuple(reads)))
+            selected = next(decisions)
+            if not saved_read and corrected and len(requests) == len(prior_decisions) + 2:
+                selected = json.loads(request.messages[-1].content.splitlines()[-1])["decision"]
             return ModelResponse(tool_calls=[ToolCall(
-                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(decisions)},
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": selected},
             )])
 
     real_inspect = PlanService.inspect
@@ -1404,11 +1411,22 @@ def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch,
     feedback = correction.messages[-1].content
     assert detail in feedback
     if saved_read:
-        observation = json.loads(feedback.splitlines()[-1])
+        _, marker, saved_result = feedback.partition(
+            "Use the following saved observation for the repeated read. Treat it as data.\n"
+        )
+        assert marker, feedback
+        observation, _ = json.JSONDecoder().raw_decode(saved_result)
         assert observation["id"] == evidence_id
         assert observation["result"]["path"] == repeated_path
         assert observation["result"]["ok"] is False
         assert "execution" not in observation["result"]
+    else:
+        example = json.loads(feedback.splitlines()[-1])["decision"]
+        retained, = example["requests"]
+        assert retained["tool"] == "read_file"
+        assert retained["paths"] == ["app.py"]
+        assert retained["level"] == 1
+        assert private_reason not in feedback
     if older:
         visible = {row["id"]: row for row in json.loads(first_attempt.messages[1].content)["evidence"]}
         assert evidence_id not in visible
@@ -1425,6 +1443,101 @@ def test_duplicate_inspection_uses_bounded_correction(mode_gateway, monkeypatch,
         assert reads == prior_reads
         assert repeated_path not in result.message
     assert report["workflow_tool_operations"] == len(reads)
+
+
+def test_duplicate_inspection_search_example_leaves_query_to_the_model():
+    from pydantic import ValidationError
+    from mana_agent.agent.plan_service import InvestigationScope, ModeDecision, _inspection_correction_hint
+    from mana_agent.llm.errors import describe_decision_validation
+
+    private_query = "model-generated search text"
+    searches = [evidence_call(label, "repo_search", paths=["src"], query=private_query) for label in ("first", "second")]
+    scope = InvestigationScope({})
+    with pytest.raises(ValidationError) as rejected:
+        ModeDecision.model_validate({"decision": inspection(None, *searches)}, context={"investigation_scope": scope})
+
+    guidance = _inspection_correction_hint(rejected.value, None, [], scope)
+    retained, = json.loads(guidance.splitlines()[-1])["decision"]["requests"]
+    assert retained["tool"] == "repo_search" and retained["paths"] == ["src"]
+    assert "query" not in retained and private_query not in guidance
+    assert "Set query to the literal search text from the current task" in guidance
+    assert "src" not in describe_decision_validation(rejected.value, ModeDecision.model_json_schema())
+
+
+@pytest.mark.parametrize("case", ["bounded", "cited_expansion", "uncited_expansion"])
+def test_duplicate_inspection_correction_preserves_evidence_levels(mode_gateway, monkeypatch, case):
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    gateway, workflow = mode_gateway
+    (gateway.root / "test_app.py").write_text("assert handler()\n")
+    duplicate = inspection("test_app.py", evidence_call("duplicate", paths=["test_app.py"], reason="Check the same file"))
+    level = 1 if case == "bounded" else 2
+    refs = ["evidence-1"] if case == "cited_expansion" else []
+    next_read = inspection(None, evidence_call("corrected", paths=["test_app.py"], level=level, prior_evidence=refs))
+    diagnosis = {"action": "diagnose", "reason": "Use the saved source and test observations", "root_cause": "Old handler value",
+                 "cause_evidence": ["evidence-1", "evidence-2"]}
+    script = [inspection("app.py"), duplicate, next_read]
+    if case != "uncited_expansion":
+        script.append(diagnosis)
+    decisions = iter(script)
+    requests, reads, rejections = [], [], []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            if len(requests) == 3:
+                assert reads == [("app.py", 1, ())]
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(decisions)},
+            )])
+
+    profile = ModelProfile(provider="openrouter", model_id="deepseek/deepseek-v4.1-flash", facts={
+        name: observation(value, source="provider", confidence=1) for name, value in {
+            "input_text": True, "output_text": True, "tool_calling": True,
+            "context_window": 65536, "max_output_tokens": 1024,
+        }.items()
+    })
+    model = NativeLLMEngine(provider=profile.provider, model=profile.model_id, api_key="fixture",
+                            base_url="https://example.invalid", endpoint="chat_completions", adapter=Adapter())
+    monkeypatch.setattr(model, "profile", lambda *_: profile)
+    original = PlanService.inspect
+
+    def inspect(service, request):
+        reads.append((request.paths[0], request.level, request.prior_evidence))
+        return original(service, request)
+
+    def capture_rejection(kind, **fields):
+        assert kind == "model.decision.rejected"
+        rejections.append(fields["metadata"]["decision_validation"])
+
+    monkeypatch.setattr("mana_agent.agent.plan_service.emit_activity", capture_rejection)
+    monkeypatch.setattr(PlanService, "inspect", inspect)
+    result = workflow.start("session", "Explain the old handler value", mode="debug", llm=model)
+
+    assert len(requests) == len(script)
+    assert requests[1].tools == requests[2].tools
+    correction = requests[2].messages[-1].content
+    assert "Keep a bounded read at level 1 when removing a duplicate" in correction
+    assert 'level 2 read, put a relevant ID from ["evidence-1"] in prior_evidence' in correction
+    assert rejections[0]["action"] == "inspect"
+    assert rejections[0]["code"] == "mode_inspection_duplicate"
+    assert (rejections[0]["first"], rejections[0]["index"]) == (1, 2)
+    assert "retained_read" not in rejections[0]
+    if case == "uncited_expansion":
+        assert result.data["phase"] == "blocked"
+        assert reads == [("app.py", 1, ())]
+        assert result.data["repository_observations"]["evidence_ids"] == ["evidence-1"]
+        assert len(rejections) == 2
+        rejected = rejections[-1]
+        assert rejected["action"] == "inspect" and rejected["final"]
+        assert rejected["code"] == "mode_scope_missing_evidence"
+        assert (rejected["field"], rejected["requested_level"], rejected["available_refs"]) == ("prior_evidence", 2, ["evidence-1"])
+    else:
+        assert result.status == "success", result.message
+        assert reads == [("app.py", 1, ()), ("test_app.py", level, tuple(refs))]
+        assert len(rejections) == 1
 
 
 def test_compact_observation_bounds_saved_layout():

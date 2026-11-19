@@ -144,6 +144,7 @@ def test_entry_route_corrects_nested_runtime_capability_change(native_profile, m
 
     registry = EntryRouteRegistry()
     registry.register(RouteRegistration("coding", "Repository coding", lambda: RouteAvailability(available=True)))
+    registry.register(RouteRegistration("repository", "Repository inspection", lambda: RouteAvailability(available=True)))
     router = EntryRouter(llm=engine(native_profile, monkeypatch, Adapter()), registry=registry)
     context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t", user_message_id="user-1")
 
@@ -153,6 +154,7 @@ def test_entry_route_corrects_nested_runtime_capability_change(native_profile, m
     else:
         decision = router.route(user_prompt="The parser failed. Fix it.", context=context)
         assert decision.runtime_capability_change is corrected_flag
+        assert decision.required_sources == ("repository",)
         assert decision.coding_workflow.mode == "debug"
         assert decision.source_message_ids == ("user-1",)
 
@@ -283,6 +285,49 @@ def test_entry_route_reason_correction_stays_on_selected_strategy(
 
     assert len(requests) == 2
     assert "reason: string too short" in requests[1].messages[-1].content
+
+
+@pytest.mark.parametrize("strategy", ["native", "tool", "text"])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_entry_route_required_sources_uses_one_native_correction(native_profile, monkeypatch, strategy, corrected):
+    import json
+
+    from mana_agent.gateway.entry_routing import (
+        EntryRouteContext, EntryRouteRegistry, EntryRouter, EntryRoutingError, RouteAvailability, RouteRegistration,
+    )
+    from mana_agent.llm.messages import ToolCall
+
+    if strategy != "native":
+        native_profile.facts.pop("native_structured_output")
+    if strategy == "text":
+        native_profile.facts.pop("tool_calling")
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            decision = {"route": "conversation", "confidence": 0.9, "reason": "Answer the greeting",
+                        "required_sources": ["none"] if len(requests) == 2 and corrected else []}
+            assert bool(request.response_schema) == (strategy == "native")
+            if strategy == "tool":
+                return ModelResponse(tool_calls=[ToolCall(id="route", name="record_decision", args=decision)])
+            assert not request.tools
+            return ModelResponse(content=json.dumps(decision))
+
+    registry = EntryRouteRegistry()
+    registry.register(RouteRegistration("conversation", "Direct reply", lambda: RouteAvailability(available=True)))
+    router = EntryRouter(llm=engine(native_profile, monkeypatch, Adapter()), registry=registry)
+    context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t")
+    if corrected:
+        assert router.route(user_prompt="Hello", context=context).required_sources == ("none",)
+    else:
+        with pytest.raises(EntryRoutingError, match="Decision still invalid after one correction.*required_sources"):
+            router.route(user_prompt="Hello", context=context)
+
+    assert len(requests) == 2
+    assert requests[0].tools == requests[1].tools
+    assert requests[0].response_schema == requests[1].response_schema
+    assert "nonempty top-level required_sources array" in requests[1].messages[-1].content
 
 
 @pytest.mark.parametrize("case", ["expired_profile", "expired_limits", "missing_output_after_refresh"])

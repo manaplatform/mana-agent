@@ -163,6 +163,33 @@ venv/bin/python -m pytest -q tests/llm/test_engine.py tests/test_tui_approval_re
 
 The agent did not run the tests or replay the provider request.
 
+### Empty required sources in entry routing
+
+On 2026-11-20, an entry-routing attempt stopped with `required_sources must
+be a non-empty list`. The reported text identifies the gateway source check.
+It does not distinguish an empty array from a missing or malformed field.
+
+The native schema required `required_sources` but accepted an empty array.
+The gateway then rejected the decision after native correction had closed.
+The legacy correction path also lacked guidance for missing, empty, or
+malformed source arrays.
+
+The schema now requires at least one source. Native routing can correct an
+empty array in its existing one-retry path. Legacy routing can request its
+existing bounded correction using the valid route name and the original
+source rules. The model supplies the sources, including `["none"]` for a
+tool-free reply. The gateway validates the selected sources before dispatch.
+
+**Do not reintroduce** an empty source array in the model schema or fill in
+missing source identifiers on the model's behalf.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/llm/test_engine.py -k 'entry_route_required_sources or missing_required_sources or entry_route_reports_schema_rejection'
+```
+
+The fixtures cover legacy correction and the native structured, tool-call,
+and text response strategies. Test execution and live replay remain pending.
+
 ## Coding route capability flag regression
 
 On 2026-11-19, a `record_decision` response placed `runtime_capability_change`
@@ -186,7 +213,13 @@ venv/bin/python -m pytest -q tests/llm/test_engine.py -k nested_runtime_capabili
 
 The fixture reproduces the rejected tool call, checks recovery with either
 boolean, and checks that an omitted flag exhausts the existing correction.
-The agent did not run the tests or replay the provider request.
+The 2026-11-20 suite reported `selected unavailable source(s): repository`
+after both valid corrections. The fixture registered only `coding`, while
+the router checks the `repository` source separately. The fixture now
+registers both and checks that the corrected decision retains that source.
+**Do not reintroduce** a coding route fixture that omits its required
+repository registration or bypasses source availability. The agent did not
+run the tests or replay the provider request.
 
 ## Entry routing prompt budget regression
 
@@ -364,13 +397,79 @@ The response passed typed decision validation. The gateway checked for duplicate
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection or deduplicates_aliases or investigation_batch_rejects or over_budget_read_batch or unjustified_expansion'`. The fixtures cover correction of same-batch and saved-read duplicates, normalized aliases, and blocking after a repeated invalid selection. The agent did not run the fixtures or resume the live task.
 
+### Duplicate correction and evidence levels
+
+On 2026-11-20, a workflow saved repository observations and then rejected two
+identical reads in one inspection batch. The correction included a higher
+evidence level without `prior_evidence`.
+Both Activity entries showed the action as `unknown`. The excerpt contains
+the validation messages and activity order, with no raw decision payload.
+
+The duplicate feedback named the two positions without explaining that the
+level expresses scope. Changing the level or rationale still selects the
+same operation. The scope check also ran on the complete decision and its
+errors had no action label for Activity.
+
+The tool schema and correction now explain that ordinary bounded reads can
+stay at level 1. The correction uses the task's current observation IDs to
+show what a justified expansion may cite. Missing citations identify the
+requested level and bounded eligible references. Duplicate and scope
+rejections carry the `inspect` action. The rejected batch runs no reads and
+gets the existing single correction.
+
+**Do not reintroduce** using evidence level to make duplicate reads appear
+distinct, citing observations from a rejected batch, or widening scope on
+the host's initiative.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection or investigation_batch_rejects or unscoped_inspection_search'
+```
+
+The fixtures cover a bounded correction, a cited level-2 correction, and an
+uncited level-2 correction that blocks before dispatch. Test execution and
+live replay remain pending.
+
+### Duplicate correction with a retained read
+
+On 2026-11-20, a correction was rejected for selecting the same read twice. The terminal
+error identified requests 1 and 2. The retry message named the positions,
+but the provider's earlier invalid response was absent from its messages.
+The positions therefore did not identify an operation the model could keep.
+
+When both requests resolve to the same fingerprint, the existing correction
+gets a one-request example derived from the first parsed request. The
+example retains bounded, safe selection fields such as a file path and line
+range. The model supplies any search text and chooses whether that read still
+answers a missing question. The example contains no original rationale and
+stays out of Activity and public errors. A correction still supplies a new
+model decision and the complete batch is validated before dispatch.
+
+**Do not reintroduce** position-only correction for an in-batch duplicate
+when a safe request example is available. Never execute a request from the
+rejected batch directly.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection'
+```
+
+The scripted model now builds its corrected response from the supplied
+example. Coverage also checks that search text is omitted and that a second
+duplicate blocks without dispatch. Test execution and live replay remain pending.
+
 ## Saved evidence in duplicate corrections
 
 On 2026-11-17, DEBUG task `task_20261117_000007` saved 11 observations and then blocked after its model requested the same `ls` operation twice, including during correction. TaskBoard had the layout under `evidence-1`. The model prompt included evidence IDs for the full history but only showed the latest eight observations. The correction identified `evidence-1` without supplying its result.
 
 The workflow keeps the shallow layout alongside recent observations. The same model's single correction attempt receives the matching saved observation as data. The public validation message contains the diagnostic and evidence ID. The correction uses the existing observation compaction, and the layout preview includes at most 50 directory names. TaskBoard retains the complete result with its original read receipt.
 
+On 2026-11-20, three saved-read cases reported `JSONDecodeError`. The fixture
+decoded the last line of the correction as JSON, even though the prompt
+builder can include other guidance after the observation. It now decodes
+the object at the saved-observation label and checks the expected evidence
+ID, failed read, and absence of the execution receipt.
+
 **Do not reintroduce** telling the model to use an evicted observation without supplying it. Keep rejecting duplicates within a batch and keep saved observation contents out of public errors.
+Keep fixture parsing anchored to the observation label as prompt guidance evolves.
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_engine.py -k 'duplicate_inspection or compact_observation_bounds_saved_layout or mode_decision_repairs_semantic_failure or inspection_correction_rebuilds'`. The fixtures exercise retention of an older layout, recovery of an older failed read for correction, and blocking if the model repeats that failed read. The agent did not run these fixtures or resume the live task.
 
@@ -499,9 +598,18 @@ explains the minimum when the model submits an empty batch. The gateway
 validates the whole batch before dispatch and retains the existing scope
 and authorization checks.
 
+On 2026-11-20, the PLAN batch regression reported that the diagnostic for
+`**/*.py` with empty `paths` omitted the level-4 requirement. The earlier
+scope message focused on how to narrow the search. The shared decision
+validator now describes both targeted selectors and the authorized level-4
+path, whether the broad glob was omitted or supplied explicitly. The PLAN
+fixture checks rejection before any batch reads run, and the DEBUG fixture
+checks that the correction includes the same authorization guidance.
+
 **Do not reintroduce** treating a query as a scope, echoing rejected values
 in recovery guidance, or retrying a rejected batch without a new model
-decision.
+decision. Keep the level-4 authorization requirement visible for broad
+globs with no paths.
 
 ```sh
 venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'unscoped_inspection_search or empty_inspection_requests or inspection_correction_rebuilds or inspection_path_correction'

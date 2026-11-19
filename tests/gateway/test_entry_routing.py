@@ -1508,6 +1508,35 @@ def test_router_rejects_missing_required_sources_instead_of_guessing(tmp_path: P
         raise AssertionError("invalid routing output must stop without selecting a source")
 
 
+@pytest.mark.parametrize("source_fields", [{}, {"required_sources": []}, {"required_sources": "private-model-value"}])
+def test_entry_route_required_sources_corrects_legacy_output(source_fields: dict) -> None:
+    calls = []
+
+    def invoke(messages):
+        calls.append(json.loads(messages[-1].content))
+        decision = {"route": "search", "confidence": 0.9, "reason": "Find current public information"}
+        decision.update(source_fields if len(calls) == 1 else {"required_sources": ["search"]})
+        return SimpleNamespace(content=json.dumps(decision))
+
+    router = EntryRouter(llm=SimpleNamespace(invoke=invoke), registry=_registry())
+    decision = router.route(
+        user_prompt="Find current competitors",
+        context=EntryRouteContext(session_id="s", conversation_id="s", turn_id="t"),
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["previous_invalid_decision"] == {"route": "search"}
+    assert calls[1]["required_source_rules"]["search"] == [["search"]]
+    assert "nonempty top-level required_sources array" in calls[1]["correction"]
+    assert decision.route == "search" and decision.required_sources == ("search",)
+
+
+def test_entry_route_required_sources_schema_requires_at_least_one_source() -> None:
+    schema = EntryRoutingOutput.model_json_schema()
+    assert "required_sources" in schema["required"]
+    assert schema["properties"]["required_sources"]["minItems"] == 1
+
+
 @pytest.mark.parametrize("reason_fields", [{}, {"reason": ""}, {"reason": " \t\n"}])
 def test_entry_route_reason_repairs_unstructured_model_output(reason_fields: dict[str, str]) -> None:
     calls = []
