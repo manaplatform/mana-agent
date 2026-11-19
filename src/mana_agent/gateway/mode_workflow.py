@@ -21,10 +21,12 @@ from tempfile import TemporaryDirectory
 import time
 from typing import Any, TYPE_CHECKING
 
+from pydantic_core import PydanticCustomError
+
 from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase as Phase, PlanRevision, PlanStep, VerificationCommand, repository_relative_path
 from mana_agent.agent.plan_service import (
-    InspectDecision, InvestigateDecision, MAX_INSPECTION_BATCH, ModeDecisionContext, PlanService,
-    validate_observation_references,
+    InspectDecision, InvestigateDecision, MAX_INSPECTION_BATCH, ModeDecisionContext, PlanService, SavedInvestigation,
+    validate_investigation_recovery, validate_observation_references,
 )
 from mana_agent.agent.repository_investigation import (
     compact_observation, investigation_scope, observation_fingerprint, read_tool_schemas,
@@ -33,7 +35,7 @@ from mana_agent.batch.policy import BatchPending, TaskExecutionPolicy
 from mana_agent.chat.activity import safe_text
 from mana_agent.chat_commands.models import CommandResult
 from mana_agent.execution_supervisor.errors import StaleLeaseError
-from mana_agent.execution_supervisor.models import ExecutionState
+from mana_agent.execution_supervisor.models import ExecutionState, RecoveryAction, TaskRecord
 from mana_agent.gateway.lane_coordinator import LaneReservation
 from mana_agent.gateway.lanes import LaneId, LaneTaskState
 from mana_agent.human_inbox.identity import local_reviewer_actor
@@ -42,7 +44,7 @@ from mana_agent.human_inbox.models import (
     ReviewerAssignment, ReviewerType, ResponseOperation, ResponseSubmission, canonical_digest,
 )
 from mana_agent.human_inbox.repository import InboxConcurrentUpdateError
-from mana_agent.multi_agent.core.types import TaskStatus
+from mana_agent.multi_agent.core.types import TaskBoardItem, TaskStatus
 from mana_agent.services.activity_context import (
     ActivityContext, activity_protected_text, activity_scope, current_activity_context, emit_activity,
 )
@@ -456,6 +458,19 @@ class ModeWorkflow:
             return self._execute(task_id, state, service, in_controller=True)
         return self._advance_decision(task_id, state, service)
 
+    def _saved_investigation(self, task_id: str, child_id: str) -> tuple[TaskBoardItem, TaskRecord, SavedInvestigation] | None:
+        child = self.board.store.repository.get_task_or_none(child_id) if child_id else None
+        if child is None or child.parent_task_id != task_id or child.task_kind not in {"investigation", "understanding"}:
+            return None
+        execution = self.lane.execution_supervisor.store.get_task_or_none(child.task_id)
+        if execution is None:
+            return None
+        return child, execution, SavedInvestigation(
+            task_id=child.task_id, objective=child.user_request, paths=tuple(child.investigation_scope),
+            task_kind=child.task_kind, initial_repository_scope=child.mode_workflow.get("initial_repository_scope", ""),
+            scope=child.mode_workflow.get("investigation_context"), checkpoint_id=execution.checkpoint_id,
+        )
+
     def _advance_decision(self, task_id, state, service) -> CommandResult | None:
         with current_activity_context().publication():
             for field in ("model", "provider"):
@@ -491,20 +506,15 @@ class ModeWorkflow:
         scope = investigation_scope(evidence)
         handoff = state.get("investigation", {})
         saved_investigation = None
-        child_id = handoff.get("task_id")
-        child = self.board.store.repository.get_task_or_none(child_id) if child_id else None
-        if child is not None and child.parent_task_id == task_id:
-            child_execution = self.lane.execution_supervisor.store.get_task_or_none(child.task_id)
+        recovery_target = None
+        saved = self._saved_investigation(task_id, handoff.get("task_id", ""))
+        if saved is not None:
+            child, child_execution, recovery_target = saved
             saved_investigation = {
-                "task_id": child.task_id,
+                **asdict(recovery_target),
                 "status": child.status.value,
-                "execution_state": child_execution.state.value if child_execution else "",
-                "objective": child.user_request,
-                "paths": child.investigation_scope,
-                "task_kind": child.task_kind,
-                "initial_repository_scope": child.mode_workflow.get("initial_repository_scope", ""),
+                "execution_state": child_execution.state.value,
                 "evidence_refs": child.evidence_refs[-12:],
-                "checkpoint_id": handoff.get("checkpoint_id", ""),
             }
         planning = state["mode"] == "plan"
         remaining_tools = self._remaining_tools(state)
@@ -598,7 +608,7 @@ class ModeWorkflow:
             waiting_task_id=waiting_task_id, checkpoint_id=pending_checkpoint, resume_ready=resume_ready,
             requirement_id=gap.requirement.requirement_id if gap else "", satisfies_requirement=satisfies_requirement,
             repair_limits=state.get("repair_limits"), required_recheck=state.get("required_recheck"),
-            required_verification=tuple(state.get("required_verification", [])),
+            required_verification=tuple(state.get("required_verification", [])), saved_investigation=recovery_target,
         )
         inspection_stop = stop
         if not inspection_stop and not planning and not can_inspect:
@@ -962,27 +972,27 @@ class ModeWorkflow:
             requirement = EvidenceRequirement.model_validate(pending["requirement"]) if pending else EvidenceRequirement(
                 requirement_id="repository_finding", objective=decision.objective,
                 acceptable_classifications=("observed", "inferred"), acceptance_criteria=(decision.objective,))
-            if decision.recovery is not None:
-                child = self.board.store.repository.get_task_or_none(decision.recovery.task_id)
-                if (child is None or child.parent_task_id != task_id or child.task_kind != decision.task_kind
-                        or child.user_request != decision.objective
-                        or child.investigation_scope != list(decision.paths)
-                        or child.mode_workflow.get("initial_repository_scope", "") != decision.initial_repository_scope
-                        or not decision.recovery.safe_to_continue):
-                    raise PermissionError("Investigation recovery must match the saved child, objective, and scope")
-                child = self.board.get_task(child.task_id)
+            recovery = decision.recovery
+            if recovery is not None:
+                saved = self._saved_investigation(task_id, recovery.task_id)
+                if saved is None:
+                    raise PermissionError("The selected investigation has no saved child and durable attempt under this workflow.")
+                child, existing, recovery_target = saved
+                try:
+                    validate_investigation_recovery(decision, recovery_target)
+                except PydanticCustomError as exc:
+                    raise PermissionError(str(exc)) from None
             else:
                 child = ensure_investigation(self.board, parent_task_id=task_id, objective=decision.objective,
                     scope=list(decision.paths), requirements=[requirement], owner_agent_id="coding_agent",
                     decision_id=decision_id, task_kind=decision.task_kind, supervisor=self.lane.execution_supervisor)
+                existing = self.lane.execution_supervisor.store.get_task_or_none(child.task_id)
             root = self._workspace_root(state)
-            child.execution_repo_root = str(root)
-            child.mode_workflow["initial_repository_scope"] = decision.initial_repository_scope
-            child.mode_workflow["investigation_context"] = decision.scope
-            self.board.save()
-            existing = self.lane.execution_supervisor.store.get_task_or_none(child.task_id)
-            if decision.recovery is not None and existing is None:
-                raise PermissionError("The selected investigation has no durable attempt to recover")
+            if recovery is None:
+                child.execution_repo_root = str(root)
+                child.mode_workflow["initial_repository_scope"] = decision.initial_repository_scope
+                child.mode_workflow["investigation_context"] = decision.scope
+                self.board.save()
             if existing and existing.state == ExecutionState.COMPLETED:
                 saved = self.lane.execution_supervisor.get_verified_execution_result(child.task_id)
                 if not saved.is_verified:
@@ -990,14 +1000,19 @@ class ModeWorkflow:
                 result = {"summary": child.result_summary, "limitations": [], "goal_satisfied": True}
                 state["investigation"] = {"task_id": child.task_id, "status": "reused"}
             else:
-                if existing and (decision.recovery is None or decision.recovery.task_id != child.task_id or not decision.recovery.safe_to_continue):
+                if existing and recovery is None:
                     raise PermissionError(f"Investigation {child.task_id} needs an explicit recovery decision before another attempt can run")
                 with self.lane.workflow_step_capacity(task_id, child.task_id):
-                    reservation = self.lane.retry_task(child.task_id, decision=decision.recovery, session_id=child.session_id) if existing else self.lane.reserve(normalized_intent=f"{task_id}:evidence:{child.task_id}", lane_id=LaneId.RESEARCH,
-                        parent_task_id=task_id, taskboard_task_id=child.task_id, session_id=child.session_id,
-                        workspace_id=child.workspace_id, repository_id=child.primary_repository_id,
-                        target_files=[str(root / path) for path in decision.paths if path != "."], execution_workspace=root,
-                        completion_contract=investigation_completion_contract(child))
+                    if recovery is None:
+                        reservation = self.lane.reserve(normalized_intent=f"{task_id}:evidence:{child.task_id}", lane_id=LaneId.RESEARCH,
+                            parent_task_id=task_id, taskboard_task_id=child.task_id, session_id=child.session_id,
+                            workspace_id=child.workspace_id, repository_id=child.primary_repository_id,
+                            target_files=[str(root / path) for path in decision.paths if path != "."], execution_workspace=root,
+                            completion_contract=investigation_completion_contract(child))
+                    elif recovery.action == RecoveryAction.RESUME_CHECKPOINT:
+                        reservation = self.lane.resume_checkpoint(child.task_id, decision=recovery, session_id=child.session_id)
+                    else:
+                        reservation = self.lane.retry_task(child.task_id, decision=recovery, session_id=child.session_id)
                     self.lane.start(reservation)
                     state["investigation"] = {"task_id": child.task_id, "status": "running", "attempt_id": activity.attempt_id,
                                               "selection": decision.model_dump(mode="json")}
@@ -1069,6 +1084,8 @@ class ModeWorkflow:
             self._persist(task_id, state)
             return
 
+        if decision.recovery is not None:
+            raise PermissionError("This investigation path has no supervised child to recover.")
         from mana_agent.agent.repository_investigation import run_repository_investigation
         activity = current_activity_context()
         revision, epoch = self._investigation_boundary(state)

@@ -544,6 +544,47 @@ def validate_observation_references(decision: ModeAction, scope: InvestigationSc
 
 
 @dataclass(frozen=True)
+class SavedInvestigation:
+    task_id: str
+    objective: str
+    paths: tuple[str, ...]
+    task_kind: str
+    initial_repository_scope: str
+    scope: str | None
+    checkpoint_id: str
+
+
+def validate_investigation_recovery(decision: InvestigateDecision, saved: SavedInvestigation | None) -> None:
+    recovery = decision.recovery
+    if recovery is None:
+        return
+    if saved is None:
+        raise _mode_error(decision, "mode_investigation_recovery_missing",
+                          "No saved investigation is available to recover. For a new investigation, set recovery to null. "
+                          "You can also select another allowed action using the existing observations.")
+    mismatched = [name for name in ("objective", "paths", "task_kind", "initial_repository_scope", "scope")
+                  if getattr(saved, name) is not None and getattr(decision, name) != getattr(saved, name)]
+    if recovery.task_id != saved.task_id:
+        mismatched.insert(0, "recovery.task_id")
+    if mismatched:
+        raise _mode_error(decision, "mode_investigation_recovery_scope",
+                          "Investigation recovery must match the saved child, objective, and scope. "
+                          f"Copy {', '.join(mismatched)} from saved_investigation.")
+    if not recovery.safe_to_continue or recovery.retry_category == RetryCategory.REPLAN:
+        raise _mode_error(decision, "mode_investigation_recovery_action",
+                          "Only select recovery when it is safe to continue the same investigation.")
+    if recovery.action == RecoveryAction.RESUME_CHECKPOINT:
+        if not saved.checkpoint_id or recovery.resume_checkpoint_id != saved.checkpoint_id:
+            raise _mode_error(decision, "mode_investigation_recovery_checkpoint",
+                              "Use resume_checkpoint only with the exact nonempty saved_investigation.checkpoint_id.")
+    elif (recovery.action != RecoveryAction.RETRY or not recovery.same_task_retry_authorized
+          or recovery.resume_checkpoint_id):
+        raise _mode_error(decision, "mode_investigation_recovery_action",
+                          "Select resume_checkpoint with the saved checkpoint, or retry with "
+                          "same_task_retry_authorized and no checkpoint ID.")
+
+
+@dataclass(frozen=True)
 class ModeDecisionContext:
     task_id: str
     strategy: str
@@ -560,6 +601,7 @@ class ModeDecisionContext:
     repair_limits: dict[str, list[str]] | None = None
     required_recheck: dict | None = None
     required_verification: tuple[dict, ...] = ()
+    saved_investigation: SavedInvestigation | None = None
 
     def validate(self, decision: ModeAction) -> None:
         if isinstance(decision, RepairDecision) and not self.repair_authorized:
@@ -569,6 +611,8 @@ class ModeDecisionContext:
                               "Use the saved observations to choose the next action.")
         if decision.action not in self.allowed_actions:
             raise _mode_error(decision, "mode_action_unavailable", "Select an action from allowed_actions for this task.")
+        if isinstance(decision, InvestigateDecision):
+            validate_investigation_recovery(decision, self.saved_investigation)
         if isinstance(decision, SwitchWorkflowDecision):
             if decision.task_id != self.task_id:
                 raise _mode_error(decision, "mode_task_identity", "For switch_workflow, copy the active task_id.")
@@ -789,8 +833,10 @@ class PlanService:
             "At zero, use current evidence, explicitly recover a matching saved investigation, or report what is unresolved. "
             "Supply bounded literal paths, an objective, and task_kind. "
             "Use paths [\".\"] only for a shallow layout task unless an explicit repository-wide audit is authorized. "
-            "When saved_investigation matches an interrupted or blocked question, reuse its current evidence "
-            "and select the exact saved objective, paths, kind, and audit scope with a safe same-task RecoveryDecision. "
+            "Set recovery to null for a new investigation. Direct inspect results are observations and create no child. "
+            "For recovery of a saved investigation, copy its task_id into recovery.task_id and copy its objective, "
+            "paths, task_kind, initial_repository_scope, and scope if present into the investigate action. "
+            "Use resume_checkpoint with its exact checkpoint_id, or select an authorized same-task retry. "
             "Investigation and understanding are tasks, never mandatory workflow stages. Reuse valid Evidence Board "
             "entries and do not create work for facts already known. "
             "Delegate the narrowest question and use the cited observations in the resulting report. "

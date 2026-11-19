@@ -24,6 +24,8 @@ DEBUG and AUTO can switch when the model cites new observed evidence on the same
 
 Mode decisions validate citations, action availability, repair scope and checks, and evidence-resume references before the selected model's single correction. The gateway rechecks current evidence and authority before execution. Automatic write workflows reserve shared budget for the first patch and focused verification. When a native patch proposal reaches its read or model budget, or the read no-progress limit, it has a final response turn to submit the patch or identify the concrete missing fact that prevents it.
 
+Direct inspection saves observations on the current task. An investigation recovery names an existing child and matches its saved objective, scope, and paths. Checkpoint recovery also requires the child's current supervisor checkpoint. A new investigation uses `recovery: null`.
+
 ## Plan a change
 
 Explicit PLAN can create read-only investigation and understanding tasks through the selected coding engine. Task and evidence writes are durable, while repository writes remain blocked until the exact plan revision is approved. New revisions cite Evidence Board references; old approved revisions retain their original digest.

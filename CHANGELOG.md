@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- Validate investigation recovery during the existing AUTO, DEBUG, and PLAN correction attempt. Use the exact saved child and its current supervisor checkpoint for checkpoint recovery. See the [investigation recovery regression and user verification command](docs/regressions/repository-evidence-orchestration.md#investigation-recovery-after-direct-inspection).
 - AUTO, DEBUG, and PLAN validate mode decisions and evidence handoffs within the existing correction window. Activity retains bounded citation diagnostics if correction fails. Optional evidence work leaves budget for the first patch and focused check, and native proposals can return a patch after reads stop. See the [evidence deadlock regression and user verification command](docs/regressions/debug-plan-execution-contract.md#evidence-deadlock-and-decision-rejection-diagnostics). The agent did not run the tests.
 - DEBUG decisions now validate causal evidence in the same-format correction path. When inspection stops, a routed repair can proceed from supported saved observations. See the [DEBUG citation regression and verification command](docs/regressions/debug-plan-execution-contract.md#debug-citations-after-repository-reads-stop).
 - Entry decisions require null media arguments on non-media routes and report the exact required input for a selected media operation. See the [media routing regression and verification command](docs/regressions/debug-plan-execution-contract.md#media-request-on-a-non-media-route).

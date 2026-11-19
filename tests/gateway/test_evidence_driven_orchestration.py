@@ -1,5 +1,6 @@
 """Investigation task identity, independent readiness, and honest completion."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -181,9 +182,10 @@ def test_equivalent_investigations_for_different_parents_keep_separate_execution
     assert [child.parent_task_id for child in children] == [first.task_id, second.task_id]
 
 
-def test_investigation_recovery_cannot_change_saved_scope(board, monkeypatch):
+@pytest.mark.parametrize("case", ["paths", "scope", "checkpoint", "other_parent", "resume", "retry"])
+def test_investigation_recovery_checks_saved_assignment_at_dispatch(board, monkeypatch, case):
     from mana_agent.agent.plan_service import InvestigateDecision
-    from mana_agent.execution_supervisor.models import RecoveryAction, RecoveryDecision
+    from mana_agent.execution_supervisor.models import ExecutionState, RecoveryAction, RecoveryDecision
     from mana_agent.gateway.mode_workflow import ModeWorkflow
 
     root = board.create_task(title="Goal", user_request="Investigate handler")
@@ -191,20 +193,52 @@ def test_investigation_recovery_cannot_change_saved_scope(board, monkeypatch):
         acceptance_criteria=("Cite handler",))
     child = ensure_investigation(board, parent_task_id=root.task_id, objective=requirement.objective, scope=["src"],
         requirements=[requirement], owner_agent_id="coding", decision_id="selected")
+    child.mode_workflow["investigation_context"] = "Inspect the handler"
+    board.save()
     restored = TaskBoard(board.store.root)
-    workflow = ModeWorkflow(SimpleNamespace(_lane_coordinator=SimpleNamespace(taskboard=restored),
+    durable = SimpleNamespace(state=ExecutionState.FAILED, checkpoint_id="checkpoint-saved")
+    selected = []
+
+    class DispatchObserved(Exception):
+        pass
+
+    def dispatch(action):
+        def schedule(task_id, *, decision, session_id):
+            selected.append((action, task_id, decision))
+            raise DispatchObserved
+        return schedule
+
+    lane = SimpleNamespace(taskboard=restored,
+        execution_supervisor=SimpleNamespace(store=SimpleNamespace(get_task_or_none=lambda _: durable)),
+        workflow_step_capacity=lambda *_: nullcontext(), resume_checkpoint=dispatch(RecoveryAction.RESUME_CHECKPOINT),
+        retry_task=dispatch(RecoveryAction.RETRY))
+    workflow = ModeWorkflow(SimpleNamespace(_lane_coordinator=lane,
         _coding_agent=SimpleNamespace(for_assignment=lambda **_: pytest.fail("Requested unauthorized dispatch"))))
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.current_activity_context",
                         lambda: SimpleNamespace(attempt_generation=2))
+    monkeypatch.setattr(workflow, "_workspace_root", lambda _: board.store.root)
+    recovery = RecoveryDecision(decision_id="recover", task_id=child.task_id,
+        action=RecoveryAction.RETRY if case == "retry" else RecoveryAction.RESUME_CHECKPOINT,
+        resume_checkpoint_id={"retry": "", "checkpoint": "checkpoint-old"}.get(case, "checkpoint-saved"),
+        same_task_retry_authorized=case == "retry", reason="Use saved evidence", safe_to_continue=True)
     decision = InvestigateDecision(action="investigate", reason="Recover the saved task", objective=requirement.objective,
-        scope="Inspect the handler", paths=("other",), recovery=RecoveryDecision(decision_id="retry", task_id=child.task_id,
-            action=RecoveryAction.RESUME_CHECKPOINT, reason="Use saved evidence", safe_to_continue=True))
+        scope="Change the saved question" if case == "scope" else "Inspect the handler",
+        paths=("other",) if case == "paths" else ("src",), recovery=recovery)
 
-    with pytest.raises(PermissionError, match="match the saved child, objective, and scope"):
-        workflow._investigate(root.task_id, {"decision_count": 1}, None, decision)
+    parent_id = "different-parent" if case == "other_parent" else root.task_id
+    if case in {"resume", "retry"}:
+        with pytest.raises(DispatchObserved):
+            workflow._investigate(parent_id, {"decision_count": 1}, None, decision)
+        assert selected == [(recovery.action, child.task_id, recovery)]
+    else:
+        expected = {"checkpoint": "exact nonempty saved_investigation.checkpoint_id", "other_parent": "no saved child"}
+        with pytest.raises(PermissionError, match=expected.get(case, "match the saved child, objective, and scope")):
+            workflow._investigate(parent_id, {"decision_count": 1}, None, decision)
+        assert not selected
 
     assert len(restored.list_tasks(parent_task_id=root.task_id)) == 1
     assert restored.get_task(child.task_id).investigation_scope == ["src"]
+    assert restored.get_task(child.task_id).mode_workflow["investigation_context"] == "Inspect the handler"
 
 
 def test_executor_adopts_new_tasks_without_an_investigation_barrier(board, complete_supervised_task):

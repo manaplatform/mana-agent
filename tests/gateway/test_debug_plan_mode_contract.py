@@ -306,6 +306,54 @@ def test_mode_decision_rejects_invalid_handoff_in_schema(case, code):
     assert rejected.value.errors(include_input=False)[0]["type"] == code
 
 
+def test_auto_corrects_investigation_recovery_after_direct_inspection(mode_gateway, monkeypatch):
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    gateway, workflow = mode_gateway
+    proposed = draft()
+    proposed["draft"]["steps"][0]["changes"] = [{"path": "app.py", "operations": ["update"]}]
+    invalid = investigation("app.py", paths=["app.py"], recovery={
+        "decision_id": "recover", "task_id": "evidence-1", "action": "resume_checkpoint",
+        "reason": "Use the observation", "resume_checkpoint_id": "evidence-1", "safe_to_continue": True,
+    })
+    actions = iter([inspection("app.py"), invalid, proposed])
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(actions)},
+            )])
+
+    profile = ModelProfile(provider="openrouter", model_id="anthropic/claude-haiku-5.5", facts={
+        name: observation(value, source="provider", confidence=1) for name, value in {
+            "tool_calling": True, "input_text": True, "output_text": True, "native_structured_output": True,
+            "context_window": 65536, "max_output_tokens": 1024,
+        }.items()
+    })
+    model = NativeLLMEngine(provider=profile.provider, model=profile.model_id, api_key="fixture",
+                            base_url="https://example.invalid", endpoint="anthropic_messages", adapter=Adapter())
+    monkeypatch.setattr(model, "profile", lambda *_a, **_kw: profile)
+    gateway._entry_router.llm = model
+    gateway._coding_agent = SimpleNamespace(for_assignment=lambda **_: pytest.fail("Recovery must not reach the worker"))
+    result = workflow.start("session", "Plan a focused change to the handler", mode="auto", repair=True,
+                            no_code=True, workflow=workflow_choice())
+
+    assert result.status == "success", result.message
+    assert len(requests) == 3
+    assert requests[1].tools == requests[2].tools
+    context = json.loads(requests[1].messages[1].content)
+    assert context["saved_investigation"] is None
+    assert context["evidence_levels"] == {"evidence-1": 1}
+    assert "No saved investigation is available to recover" in requests[2].messages[-1].content
+    task_id = result.data["task_id"]
+    assert workflow.board.get_task(task_id).mode_workflow["plan"]["draft"]["steps"][0]["step_id"] == "fix"
+    assert workflow.board.list_tasks(parent_task_id=task_id) == []
+
+
 def test_auto_uses_the_required_worktree_and_preserves_dirty_primary_checkout(mode_gateway, monkeypatch):
     gateway, workflow = mode_gateway
     from mana_agent.approval.models import ApprovalMode
