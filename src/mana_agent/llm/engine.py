@@ -273,18 +273,25 @@ class NativeLLMEngine:
             error = InvalidResponseError(detail, public_detail=detail)
             error.provider_usage, error.response_accepted = response.usage.model_dump(), True
             raise error
-        if not response.content and not response.tool_calls and not response.protocol_pending:
-            error = InvalidResponseError("Empty inference output is not completion evidence",
-                                         public_detail="The provider returned an empty response.")
-            error.provider_usage, error.response_accepted = response.usage.model_dump(), True
-            raise error
         try:
             from mana_agent.multi_agent.tools.operation_policy import validate_arguments
             offered = {tool["name"]: tool["parameters"] for tool in request.tools if tool.get("name") and "parameters" in tool}
+            if offered.keys() == {"record_decision"} and "record_decision" in self._tool_argument_validators:
+                calls = response.tool_calls
+                if len(calls) != 1 or calls[0].name != "record_decision":
+                    detail = "Return exactly one record_decision call."
+                    raise StructuredOutputError(detail, public_detail=detail)
+            if not response.content and not response.tool_calls and not response.protocol_pending:
+                raise InvalidResponseError("Empty inference output is not completion evidence",
+                                           public_detail="The provider returned an empty response.")
             seen = {call.id for message in request.messages for call in message.tool_calls}
             for call in response.tool_calls:
-                if call.id in seen or call.name not in offered:
-                    raise InvalidResponseError("Provider returned a reused call ID or a tool outside the offered set")
+                if call.id in seen:
+                    detail = "The provider reused a tool call ID."
+                    raise InvalidResponseError(detail, public_detail=detail, reason_code="tool_call_id_reused")
+                if call.name not in offered:
+                    detail = "The provider called a tool outside the offered set."
+                    raise InvalidResponseError(detail, public_detail=detail, reason_code="tool_not_offered")
                 validator = self._tool_argument_validators.get(call.name)
                 try:
                     if validator is not None:
@@ -355,6 +362,12 @@ class NativeLLMEngine:
             metadata["reason_code"] = "response_schema_invalid"
             if decision_correction_available:
                 title, status = "Decision needs correction", "rejected"
+        elif isinstance(error, InvalidResponseError):
+            if getattr(error, "response_accepted", False):
+                title = "Model response rejected"
+                metadata["reason_code"] = error.reason_code or "provider_response_invalid"
+            elif error.reason_code:
+                metadata["reason_code"] = error.reason_code
         elif isinstance(error, asyncio.TimeoutError):
             title = "Model request timed out"
             summary = f"The provider response did not complete within the {self.timeout:g}-second request deadline."
@@ -524,10 +537,7 @@ class NativeLLMEngine:
             else:
                 try:
                     if tool_based:
-                        calls = response.tool_calls
-                        if len(calls) != 1 or calls[0].name != "record_decision":
-                            raise StructuredOutputError("Return exactly one record_decision call.")
-                        content = json.dumps(calls[0].args)
+                        content = json.dumps(response.tool_calls[0].args)
                     else:
                         content = response.content.strip() if isinstance(response.content, str) else ""
                         if not native and content.startswith("```"):

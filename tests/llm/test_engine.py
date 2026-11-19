@@ -906,6 +906,125 @@ def test_openrouter_claude_uses_messages_decision_tool(tmp_path, native_profile,
         assert tool["input_schema"]["$defs"]["BlockDecision"]["properties"]["reason"]["minLength"] == 1
 
 
+@pytest.mark.parametrize("malformed", ["unoffered", "multiple", "absent"])
+@pytest.mark.parametrize("corrected", [False, True])
+def test_messages_mode_decision_corrects_invalid_tool_response(tmp_path, native_profile, monkeypatch, malformed, corrected):
+    from types import SimpleNamespace
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.llm.providers.anthropic import AnthropicProvider
+
+    requests, activity = [], []
+    valid = {"type": "tool_use", "id": "decision", "name": "record_decision",
+             "input": {"decision": {"action": "block", "reason": "More evidence is required."}}}
+    invalid = {
+        "unoffered": [{**valid, "name": "fixture-private-tool-name"}],
+        "multiple": [valid, valid],
+        "absent": [],
+    }[malformed]
+
+    async def create(**body):
+        requests.append(body)
+        content = [valid] if len(requests) == 2 and corrected else invalid
+        return {"stop_reason": "tool_use" if content else "end_turn", "content": content,
+                "usage": {"input_tokens": 40, "output_tokens": 10}}
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    adapter = AnthropicProvider(provider="openrouter", api_key="fixture", base_url="https://example.org",
+                                endpoint="anthropic_messages", client=client)
+    model = NativeLLMEngine(provider="openrouter", model="anthropic/claude-haiku-5.5", api_key="fixture",
+                            base_url="https://example.org", endpoint="anthropic_messages", adapter=adapter)
+    monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
+    monkeypatch.setattr("mana_agent.llm.engine._emit_inference_activity",
+                        lambda event, **fields: activity.append((event, fields)))
+
+    service = PlanService(tmp_path, llm=model)
+    if corrected:
+        assert service.next_decision("debug", {"request": "Explain app.py"}).action == "block"
+    else:
+        with pytest.raises(RuntimeError, match="still invalid after one correction.*exactly one record_decision") as exc:
+            service.next_decision("debug", {"request": "Explain app.py"})
+        assert "fixture-private-tool-name" not in str(exc.value)
+
+    first, second = requests
+    for field in ("model", "tools", "tool_choice", "max_tokens"):
+        assert first.get(field) == second.get(field)
+    assert [tool["name"] for tool in second["tools"]] == ["record_decision"]
+    assert "Return exactly one record_decision call." in str(second["messages"])
+    assert "fixture-private-tool-name" not in str(second["messages"])
+    failures = [fields for event, fields in activity if event == "model.failed"]
+    assert [failure["status"] for failure in failures] == (["rejected"] if corrected else ["rejected", "failed"])
+    assert all(failure["metadata"]["reason_code"] == "response_schema_invalid" for failure in failures)
+    assert "fixture-private-tool-name" not in str(activity)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(("stop_reason", "reason_code", "detail"), [
+    ("max_tokens", "messages_stop_max_tokens", "reached the output-token limit"),
+    ("pause_turn", "messages_stop_pause_turn", "paused the Messages turn"),
+    ("refusal", "messages_stop_refusal", "refused the request"),
+    ("end_turn", "messages_unsupported_block", "unsupported Messages content block"),
+])
+def test_messages_mode_decision_surfaces_response_rejection(
+    tmp_path, native_profile, monkeypatch, stream, stop_reason, reason_code, detail,
+):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from mana_agent.agent.plan_service import PlanService
+    from mana_agent.chat.activity import project_activity
+    from mana_agent.llm.providers.anthropic import AnthropicProvider
+
+    requests, activity = [], []
+    protected = "fixture-private-provider-value"
+    counts = {"input_tokens": 40, "output_tokens": 10}
+    raw = {"stop_reason": stop_reason, "content": [{"type": protected}], "usage": counts}
+
+    async def create(**body):
+        requests.append(body)
+        return raw
+
+    class Stream:
+        async def __aiter__(self):
+            yield {"type": "message_stop"}
+
+        async def get_final_message(self):
+            return raw
+
+    @asynccontextmanager
+    async def stream_response(**body):
+        requests.append(body)
+        yield Stream()
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create, stream=stream_response))
+    adapter = AnthropicProvider(provider="openrouter", api_key="fixture", base_url="https://example.org",
+                                endpoint="anthropic_messages", client=client)
+    model = NativeLLMEngine(provider="openrouter", model="anthropic/claude-haiku-5.5", api_key="fixture",
+                            base_url="https://example.org", endpoint="anthropic_messages",
+                            parameters={"stream": stream}, adapter=adapter)
+    monkeypatch.setattr(model, "profile", lambda *args, **kwargs: native_profile)
+    monkeypatch.setattr("mana_agent.llm.engine._emit_inference_activity",
+                        lambda event, **fields: activity.append(project_activity({"type": event, **fields})))
+
+    recorded = []
+    model.context_cost_governor = SimpleNamespace(
+        enabled=True, before_model_call=lambda *args, **kwargs: ("reservation", None),
+        record_model_call=lambda reservation, **kwargs: recorded.append((reservation, kwargs["usage"])),
+    )
+    with pytest.raises(RuntimeError, match=f"Invalid ModeDecision model decision.*{detail}") as exc:
+        PlanService(tmp_path, llm=model).next_decision("debug", {"request": "Explain app.py"})
+
+    assert len(requests) == 1
+    assert recorded == [("reservation", counts)]
+    failed = next(event for event in activity if event["type"] == "model.failed")
+    assert failed["status"] == "failed"
+    assert failed["title"] == "Model response rejected"
+    assert failed["metadata"]["reason_code"] == reason_code
+    assert detail in failed["summary"]
+    assert protected not in str(exc.value)
+    assert protected not in str(activity)
+
+
 @pytest.mark.parametrize(("model", "mode", "expected"), [
     ("anthropic/claude-haiku-5.5", "auto", "anthropic_messages"),
     ("openrouter/~anthropic/claude-haiku-latest", "auto", "anthropic_messages"),

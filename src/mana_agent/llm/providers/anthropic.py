@@ -14,6 +14,13 @@ from mana_agent.llm.types import ContinuationState, InferenceRequest, ModelRespo
 from mana_agent.utils.text import _strip_thinking_tags
 
 
+_STOP_DETAILS = {
+    "max_tokens": "The provider reached the output-token limit before completing its response.",
+    "pause_turn": "The provider paused the Messages turn before completing its response.",
+    "refusal": "The selected provider refused the request.",
+}
+
+
 class AnthropicProvider:
     def __init__(self, *, provider: str, api_key: str, base_url: str, endpoint: str,
                  headers: dict[str, str] | None = None, query: dict[str, str] | None = None,
@@ -151,8 +158,10 @@ class AnthropicProvider:
 
     def normalize(self, raw: Any, request: InferenceRequest) -> ModelResponse:
         data = plain(raw)
-        if data.get("stop_reason") in {"max_tokens", "pause_turn", "refusal"}:
-            raise InvalidResponseError(f"Anthropic response is incomplete/refused: {data['stop_reason']}")
+        stop_reason = data.get("stop_reason")
+        if stop_reason in _STOP_DETAILS:
+            detail = _STOP_DETAILS[stop_reason]
+            raise InvalidResponseError(detail, public_detail=detail, reason_code=f"messages_stop_{stop_reason}")
         text, calls, opaque = [], [], []
         has_private_thinking = False
         for block in data.get("content", []):
@@ -165,7 +174,8 @@ class AnthropicProvider:
             elif block["type"] == "thinking":
                 has_private_thinking = True
             else:
-                raise InvalidResponseError(f"Unsupported Anthropic output block: {block['type']}")
+                detail = "The provider returned an unsupported Messages content block."
+                raise InvalidResponseError(detail, public_detail=detail, reason_code="messages_unsupported_block")
         content = decode_structured("".join(text), request.response_schema or None)
         continuation = None
         if (calls and has_private_thinking) or opaque or request.continuation:
@@ -189,18 +199,21 @@ class AnthropicProvider:
         usage = Usage(input_tokens=incoming, output_tokens=outgoing, total_tokens=incoming + outgoing,
             cached_input_tokens=cached)
         return ModelResponse(id=data.get("id", ""), provider=request.provider, model=request.model, content=content,
-            tool_calls=calls, usage=usage, finish_reason=data.get("stop_reason") or "stop",
+            tool_calls=calls, usage=usage, finish_reason=stop_reason or "stop",
             continuation=continuation,
             configuration_observation={"reasoning_effort": (data.get("output_config") or {}).get("effort")})
 
-    async def generate(self, request: InferenceRequest) -> ModelResponse:
-        raw = await self._client().messages.create(**self.encode(request))
+    def _finish(self, raw: Any, request: InferenceRequest) -> ModelResponse:
         try:
             return self.normalize(raw, request)
         except Exception as exc:
             exc.provider_usage = plain(raw).get("usage")
             exc.response_accepted = True
             raise
+
+    async def generate(self, request: InferenceRequest) -> ModelResponse:
+        raw = await self._client().messages.create(**self.encode(request))
+        return self._finish(raw, request)
 
     async def stream(self, request: InferenceRequest) -> AsyncIterator[StreamEvent]:
         sequence = 0
@@ -222,8 +235,9 @@ class AnthropicProvider:
                         yield StreamEvent(type="tool.arguments.delta", request_id=request.request_id, sequence=sequence,
                             call_id=identity, name=name, delta=delta["partial_json"])
                 elif event["type"] == "error":
-                    raise InvalidResponseError("Anthropic stream failed")
-            response = self.normalize(await stream.get_final_message(), request)
+                    detail = "The provider interrupted its Messages stream before completing the response."
+                    raise InvalidResponseError(detail, public_detail=detail, reason_code="messages_stream_interrupted")
+            response = self._finish(await stream.get_final_message(), request)
             for call in response.tool_calls:
                 sequence += 1
                 yield StreamEvent(type="tool.completed", request_id=request.request_id, sequence=sequence, call_id=call.id, name=call.name)

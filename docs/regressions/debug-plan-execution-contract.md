@@ -216,6 +216,38 @@ venv/bin/python -m pytest -q tests/llm/test_engine.py tests/llm/test_providers.p
 
 The focused regression tests passed locally. Live provider behavior remains unverified.
 
+## Messages mode response regression
+
+On 2026-11-19 at 23:00 Tehran time, the Debug workflow for
+`task_20261119_000018` stopped with `The selected provider returned an
+unusable response`. The journal showed a failed OpenRouter Messages
+call to `anthropic/claude-haiku-5.5` after successful repository reads.
+Accounting recorded 1,091 output tokens for the failed call. The journal
+had no rejection detail, so the upstream stop reason and response shape
+cannot be recovered from the saved logs.
+
+The Messages decoder and tool response validation raised errors without
+public details on several paths. Those errors produced blank activity
+details. An unoffered decision tool also exited before the existing
+decision correction could run.
+
+Messages responses now carry a safe diagnostic and reason code for a
+known stop or unsupported content block. Buffered and streamed final
+responses retain usage when validation rejects them. Decision tool
+validation requires exactly one `record_decision` call. A missing,
+unoffered, or repeated call can use the existing single correction
+with the same model, tools, and output budget. Provider stops, refusals,
+and unsupported blocks end the decision. Existing tasks require no
+migration.
+
+**Do not reintroduce** blank diagnostics for known Messages failures,
+public logging of rejected provider content, or execution of unoffered
+tools during a decision correction.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_engine.py -k 'messages_mode_decision or openrouter_claude'
+```
+
 ## Action payload regression
 
 Plan or Debug could block after the model's correction with a generic list of action requirements. For example, a response that selected `draft` with a null draft satisfied the provider schema and then failed the application validator. The original schema described the action and every optional payload independently. The earlier correction fix gave the model another attempt, while the schema still allowed invalid combinations on both calls. The reported diagnostic alone gives no evidence about which combination the live model selected.
