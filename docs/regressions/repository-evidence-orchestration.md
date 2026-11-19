@@ -725,6 +725,42 @@ recorded a failing command at exit 7 and the same command passing at exit 0
 after a fixture edit. Each run returned its own sandbox receipt. The exact
 reported live-provider turn remains unverified.
 
+## Scoped Coding investigation budget
+
+On November 20 at 01:24:57 Tehran time, investigation `task_20261120_000008`
+failed while its parent `task_20261120_000007` was still collecting evidence.
+The Internal engine logged “The requested tool group exceeds the remaining
+coding tool budget.” It rejected the parallel batch before dispatch. The
+investigation had its own backend invocation and reported that rejection as a
+failed assignment, so the parent's next Coding decision could not use the
+evidence and choose a narrower batch. The session was subsequently cancelled.
+
+A focused Coding decision now records a question and bounded reads or searches
+on the existing task. Current exact file reads are reused before fresh
+operations are counted. A rejected batch reports the allowance and keeps the
+current receipts available to Coding. Evidence integration filters and ranks
+the current checkout's observations. For new runtime-capability plans, Coding
+owns any wiring edits. The completion gate matches isolated verification
+receipts for the approved command and current source versions and requires
+review and supervisor confirmation. Legacy records retain their approval
+digests and can supply current evidence during recovery.
+
+**Do not reintroduce** an investigation backend run for a Coding-owned question
+or throw away valid observations when a batch exceeds the shared allowance.
+Do not treat a planned command or a model-reported edge as independent
+execution evidence.
+
+User-owned verification:
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_scoped_evidence_tools.py tests/test_internal_coding_engine_workflow.py tests/gateway/test_debug_plan_mode_contract.py tests/gateway/test_feature_integration_lifecycle.py tests/test_codex_integration.py tests/test_tui_approval_realtime.py
+```
+
+The agent did not run these checks or replay the live incident. Live Codex
+requires an app-server build that supports dynamic tools. Versioned exact reads
+can be reused across attempts. Searches over directories are reevaluated because
+the set of matching sources can change.
+
 ## Do not reintroduce
 
 - Never implement `INVESTIGATE → UNDERSTAND → PLAN → CODE` as required stages.

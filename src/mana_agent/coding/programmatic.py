@@ -22,6 +22,7 @@ from itertools import islice
 from pathlib import Path as FilePath
 from typing import Any, Sequence
 
+from mana_agent.coding.evidence_tools import CodingEvidenceTools, INVESTIGATE
 from mana_agent.coding.live_events import publish_coding_event
 from mana_agent.coding.models import AgentEvent, WorkspaceContext
 from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
@@ -121,6 +122,7 @@ class ToolExecutionDispatcher:
         self.read_cache = OperationReadCache(ttl_seconds=cache_ttl_seconds) if cache_enabled else None
         self._read_locks: dict[str, threading.Lock] = {}
         self.runner = None
+        self.evidence_tools: CodingEvidenceTools | None = None
         if execution_authority is not None:
             from mana_agent.multi_agent.agents.tool_runner_agent import ToolRunnerAgent
             self.runner = ToolRunnerAgent(execution_authority)
@@ -134,6 +136,8 @@ class ToolExecutionDispatcher:
         from mana_agent.multi_agent.agents.tool_runner_agent import bind_tool_authority, ToolRunnerAgent
         from mana_agent.multi_agent.tools.operation_policy import OperationPolicy
         contracts = {c.name.replace(".", "_"): c for c in coding_tool_contracts()}
+        if self.evidence_tools is not None:
+            contracts.update({name: self.evidence_tools.contract(name) for name in self.evidence_tools.definitions})
         for name, implementation in self.extra_tools.items():
             contract = getattr(implementation, "tool_contract", None)
             if contract is not None:
@@ -210,6 +214,11 @@ class ToolExecutionDispatcher:
         def execute_once(selected_arguments):
             if _cached_result is not None and policy.effect == "read_only":
                 return {**_cached_result, "cache_hit": True}
+            if self.evidence_tools is not None and name in self.evidence_tools.definitions:
+                try:
+                    return self.evidence_tools.invoke(name, selected_arguments, call_id=cid)
+                except (ValueError, PermissionError) as exc:
+                    return {"ok": False, "error_code": "EVIDENCE_SELECTION_REJECTED", "error": str(exc)}
             for candidate in (tool_name, name):
                 if candidate in self.extra_tools:
                     value = self.extra_tools[candidate](**selected_arguments)
@@ -252,7 +261,7 @@ class ToolExecutionDispatcher:
             request = self.runner.request(name, arguments, call_id=cid, decision_id=cid,
                 timeout_seconds=float(arguments.get("timeout") or 120))
             from mana_agent.multi_agent.agents.tool_runner_agent import model_result
-            if callable(getattr(self, "charge_tool", None)):
+            if name != INVESTIGATE and callable(getattr(self, "charge_tool", None)):
                 self.charge_tool()
             return model_result(self.runner.execute(request, execute), self.runner.authority)
         except (ExecutionAuthorityError, ValueError) as exc:
@@ -828,7 +837,8 @@ class ProgrammaticExecutionSession:
         caller = item.get("caller")
         caller_prog_id = str(caller.get("caller_id") or caller.get("call_id") or "") if isinstance(caller, dict) else None
 
-        if self.state.tool_calls_executed >= self.state.max_tool_calls:
+        compound = tool_name == INVESTIGATE and getattr(self.dispatcher, "evidence_tools", None) is not None
+        if not compound and self.state.tool_calls_executed >= self.state.max_tool_calls:
             err_msg = f"Maximum tool calls budget ({self.state.max_tool_calls}) exceeded for program"
             self.state.errors.append(err_msg)
             return {
@@ -837,7 +847,8 @@ class ProgrammaticExecutionSession:
                 "output": json.dumps({"ok": False, "error": err_msg, "error_code": "BUDGET_EXCEEDED"}),
             }
 
-        self.state.tool_calls_executed += 1
+        if not compound:
+            self.state.tool_calls_executed += 1
 
         logger.info("Tool call [%s]: %s", call_id, tool_name)
         publish_coding_event(AgentEvent(

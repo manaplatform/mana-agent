@@ -36,6 +36,31 @@ def test_native_resume_adds_refreshed_evidence_to_saved_history(tmp_path):
     assert result.status == "completed", result.errors
 
 
+def test_native_oversized_read_group_can_be_narrowed(tmp_path):
+    (tmp_path / "handler.py").write_text("handler = True\n")
+
+    class Model:
+        turns = 0
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            if self.turns == 1:
+                return SimpleNamespace(tool_calls=[{"id": f"read-{n}", "name": "read_file", "args": {"path": path}}
+                    for n, path in enumerate(("handler.py", "caller.py"))])
+            if self.turns == 2:
+                assert [json.loads(message.content)["executed"] for message in messages[-2:]] == [0, 0]
+                return SimpleNamespace(tool_calls=[{"id": "narrow", "name": "read_file", "args": {"path": "handler.py"}}])
+            assert "handler = True" in messages[-1].content
+            return SimpleNamespace(tool_calls=[], content="The handler is enabled.")
+
+    engine = InternalCodingEngine(llm_client=Model(), max_tool_calls=1)
+    task = CodingTask(task_id="coding", goal="Confirm handler", requires_repository_write=False)
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+    assert result.status == "completed", result.errors
+    assert result.summary == "The handler is enabled."
+
+
 def test_slow_native_provider_is_measured_separately_from_duplicate_reads(tmp_path, monkeypatch):
     from mana_agent.coding import internal_engine
 

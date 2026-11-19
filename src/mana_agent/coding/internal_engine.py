@@ -98,7 +98,7 @@ from mana_agent.utils.text import extract_model_text
 _REPOSITORY_EVIDENCE_TOOLS = {
     "ls", "list_files", "batch_list_files", "read_file", "repo_batch_read", "batch_read_files",
     "repo_search", "batch_search_files", "find_symbols", "call_graph",
-    "repository_evidence_query", "repository_evidence_get",
+    "repository_evidence_query", "repository_evidence_get", "investigate_repository", "integrate_repository_evidence",
 }
 
 
@@ -281,7 +281,9 @@ class InternalCodingEngine(CodingEngine):
     def _build_tool_definitions(self, dispatcher: ToolExecutionDispatcher) -> list[dict[str, Any]]:
         tool_schemas: list[dict[str, Any]] = []
         seen_names: set[str] = set()
-        contracts = coding_tool_contracts()
+        contracts = list(coding_tool_contracts())
+        if getattr(dispatcher, "evidence_tools", None) is not None:
+            contracts.extend(dispatcher.evidence_tools.contract(name) for name in dispatcher.evidence_tools.definitions)
         for c in contracts:
             if not dispatcher.is_tool_allowed(c.name):
                 continue
@@ -353,6 +355,18 @@ class InternalCodingEngine(CodingEngine):
             cache_ttl_seconds=self.cache_ttl_seconds,
         )
         dispatcher.charge_tool = getattr(self, "charge_tool", None)
+        session = ProgrammaticExecutionSession(
+            task_id=task_id, dispatcher=dispatcher, max_tool_calls=self.max_tool_calls, backend_name=self.name,
+        )
+        if self.taskboard is not None and not task.context.get("repository_investigation") and not task.execution_policy.required:
+            from mana_agent.coding.evidence_tools import CodingEvidenceTools
+
+            def charge_read():
+                session.state.tool_calls_executed += 1
+
+            dispatcher.evidence_tools = CodingEvidenceTools(self.taskboard, task_id, workspace.worktree_path,
+                dispatch=dispatcher.dispatch, remaining=lambda: session.state.max_tool_calls - session.state.tool_calls_executed,
+                charge=charge_read, authorize=getattr(self, "tool_authorize", None))
         from mana_agent.multi_agent.registry.agent_registry import AgentRegistry
         from mana_agent.multi_agent.core.types import AgentRole
         registry = getattr(self, "execution_registry", None) or AgentRegistry()
@@ -367,12 +381,6 @@ class InternalCodingEngine(CodingEngine):
             task_id=task_id, agent_id=coding_owner.agent_id,
             parent_agent_id=registry.find_by_role(AgentRole.MAIN).agent_id,
             operation_id=f"{task_id}:coding-owner", metadata={"execution_level": 2})
-        session = ProgrammaticExecutionSession(
-            task_id=task_id,
-            dispatcher=dispatcher,
-            max_tool_calls=self.max_tool_calls,
-            backend_name=self.name,
-        )
         self._active_sessions[task_id] = session
 
         saved_context = task.context.get("coding_resume_context") or {}
@@ -691,6 +699,7 @@ class InternalCodingEngine(CodingEngine):
             investigation_result_schema, validate_investigation_report_arguments,
         )
         from mana_agent.repository_evidence.models import CodingAssignment
+        from mana_agent.coding.evidence_tools import INVESTIGATE
 
         investigation = task.context.get("repository_investigation")
         patch_proposal = bool(task.context.get("mode_patch_proposal"))
@@ -706,7 +715,7 @@ class InternalCodingEngine(CodingEngine):
         if self._should_use_programmatic():
             tool_defs = [{"type": "programmatic_tool_calling"}, *[
                 {"type": "function", **entry["function"], "allowed_callers":
-                 ["direct"] if entry["function"]["name"] == INVESTIGATION_REPORT_TOOL and investigation
+                 ["direct"] if entry["function"]["name"] in {INVESTIGATION_REPORT_TOOL, INVESTIGATE}
                  else ["direct", "programmatic"]}
                 for entry in tool_defs
             ]]
@@ -912,20 +921,26 @@ class InternalCodingEngine(CodingEngine):
             messages.append(response_msg)
             session.state.native_messages = [message.model_dump(mode="json") if hasattr(message, "model_dump") else message for message in messages]
 
+            remaining = max(0, session.state.max_tool_calls - session.state.tool_calls_executed)
+            compound = any(call.get("name") == INVESTIGATE for call in tool_calls)
+            if len(tool_calls) > 1 and (compound or len(tool_calls) > remaining and evidence_only):
+                for call in tool_calls:
+                    detail = {"ok": False, "remaining": remaining, "executed": 0,
+                              "error_code": "SELECT_INVESTIGATION_ALONE" if compound else "BUDGET_EXCEEDED",
+                              "error": "Select investigate_repository on its own." if compound else
+                                       "Select a smaller group or continue with the observations already collected."}
+                    messages.append(ToolResultMessage(content=json.dumps(detail), tool_call_id=call["id"], caller=call.get("caller")))
+                session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+                session.state.native_pending_calls = []
+                evidence_misses += 1
+                turn += 1
+                continue
+
             if self.parallel_scheduling_enabled and len(tool_calls) > 1:
                 if len(tool_calls) > session.state.max_tool_calls - session.state.tool_calls_executed:
                     raise RuntimeError("The requested tool group exceeds the remaining coding tool budget")
                 # Parallel tool execution with dependency-aware scheduling
                 graph = DependencyGraph.build(tool_calls)
-
-                has_writes = any(n.kind == OperationKind.WRITE for n in graph.nodes.values())
-                has_exec = any(n.kind == OperationKind.EXECUTE for n in graph.nodes.values())
-                if has_exec:
-                    current_phase = "verification"
-                elif has_writes:
-                    current_phase = "implementation"
-                else:
-                    current_phase = "exploration"
 
                 publish_coding_event(AgentEvent(
                     event_type="parallel.group.started",
@@ -933,10 +948,10 @@ class InternalCodingEngine(CodingEngine):
                     backend=self.name,
                     sequence=session._next_sequence(),
                     title=f"Parallel tool group ({len(tool_calls)} operations)",
-                    summary=f"Executing {len(tool_calls)} operations in parallel · Phase: {current_phase}",
+                    summary=f"Executing {len(tool_calls)} operations in parallel",
                     visibility="progress",
                     semantic_kind="tool_execution",
-                    payload={"phase": current_phase, "count": len(tool_calls), "concurrency": self.max_concurrency},
+                    payload={"count": len(tool_calls), "concurrency": self.max_concurrency},
                 ))
 
                 def _on_parallel_event(event_name: str, data: dict[str, Any]) -> None:
@@ -1067,13 +1082,12 @@ class InternalCodingEngine(CodingEngine):
                     try:
                         self.taskboard.update_task(
                             task_id=task.task_id,
-                            progress_summary=f"Executed {len(tool_calls)} operations ({current_phase})",
-                            changed_files=list(session.state.changed_files),
+                            progress=f"Executed {len(tool_calls)} operations",
                         )
                     except Exception:
                         pass
 
-                if session.state.tool_calls_executed >= session.state.max_tool_calls:
+                if session.state.tool_calls_executed >= session.state.max_tool_calls and not evidence_only:
                     renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
                         task=task,
                         session=session,
@@ -1102,7 +1116,7 @@ class InternalCodingEngine(CodingEngine):
                     args = tc.get("args") or {}
                     call_id = tc["id"]
 
-                    if session.state.tool_calls_executed >= session.state.max_tool_calls:
+                    if session.state.tool_calls_executed >= session.state.max_tool_calls and fn_name != INVESTIGATE:
                         renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
                             task=task,
                             session=session,
@@ -1131,7 +1145,7 @@ class InternalCodingEngine(CodingEngine):
                     session.state.native_pending_calls = [identity for identity in session.state.native_pending_calls if identity != call_id]
                     _check_action_approval(output_str)
 
-                    if session.state.tool_calls_executed >= session.state.max_tool_calls:
+                    if session.state.tool_calls_executed >= session.state.max_tool_calls and not evidence_only:
                         renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
                             task=task,
                             session=session,
@@ -1171,13 +1185,12 @@ class InternalCodingEngine(CodingEngine):
                     try:
                         self.taskboard.update_task(
                             task_id=task.task_id,
-                            progress_summary=seq_summary,
-                            changed_files=list(session.state.changed_files),
+                            progress=seq_summary,
                         )
                     except Exception:
                         pass
 
-            if not patch_proposal and session.state.tool_calls_executed >= session.state.max_tool_calls:
+            if not patch_proposal and not evidence_only and session.state.tool_calls_executed >= session.state.max_tool_calls:
                 break
 
             if evidence_only:

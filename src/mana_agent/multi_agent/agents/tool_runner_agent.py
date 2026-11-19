@@ -273,8 +273,10 @@ class RunningOperation:
             _ACTIVE.reset(token)
 
     def emit(self, event_type: str, *, status: str = "running", **details: Any) -> None:
-        from mana_agent.coding.live_events import publish_coding_event
+        from mana_agent.coding.live_events import current_coding_execution, publish_coding_event
         details = _public_value(details, self.protected)
+        coding = current_coding_execution() or {}
+        backend = str(coding.get("backend") or "internal") if coding.get("task_id") == self.request.task_id else "internal"
         with self.lock:
             self.sequence += 1
             metadata = {**self.public, **details, "parent_execution_id": self.request.parent_execution_id,
@@ -284,7 +286,7 @@ class RunningOperation:
                 "trace_complete": self.trace_complete, "retained_bytes": self.retained_bytes,
                 "omitted_bytes": self.omitted_bytes}
             event = AgentEvent(event_type=event_type, task_id=self.request.task_id,
-                backend="internal" if self.authority.actor_role == AgentRole.CODING else "tools",
+                backend=backend if self.authority.actor_role == AgentRole.CODING else "tools",
                 operation_id=self.request.operation_id, operation_attempt_id=self.request.operation_attempt_id,
                 agent_id=self.request.agent_id, parent_agent_id=self.request.requested_by_agent_id,
                 root_task_id=self.request.root_task_id, parent_task_id=self.request.parent_task_id,

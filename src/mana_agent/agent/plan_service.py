@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from hashlib import sha256
 from itertools import islice
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Callable, Literal, get_args
 
 from pydantic import AfterValidator, Field, GetJsonSchemaHandler, ValidationError, ValidationInfo, model_validator
@@ -29,7 +29,7 @@ from mana_agent.llm.errors import (
 )
 from mana_agent.llm.messages import SystemMessage, UserMessage
 from mana_agent.prompting.repo_rules import render_repo_rules
-from mana_agent.repository_evidence.models import EvidenceQuery, EvidenceRef, relative_source
+from mana_agent.repository_evidence.models import EvidenceQuery, EvidenceRef, RuntimeWiringEvidence, relative_source
 from mana_agent.services.activity_context import current_activity_context, emit_activity
 from mana_agent.tools.repository import (
     DISCOVERY_LITERAL_PATH_PATTERN,
@@ -503,6 +503,7 @@ class InvestigateDecision(_ModeAction):
     task_kind: Literal["investigation", "understanding"] = "investigation"
     recovery: RecoveryDecision | None = None
     initial_repository_scope: Literal["", "explicit_audit", "architecture_wide"] = ""
+    requests: tuple[FileReadEvidence | RepositorySearchEvidence, ...] = Field(default=(), max_length=MAX_INSPECTION_BATCH)
 
     @model_validator(mode="before")
     @classmethod
@@ -517,6 +518,22 @@ class InvestigateDecision(_ModeAction):
             # The model validator sees Python input even for a JSON response.
             paths = tuple(paths)
         return {**data, "paths": paths}
+
+    @model_validator(mode="after")
+    def validate_scoped_requests(self):
+        if not self.requests:
+            return self  # Saved recovery envelopes may omit a new selection.
+        if self.recovery is not None:
+            raise ValueError("Import the saved investigation before selecting new reads")
+        paths = tuple(PurePosixPath(relative_source(path)) for path in self.paths)
+        if PurePosixPath(".") in paths:
+            raise ValueError("Select specific paths for a scoped investigation")
+        for request in self.requests:
+            if request.level == 4 or not request.paths or any(
+                not any(PurePosixPath(path).is_relative_to(scope) for scope in paths) for path in request.paths
+            ):
+                raise ValueError("Investigation reads must stay inside the selected paths")
+        return self
 
 
 InspectionRequest = Annotated[
@@ -587,6 +604,7 @@ class ClarifyDecision(_ModeAction):
 class DraftDecision(_ModeAction):
     action: Literal["draft"]
     draft: PlanDraft
+    runtime_wiring: RuntimeWiringEvidence | None = None
 
 
 class DiagnoseDecision(_ModeAction):
@@ -612,6 +630,7 @@ class RepairDecision(_ModeAction):
         min_length=1, description="Exact observation IDs from evidence_levels that support the repair.",
     )
     uncertainty: str = ""
+    runtime_wiring: RuntimeWiringEvidence | None = None
 
 
 class ResearchDecision(_ModeAction):
@@ -766,6 +785,7 @@ class ModeDecisionContext:
     required_recheck: dict | None = None
     required_verification: tuple[dict, ...] = ()
     saved_investigation: SavedInvestigation | None = None
+    runtime_wiring_required: bool = False
 
     def validate(self, decision: ModeAction) -> None:
         if isinstance(decision, RepairDecision) and not self.repair_authorized:
@@ -777,6 +797,12 @@ class ModeDecisionContext:
             raise _mode_error(decision, "mode_action_unavailable", "Select an action from allowed_actions for this task.")
         if isinstance(decision, InvestigateDecision):
             validate_investigation_recovery(decision, self.saved_investigation)
+            if not decision.requests and decision.recovery is None:
+                raise _mode_error(decision, "mode_investigation_reads_required",
+                                  "Supply the specific read_file or repo_search requests for the focused question.")
+        if isinstance(decision, (DraftDecision, RepairDecision)) and self.runtime_wiring_required and decision.runtime_wiring is None:
+            raise _mode_error(decision, "mode_runtime_wiring_required",
+                              "Include any necessary wiring edits in the normal patch scope and supply runtime_wiring with the connected source references.")
         if isinstance(decision, SwitchWorkflowDecision):
             if decision.task_id != self.task_id:
                 raise _mode_error(decision, "mode_task_identity", "For switch_workflow, copy the active task_id.")
@@ -836,10 +862,10 @@ class ModeDecision(ModeContract):
         }:
             raise PydanticCustomError("mode_inspection_action", "Use {expected_action} for repository reads in this mode.",
                                       {"action": self.decision.action, "expected_action": context["inspection_action"]})
-        if isinstance(self.decision, InspectDecision):
-            if context.get("inspection_available") is False:
+        if isinstance(self.decision, (InspectDecision, InvestigateDecision)):
+            if isinstance(self.decision, InspectDecision) and context.get("inspection_available") is False:
                 raise _mode_error(self.decision, "mode_inspection_unavailable", "Use the saved observations for the next decision.")
-            if scope is not None:
+            if scope is not None and self.decision.requests:
                 try:
                     scope.validate_requests(self.decision.requests, reuse_saved_reads=True)
                 except PydanticCustomError as exc:
@@ -988,31 +1014,26 @@ class PlanService:
             "Protected paths include .git, .mana, .ssh, .env files, and credential files. If a needed path is "
             "protected or outside the repository, use accessible evidence or report the gap in the next decision. "
             "Draft or repair as soon as you can name the files, intended change, and focused check. "
+            "When runtime_capability_change is true, put any wiring edits in the ordinary draft or repair steps. "
+            "Return runtime_wiring with the connected production reachability edges and their repository source paths. "
+            "Include verification covering the production entrypoint in the draft. "
             "Inspect only when a specific missing fact would materially change that decision, and name it in the reason. "
             "Leave implementation details to the coding engine's scoped reads while it prepares the patch. "
             "Leave enough of the shared budget for patching and verification. "
             "When reads are unavailable, use the saved observations and explain material unresolved gaps. "
             "When pending_repository_evidence is present, preserve the approved plan and completed steps. "
             "If current evidence satisfies the request, select use_evidence with the exact requirement_id. "
-            "Create only the investigation tasks required by the gap, then use resume_implementation with an "
+            "Collect only the specific reads required by the gap, then use resume_implementation with an "
             "explicit safe same-task resume_checkpoint RecoveryDecision and pending_coding_checkpoint_id after its evidence "
             "requirements are satisfied. "
             "When additional knowledge is needed, query_evidence by bounded paths, symbols, or a specific literal. "
             "Use use_evidence to reuse exact ID and revision pairs from current_evidence_refs without reading files again. "
-            "In any mode, use investigate to create an independently supervised investigation or understanding task "
-            "when the missing question needs delegated analysis. Use inspect for reads you can already specify in AUTO or DEBUG. "
-            "Only create a new investigation when remaining_investigation_child_slots is positive. "
-            "At zero, use current evidence, explicitly recover a matching saved investigation, or report what is unresolved. "
-            "Supply bounded literal paths, an objective, and task_kind. "
-            "Use paths [\".\"] only for a shallow layout task unless an explicit repository-wide audit is authorized. "
-            "Set recovery to null for a new investigation. Direct inspect results are observations and create no child. "
-            "For recovery of a saved investigation, copy its task_id into recovery.task_id and copy its objective, "
-            "paths, task_kind, initial_repository_scope, and scope if present into the investigate action. "
-            "Use resume_checkpoint with its exact checkpoint_id, or select an authorized same-task retry. "
-            "Investigation and understanding are tasks, never mandatory workflow stages. Reuse valid Evidence Board "
-            "entries and do not create work for facts already known. "
-            "Delegate the narrowest question and use the cited observations in the resulting report. "
-            "For investigate, set initial_repository_scope only for an explicit audit or architecture-wide request. "
+            "In any mode, investigate records a focused question on the current Coding task and executes the supplied "
+            "read_file and repo_search requests. Supply an objective, literal paths inside the checkout, and the exact requests. "
+            "Every request must stay within those paths. Use inspect for quick reads or shallow layout. "
+            "Use current Evidence Board observations before requesting fresh reads. If a group exceeds the available budget, "
+            "select a smaller group or continue with the evidence gathered. "
+            "Set recovery to null for new reads. A matching legacy recovery imports its current evidence and retires the old child. "
             "Clarify requires questions, draft and repair require a draft, and research requires a debugging report. "
             "Choose clarify only for a specific missing fact or preference that the user must supply and that "
             "materially blocks progress. Investigate a gap the repository can answer. Ask immediately only when "
@@ -1028,7 +1049,7 @@ class PlanService:
             "must have file operations or a verification command and clear acceptance criteria. "
             f"{_DRAFT_GUIDANCE} "
             "AUTO can draft immediately when the request and available context establish a safe scope. "
-            "A separate investigation, evidence query, or preliminary read is optional. "
+            "Select additional evidence only when needed for the next Coding decision. "
             "The draft is an execution plan, so list production entry point changes and relevant checks "
             "as concrete steps. If the goal already holds, use a verification-only draft and cite observed evidence. "
             "On verification_failure, use the executed receipt to select targeted inspection, research, repair, "
@@ -1055,7 +1076,7 @@ class PlanService:
                                 "investigation_scope": scope,
                                 "mode_decision_context": workflow_context,
                                 "repair_required": bool(state.get("coding_workflow") and state.get("repair_authorized")),
-                                "inspection_action": "investigate" if mode == "plan" else "inspect",
+                                "inspection_action": "inspect",
                                 "answered_field_ids": tuple(state.get("constraints", {}))},
         )
         return envelope.decision

@@ -5,17 +5,17 @@
 The gateway starts AUTO and DEBUG with a typed decision for the current request.
 AUTO can record a scoped implementation plan on the first decision. Known files
 can be read directly through ToolRunner or during a read-only patch proposal.
-The model can also select saved evidence, a scoped investigation assignment, or
-research for an unresolved dependency. The Autonomous Execution Controller
+The model can also select saved evidence, a scoped group of reads and searches,
+or research for an unresolved dependency. The Autonomous Execution Controller
 drives decisions and execution for the same parent task. PLAN retains approval
 of the exact reviewed revision.
 
 An implementation step that needs evidence saves its continuation on the
 existing supervisor checkpoint and releases its child capacity. The model must
 bind current evidence to the exact requirement and select that task and
-checkpoint to resume. An independently selected investigation may wait while
-unrelated work progresses. Supervisor completion still requires resolution of
-admitted children and consequential actions.
+checkpoint to resume. Coding selects its own reads and searches during the
+current invocation. Supervisor completion still requires resolution of admitted
+children and consequential actions.
 
 Checks run through the existing isolated verifier. A failed check returns its
 command, exit code, bounded output, and attempt receipt to the next decision.
@@ -32,9 +32,9 @@ classification. Executed verification results are kept on TaskBoard, and
 enabled Coding Memory records them as historical receipts with checkout and
 file versions. A historical receipt cannot complete a later coding task.
 
-Coding Activity shows scoped evidence reads, reuse, implementation, verification
-commands and strategy changes. Provider waits, tool execution, and evidence
-progress have separate events and timing. See the
+Coding Activity shows task status, searches, reads, evidence reuse, available tool
+budget, and model and tool time. It also shows patches, verification commands,
+and strategy changes. See the
 [optional evidence regression](regressions/repository-evidence-orchestration.md#optional-evidence-and-verification-recovery)
 for the traced failures and replay commands.
 

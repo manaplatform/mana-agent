@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from mana_agent.multi_agent.agents.base_agent import BaseAgent, agent_activity
+from mana_agent.coding.verification_evidence import isolated_verification_ids
 from mana_agent.evals.recorder import record_current
 
 
@@ -79,11 +80,12 @@ class ReviewerAgent(BaseAgent):
     @agent_activity
     def review_evidence(self, task_id: str, *, route_name: str, requires_verification: bool) -> bool:
         task = self.taskboard.get_task(task_id)
+        isolated_ids = isolated_verification_ids(task)
         if task.hierarchy_violations:
             self.reject_weak_evidence(task_id, "hierarchy violations were recorded")
             return False
-        if route_name in {"coding", "tool", "high_risk_tool"} and not task.queue_job_ids and not task.verification_queue_job_ids:
-            self.reject_weak_evidence(task_id, "tool-heavy route has no queue_job_ids")
+        if route_name in {"coding", "tool", "high_risk_tool"} and not (task.queue_job_ids or task.verification_queue_job_ids or isolated_ids):
+            self.reject_weak_evidence(task_id, "tool-heavy route has no executed operation evidence")
             return False
         if any(event.get("agent_id") == "main" or str(event.get("agent_id", "")).startswith("agent_main_") for event in task.actual_tool_events):
             self.reject_weak_evidence(task_id, "MainAgent appeared in actual tool execution events")
@@ -113,8 +115,8 @@ class ReviewerAgent(BaseAgent):
                 return False
         if requires_verification:
             latest = task.verification_results[-1] if task.verification_results else None
-            if latest is None or not latest.passed or not task.verification_queue_job_ids:
-                self.reject_weak_evidence(task_id, "verification lacks executed queue job evidence")
+            if latest is None or not latest.passed or not (task.verification_queue_job_ids or isolated_ids):
+                self.reject_weak_evidence(task_id, "verification lacks executed operation evidence")
                 return False
         if task.wiring_required:
             if not task.required_wiring_task_ids:

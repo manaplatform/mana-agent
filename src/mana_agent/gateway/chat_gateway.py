@@ -11206,6 +11206,24 @@ class AgentChatGateway:
                 "execution_supervisor": self._lane_coordinator.execution_supervisor,
                 "tool_authorize": (lambda name: self._lane_coordinator.authorize_tool(lane_task_id, name)) if lane_task_id else None,
             }
+            if lane_task_id:
+                supervisor = self._lane_coordinator.execution_supervisor
+                tool_limit = self._autonomous_controller.config.max_tool_calls
+
+                def charge_coding_tool():
+                    def charge(task):
+                        supervisor._validate_lease(task, attempt_id=supervisor_attempt_id, lease_token=supervisor_lease_token)
+                        if task.state != ExecutionState.RUNNING or task.cancellation_status is not None:
+                            raise PermissionError("The Coding execution is no longer active")
+                        if task.autonomous_tool_calls >= tool_limit:
+                            raise ValueError("The Coding tool budget is exhausted")
+                        task.autonomous_tool_calls += 1
+                    supervisor.store.update_task(lane_task_id, charge)
+
+                used = supervisor.get_task(lane_task_id).autonomous_tool_calls
+                state["_coding_execution_runtime"].update(
+                    remaining_tool_calls=max(0, tool_limit - used), charge_tool=charge_coding_tool,
+                )
             result = run_with_activity_attempt(
                 process_chat_turn,
                 _activity_supervisor=self._lane_coordinator.execution_supervisor,

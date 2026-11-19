@@ -6,9 +6,13 @@ from mana_agent.llm.messages import ToolCall
 from mana_agent.llm.types import ModelResponse
 
 
-def investigation(scope, **fields):
+def investigation(scope, *calls, **fields):
+    if not calls and fields.get("recovery") is None:
+        paths = fields.get("paths") or [scope]
+        calls = tuple(evidence_call(f"read-{index}", paths=[path]) for index, path in enumerate(paths))
     return {"action": "investigate", "reason": "Repository evidence is needed",
-            "objective": "Explain the current behavior", "scope": scope, **fields}
+            "objective": "Explain the current behavior", "scope": scope,
+            "requests": [{"tool": call.name, **call.args} for call in calls], **fields}
 
 
 def evidence_call(identity, tool="read_file", **arguments):

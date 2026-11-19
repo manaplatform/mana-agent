@@ -147,8 +147,8 @@ be independently entry-routed and capability-checked after this decision; do not
 tools here. Documentation inspection, integration persistence, and execution against that same API
 form one atomic child rather than independently completable children. A child is complete only when
 its acceptance criteria are met; a prose explanation that an intended action was not executed is a
-blocker, not completion. Investigation and understanding are optional independent task_kind values with investigation_scope and
-explicit evidence_requirements. They are never mandatory stages or prerequisites for unrelated work.
+blocker, not completion. Use investigation and understanding task kinds only for distinct read-only
+deliverables the user requested. Coding owns its own scoped reads and searches, including reads needed for wiring.
 This is decomposition only, never execution or a prose answer.
 """
 

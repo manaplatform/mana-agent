@@ -456,7 +456,8 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         self.turn_id = turn_id
         self.backend = ""
         self.model = ""
-        self.phase = "queued"
+        self.task_status = "queued"
+        self.tool_budget: dict[str, int] = {}
         self.active_group = ""
         self.active_concurrency = 0
         self.batch_progress = ""
@@ -504,17 +505,23 @@ class CodingActivityBox(_ActivityRendering, Vertical):
     def update_event(self, event: dict[str, Any]) -> None:
         """Append or update a coding operation in the box."""
         ev = self._upsert_activity(event)
-        # Track phase and concurrency metadata
+        # Lifecycle and budget come from the task and execution receipts.
         payload_dict = _safe_dict(ev.get("payload"))
         meta = dict(ev.get("metadata") or ev.get("details") or payload_dict)
-        if meta.get("phase"):
-            self.phase = str(meta["phase"])
+        ev_type = str(ev.get("event_type") or ev.get("type") or "")
+        task_status = meta.get("task_status")
+        if task_status is None and ev_type == "task.updated":
+            task_status = ev.get("status")
+        if task_status:
+            self.task_status = str(task_status)
+        for key in ("tool_budget_used", "tool_budget_remaining"):
+            if isinstance(meta.get(key), int):
+                self.tool_budget[key] = meta[key]
         if "active_concurrency" in meta or "active_concurrency" in payload_dict:
             self.active_concurrency = int(meta.get("active_concurrency") or payload_dict.get("active_concurrency") or 0)
         if meta.get("group") or meta.get("operation_group"):
             self.active_group = str(meta.get("group") or meta.get("operation_group"))
 
-        ev_type = str(ev.get("event_type") or ev.get("type") or "")
         if ev_type.startswith("parallel.group"):
             count = payload_dict.get("count") or payload_dict.get("total_operations") or ""
             self.active_group = f"parallel group ({count} ops)" if count else "parallel group"
@@ -634,9 +641,9 @@ class CodingActivityBox(_ActivityRendering, Vertical):
             approval_suffix = ""
 
         backend_tag = f"[{self.backend.upper()}] " if self.backend and self.backend.lower() != "coding" else ""
-        phase_tag = f" · Phase: {self.phase.capitalize()}" if self.phase and self.phase != "queued" else ""
+        status_tag = f" · {self.task_status.replace('_', ' ')}"
         model_tag = f" · {self.model}" if self.model else ""
-        self.header.update(f"{icon} {backend_tag}{title}{phase_tag}{model_tag}{approval_suffix}")
+        self.header.update(f"{icon} {backend_tag}{title}{status_tag}{model_tag}{approval_suffix}")
 
         # Update changed files list
         if self.changed_files:
@@ -711,6 +718,26 @@ class CodingActivityBox(_ActivityRendering, Vertical):
         tokens = usage.get("total_tokens") or usage.get("totalTokens")
         duration = event.get("duration_ms")
         stats = [f"{len(self.events)} events"]
+        receipts = {(row.get("attempt_id"), row.get("operation_id")): row for row in self.events
+                    if row.get("operation_id") and row.get("event_type") in {"tool.completed", "model.completed"}}
+        searches = sum(row.get("tool_name") == "repo_search" for row in receipts.values())
+        reads = sum(row.get("tool_name") in {"read_file", "batch_read_files", "repo_batch_read"} for row in receipts.values())
+        reused = sum(value for row in self.events
+                     if isinstance(value := _safe_dict(row.get("metadata")).get("reused_evidence"), int))
+        if reads or searches or reused:
+            stats.append(f"searches {searches} · reads {reads} · reused {reused}")
+        for label, kind in (("model", "model.completed"), ("tools", "tool.completed")):
+            elapsed = sum(value for row in receipts.values()
+                          if row.get("event_type") == kind and isinstance(value := row.get("duration_ms"), int))
+            if elapsed:
+                stats.append(f"{label} {elapsed} ms")
+        if self.tool_budget:
+            used = self.tool_budget.get("tool_budget_used")
+            remaining = self.tool_budget.get("tool_budget_remaining")
+            if used is not None:
+                stats.append(f"tools used {used}")
+            if remaining is not None:
+                stats.append(f"tools remaining {remaining}")
         if self.active_concurrency > 0:
             stats.append(f"{self.active_concurrency} concurrent")
         if self.batch_progress:

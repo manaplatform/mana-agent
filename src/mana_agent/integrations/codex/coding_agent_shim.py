@@ -345,6 +345,7 @@ class CodexCodingAgentShim:
             coding_continuation_id=kwargs.get("coding_continuation_id", ""),
             repository_investigation=kwargs.get("repository_investigation"),
             mode_proposal=tuple(kwargs.get("coding_mode_files") or ()) if kwargs.get("coding_mode_proposal") else (),
+            **({"execution_runtime": kwargs["execution_runtime"]} if kwargs.get("execution_runtime") else {}),
             **({"proposal_root": proposal_root} if proposal_root is not None else {}),
         )
 
@@ -362,6 +363,7 @@ class CodexCodingAgentShim:
             user_message_id=kwargs.get("user_message_id"),
             dispatch_source=kwargs.get("dispatch_source") or "generate_auto_execute",
             coding_continuation_id=kwargs.get("coding_continuation_id", ""),
+            **({"execution_runtime": kwargs["execution_runtime"]} if kwargs.get("execution_runtime") else {}),
         )
 
     def flow_summary(self, flow_id: str | None = None) -> dict[str, Any] | None:
@@ -435,6 +437,7 @@ class CodexCodingAgentShim:
         mode_proposal: tuple[str, ...] = (),
         repository_investigation: dict | None = None,
         proposal_root: Path | None = None,
+        execution_runtime: dict | None = None,
     ) -> dict[str, Any]:
         """Run a coding turn with bounded mutation recovery (explicit attempt loop).
 
@@ -531,6 +534,22 @@ class CodexCodingAgentShim:
                 if _mutation_recovery or not requires_repository_write
                 else self._MAX_MUTATION_ATTEMPTS
             )
+            if execution_runtime and "remaining_tool_calls" in execution_runtime:
+                from mana_agent.services.activity_context import current_activity_context
+
+                configured_charge = execution_runtime.get("charge_tool")
+                remaining = max(0, int(execution_runtime["remaining_tool_calls"]))
+
+                def charge():
+                    nonlocal remaining
+                    with current_activity_context().publication():
+                        if remaining <= 0:
+                            raise ValueError("The Coding tool budget is exhausted.")
+                        if configured_charge is not None:
+                            configured_charge()
+                        remaining -= 1
+
+                execution_runtime = {**execution_runtime, "evidence_remaining": lambda: remaining, "evidence_charge": charge}
 
             for attempt_index in range(max_attempts):
                 is_recovery = attempt_index > 0 or _mutation_recovery
@@ -566,6 +585,7 @@ class CodexCodingAgentShim:
                     is_recovery=is_recovery,
                     coding_continuation_id=coding_continuation_id,
                     repository_investigation=repository_investigation,
+                    **({"execution_runtime": execution_runtime} if execution_runtime else {}),
                     **({"mode_proposal": mode_proposal} if mode_proposal else {}),
                     **({"proposal_root": proposal_root} if proposal_root is not None else {}),
                 )
@@ -670,6 +690,7 @@ class CodexCodingAgentShim:
         mode_proposal: tuple[str, ...] = (),
         repository_investigation: dict | None = None,
         proposal_root: Path | None = None,
+        execution_runtime: dict | None = None,
     ) -> dict[str, Any]:
         # A gateway lane is the durable execution and accounting owner. The
         # connector must not manufacture a second task identity after routing:
@@ -899,6 +920,18 @@ class CodexCodingAgentShim:
             self._session_backend = backend
             self._session_backend_key = backend_key
 
+        backend.evidence_tools = None
+        runtime = execution_runtime or {}
+        if runtime.get("taskboard") is not None and runtime.get("evidence_remaining") is not None and not repository_investigation:
+            from mana_agent.coding.evidence_tools import CodingEvidenceTools
+            from mana_agent.coding.programmatic import ToolExecutionDispatcher
+
+            reader = ToolExecutionDispatcher.for_coding_task(
+                workspace.model_copy(update={"sandbox": "readOnly"}), task_id=task_id,
+            )
+            backend.evidence_tools = CodingEvidenceTools(runtime["taskboard"], task_id, workspace.worktree_path,
+                dispatch=reader.dispatch, remaining=runtime["evidence_remaining"], charge=runtime["evidence_charge"],
+                authorize=runtime.get("tool_authorize"))
         self._active_backend = (task_id, backend)
 
         async def run() -> CodingTaskResult:

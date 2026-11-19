@@ -293,3 +293,24 @@ class InvestigationResult(Contract):
 class PatchEvidenceResult(Contract):
     patch: str
     missing_evidence: tuple[MissingEvidenceRequest, ...] = ()
+
+
+class RuntimeReachabilityEdge(Contract):
+    source: str = Field(pattern=r"\S")
+    target: str = Field(pattern=r"\S")
+    relation: Literal["calls", "selects", "constructs", "instantiates", "routes", "registers", "imports"]
+    path: str
+    line: int | None = Field(default=None, ge=1)
+
+    _path = field_validator("path")(relative_source)
+
+
+class RuntimeWiringEvidence(Contract):
+    reason: str = Field(pattern=r"\S")
+    edges: tuple[RuntimeReachabilityEdge, ...] = Field(min_length=3, max_length=16)
+
+    @model_validator(mode="after")
+    def connected(self):
+        if any(first.target != second.source for first, second in zip(self.edges, self.edges[1:])):
+            raise ValueError("Runtime reachability must describe a connected path from the entrypoint")
+        return self

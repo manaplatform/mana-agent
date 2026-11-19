@@ -6,6 +6,22 @@ import shlex
 from typing import Any
 
 
+def isolated_verification_ids(task: Any) -> list[str]:
+    """Return the host-owned receipt IDs adopted by a wiring verification result."""
+    from mana_agent.human_inbox.models import canonical_digest
+
+    provenance = getattr(task, "verification_provenance", None) or {}
+    ids = provenance.get("isolated_operation_ids") or []
+    results = getattr(task, "verification_results", ())
+    if (getattr(task, "integration_role", "") != "wiring" or not isinstance(ids, list) or not ids or not results or not results[-1].passed
+            or results[-1].verified_by_agent_id != "isolated_verifier"
+            or not all(isinstance(identity, str) and identity for identity in ids)
+            or results[-1].verification_id != provenance.get("verification_id")
+            or canonical_digest(ids) != results[-1].verification_id):
+        return []
+    return list(ids)
+
+
 def verification_evidence(receipts: list[dict[str, Any]], selected_commands: list[str]) -> tuple[list[str], bool]:
     observed: dict[str, bool] = {}
     selected = {command.strip() for command in selected_commands if command.strip()}

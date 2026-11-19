@@ -317,7 +317,7 @@ class CodexCodingBackend:
                     )
                     if task.context.get("coding_research_resume"):
                         raise CodexExecutionError("Coding research continuation requires its original Codex thread")
-                    thread_response = await self._client.request("thread/start", self._thread_params(workspace))
+                    thread_response = await self._client.request("thread/start", self._thread_params(workspace, starting=True))
                     thread_id = _response_id(thread_response, "thread")
                     if not thread_id:
                         raise CodexExecutionError("Codex thread/start returned no thread id")
@@ -374,7 +374,7 @@ class CodexCodingBackend:
                                 "operation": "recovery",
                             },
                         )
-                        thread_response = await self._client.request("thread/start", self._thread_params(workspace))
+                        thread_response = await self._client.request("thread/start", self._thread_params(workspace, starting=True))
                         thread_id = _response_id(thread_response, "thread")
                         if not thread_id:
                             raise CodexExecutionError("Codex thread/start returned no thread id during recovery")
@@ -435,7 +435,7 @@ class CodexCodingBackend:
                                     "operation": "recovery",
                                 },
                             )
-                            thread_response = await self._client.request("thread/start", self._thread_params(workspace))
+                            thread_response = await self._client.request("thread/start", self._thread_params(workspace, starting=True))
                             thread_id = _response_id(thread_response, "thread")
                             if not thread_id:
                                 raise CodexExecutionError("Codex thread/start returned no thread id during recovery")
@@ -553,6 +553,7 @@ class CodexCodingBackend:
                     supported=capability.supports_public_reasoning_summaries and native_summary_endpoint(self.settings.base_url))
                 iterator = self._client.notifications(thread_id).__aiter__()
                 deadline = asyncio.get_running_loop().time() + self.settings.task_timeout_seconds
+                dynamic_results = {}
                 try:
                     while True:
                         remaining = deadline - asyncio.get_running_loop().time()
@@ -576,6 +577,11 @@ class CodexCodingBackend:
                             or (notif_params.get("turn", {}).get("id") if isinstance(notif_params.get("turn"), dict) else "")
                             or ""
                         ).strip()
+                        if notification.get("method") == "item/tool/call":
+                            await asyncio.wait_for(self._dispatch_dynamic_tool(
+                                notification, thread_id=thread_id, turn_id=turn_id, results=dynamic_results,
+                            ), timeout=remaining)
+                            continue
                         if notif_turn and turn_id and notif_turn != turn_id:
                             logger.debug(
                                 "codex_stream.skipping_stale_notification task_id=%s turn_id=%s notif_turn=%s method=%s",
@@ -901,8 +907,48 @@ class CodexCodingBackend:
     def health(self, repository_path: str | Path):
         return check_codex_health(self.settings, repository_path)
 
-    def _thread_params(self, workspace: WorkspaceContext) -> dict[str, Any]:
+    async def _dispatch_dynamic_tool(self, notification, *, thread_id, turn_id, results):
+        import json
+
+        from mana_agent.coding.evidence_tools import INVESTIGATE
+        from mana_agent.coding.live_events import coding_execution_context
+        from mana_agent.utils.redaction import redact_secrets
+
+        request_id = notification.get("id")
+        if request_id is None:
+            return
+        params = notification.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        name, args, call_id = params.get("tool"), params.get("arguments"), params.get("callId")
+        tools = getattr(self, "evidence_tools", None)
+        if (tools is None or params.get("threadId") != thread_id or params.get("turnId") != turn_id or params.get("namespace")
+                or not isinstance(name, str) or name not in tools.definitions or not isinstance(args, dict)
+                or not isinstance(call_id, str) or not call_id):
+            result = {"ok": False, "error": "Tool call does not belong to the active Coding turn and its registered tools."}
+        else:
+            key = json.dumps([name, args], sort_keys=True)
+            previous = results.get(call_id)
+            if previous is not None:
+                result = previous[1] if previous[0] == key else {"ok": False, "error": "Tool call identity changed."}
+            else:
+                try:
+                    if name != INVESTIGATE:
+                        if tools.remaining() <= 0:
+                            raise ValueError("The Coding tool budget is exhausted.")
+                        tools.charge()
+                    with coding_execution_context(task_id=tools.task_id, backend="codex"):
+                        result = await asyncio.to_thread(tools.invoke, name, args, call_id=f"{turn_id}:{call_id}")
+                except (ValueError, PermissionError) as exc:
+                    result = {"ok": False, "error": redact_secrets(str(exc))}
+                results[call_id] = (key, result)
+        await self._client.respond_to_dynamic_tool(request_id, success=bool(result.get("ok", True)),
+            text=json.dumps(redact_secrets(result), ensure_ascii=False))
+
+    def _thread_params(self, workspace: WorkspaceContext, *, starting: bool = False) -> dict[str, Any]:
+        tools = getattr(self, "evidence_tools", None)
         return {
+            **({"dynamicTools": tools.codex_specs()} if starting and tools is not None else {}),
             "cwd": str(_execution_directory(workspace)),
             "approvalPolicy": self.settings.approval_policy,
             "sandbox": _codex_sandbox(workspace),

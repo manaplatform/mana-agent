@@ -11,9 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from repository_investigation_fixture import FileInvestigator, evidence_call, inspection, investigation, report_call
-from mana_agent.multi_agent.core.types import TaskStatus
-
+from repository_investigation_fixture import evidence_call, inspection, investigation
 from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase, PlanRevision, PlanStep
 from mana_agent.agent.plan_service import EvidenceRequest, PlanService
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
@@ -44,29 +42,18 @@ def draft(path="app.py"):
     }
 
 
-class Decisions(FileInvestigator):
-    def __init__(self, *decisions, investigations=()):
+class Decisions:
+    def __init__(self, *decisions):
         self.decisions = iter(decisions)
         self.inputs = []
-        self.investigations = iter(investigations)
-        self.native_inputs = []
 
     def decide_sync(self, messages, schema):
         self.inputs.append(json.loads(messages[-1].content))
         payload = next(self.decisions)
         return {"decision": payload} if schema["title"] == "ModeDecision" else payload
 
-    def with_tools(self, tools):
-        scripted = next(self.investigations, None)
-        if scripted is None:
-            return super().with_tools(tools)
-        responses = iter(scripted)
-
-        def generate(messages, *, continuation):
-            self.native_inputs.append(list(messages))
-            return ModelResponse(tool_calls=next(responses))
-
-        return SimpleNamespace(generate_sync=generate)
+    def with_tools(self, _tools):
+        pytest.fail("Repository inspection must not start a second model loop")
 
 
 def workflow_choice(*, mode="auto", effect="write"):
@@ -130,8 +117,8 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
         assert task.owning_lane == "coding"
         if not inspect:
             assert bool(task.evidence_refs) is investigate
-        assert any(child.task_kind == "investigation" and child.status == TaskStatus.DONE
-                   for child in workflow.board.list_tasks(parent_task_id=task.task_id)) is investigate
+        assert not any(child.task_kind == "investigation"
+                       for child in workflow.board.list_tasks(parent_task_id=task.task_id))
         assert kwargs["execution_mode"] == "read_only"
         assert (Path(kwargs["coding_mode_root"]) / "app.py").read_text() == "before\n"
         assert kwargs["execution_mode"] == "read_only"
@@ -143,22 +130,7 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
         assert (root / "app.py").read_text() == "after\n"
         return {"passed": True, "exit_code": 0, "output": "focused check passed"}
 
-    from mana_agent.repository_evidence.observations import read_source
-
-    def assign(*, root, **_):
-        def generate(prompt, **kwargs):
-            if kwargs.get("repository_investigation"):
-                assert kwargs["execution_mode"] == "read_only"
-                return {"status": "completed", "investigation_result": {
-                    "findings": [{"category": "code_behavior", "statement": "The handler returns the wrong value.",
-                                  "classification": "inferred", "confidence": 0.9,
-                                  "sources": [read_source(root, "app.py")["source_evidence"]]}],
-                    "requirement_bindings": {"repository_finding": [0]},
-                }}
-            return propose(prompt, **kwargs)
-        return SimpleNamespace(generate=generate, close=lambda: None)
-
-    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode=backend, for_assignment=assign)
+    gateway._coding_agent = SimpleNamespace(generate=propose, active_engine_mode=backend)
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
     from mana_agent.approval.models import ApprovalMode
     from mana_agent.approval.policy import set_approval_mode
@@ -580,45 +552,34 @@ def test_implementation_resumes_exact_step_after_reusing_evidence_from_another_s
     assert result.data["repository_observations"]["evidence_accounting"]["reused_evidence"] == 1
 
 
-def test_waiting_optional_investigation_does_not_block_independent_implementation(mode_gateway, monkeypatch):
+def test_optional_scoped_investigation_does_not_block_implementation(mode_gateway, monkeypatch):
     from mana_agent.approval.policy import set_approval_mode
-    from mana_agent.gateway.lanes import LaneTaskState
 
     gateway, workflow = mode_gateway
-    (gateway.root / "integration").mkdir()
     set_approval_mode("full_access")
-    gateway._entry_router.llm = Decisions(investigation("integration", paths=["integration"]), draft(),
-                                        {"disposition": "in_scope", "reason": "Only app.py changes"})
-    investigation_id = ""
+    gateway._entry_router.llm = Decisions(
+        investigation("optional.py", paths=["optional.py"]), draft(),
+        {"disposition": "in_scope", "reason": "Only app.py changes"},
+    )
 
-    def assign(*, root, **_kwargs):
-        def generate(_prompt, *, gateway_task_id, **kwargs):
-            nonlocal investigation_id
-            if kwargs.get("repository_investigation"):
-                investigation_id = gateway_task_id
-                return {"status": "waiting", "investigation_result": {"missing_evidence": [{
-                    "task_id": gateway_task_id, "reason": "The client version must be confirmed",
-                    "requirement": {"requirement_id": "version", "objective": "Confirm the client version",
-                                    "acceptance_criteria": ["Version is observed"]},
-                }]}}
-            assert root == gateway.root
-            assert workflow.lane.inspect_task(investigation_id).state == LaneTaskState.WAITING
-            patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
-            return {"status": "completed", "output": json.dumps({"patch": patch})}
-        return SimpleNamespace(generate=generate, close=lambda: None)
+    def propose(_prompt, **kwargs):
+        assert not kwargs.get("repository_investigation")
+        patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
 
     async def verify(*_args, **_kwargs):
         return {"passed": True, "exit_code": 0, "output": "Independent check passed"}
 
-    gateway._coding_agent = SimpleNamespace(active_engine_mode="internal", for_assignment=assign)
+    gateway._coding_agent = SimpleNamespace(active_engine_mode="internal", generate=propose)
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
     result = workflow.start("session", "Add the handler behavior", mode="auto", repair=True,
                             workflow=workflow_choice())
-    assert result.status == "error"
-    assert "child results or consequential actions remain unresolved" in result.message
+    assert result.status == "success", result.message
     assert result.data["verification"][-1]["passed"]
-    assert workflow.lane.execution_supervisor.get_task(investigation_id).checkpoint_id
     assert (gateway.root / "app.py").read_text() == "after\n"
+    assert all(child.task_kind != "investigation" for child in workflow.board.list_tasks(
+        parent_task_id=result.data["task_id"],
+    ))
 
 
 def test_draft_waits_for_exact_approval_and_executes_ordered_steps(mode_gateway, monkeypatch):
@@ -986,7 +947,6 @@ def test_debug_reads_a_known_file_after_a_repository_audit(mode_gateway, tool, a
 
     assert result.status == "success", result.message
     assert all(entry["inspection_available"] for entry in model.inputs)
-    assert not model.native_inputs
     search, read = model.inputs[-1]["evidence"]
     assert search["level"] == 4
     assert model.inputs[1]["evidence"][0]["result"] == search["result"]
@@ -1009,7 +969,7 @@ def test_repository_read_batch_saves_observations_for_the_next_decision(mode_gat
     gateway._autonomous_controller.config = AutonomousExecutionConfig(max_tool_calls=2, max_model_turns=4)
     batch = [evidence_call("first", paths=["app.py"]), evidence_call("second", paths=["test_app.py"])]
     if mode == "plan":
-        model = Decisions(investigation("app.py and its test"), final, investigations=[[batch]])
+        model = Decisions(investigation("app.py and its test", *batch, paths=["app.py", "test_app.py"]), final)
     else:
         model = Decisions(inspection(None, *batch), final)
 
@@ -1024,10 +984,9 @@ def test_repository_read_batch_saves_observations_for_the_next_decision(mode_gat
         ("evidence-1", "before\n"), ("evidence-2", "assert handler()\n"),
     ]
     state = workflow.board.get_task(result.data["task_id"]).mode_workflow
-    assert (state["decision_count"], state["tool_operations"]) == (3 if mode == "plan" else 2, 2)
+    assert (state["decision_count"], state["tool_operations"]) == (2, 2)
     if mode == "plan":
-        assert state["investigation"]["status"] == "completed"
-        assert state["investigation"]["report"]["evidence_ids"] == ["evidence-1", "evidence-2"]
+        assert state["investigation"]["status"] == "returned"
     else:
         assert "investigation" not in state
     persisted = state["evidence"]
@@ -1658,27 +1617,25 @@ def test_coding_inspection_has_no_investigator_round_trips_at_child_limit(mode_g
     state = task.mode_workflow
     assert (state["decision_count"], state["tool_operations"]) == (22, 63)
     assert len(state["evidence"]) == len(task.evidence_refs) == 63
-    assert all(turn["remaining_investigation_child_slots"] == 0 for turn in model.inputs)
     assert not workflow.board.list_tasks(parent_task_id=task.task_id)
     assert not supervisor.get_task(task.task_id).child_task_ids
 
 
-def test_explicit_investigation_at_child_limit_creates_no_taskboard_row(mode_gateway):
+def test_scoped_investigation_uses_no_child_slots(mode_gateway):
     gateway, workflow = mode_gateway
     supervisor = workflow.lane.execution_supervisor
     supervisor.config = supervisor.config.model_copy(update={"max_children_per_task": 0})
     gateway._coding_agent = SimpleNamespace(
         active_engine_mode="external",
-        for_assignment=lambda **_: pytest.fail("Capacity must be checked before dispatch"),
+        for_assignment=lambda **_: pytest.fail("Scoped reads must stay on the current task"),
     )
-    model = Decisions(investigation("app.py", paths=["app.py"]))
-
+    model = Decisions(investigation("app.py", paths=["app.py"]),
+                      {"action": "diagnose", "reason": "The code explains the result",
+                       "root_cause": "Old handler value", "cause_evidence": ["evidence-1"]})
     result = workflow.start("session", "Investigate a missing source fact", mode="debug", llm=model)
 
-    assert result.data["phase"] == "blocked"
-    assert "no remaining slots for new investigation tasks" in result.message
+    assert result.status == "success", result.message
     task_id = result.data["task_id"]
-    assert model.inputs[0]["remaining_investigation_child_slots"] == 0
     assert not workflow.board.list_tasks(parent_task_id=task_id)
     assert not supervisor.get_task(task_id).child_task_ids
 
@@ -1793,25 +1750,23 @@ def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(
     assert [turn["inspection_available"] for turn in model.inputs] == [True, True, True, False]
 
 
-def test_cancel_during_native_response_discards_late_tools(mode_gateway):
+def test_cancel_during_scoped_investigation_selection_discards_late_reads(mode_gateway, monkeypatch):
     _, workflow = mode_gateway
-    model = Decisions(investigation("app.py"))
+    monkeypatch.setattr(PlanService, "inspect", lambda *_: pytest.fail("Cancelled task cannot read source"))
 
-    def with_tools(_):
-        def generate(messages, *, continuation):
-            task_id = model.inputs[0]["task_id"]
+    class CancelledInvestigation(Decisions):
+        def decide_sync(self, messages, schema):
+            decision = super().decide_sync(messages, schema)
+            task_id = self.inputs[-1]["task_id"]
             workflow.lane.cancel_tree(task_id)
             workflow.note_cancellation(task_id)
-            return ModelResponse(tool_calls=[evidence_call("late", paths=["app.py"])])
-        return SimpleNamespace(generate_sync=generate)
+            return decision
 
-    model.with_tools = with_tools
-    result = workflow.start("session", "Investigate app.py", mode="plan", llm=model)
+    result = workflow.start("session", "Investigate app.py", mode="plan",
+                            llm=CancelledInvestigation(investigation("app.py")))
 
     assert result.data["phase"] == "cancelled"
-    state = workflow.board.get_task(result.data["task_id"]).mode_workflow
-    assert state["investigation"]["status"] == "cancelled"
-    assert state["evidence"] == []
+    assert workflow.board.get_task(result.data["task_id"]).mode_workflow["evidence"] == []
 
 
 def test_cancel_during_coding_decision_discards_the_read_batch(mode_gateway, monkeypatch):
@@ -1841,13 +1796,13 @@ def test_cancel_during_coding_decision_discards_the_read_batch(mode_gateway, mon
     (evidence_call("second", paths=["test_app.py"], level=2, prior_evidence=["evidence-1"]), 2,
      "The next permitted level is 1"),
     (evidence_call("second", "list_files", paths=["tests/**/*.py"]), 2,
-     "arguments did not match the registered schema"),
+     "Discovery paths must name literal files or directories"),
     (evidence_call("second", "list_files", paths=["/"]), 2,
-     "paths.0: Discovery paths must name literal files or directories"),
+     "Discovery paths must name literal files or directories"),
     (evidence_call("second", "list_files", paths=["runtime/../docs"]), 2,
-     "paths.0: Discovery paths must name literal files or directories"),
+     "Discovery paths must name literal files or directories"),
     (evidence_call("second", "list_files", paths=["./.env/"]), 2,
-     "paths.0: Protected repository paths are unavailable"),
+     "Protected repository paths are unavailable"),
     (evidence_call("second", "list_files", level=4), 2, "The next permitted level is 1"),
     (evidence_call("second", "list_files", level=4, reason=" "), 2, "Provide a reason for the requested level-4 scope"),
     (evidence_call("second", "repo_search", paths=["."], query="before"), 2,
@@ -1855,11 +1810,11 @@ def test_cancel_during_coding_decision_discards_the_read_batch(mode_gateway, mon
     (evidence_call("second", "repo_search", query="before"), 2, "Supply literal paths or a targeted glob"),
     (evidence_call("second", "repo_search", query="before", glob="**/*.py"), 2,
      "Repository-wide discovery requires an authorized level 4"),
-    (evidence_call("second", "ls", paths=["docs"]), 2, "arguments did not match the registered schema"),
+    (evidence_call("second", "ls", paths=["docs"]), 2, "Send only tool ls"),
     (evidence_call("second", "repo_search", level=4, query="before", initial_repository_scope="explicit_audit"), 2,
-     "arguments did not match the registered schema"),
+     "Investigation reads must stay inside the selected paths"),
     (evidence_call("second", paths=[".env"]), 2, "Protected repository paths are unavailable"),
-    (evidence_call("second", "apply_patch", patch="unauthorized"), 2, "outside the registered read-only set"),
+    (evidence_call("second", "apply_patch", patch="unauthorized"), 2, "Invalid ModeDecision"),
 ])
 def test_investigation_batch_rejects_all_reads_if_any_selection_is_invalid(
     mode_gateway, monkeypatch, second, tool_budget, detail,
@@ -1868,8 +1823,9 @@ def test_investigation_batch_rejects_all_reads_if_any_selection_is_invalid(
     gateway._autonomous_controller.config = AutonomousExecutionConfig(max_tool_calls=tool_budget)
     calls = []
     monkeypatch.setattr(PlanService, "inspect", lambda _, request: calls.append(request))
-    model = Decisions(investigation("app.py and its test"),
-                      investigations=[[[evidence_call("first", paths=["app.py"]), second]]])
+    selected = (investigation("Inspect app.py", evidence_call("first", paths=["app.py"]), second, paths=["app.py"])
+                if second.args.get("initial_repository_scope") else inspection("app.py", second))
+    model = Decisions(selected)
 
     result = workflow.start("session", "Inspect two files", mode="plan", llm=model)
 
@@ -1882,19 +1838,29 @@ def test_investigation_batch_rejects_all_reads_if_any_selection_is_invalid(
 def test_over_budget_read_batch_returns_control_without_a_partial_dispatch(mode_gateway, monkeypatch, mode):
     gateway, workflow = mode_gateway
     gateway._autonomous_controller.config = AutonomousExecutionConfig(max_tool_calls=1)
-    monkeypatch.setattr(PlanService, "inspect", lambda *_: pytest.fail("The batch cannot be partially dispatched"))
+    seen = []
+    inspect = PlanService.inspect
+
+    def record(service, request):
+        seen.append(request.paths)
+        return inspect(service, request)
+
+    monkeypatch.setattr(PlanService, "inspect", record)
     calls = [evidence_call("first", paths=["app.py"]), evidence_call("second", paths=["test_app.py"])]
-    conclusion = {"action": "block", "reason": "Need both files to compare the behavior"}
-    if mode == "plan":
-        model = Decisions(investigation("Compare two files"), conclusion, investigations=[[calls]])
-    else:
-        model = Decisions(inspection(None, *calls), conclusion)
+    final = draft() if mode == "plan" else {
+        "action": "diagnose", "reason": "Observed the cause", "root_cause": "Old handler value",
+        "cause_evidence": ["evidence-1"],
+    }
+    oversized = (investigation("Compare two files", *calls, paths=["app.py", "test_app.py"])
+                 if mode == "plan" else inspection(None, *calls))
+    model = Decisions(oversized, inspection("app.py"), final)
 
-    result = workflow.start("session", "Compare app.py with test_app.py", mode=mode, llm=model)
+    result = workflow.start("session", "Compare app.py with test_app.py", mode=mode, llm=model, no_code=True, save=False)
 
-    assert len(model.inputs) == 2
-    assert "exceeds the remaining shared tool budget" in result.message
-    assert not result.data["repository_observations"]["workflow_tool_operations"]
+    assert result.status == "success", result.message
+    assert model.inputs[1]["rejected_inspection_batch"] == {"required": 2, "remaining": 1}
+    assert seen == [("app.py",)]
+    assert result.data["repository_observations"]["workflow_tool_operations"] == 1
 
 
 @pytest.mark.parametrize(("first", "second"), [
@@ -1978,40 +1944,19 @@ def test_investigation_batch_resume_uses_completed_observations(mode_gateway, mo
     assert (state["decision_count"], state["tool_operations"]) == (3, 3)
 
 
-def test_programmatic_investigation_preserves_provider_continuation_and_callers(mode_gateway, monkeypatch):
+def test_responses_provider_investigation_uses_only_coding_decisions(mode_gateway, monkeypatch):
     from mana_agent.llm.capabilities import ModelProfile, observation
     from mana_agent.llm.engine import NativeLLMEngine
-    from mana_agent.llm.providers.openai import OpenAIProvider
 
     _, workflow = mode_gateway
-    provider = OpenAIProvider(provider="openai", api_key="fixture", base_url="https://example.invalid",
-                              endpoint="responses")
-    program = {"type": "program", "id": "program-1", "code": "/* fixture only */"}
-    caller = {"type": "program", "call_id": "program-1"}
     requests = []
+    decisions = iter([investigation("app.py"), draft()])
 
     class Adapter:
         async def generate(self, request):
             requests.append(request)
-            if request.response_schema:
-                final = draft()
-                return ModelResponse(content=json.dumps({"decision": investigation("app.py") if len(requests) == 1 else final}))
-            assert request.tools[0]["type"] == "programmatic_tool_calling"
-            assert next(tool for tool in request.tools if tool.get("name") == "report_investigation")["allowed_callers"] == ["direct"]
-            if len(requests) == 2:
-                output = [program, {"type": "function_call", "call_id": "read-1", "name": "read_file", "caller": caller,
-                                    "arguments": json.dumps(evidence_call("read-1", paths=["app.py"]).args)}]
-            else:
-                sent = provider.encode(request)["input"]
-                result = sent[-1]
-                assert request.continuation.response_id == "response-2"
-                assert any(item.get("id") == program["id"] for item in sent)
-                assert (result["type"], result["call_id"], result["caller"]) == ("function_call_output", "read-1", caller)
-                assert json.loads(result["output"])["result"]["content"] == "before\n"
-                report = report_call("evidence-1")
-                output = [{"type": "function_call", "call_id": report.id, "name": report.name,
-                           "arguments": json.dumps(report.args)}]
-            return provider.normalize({"id": f"response-{len(requests)}", "status": "completed", "output": output}, request)
+            assert request.response_schema
+            return ModelResponse(content=json.dumps({"decision": next(decisions)}))
 
     facts = {name: observation(value, source="provider", confidence=1) for name, value in {
         "input_text": True, "output_text": True, "tool_calling": True, "native_structured_output": True,
@@ -2024,8 +1969,7 @@ def test_programmatic_investigation_preserves_provider_continuation_and_callers(
     result = workflow.start("session", "Investigate app.py", mode="plan", llm=model, no_code=True, save=False)
 
     assert result.status == "success", result.message
-    assert len(requests) == 4
-    assert [bool(req.response_schema) for req in requests] == [True, False, False, True]
+    assert len(requests) == 2
 
 
 def test_exact_patch_operations_and_protected_paths(tmp_path):
