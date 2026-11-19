@@ -10,7 +10,8 @@ from mana_agent.gateway.checkpoint_resume import CheckpointResumeError
 from mana_agent.services.chat_session_history import ChatSessionMessage
 
 
-def test_canonical_retry_request_uses_trigger_turn_user_message() -> None:
+@pytest.mark.parametrize("origin_session", ["", "session-original"])
+def test_canonical_retry_request_uses_trigger_turn_user_message(origin_session: str) -> None:
     gateway = AgentChatGateway.__new__(AgentChatGateway)
     gateway._lane_coordinator = SimpleNamespace(
         execution_supervisor=SimpleNamespace(
@@ -18,12 +19,14 @@ def test_canonical_retry_request_uses_trigger_turn_user_message() -> None:
                 get_task_or_none=lambda task_id: SimpleNamespace(
                     task_id=task_id,
                     trigger_turn_id="turn_original",
+                    session_id=origin_session,
                 )
             )
         )
     )
-    gateway._history_store = SimpleNamespace(
-        list=lambda session_id, limit: [
+    def list_messages(session_id, limit):
+        assert session_id == (origin_session or "session_1")
+        return [
             ChatSessionMessage(
                 message_id="msg_original",
                 session_id=session_id,
@@ -41,7 +44,8 @@ def test_canonical_retry_request_uses_trigger_turn_user_message() -> None:
                 content="retry",
             ),
         ]
-    )
+
+    gateway._history_store = SimpleNamespace(list=list_messages)
 
     assert gateway._canonical_task_request("task_1", "session_1") == "original request ABC"
 

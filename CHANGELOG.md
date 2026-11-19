@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-19
 
+- Require a saved supervisor record for same-task recovery and explain when a task was archived. Retry reads the original session for the linked request. See the [archived task recovery regression](docs/regressions/batch-and-followup-context.md#archived-task-recovery-regression) for verification.
 - Advertise investigation paths, task kind, and recovery in the closed `ModeDecision` schema. Keep decisions nested under the single `decision` argument and give same-format corrections redacted field diagnostics. See the [decision argument regression](docs/regressions/debug-plan-execution-contract.md#mode-decision-tool-argument-regression) for verification.
 - Shorten the entry router prompt so the 8,000-token compaction fixture fits with complete route availability. Keep the required decision fields and response format instructions. See the [routing prompt budget regression](docs/regressions/debug-plan-execution-contract.md#entry-routing-prompt-budget-regression) for verification.
 - Preserve newer capability observations when resolving an older copy of the same fact. Entry routing includes required tool-calling or structured-output support in its metadata refresh. See the [stale tool-calling regression](docs/regressions/dynamic-capability-discovery-and-autorouter-startup.md#stale-tool-calling-with-a-fresh-catalog) for verification.

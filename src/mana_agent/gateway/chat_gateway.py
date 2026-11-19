@@ -165,6 +165,7 @@ from mana_agent.execution_supervisor.models import (
     RetryCategory,
     SideEffectClassification,
     TERMINAL_STATES,
+    TaskRecord,
 )
 from mana_agent.execution_supervisor.budget_decision import BudgetOverrunFinalizationDecider
 from mana_agent.execution_supervisor.errors import ExecutionSupervisorError
@@ -5092,15 +5093,13 @@ class AgentChatGateway:
 
     def resume_task(self, task_id: str) -> dict[str, Any]:
         """Resume a paused/waiting task, or same-task retry when already stopped."""
+        self._require_recovery_task(task_id)
         mode_task = self._lane_coordinator.taskboard.store.repository.get_task_or_none(task_id)
         if mode_task and mode_task.mode_workflow:
             if mode_task.mode_workflow.get("plan_id"):
                 raise LaneCoordinatorError("Resume the owning plan, which checks the approved step scope")
             return self.mode_workflow.retry(task_id).model_dump()
-        try:
-            execution = self._lane_coordinator.ensure_recoverable_execution(task_id)
-        except LaneCoordinatorError:
-            execution = self._lane_coordinator.inspect_task(task_id)
+        execution = self._lane_coordinator.ensure_recoverable_execution(task_id)
         if execution.state is LaneTaskState.PAUSED:
             return asdict(self._lane_coordinator.resume(task_id))
         if execution.state in {
@@ -5131,6 +5130,7 @@ class AgentChatGateway:
 
     def retry_task_control(self, task_id: str, *, session_id: str = "") -> dict[str, Any]:
         """Operator-authorized same-task retry through the lane recovery path."""
+        self._require_recovery_task(task_id)
         mode_task = self._lane_coordinator.taskboard.store.repository.get_task_or_none(task_id)
         if mode_task and mode_task.mode_workflow:
             if session_id and session_id != mode_task.session_id:
@@ -5161,6 +5161,7 @@ class AgentChatGateway:
 
     def replan_task_control(self, task_id: str, *, session_id: str = "") -> dict[str, Any]:
         """Operator-authorized same-task replan that restarts incomplete job steps."""
+        self._require_recovery_task(task_id)
         mode_task = self._lane_coordinator.taskboard.store.repository.get_task_or_none(task_id)
         if mode_task and mode_task.mode_workflow:
             raise LaneCoordinatorError("Use /revise on the owning plan so the new scope can be reviewed")
@@ -9879,15 +9880,34 @@ class AgentChatGateway:
             return False
         return task.retry_budget.remaining(category, task.retry_usage) <= 0
 
+    def _require_recovery_task(self, task_id: str) -> TaskRecord:
+        """Require an authoritative execution record before recovering a task."""
+        task = self._lane_coordinator.execution_supervisor.store.get_task_or_none(task_id)
+        if task is not None:
+            return task
+        reason = "its saved execution record is unavailable"
+        gc = getattr(getattr(self, "_workspaces", None), "gc", None)
+        if gc is not None and _GATEWAY_TASK_ID_RE.fullmatch(task_id):
+            archived = gc.get_tombstone(task_id)
+            store = self._lane_coordinator.taskboard.store
+            if (archived is not None and archived.type == "task"
+                    and archived.workspace_reference == store.workspace_id
+                    and archived.repository_reference == store.repository_id):
+                reason = f"it was archived with status {archived.terminal_status}"
+        raise LaneCoordinatorError(
+            f"Task {task_id} cannot be resumed because {reason}. "
+            "To run the work again, send the original request as a new task."
+        )
+
     def _canonical_task_request(self, task_id: str, session_id: str) -> str:
         """Load the exact user request that created a durable task."""
-        task = self._lane_coordinator.execution_supervisor.store.get_task_or_none(task_id)
-        if task is None:
+        try:
+            task = self._require_recovery_task(task_id)
+        except LaneCoordinatorError as exc:
             raise CheckpointResumeError(
-                f"Canonical request recovery failed for task {task_id}: task not found.",
-                code="canonical_request_unavailable",
-            )
-        trigger_turn_id = str(getattr(task, "trigger_turn_id", "") or "") if task else ""
+                str(exc), code="recovery_task_unavailable",
+            ) from exc
+        trigger_turn_id = str(getattr(task, "trigger_turn_id", "") or "")
         if not trigger_turn_id:
             intent = str(
                 getattr(task, "normalized_intent", "")
@@ -9901,7 +9921,8 @@ class AgentChatGateway:
                 f"Canonical request recovery failed for task {task_id}: trigger turn linkage is missing.",
                 code="canonical_request_unavailable",
             )
-        messages = self._history_store.list(session_id, limit=5000)
+        origin_session_id = str(getattr(task, "session_id", "") or session_id)
+        messages = self._history_store.list(origin_session_id, limit=5000)
         matches = [
             message for message in messages
             if message.turn_id == trigger_turn_id
@@ -9933,7 +9954,7 @@ class AgentChatGateway:
     ) -> list[dict[str, Any]]:
         """List durable tasks eligible for chat-turn auto resume/retry/replan/status.
 
-        Includes:
+        Requires a persisted supervisor record. Includes:
         - failed / budget-exhausted / completed (status reuse) supervisor records
         - waiting supervisor records that are *not* human-inbox waits (blocked
           multi-task roots after child failure or job revert)
@@ -9975,7 +9996,6 @@ class AgentChatGateway:
         )
         now = datetime.now(timezone.utc)
         fenced_sessions = getattr(self, "_fenced_sessions", None) or set()
-        seen: set[str] = set()
         for task in durable_tasks:
             execution = executions.get(task.task_id)
             selected_lane = (
@@ -10099,66 +10119,8 @@ class AgentChatGateway:
                 ],
             }
             candidates.append(candidate)
-            seen.add(task.task_id)
             if len(candidates) >= 20:
                 break
-        # Lane-only projections that lost durable visibility still matter when
-        # the supervisor row is missing after partial materialization; rehydrate
-        # path handles that at recovery time.
-        if len(candidates) < 20:
-            for execution in self._lane_coordinator.executions:
-                if execution.task_id in seen:
-                    continue
-                if execution.state not in recoverable_lane_states:
-                    continue
-                if (
-                    execution.workspace_id != workspace_id
-                    or execution.repository_id != repository_id
-                    or (execution.session_id and str(execution.session_id) in fenced_sessions)
-                ):
-                    continue
-                if lane_id is not None and execution.owning_lane != lane_id:
-                    continue
-                candidates.append(
-                    {
-                        "task_id": execution.task_id,
-                        "checkpoint_id": execution.checkpoint_id or "",
-                        "checkpoint_available": bool(execution.checkpoint_id),
-                        "checkpoint_error": "",
-                        "normalized_intent": redact_text(execution.normalized_intent),
-                        "lane": execution.owning_lane.value,
-                        "session_id": execution.session_id,
-                        "workspace_id": execution.workspace_id,
-                        "repository_id": execution.repository_id,
-                        "state": execution.state.value,
-                        "lane_state": execution.state.value,
-                        "waiting_for_human": False,
-                        "recovery_review_required": False,
-                        "recovery_intervention": {},
-                        "entry_route": "",
-                        "task_type": execution.task_type,
-                        "child_task_ids": [],
-                        "updated_at": execution.updated_at,
-                        "deadline_at": "",
-                        "deadline_exceeded": False,
-                        "failure_reason": redact_text(execution.error),
-                        "side_effect_classification": SideEffectClassification.UNKNOWN.value,
-                        "irreversible_side_effect_started": False,
-                        "completed_steps": [],
-                        "pending_steps": [],
-                        "resume_payload_fields": [],
-                        "generated_files": [],
-                        "verification_status": "",
-                        "completion_contract": [],
-                        "target_resources": list(execution.target_files),
-                        "important_constraints": [],
-                        "field_provenance": {},
-                        "retry_budget_remaining": {},
-                        "action_states": [],
-                    }
-                )
-                if len(candidates) >= 20:
-                    break
         return candidates
 
     def _execute_domain_operation(self, *, tool_name: str, arguments: dict, invoke, read_only: bool = False):

@@ -153,6 +153,34 @@ Targeted verification is user-owned. The agent did not rerun the test.
 python -m pytest -v tests/test_conversation_followup_context.py
 ```
 
+## Archived task recovery regression
+
+On 2026-11-19, retention archived the failed DEBUG task
+`task_20261118_000014` after its execution deadline had expired. Its
+TaskBoard entry, original user message, and checkpoint files remained.
+The supervisor record was pruned. The gateway still offered the stale
+lane projection for recovery, so a selected retry stopped while loading
+the canonical request.
+
+Recovery candidates now require the saved supervisor record, and the lane
+coordinator checks that record before reusing a cached projection. An
+explicit recovery command reports the terminal archive status when a
+same-workspace, same-repository tombstone exists. The gateway asks for a
+new request when the execution record is unavailable. Saved history and
+orphaned checkpoint files confer no recovery authority. For durable tasks
+with turn linkage, canonical request lookup uses the originating session.
+
+Do not offer a lane projection as a recovery candidate after the
+supervisor record has been pruned. Preserve the task's original session
+when loading the linked request.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_followup_retry_lifecycle.py tests/gateway/test_lane_coordinator.py -k 'canonical or archived or recovery_candidates'
+```
+
+The focused regression passed against the retention path in a temporary
+workspace. The archived live task was left untouched.
+
 ## User-owned verification
 
 ```bash

@@ -29,6 +29,7 @@ from mana_agent.gateway.lane_coordinator import (
     LaneReservation,
 )
 from mana_agent.gateway.chat_gateway import AgentChatGateway
+from mana_agent.gateway.checkpoint_resume import CheckpointResumeError
 from mana_agent.gateway.lanes import (
     ACTIVE_LANE_STATES,
     LockMode,
@@ -147,6 +148,47 @@ def test_recovery_candidates_include_failed_task_from_another_session(
         repository_id=coordinator.taskboard.store.repository_id,
     )
     assert fenced_candidates == []
+
+
+def test_archived_task_is_not_offered_for_recovery_and_explains_resume_failure(
+    coordinator: LaneCoordinator,
+) -> None:
+    from mana_agent.workspaces.retention import ReferenceAwareGC, RetentionMetrics, RetentionPolicy
+
+    reservation = _reserve(coordinator, LaneId.CODING, session="session-archived")
+    task_id = reservation.execution.task_id
+    coordinator.start(reservation)
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="Task deadline exceeded")
+    gc = ReferenceAwareGC(
+        execution_store=coordinator.execution_supervisor.store,
+        policy=RetentionPolicy(max_completed_tasks_per_workspace=0),
+    )
+    assert gc.compact_completed_tasks(gc.collect_active_references(), RetentionMetrics()) == [task_id]
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.FAILED
+    assert coordinator.taskboard.get_task(task_id)
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+    gateway._workspaces = SimpleNamespace(gc=gc)
+    gateway._history_store = SimpleNamespace(
+        list=lambda **kw: pytest.fail("Archived work must stop before loading the original request"),
+    )
+    assert gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-archived",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    ) == []
+
+    with pytest.raises(CheckpointResumeError, match="archived with status failed") as error:
+        gateway._canonical_task_request(task_id, "session-archived")
+    assert error.value.code == "recovery_task_unavailable"
+    for control in (gateway.resume_task, gateway.retry_task_control, gateway.replan_task_control):
+        with pytest.raises(LaneCoordinatorError, match="archived with status failed.*original request as a new task"):
+            control(task_id)
+    with pytest.raises(LaneCoordinatorError, match="no saved execution record"):
+        coordinator.ensure_recoverable_execution(task_id)
+    assert coordinator.execution_supervisor.store.get_task_or_none(task_id) is None
 
 
 def test_recovery_candidates_include_blocked_multi_task_root_without_inbox_wait(

@@ -2244,12 +2244,12 @@ class LaneCoordinator:
         not fail with an opaque unknown-task error when the supervisor record is
         present and recoverable.
         """
+        durable = self.execution_supervisor.store.get_task_or_none(task_id)
+        if durable is None:
+            raise LaneCoordinatorError(f"Task {task_id} has no saved execution record for recovery")
         existing = self._executions.get(task_id)
         if existing is not None:
             return existing
-        durable = self.execution_supervisor.store.get_task_or_none(task_id)
-        if durable is None:
-            raise LaneCoordinatorError(f"Unknown gateway task: {task_id}")
         if durable.state in {
             SupervisorState.RUNNING,
             SupervisorState.LEASED,
