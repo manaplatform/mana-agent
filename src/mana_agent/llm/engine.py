@@ -472,7 +472,8 @@ class NativeLLMEngine:
     async def decide(
         self, messages: Any, schema: type[BaseModel] | dict[str, Any], *,
         repair_decision: bool = False, validation_context: dict[str, Any] | None = None,
-        complex_schema: bool = False, correction_hint: str | Callable[[ValueError], str] = "", **options: Any,
+        complex_schema: bool = False, correction_hint: str | Callable[[ValueError], str] = "",
+        on_decision_rejected: Callable[[int, Exception, bool], None] | None = None, **options: Any,
     ) -> BaseModel | dict[str, Any]:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
@@ -535,6 +536,10 @@ class NativeLLMEngine:
                 )
             except StructuredOutputError as exc:
                 failure = exc
+            except Exception as exc:
+                if attempt and on_decision_rejected is not None:
+                    on_decision_rejected(attempt, exc, True)
+                raise
             else:
                 try:
                     if tool_based:
@@ -557,6 +562,9 @@ class NativeLLMEngine:
                 except ValueError as exc:
                     failure = exc
 
+            final = attempt + 1 >= attempts
+            if on_decision_rejected is not None:
+                on_decision_rejected(attempt, failure, final)
             if attempts == 1:
                 raise failure
             if isinstance(failure, ValidationError):
@@ -565,7 +573,7 @@ class NativeLLMEngine:
                 detail = str(failure)
             else:
                 detail = "The response did not match the required JSON fields or types."
-            if attempt + 1 >= attempts:
+            if final:
                 raise StructuredOutputError(f"Decision still invalid after one correction (failed schema validation). {detail}") from None
             correction = (
                 f"The decision was invalid. {detail}\n"

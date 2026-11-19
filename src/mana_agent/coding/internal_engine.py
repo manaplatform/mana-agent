@@ -693,6 +693,7 @@ class InternalCodingEngine(CodingEngine):
         from mana_agent.repository_evidence.models import CodingAssignment
 
         investigation = task.context.get("repository_investigation")
+        patch_proposal = bool(task.context.get("mode_patch_proposal"))
         tool_defs = self._build_tool_definitions(session.dispatcher)
         if investigation:
             assignment = CodingAssignment.model_validate(investigation)
@@ -754,6 +755,13 @@ class InternalCodingEngine(CodingEngine):
             context_parts.append(INVESTIGATION_REPORT_INSTRUCTION)
         else:
             context_parts.extend((CODING_DEBUGGING_HANDOFF_INSTRUCTION, MISSING_EVIDENCE_INSTRUCTION))
+            if patch_proposal:
+                context_parts.append(
+                    "Return the scoped patch as soon as the assignment and current source support it. "
+                    "Read only the specific file or range needed for the next edit. Use supplied observations "
+                    "and completed reads. Request missing evidence only for a concrete fact that prevents a safe patch "
+                    "and cannot be resolved within this assignment."
+                )
         user_content = "\n\n".join(context_parts)
 
         messages: list[Any] = [
@@ -802,6 +810,16 @@ class InternalCodingEngine(CodingEngine):
             if cancel_ev.is_set():
                 raise asyncio.CancelledError()
 
+            finish_proposal = patch_proposal and (
+                max_turns - turn == 1 or session.state.tool_calls_executed >= session.state.max_tool_calls
+                or evidence_misses >= max_evidence_misses
+            )
+            if finish_proposal:
+                messages.append(UserMessage(
+                    "Use the current observations to return the scoped patch now. If a specific unresolved fact "
+                    "prevents a safe patch, return the typed missing_evidence response for that fact. "
+                    "No further tools are available in this proposal."
+                ))
             if callable(getattr(self, "charge_model", None)):
                 self.charge_model()
             started = time.monotonic()
@@ -835,6 +853,15 @@ class InternalCodingEngine(CodingEngine):
                     return json.dumps(arguments, ensure_ascii=False)
                 if not raw_tool_calls and not protocol_pending:
                     raise StructuredOutputError(INVESTIGATION_REPORT_INSTRUCTION)
+            if finish_proposal and raw_tool_calls:
+                raise RuntimeError("The selected model requested more repository tools instead of returning a patch "
+                                   "or a concrete missing evidence requirement.")
+            evidence_only = bool(raw_tool_calls) and all(
+                call.get("name") in _REPOSITORY_EVIDENCE_TOOLS for call in raw_tool_calls
+            )
+            if evidence_only and evidence_misses >= max_evidence_misses:
+                raise RuntimeError("Repeated repository reads yielded no new evidence. "
+                                   "The selected model did not continue with a different authorized action.")
             continuation = getattr(response, "continuation", None)
             session.state.native_continuation = continuation.model_dump(mode="json") if continuation else None
             session.state.native_messages = [message.model_dump(mode="json") if hasattr(message, "model_dump") else message for message in messages]
@@ -872,10 +899,6 @@ class InternalCodingEngine(CodingEngine):
                         final_summary = f"Successfully completed operations: {', '.join(ops[-5:])}."
                 break
 
-            evidence_only = all(call.get("name") in _REPOSITORY_EVIDENCE_TOOLS for call in tool_calls)
-            if evidence_only and evidence_misses >= max_evidence_misses:
-                raise RuntimeError("Repeated repository reads yielded no new evidence. "
-                                   "The selected model did not continue with a different authorized action.")
             result_start = len(messages)
             tools_started = time.monotonic()
 
@@ -1154,7 +1177,7 @@ class InternalCodingEngine(CodingEngine):
                     except Exception:
                         pass
 
-            if session.state.tool_calls_executed >= session.state.max_tool_calls:
+            if not patch_proposal and session.state.tool_calls_executed >= session.state.max_tool_calls:
                 break
 
             if evidence_only:
@@ -1164,7 +1187,7 @@ class InternalCodingEngine(CodingEngine):
                 novel = observed - seen_evidence
                 seen_evidence.update(observed)
                 evidence_misses = 0 if novel else evidence_misses + 1
-                if evidence_misses == max_evidence_misses:
+                if not patch_proposal and evidence_misses == max_evidence_misses:
                     messages.append(UserMessage(
                         "Repository reads stopped producing new evidence. Use current observations to proceed, "
                         "return the investigation report, or identify the exact unresolved requirement."

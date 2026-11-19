@@ -420,6 +420,49 @@ The fixtures cover a corrected repair that invokes the coding backend and
 verification, and a repeated invalid citation that blocks before either.
 The agent did not run the tests or resume the live task.
 
+### Evidence deadlock and decision rejection diagnostics
+
+The causal citation fix moved one check into the native validator. Workflow
+switches, Evidence Board selections, and evidence-resume decisions still had
+correctable checks after the provider returned. The original failure also
+exposed a budget gap. Optional reads could leave insufficient shared budget
+for implementation, and a native patch proposal stopped as soon as its final
+read consumed the tool budget, before the model could submit the patch.
+
+The mode service and gateway share validation for the active action, task
+identity, observation IDs, current Evidence Board ID and revision pairs,
+repair authorization and checks, and the waiting task's checkpoint. The
+model's existing same-format correction receives valid reference examples
+from the current task. The gateway rechecks cited observations and saved
+evidence before using them. The supervisor still decides whether the exact
+checkpoint can resume, and the existing approval and verification gates
+apply to patch execution. Saved tasks need no migration.
+
+`model.decision.rejected` records the task, action, error code, citation field,
+expected format, up to 12 valid references, and correction index in the
+Activity journal. It records a recognized reference-shaped identifier after
+redaction and uses a short digest for malformed values. The first rejection
+is published before the correction request, so a provider failure leaves
+both the original diagnosis and the final failure reason.
+
+AUTO can draft immediately or select a short scoped read when it matters.
+Automatic write workflows limit optional evidence work so the first edit can
+reach proposal, review, application, and focused verification. The native
+proposal loop still accepts a patch response after the last read consumes
+its available tool budget. If the read no-progress guard trips, the final
+proposal response can contain the patch or an exact unresolved requirement.
+DEBUG repair still requires causal support and a passing regression check.
+
+**Do not reintroduce** gateway-only checks for correctable decision fields,
+raw rejected model values in Activity, or a required investigation phase.
+Keep the final patch-response turn available when a read allowance ends.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/test_internal_coding_engine_workflow.py -k 'invalid_handoff_in_schema or corrects_evidence_after_inspection_stops or auto_records_internal_plan or native_patch_proposal_can_finish or repeated_repository_results or implementation_resumes_exact_step'
+```
+
+The agent reviewed the diff. The fixtures and live incident replay remain unverified.
+
 ## Text search query contract
 
 On 2026-11-17, DEBUG task `task_20261117_000009` using OpenRouter DeepSeek saved 96 observations before decision validation rejected the second request in a proposed batch. The corrected `repo_search` request lacked a nonblank query. The journal retained the validation failure and the saved observations. It did not retain the rejected argument.

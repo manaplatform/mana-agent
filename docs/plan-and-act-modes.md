@@ -16,11 +16,13 @@ AUTO and DEBUG execute `inspect` batches through the parent task's read-only too
 
 ## Implement a change
 
-AUTO starts with scoped repository observations, records an internal plan and its verification requirements on TaskBoard, and executes the plan through the configured CodingAgent. The gateway projects the workflow on the same task through integration, testing, and review. Runtime capabilities require evidence from the existing feature integration coordinator before they are reported as complete. An internal plan has no separate PLAN approval step. Tool and action approvals still apply.
+AUTO can draft as its first action when the request and available context establish the files, intended change, and focused check. The model can also request a specific observation that would change its plan. AUTO records the internal plan and verification requirements on TaskBoard and executes through the configured CodingAgent. The gateway projects the workflow on the same task through integration, testing, and review. Runtime capabilities require evidence from the existing feature integration coordinator before they are reported as complete. An internal plan has no separate PLAN approval step. Tool and action approvals still apply.
 
 When Codex worktree isolation is enabled, AUTO and DEBUG repairs inspect, patch, and verify in the task's assigned worktree. The result reports the verified worktree path for review. The primary checkout retains the user's changes.
 
-DEBUG and AUTO can switch when the model cites new observed evidence on the same task. Scope, completed steps, and execution permissions carry forward. When a required verification command runs and fails, an automatic workflow can revise its plan once within the accepted file operations and rerun that command. Other failures and unavailable verification environments produce a blocked result with the task's evidence preserved.
+DEBUG and AUTO can switch when the model cites new observed evidence on the same task. Scope, completed steps, and execution permissions carry forward. When a required verification command fails, the model can revise its plan within the accepted file operations, retain required checks, and rerun the failed command. Unavailable verification environments produce a blocked result with the task's evidence preserved.
+
+Mode decisions validate citations, action availability, repair scope and checks, and evidence-resume references before the selected model's single correction. The gateway rechecks current evidence and authority before execution. Automatic write workflows reserve shared budget for the first patch and focused verification. When a native patch proposal reaches its read or model budget, or the read no-progress limit, it has a final response turn to submit the patch or identify the concrete missing fact that prevents it.
 
 ## Plan a change
 

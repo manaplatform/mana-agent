@@ -110,11 +110,17 @@ def mode_gateway(tmp_path):
 
 
 @pytest.mark.parametrize("backend", ["internal", "external"])
-@pytest.mark.parametrize("investigate", [False, True])
-def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, monkeypatch, backend, investigate):
+@pytest.mark.parametrize("initial_evidence", ["none", "inspect", "investigate"])
+def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, monkeypatch, backend, initial_evidence):
     gateway, workflow = mode_gateway
-    operation = investigation("app.py", paths=["app.py"])
-    gateway._entry_router.llm = Decisions(*([operation] if investigate else []),
+    investigate = initial_evidence == "investigate"
+    inspect = initial_evidence == "inspect"
+    if not investigate:
+        budget = 4 if inspect else 3
+        gateway._autonomous_controller.config = AutonomousExecutionConfig(max_model_turns=budget, max_tool_calls=budget)
+    initial = {"none": [], "inspect": [inspection("app.py")],
+               "investigate": [investigation("app.py", paths=["app.py"])]}
+    gateway._entry_router.llm = Decisions(*initial[initial_evidence],
                                         draft(), {"disposition": "in_scope", "reason": "Only app.py differs"})
 
     def propose(_prompt, **kwargs):
@@ -122,7 +128,8 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
         assert task.mode_workflow["plan"]["draft"]["steps"][0]["step_id"] == "fix"
         assert task.mode_workflow["phase"] == "executing"
         assert task.owning_lane == "coding"
-        assert bool(task.evidence_refs) is investigate
+        if not inspect:
+            assert bool(task.evidence_refs) is investigate
         assert any(child.task_kind == "investigation" and child.status == TaskStatus.DONE
                    for child in workflow.board.list_tasks(parent_task_id=task.task_id)) is investigate
         assert kwargs["execution_mode"] == "read_only"
@@ -167,8 +174,12 @@ def test_auto_records_internal_plan_before_applying_and_verifying(mode_gateway, 
     if investigate:
         assert task.mode_workflow["evidence"][0]["board_ref"] in task.evidence_refs
     else:
-        assert task.mode_workflow["evidence"] == []
-        assert result.data["repository_observations"]["workflow_model_decisions"] == 3
+        assert len(task.mode_workflow["evidence"]) == int(inspect)
+        assert result.data["repository_observations"]["workflow_model_decisions"] == budget
+        draft_input = gateway._entry_router.llm.inputs[int(inspect)]
+        assert "draft" in draft_input["allowed_actions"]
+        assert draft_input["remaining_inspections"] == 0
+        assert "reserved for patching and verification" in draft_input["inspection_stop"]
     assert task.mode_workflow["approved_digest"] == ""
     assert not task.mode_workflow.get("inbox_id")
 
@@ -234,6 +245,65 @@ def test_auto_switches_to_debug_on_the_same_task_with_observed_evidence(mode_gat
     assert inputs[-1]["user_mode"] == "auto"
     assert inputs[-1]["mode"] == "debug"
     assert (gateway.root / "app.py").read_text() == "before\n"
+
+
+@pytest.mark.parametrize("case,code", [
+    ("wrong_task", "mode_task_identity"),
+    ("unknown_switch_citation", "mode_unknown_evidence_reference"),
+    ("unoffered_action", "mode_action_unavailable"),
+    ("unauthorized_repair", "mode_repair_unauthorized"),
+    ("missing_repair_check", "mode_passing_check"),
+    ("missing_recheck", "mode_required_recheck"),
+    ("old_evidence_revision", "mode_unknown_evidence_reference"),
+    ("wrong_checkpoint", "mode_resume_checkpoint"),
+    ("unsatisfied_checkpoint", "mode_resume_evidence"),
+])
+def test_mode_decision_rejects_invalid_handoff_in_schema(case, code):
+    from dataclasses import replace
+    from pydantic import ValidationError
+    from mana_agent.agent.plan_service import InvestigationScope, ModeDecision, ModeDecisionContext
+    from mana_agent.repository_evidence.models import EvidenceRef
+
+    board_id = "repo_ev_" + "a" * 32
+    workflow = ModeDecisionContext(
+        task_id="active", strategy="debug", repair_authorized=True,
+        allowed_actions=frozenset({"switch_workflow", "repair", "use_evidence", "resume_implementation"}),
+        current_evidence_refs=(EvidenceRef(evidence_id=board_id, revision=2),),
+        waiting_task_id="waiting", checkpoint_id="checkpoint-current", resume_ready=True,
+    )
+    if case in {"wrong_task", "unknown_switch_citation"}:
+        decision = {"action": "switch_workflow", "reason": "New source evidence", "mode": "auto",
+                    "task_id": "unrelated" if case == "wrong_task" else "active",
+                    "evidence_ids": ["evidence-9" if case == "unknown_switch_citation" else "evidence-1"]}
+    elif case == "unoffered_action":
+        decision = draft()
+    elif case in {"unauthorized_repair", "missing_repair_check", "missing_recheck"}:
+        decision = draft()
+        decision.update(action="repair", root_cause="Old handler value", cause_evidence=["evidence-1"])
+        if case == "unauthorized_repair":
+            workflow = replace(workflow, repair_authorized=False)
+        elif case == "missing_repair_check":
+            decision["draft"]["steps"].pop()
+        else:
+            workflow = replace(workflow, repair_limits={"app.py": ["update"]}, required_recheck={"argv": ["check"]})
+    elif case == "old_evidence_revision":
+        decision = {"action": "use_evidence", "reason": "Use the source", "evidence": [
+            {"evidence_id": board_id, "revision": 1},
+        ]}
+    else:
+        decision = {"action": "resume_implementation", "reason": "Continue the assigned step", "recovery": {
+            "decision_id": "resume", "task_id": "waiting", "action": "resume_checkpoint", "reason": "Continue",
+            "resume_checkpoint_id": "checkpoint-old" if case == "wrong_checkpoint" else "checkpoint-current",
+            "safe_to_continue": True,
+        }}
+        if case == "unsatisfied_checkpoint":
+            workflow = replace(workflow, resume_ready=False)
+
+    with pytest.raises(ValidationError) as rejected:
+        ModeDecision.model_validate({"decision": decision}, context={
+            "mode_decision_context": workflow, "investigation_scope": InvestigationScope({"evidence-1": 1}),
+        })
+    assert rejected.value.errors(include_input=False)[0]["type"] == code
 
 
 def test_auto_uses_the_required_worktree_and_preserves_dirty_primary_checkout(mode_gateway, monkeypatch):
@@ -1786,12 +1856,16 @@ def test_debug_repair_uses_causal_evidence_and_runs_the_focused_check(mode_gatew
     assert checks == [("python", "app.py")]
 
 
-@pytest.mark.parametrize("case", ["unknown_diagnosis", "unknown_repair", "diagnosis_only", "repeated_unknown"])
+@pytest.mark.parametrize("case", [
+    "unknown_diagnosis", "unknown_repair", "diagnosis_only", "repeated_unknown", "provider_timeout", "stale_after_correction",
+])
 def test_debug_corrects_evidence_after_inspection_stops(mode_gateway, monkeypatch, case):
+    import asyncio
     from mana_agent.approval.policy import set_approval_mode
     from mana_agent.llm.capabilities import ModelProfile, observation
     from mana_agent.llm.engine import NativeLLMEngine
     from mana_agent.llm.messages import ToolCall
+    from mana_agent.services.execution_event_hub import conversation_events_path
 
     set_approval_mode("full_access")
     gateway, workflow = mode_gateway
@@ -1799,7 +1873,7 @@ def test_debug_corrects_evidence_after_inspection_stops(mode_gateway, monkeypatc
     repair = draft()
     repair.update(action="repair", root_cause="The handler emits the old value.", cause_evidence=["evidence-1"])
     repair["draft"]["steps"][0]["changes"] = [{"path": "app.py", "operations": ["update"]}]
-    bad_citation = "unrecognized-private-reference"
+    bad_citation = "api_key=unrecognized-private-reference" if case == "provider_timeout" else "evidence-999"
     if case in {"unknown_diagnosis", "diagnosis_only"}:
         rejected = {
             "action": "diagnose", "reason": "The read shows the old value.", "root_cause": repair["root_cause"],
@@ -1817,6 +1891,10 @@ def test_debug_corrects_evidence_after_inspection_stops(mode_gateway, monkeypatc
             requests.append(request)
             if not request.tools:
                 return ModelResponse(content=json.dumps({"disposition": "in_scope", "reason": "Only app.py changed"}))
+            if case == "provider_timeout" and len(requests) == 5:
+                raise asyncio.TimeoutError()
+            if case == "stale_after_correction" and len(requests) == 5:
+                (gateway.root / "app.py").write_text("changed during the model request\n")
             return ModelResponse(tool_calls=[ToolCall(
                 id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(actions)},
             )])
@@ -1861,15 +1939,45 @@ def test_debug_corrects_evidence_after_inspection_stops(mode_gateway, monkeypatc
     )
     assert expected_error in correction
     assert bad_citation not in correction
+    if case != "diagnosis_only":
+        assert 'Valid references for this field: ["evidence-1"]' in correction
+    task = workflow.board.get_task(result.data["task_id"])
+    events = conversation_events_path(task.primary_repository_id, task.session_id).read_text()
+    diagnostics = [event["metadata"]["decision_validation"] for line in events.splitlines()
+                   if (event := json.loads(line))["type"] == "model.decision.rejected" and event["task_id"] == task.task_id]
+    assert diagnostics[0]["correction_attempt"] == 0
+    assert not diagnostics[0]["final"]
+    if case != "diagnosis_only":
+        assert diagnostics[0]["code"] == "mode_unknown_evidence_reference"
+        assert diagnostics[0]["field"] == "cause_evidence"
+        assert diagnostics[0]["available_refs"] == ["evidence-1"]
+        assert diagnostics[0]["expected_format"] == "observation ID from evidence_levels"
+        if case == "provider_timeout":
+            assert diagnostics[0]["rejected_id"].startswith("<malformed reference ")
+            assert "unrecognized-private-reference" not in events
+        else:
+            assert diagnostics[0]["rejected_id"] == bad_citation
     report = result.data["repository_observations"]
+    if case == "stale_after_correction":
+        assert result.data["phase"] == "blocked", result.message
+        assert expected_error in result.message
+        assert not proposals and not checks
+        assert (gateway.root / "app.py").read_text() == "changed during the model request\n"
+        return
+
     assert report["evidence_ids"] == ["evidence-1"]
-    if case == "repeated_unknown":
+    if case in {"repeated_unknown", "provider_timeout"}:
         assert result.data["phase"] == "blocked", result.message
         assert report["workflow_tool_operations"] == 1
-        assert expected_error in result.message
+        assert ("timed out" if case == "provider_timeout" else expected_error) in result.message
         assert bad_citation not in result.message
         assert not proposals and not checks
+        assert len(diagnostics) == 2
+        assert diagnostics[1]["correction_attempt"] == 1
+        assert diagnostics[1]["final"]
+        assert diagnostics[1]["final_reason"]
     else:
+        assert len(diagnostics) == 1
         assert result.status == "success", result.message
         assert result.data["changed_files"] == ["app.py"]
         assert proposals == ["read_only"]

@@ -71,6 +71,35 @@ def test_slow_native_provider_is_measured_separately_from_duplicate_reads(tmp_pa
     assert result.duration_breakdown["provider_execution_time_ms"] == 300_003
 
 
+@pytest.mark.parametrize(("max_tool_calls", "max_model_turns", "expected_reads"), [(1, 4, 1), (5, 2, 1), (5, 5, 2)])
+def test_native_patch_proposal_can_finish_after_reads_stop(tmp_path, max_tool_calls, max_model_turns, expected_reads):
+    (tmp_path / "a.py").write_text("value = True\n")
+    patch = "*** Begin Patch\n*** Update File: a.py\n@@\n-value = True\n+value = False\n*** End Patch"
+
+    class Model:
+        reads = 0
+
+        async def generate(self, messages, *, continuation):
+            if "No further tools are available in this proposal" in messages[-1].content:
+                return SimpleNamespace(tool_calls=[], content=json.dumps({"patch": patch}))
+            self.reads += 1
+            return SimpleNamespace(tool_calls=[{"id": f"read-{self.reads}", "name": "read_file", "args": {"path": "a.py"}}])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=max_tool_calls)
+    engine.max_model_turns = max_model_turns
+    engine.max_no_progress_cycles = 1
+    task = CodingTask(task_id="proposal", goal="Propose a change for a.py", allowed_files=["a.py"],
+                      requires_repository_write=False, context={"mode_patch_proposal": True})
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "completed", result.errors
+    assert json.loads(result.summary) == {"patch": patch}
+    assert model.reads == expected_reads
+    assert (tmp_path / "a.py").read_text() == "value = True\n"
+
+
 def test_cancelling_provider_wait_retains_completed_tool_result(tmp_path):
     (tmp_path / "a.py").write_text("value = True\n")
     task = CodingTask(task_id="cancel-after-read", goal="Inspect a.py", requires_repository_write=False)

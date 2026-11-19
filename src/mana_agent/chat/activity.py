@@ -91,6 +91,7 @@ _PUBLIC_METADATA = frozenset(_IDENTITY_FIELDS) | frozenset({
     "provenance", "streaming", "mutation", "diff", "added_lines", "removed_lines", "diff_scope",
     "child_operation_ids",
     "observability_degraded", "preview_truncated", "mutations",
+    "decision_validation",
 })
 _FORBIDDEN = frozenset({
     "payload", "raw", "raw_payload", "instructions", "system_prompt", "developer_prompt", "prompt",
