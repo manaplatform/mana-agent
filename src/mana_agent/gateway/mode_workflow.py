@@ -634,6 +634,7 @@ class ModeWorkflow:
             "constraints": state["constraints"], "skills": state["skills"],
             "evidence": _investigation_context(observations),
             "reused_evidence_ids": reused_evidence_ids,
+            "deduplicated_inspection_requests": inspection.get("deduplicated_requests", 0) if current_inspection else 0,
             "evidence_levels": scope.evidence_levels,
             "max_next_level": scope.max_next_level,
             "remaining_inspections": min(inspection_tools, MAX_INSPECTION_BATCH) if can_inspect else 0,
@@ -763,7 +764,8 @@ class ModeWorkflow:
             state.pop("runtime_wiring", None)
         return self._draft(task_id, state, decision.draft, service)
 
-    def _record_evidence_progress(self, task_id, state, *, new, reused, title, reason, duration_ms=None, status="success"):
+    def _record_evidence_progress(self, task_id, state, *, new, reused, title, reason, duration_ms=None, status="success",
+                                  deduplicated=0):
         discovery = state.setdefault("evidence_discovery", {})
         boundary = list(self._investigation_boundary(state))
         misses = discovery.get("no_progress", 0) if discovery.get("boundary") == boundary else 0
@@ -779,6 +781,7 @@ class ModeWorkflow:
                       summary=safe_text(reason, protected=activity.protected_text),
                       operation_id=f"{task_id}:evidence:{state['decision_count']}",
                       duration_ms=duration_ms, metadata={"new_evidence": new, "reused_evidence": reused,
+                          "deduplicated_requests": deduplicated,
                           "tool_budget_used": state.get("tool_operations", len(state["evidence"])),
                           "tool_budget_remaining": max(0, self._remaining_tools(state))})
 
@@ -898,6 +901,7 @@ class ModeWorkflow:
             saved_reads = investigation_scope(evidence).validate_requests(decision.requests, reuse_saved_reads=True)
             selected = []
             reused_evidence_ids = []
+            seen = set()
             for request, evidence_id in zip(decision.requests, saved_reads, strict=True):
                 if not request.reason.strip():
                     raise ValueError("Each repository read must explain the fact it will resolve.")
@@ -906,6 +910,10 @@ class ModeWorkflow:
                 service.validate_inspection_target(request)
                 arguments = request.model_dump(mode="json", include=set(schemas[request.tool]["properties"]))
                 validate_arguments(arguments, schemas[request.tool])
+                fingerprint = request.fingerprint
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
                 if evidence_id is not None:
                     reused_evidence_ids.append(evidence_id)
                     continue
@@ -916,6 +924,7 @@ class ModeWorkflow:
             with activity.publication():
                 self._check_live(task_id)
                 inspection["reused_evidence_ids"] = reused_evidence_ids
+                inspection["deduplicated_requests"] = len(decision.requests) - len(seen)
                 state["inspection"] = inspection
                 if len(selected) > available_tools:
                     inspection["budget_rejection"] = {"required": len(selected), "remaining": available_tools}
@@ -956,6 +965,7 @@ class ModeWorkflow:
                 self._transition(task_id, state, Phase.ACTIVE, summary)
                 self._record_evidence_progress(task_id, state, new=new_evidence, reused=len(reused_evidence_ids),
                                                title=summary, reason=decision.reason,
+                                               deduplicated=inspection["deduplicated_requests"],
                                                duration_ms=round((time.monotonic() - started) * 1000))
 
     def _investigate(self, task_id, state, service, decision, *, tool_reserve=0):

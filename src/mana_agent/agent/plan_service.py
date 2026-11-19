@@ -151,35 +151,6 @@ def _search_scope_correction(observations: list[dict], scope: InvestigationScope
     )
 
 
-def _retained_read_example(request: EvidenceRequest) -> dict[str, Any] | None:
-    """Project a bounded, structurally validated read into correction data."""
-    if request.level == 4:
-        return None
-    fields = {"tool", "level"}
-    if request.tool != "ls":
-        fields.add("paths")
-        fields.update({"start_line", "end_line"} if request.tool == "read_file" else {"glob"})
-        if request.level > 1:
-            fields.add("prior_evidence")
-    example = request.model_dump(mode="json", include=fields, exclude_defaults=True)
-    activity = current_activity_context()
-    protected = getattr(activity, "protected_text", ())
-    for path in example.get("paths", ()):
-        try:
-            relative_source(path)
-        except ValueError:
-            return None
-    for ref in example.get("prior_evidence", ()):
-        if _safe_evidence_id(ref) != ref:
-            return None
-    for value in (*example.get("paths", ()), example.get("glob", "")):
-        if any(ord(char) < 32 for char in value) or safe_text(value, protected=protected) != value:
-            return None
-    if len(json.dumps(example)) > 1024:
-        return None
-    return {**example, "reason": "Read the specific repository fact needed for the next decision"}
-
-
 def _inspection_correction_hint(
     error: ValueError, lookup_observation: Callable[[str], dict[str, Any] | None] | None,
     observations: list[dict], scope: InvestigationScope | None,
@@ -200,8 +171,6 @@ def _inspection_correction_hint(
         if issue["type"] == "mode_discovery_scope_required":
             return f"{guidance}\n{_search_scope_correction(observations, scope)}"
         if issue["type"] == "mode_inspection_duplicate":
-            guidance += ("\nKeep one request for each distinct read. Changing only its reason, level, or citations "
-                         "still selects the same read. Keep a bounded read at level 1 when removing a duplicate.")
             context = issue.get("ctx") or {}
             evidence_id = context.get("evidence_id")
             if lookup_observation is not None and isinstance(evidence_id, str) and (observation := lookup_observation(evidence_id)) is not None:
@@ -211,13 +180,6 @@ def _inspection_correction_hint(
                 if isinstance(result, dict) and isinstance(result.get("directories"), list):
                     guidance += f"\n{_search_scope_correction([observation], scope)}"
                 return guidance
-            if retained := context.get("retained_read"):
-                example = {"decision": {"action": "inspect", "reason": "Resolve the remaining repository question",
-                                        "requests": [retained]}}
-                guidance += "\nThe example retains one copy of the duplicated read. Choose it only if it still answers a needed question."
-                if context.get("complete_query"):
-                    guidance += " Set query to the literal search text from the current task before submitting."
-                return f"{guidance}\n{json.dumps(example)}"
     return guidance
 
 
@@ -228,7 +190,7 @@ def _mode_validation_issue(error: Exception) -> dict:
     context = issue.get("ctx") or {}
     fields = {key: context[key] for key in (
         "action", "field", "rejected_id", "rejected_revision", "expected_format", "available_refs",
-        "requested_level", "first", "index",
+        "requested_level", "index",
     ) if key in context}
     if len(issue["loc"]) > 1 and issue["loc"][0] == "decision" and issue["loc"][1] in _MODE_ACTION_NAMES:
         fields.setdefault("action", issue["loc"][1])
@@ -403,7 +365,7 @@ class InvestigationScope:
         self, requests: tuple[EvidenceRequest, ...], *, reuse_saved_reads: bool = False,
     ) -> tuple[str | None, ...]:
         """Validate the whole batch and identify saved evidence for matching reads."""
-        seen: dict[str, int] = {}
+        uncached: set[str] = set()
         saved_reads: list[str | None] = []
         for index, request in enumerate(requests, start=1):
             self.validate(request)
@@ -416,19 +378,10 @@ class InvestigationScope:
                     "Review that result or select a different read.",
                     {"index": index, "evidence_id": evidence_id},
                 )
-            if fingerprint in seen:
-                context: dict[str, int | str] = {"first": seen[fingerprint], "index": index}
-                if evidence_id is not None:
-                    context["evidence_id"] = evidence_id
-                raise PydanticCustomError(
-                    "mode_inspection_duplicate",
-                    "Inspection requests {first} and {index} select the same read. "
-                    "Include it once in the next decision.",
-                    context,
-                )
-            seen[fingerprint] = index
+            if evidence_id is None:
+                uncached.add(fingerprint)
             saved_reads.append(evidence_id)
-        if self.remaining_tool_calls is not None and saved_reads.count(None) > self.remaining_tool_calls:
+        if self.remaining_tool_calls is not None and len(uncached) > self.remaining_tool_calls:
             raise PydanticCustomError(
                 "mode_inspection_budget", "The number of operations must fit the remaining tool budget ({remaining}).",
                 {"remaining": self.remaining_tool_calls},
@@ -870,10 +823,6 @@ class ModeDecision(ModeContract):
                     scope.validate_requests(self.decision.requests, reuse_saved_reads=True)
                 except PydanticCustomError as exc:
                     error_context = {**(exc.context or {}), "action": self.decision.action}
-                    if exc.type == "mode_inspection_duplicate" and "first" in error_context:
-                        first = self.decision.requests[error_context["first"] - 1]
-                        error_context["retained_read"] = _retained_read_example(first)
-                        error_context["complete_query"] = first.tool in {"repo_search", "find_symbols", "call_graph"} and bool(first.query)
                     raise PydanticCustomError(exc.type, exc.message_template, error_context) from None
         if self.decision.action == "investigate" and context.get("investigation_available") is False:
             raise _mode_error(
@@ -1004,7 +953,7 @@ class PlanService:
             "In AUTO and DEBUG, choose inspect only when inspection_available is true and a repository fact "
             "is needed for the immediate decision. The workflow executes these exact reads directly. "
             "Batch independent requests within remaining_inspections. "
-            "Select each read once. Use reused_evidence_ids to identify saved results from the last batch. "
+            "Identical reads in a batch run once. Use reused_evidence_ids to identify saved results from the last batch. "
             "Use the returned line bounds and truncation flags to request only the next needed range. "
             "If an observation contains directories, use it as the repository layout. "
             "Wait for results before selecting dependent reads. Start with known locations or symbols. "

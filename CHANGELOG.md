@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- Validate every inspection batch entry and execute identical reads once on the current Coding task. Reuse saved observations once per batch and charge only distinct uncached reads. See the [duplicate batch incident and user verification command](docs/regressions/debug-plan-execution-contract.md#repeated-reads-in-a-coding-decision).
 - Coding executes focused repository investigations on its existing task and returns oversized batches to Coding with the remaining allowance. The evidence tools reuse current source-backed reads and expose ranked evidence to Internal and Codex. New runtime changes include wiring in ordinary Coding steps and reuse isolated verification receipts for the completion gate. See the [budget incident and user verification commands](docs/regressions/repository-evidence-orchestration.md#scoped-coding-investigation-budget).
 
 - Restrict the initial audit marker to level-4 inspection discovery and cite the saved layout when correcting a duplicate root listing. See the [bounded search regression and user verification command](docs/regressions/debug-plan-execution-contract.md#bounded-search-after-a-duplicate-layout-read).

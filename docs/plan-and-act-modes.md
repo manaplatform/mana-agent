@@ -12,7 +12,7 @@ Realtime Coding can call `investigate_repository` for up to four scoped operatio
 
 An `ls` decision takes the tool name, level 1, and a reason. It lists immediate directories from the checkout root. Use `list_files` with a directory path or targeted glob to inspect a subdirectory. Use `repo_search` with a nonblank literal `query` to find text in the selected files. A bounded `inspect` request at levels 1–3 leaves `initial_repository_scope` empty. An audit value is reserved for an initial level-4 discovery for an explicit user-requested audit or architecture-wide investigation.
 
-AUTO, DEBUG, and PLAN execute `inspect` batches through the current task's read-only tools. Source-backed results are saved to the Evidence Board, and exact reads reuse current observations. A duplicate within one batch gets a correction. If the repeated read is the saved root listing, the model gets the layout and an example scoped to an observed directory. The Autonomous Loop retains its no-progress and budget limits.
+AUTO, DEBUG, and PLAN execute `inspect` batches through the current task's read-only tools. Every entry is validated before dispatch. Identical reads run once and count once against the shared allowance. Source-backed results are saved to the Evidence Board, and exact reads reuse current observations. The model receives the reused observation IDs and the count of duplicate requests. The Autonomous Loop retains its no-progress and budget limits.
 
 ## Implement a change
 

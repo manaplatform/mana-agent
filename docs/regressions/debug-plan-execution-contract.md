@@ -429,7 +429,43 @@ The fixtures cover a bounded correction, a cited level-2 correction, and an
 uncited level-2 correction that blocks before dispatch. Test execution and
 live replay remain pending.
 
+### Repeated reads in a Coding decision
+
+On 2026-11-20 at 02:04:39 Tehran time, DEBUG task `task_20261120_000011`
+submitted two equivalent inspection requests. Its one correction repeated the
+duplicate at 02:05:05. The journal records two `mode_inspection_duplicate`
+rejections without a read dispatch between them. The raw selections are
+unavailable. The task retained its earlier observations and checkpoint.
+
+The batch validator treated duplicate operation fingerprints as a malformed
+decision. That spent the correction on removing redundant work even when
+each request could be validated independently. The examples in the earlier
+duplicate correction notes did not prevent recurrence.
+
+The current workflow validates scope, citations, tool registration, arguments,
+and target paths for each entry. It keeps the first occurrence of each equivalent
+read and counts only distinct uncached operations. A current saved observation
+is reused once per batch. An invalid entry still stops the whole batch before
+dispatch. Repeated batches that produce no new evidence still reach the existing
+no-progress limit. This applies to new `inspect` and focused `investigate`
+decisions without changing saved checkpoints or approval digests.
+
+**Do not reintroduce** rejecting an otherwise valid batch solely because two
+entries select the same read. Validate each entry before coalescing so a later
+duplicate cannot conceal an invalid scope or citation.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'duplicate_inspection or failed_saved_inspection or investigation_list_files_deduplicates or over_budget_read_batch or investigation_batch_rejects'
+```
+
+The fixtures cover file reads, searches, alias normalization, saved layout
+reuse, and equivalent requests with valid and invalid scope. Test execution
+and live replay remain pending.
+
 ### Duplicate correction with a retained read
+
+This records the earlier correction-based behavior. The current workflow
+coalesces equivalent requests after validation.
 
 On 2026-11-20, a correction was rejected for selecting the same read twice. The terminal
 error identified requests 1 and 2. The retry message named the positions,
@@ -457,6 +493,9 @@ example. Coverage also checks that search text is omitted and that a second
 duplicate blocks without dispatch. Test execution and live replay remain pending.
 
 ### Bounded search after a duplicate layout read
+
+This records the earlier correction path. The audit scope restrictions still
+apply when Coding reuses a deduplicated layout read.
 
 On 2026-11-20, DEBUG task `task_20261120_000006` used OpenRouter DeepSeek V4.1 Flash.
 The first duplicate inspection batch was corrected, and the journal records one
