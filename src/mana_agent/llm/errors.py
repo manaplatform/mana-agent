@@ -48,7 +48,7 @@ def describe_decision_validation(error: ValidationError, schema: dict[str, Any])
         path = ".".join(str(part) if isinstance(part, int) or part in fields else "<key>"
                         for part in issue["loc"])
         code = issue["type"]
-        if code.startswith(("mode_", "source_citation_")):
+        if code.startswith(("mode_", "source_citation_")) or code in {"entry_route_media_request", "media_operation_input"}:
             message = issue["msg"]
         elif code in {"union_tag_invalid", "union_tag_not_found"}:
             message = "Select an action or tool declared in the schema."

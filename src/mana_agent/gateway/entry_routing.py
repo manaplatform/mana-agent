@@ -8,7 +8,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Annotated, Any, Callable, Literal, Mapping, Sequence, get_args
 
 from mana_agent.llm.messages import UserMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, StringConstraints, ValidationError, ValidationInfo, field_validator, model_validator,
+)
+from pydantic_core import PydanticCustomError
 from mana_agent.agent.mode import CodingWorkflowDecision
 from mana_agent.context_cost.accounting import ModelContextLimitError
 from mana_agent.context_cost.models import ContextBudgetExceeded
@@ -275,7 +278,10 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     mcp_request: EntryRoutingMcpRequest | None = None
     memory_task_id: str = ""
     artifact_family: Literal["", "spreadsheet", "document", "presentation", "pdf", "image"] = ""
-    media_request: MediaOperationDecision | None = None
+    media_request: MediaOperationDecision | None = Field(
+        default=None, validate_default=True,
+        description="Required for route=media. Use null for every other route.",
+    )
     automation_operation: Literal[
         "", "create", "get", "list", "status", "update", "delete", "enable", "disable", "run_now",
     ] = ""
@@ -296,6 +302,16 @@ class EntryRoutingOutput(_StrictRoutingOutput):
     response_kind: Literal["task", "status", "clarification"] = "task"
     public_summary: str = Field(default="", max_length=240)
     context_request: EntryContextRequest | None = None
+
+    @field_validator("media_request", mode="before")
+    @classmethod
+    def validate_media_route(cls, value: Any, info: ValidationInfo) -> Any:
+        route = info.data.get("route")
+        if route == "media" and value is None:
+            raise PydanticCustomError("entry_route_media_request", "Provide a complete media_request for route=media.")
+        if route is not None and route != "media" and value is not None:
+            raise PydanticCustomError("entry_route_media_request", "Use null for media_request when route is not media.")
+        return value
 
     @model_validator(mode="after")
     def require_coding_capability_flag(self) -> EntryRoutingOutput:
@@ -454,8 +470,8 @@ Route semantics:
   repository edit. Return artifact_family for creation requests even when no existing filename or
   attachment supplies artifact evidence. Do not invent a filename.
 - media: generate an image, spoken voice/audio, or video; inspect a media generation job; or cancel
-  one. Return a complete typed media_request. Never route media generation to artifact, coding, or
-  conversation. The configured media provider/model is authoritative; never select a fallback.
+  one. Select media for generation. Set media_request for media and use null for every other route.
+  The configured media provider/model is authoritative; never select a fallback.
 - gmail: inspect or act on the user's Gmail/email account immediately in the current turn through
   registered email tools. Do not select gmail when the requested mailbox action is deferred,
   scheduled for a specified time, or recurring.
@@ -1507,7 +1523,9 @@ def _invoke_routing_model(llm: Any, messages: list[Any]) -> tuple[Any, dict[str,
             messages, EntryRoutingOutput, complex_schema=True, repair_decision=True,
             correction_hint=(
                 "For a coding route, explicitly set runtime_capability_change at the top level beside "
-                "coding_workflow. Use true for changes to production capabilities and false otherwise."
+                "coding_workflow. Use true for changes to production capabilities and false otherwise. "
+                "Set media_request to null unless route=media. Image and video generation require prompt, "
+                "voice generation requires text, and generation status or cancellation requires generation_id."
             ),
         )
         return response, response.model_dump()

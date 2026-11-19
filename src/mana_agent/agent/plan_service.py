@@ -78,6 +78,15 @@ _DRAFT_GUIDANCE = (
     "optional reproduction check, preserve the uncertainty, and include a verification that expects to pass."
 )
 
+_DEBUG_FINDING_GUIDANCE = (
+    "For diagnose or repair, copy exact observation IDs from evidence_levels into cause_evidence. "
+    "Use the top-level id of a saved observation. Evidence Board references, paths, and message IDs are separate fields. "
+    "For a diagnosis based only on the user's report, leave cause_evidence empty and state what remains unconfirmed. "
+    "When repair_authorized is true, choose repair if saved observations support a scoped fix and a passing "
+    "regression check. This still applies when inspection_stop ends repository reads. If a material fact is "
+    "missing, clarify if the user can supply it or block with the concrete gap."
+)
+
 
 def _inspection_correction_hint(
     error: ValueError, lookup_observation: Callable[[str], dict[str, Any] | None] | None,
@@ -400,7 +409,9 @@ class DraftDecision(_ModeAction):
 class DiagnoseDecision(_ModeAction):
     action: Literal["diagnose"]
     root_cause: str = ""
-    cause_evidence: tuple[str, ...] = ()
+    cause_evidence: tuple[str, ...] = Field(
+        default=(), description="Exact observation IDs from evidence_levels that support the diagnosis.",
+    )
     uncertainty: str = ""
 
     @model_validator(mode="after")
@@ -414,7 +425,9 @@ class RepairDecision(_ModeAction):
     action: Literal["repair"]
     draft: PlanDraft
     root_cause: str = Field(pattern=r"\S")
-    cause_evidence: tuple[str, ...] = Field(min_length=1)
+    cause_evidence: tuple[str, ...] = Field(
+        min_length=1, description="Exact observation IDs from evidence_levels that support the repair.",
+    )
     uncertainty: str = ""
 
 
@@ -475,6 +488,7 @@ class ModeDecision(ModeContract):
     @model_validator(mode="after")
     def validate_handoff(self, info: ValidationInfo):
         context = info.context or {}
+        scope = context.get("investigation_scope")
         if self.decision.action == "inspect" and context.get("inspection_action") not in {
             None, self.decision.action,
         }:
@@ -483,7 +497,6 @@ class ModeDecision(ModeContract):
         if isinstance(self.decision, InspectDecision):
             if context.get("inspection_available") is False:
                 raise PydanticCustomError("mode_inspection_unavailable", "Use the saved observations for the next decision.")
-            scope = context.get("investigation_scope")
             if scope is not None:
                 scope.validate_requests(self.decision.requests, reuse_saved_reads=True)
         if self.decision.action == "investigate" and context.get("investigation_available") is False:
@@ -495,6 +508,16 @@ class ModeDecision(ModeContract):
             question.field_id in context.get("answered_field_ids", ()) for question in self.decision.questions
         ):
             raise PydanticCustomError("mode_question_answered", "The model asked for an already resolved decision.")
+        if isinstance(self.decision, (DiagnoseDecision, RepairDecision)) and scope is not None:
+            if not set(self.decision.cause_evidence).issubset(scope.evidence_levels):
+                raise PydanticCustomError(
+                    "mode_cause_evidence", "cause_evidence must contain only exact observation IDs from evidence_levels.",
+                )
+        if isinstance(self.decision, DiagnoseDecision) and context.get("repair_required"):
+            raise PydanticCustomError(
+                "mode_diagnosis_only", "The user requested a repair. Select repair with supporting observations "
+                "or identify the gap that prevents a safe fix.",
+            )
         return self
 
     @classmethod
@@ -553,10 +576,13 @@ class PlanService:
                       investigation_available: bool = True, inspection_available: bool = False,
                       scope: InvestigationScope | None = None,
                       lookup_observation: Callable[[str], dict[str, Any] | None] | None = None) -> ModeAction:
+        finding_guidance = _DEBUG_FINDING_GUIDANCE if mode == "debug" or state.get("verification_failure") else ""
+
         def correction_hint(error: ValueError) -> str:
+            guidance = "\n".join(filter(None, (_DRAFT_GUIDANCE, finding_guidance)))
             if inspection_available:
-                return f"{_DRAFT_GUIDANCE}\n{_inspection_correction_hint(error, lookup_observation)}"
-            return _DRAFT_GUIDANCE
+                return f"{guidance}\n{_inspection_correction_hint(error, lookup_observation)}"
+            return guidance
 
         envelope = self.decide(
             ModeDecision,
@@ -630,6 +656,7 @@ class PlanService:
             "Keep diagnostics-only requests read-only and use diagnose to report the finding. Repair requires an "
             "evidence-backed hypothesis, the smallest fix, and goal-specific verification. If the intended "
             "failure diagnostic is known, include a verification-only reproduction step before repair. "
+            f"{finding_guidance} "
             "Include a passing regression check after repair. Report remaining uncertainty. For an unfamiliar "
             "external dependency, research may submit a debugging report citing existing local "
             "observations and identifying the specific gap that authoritative sources may resolve. "
@@ -640,6 +667,7 @@ class PlanService:
             validation_context={"investigation_available": investigation_available,
                                 "inspection_available": inspection_available,
                                 "investigation_scope": scope,
+                                "repair_required": bool(state.get("coding_workflow") and state.get("repair_authorized")),
                                 "inspection_action": "investigate" if mode == "plan" else "inspect",
                                 "answered_field_ids": tuple(state.get("constraints", {}))},
         )

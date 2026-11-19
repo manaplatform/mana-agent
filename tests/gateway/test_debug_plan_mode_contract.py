@@ -1786,6 +1786,96 @@ def test_debug_repair_uses_causal_evidence_and_runs_the_focused_check(mode_gatew
     assert checks == [("python", "app.py")]
 
 
+@pytest.mark.parametrize("case", ["unknown_diagnosis", "unknown_repair", "diagnosis_only", "repeated_unknown"])
+def test_debug_corrects_evidence_after_inspection_stops(mode_gateway, monkeypatch, case):
+    from mana_agent.approval.policy import set_approval_mode
+    from mana_agent.llm.capabilities import ModelProfile, observation
+    from mana_agent.llm.engine import NativeLLMEngine
+    from mana_agent.llm.messages import ToolCall
+
+    set_approval_mode("full_access")
+    gateway, workflow = mode_gateway
+    gateway._autonomous_controller.config = AutonomousExecutionConfig(max_no_progress_cycles=2)
+    repair = draft()
+    repair.update(action="repair", root_cause="The handler emits the old value.", cause_evidence=["evidence-1"])
+    repair["draft"]["steps"][0]["changes"] = [{"path": "app.py", "operations": ["update"]}]
+    bad_citation = "unrecognized-private-reference"
+    if case in {"unknown_diagnosis", "diagnosis_only"}:
+        rejected = {
+            "action": "diagnose", "reason": "The read shows the old value.", "root_cause": repair["root_cause"],
+            "cause_evidence": ["evidence-1" if case == "diagnosis_only" else bad_citation],
+        }
+    else:
+        rejected = {**repair, "cause_evidence": [bad_citation]}
+    read = inspection("app.py")
+    corrected = rejected if case == "repeated_unknown" else repair
+    actions = iter([read, read, read, rejected, corrected])
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            if not request.tools:
+                return ModelResponse(content=json.dumps({"disposition": "in_scope", "reason": "Only app.py changed"}))
+            return ModelResponse(tool_calls=[ToolCall(
+                id=f"decision-{len(requests)}", name="record_decision", args={"decision": next(actions)},
+            )])
+
+    profile = ModelProfile(provider="openrouter", model_id="anthropic/claude-haiku-5.5", facts={
+        name: observation(value, source="provider", confidence=1) for name, value in {
+            "tool_calling": True, "input_text": True, "output_text": True, "native_structured_output": True,
+            "context_window": 65536, "max_output_tokens": 1024,
+        }.items()
+    })
+    model = NativeLLMEngine(provider=profile.provider, model=profile.model_id, api_key="fixture",
+                            base_url="https://example.invalid", endpoint="anthropic_messages", adapter=Adapter())
+    monkeypatch.setattr(model, "profile", lambda *_a, **_kw: profile)
+    gateway._entry_router.llm = model
+    proposals, checks = [], []
+
+    def propose(*args, **kwargs):
+        proposals.append(kwargs["execution_mode"])
+        patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    async def verify(root, command, **kwargs):
+        checks.append(command.argv)
+        return {"passed": (root / "app.py").read_text() == "after\n", "exit_code": 0, "output": "after"}
+
+    gateway._coding_agent = SimpleNamespace(generate=propose)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", verify)
+    result = workflow.start("session", "Fix the handler at app.py:1", mode="debug", repair=True,
+                            workflow=workflow_choice(mode="debug"), source_message_ids=("user-1",))
+
+    mode_requests = [request for request in requests if request.tools]
+    assert len(mode_requests) == 5
+    assert mode_requests[3].tools == mode_requests[4].tools
+    stopped = json.loads(mode_requests[3].messages[1].content)
+    assert stopped["inspection_stop"] == "Repository reads stopped yielding new evidence."
+    assert stopped["inspection_available"] is False
+    assert stopped["evidence_levels"] == {"evidence-1": 1}
+    correction = mode_requests[4].messages[-1].content
+    expected_error = (
+        "The user requested a repair." if case == "diagnosis_only"
+        else "cause_evidence must contain only exact observation IDs"
+    )
+    assert expected_error in correction
+    assert bad_citation not in correction
+    report = result.data["repository_observations"]
+    assert report["evidence_ids"] == ["evidence-1"]
+    if case == "repeated_unknown":
+        assert result.data["phase"] == "blocked", result.message
+        assert report["workflow_tool_operations"] == 1
+        assert expected_error in result.message
+        assert bad_citation not in result.message
+        assert not proposals and not checks
+    else:
+        assert result.status == "success", result.message
+        assert result.data["changed_files"] == ["app.py"]
+        assert proposals == ["read_only"]
+        assert checks == [("python", "app.py")]
+
+
 def test_missing_verification_image_reports_applied_changes_and_can_resume(mode_gateway, monkeypatch):
     import mana_agent.gateway.mode_workflow as mode_module
     from mana_agent.approval.policy import set_approval_mode

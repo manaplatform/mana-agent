@@ -2,6 +2,11 @@
 
 All notable repository changes should be recorded here.
 
+## Unreleased — 2026-11-20
+
+- DEBUG decisions now validate causal evidence in the same-format correction path. When inspection stops, a routed repair can proceed from supported saved observations. See the [DEBUG citation regression and verification command](docs/regressions/debug-plan-execution-contract.md#debug-citations-after-repository-reads-stop).
+- Entry decisions require null media arguments on non-media routes and report the exact required input for a selected media operation. See the [media routing regression and verification command](docs/regressions/debug-plan-execution-contract.md#media-request-on-a-non-media-route).
+
 ## Unreleased — 2026-11-19
 
 - Entry routing. Place `runtime_capability_change` beside `coding_workflow` in the prompt, schema, and correction guidance. Require coding decisions to supply the flag explicitly. User verification is `venv/bin/python -m pytest -q tests/llm/test_engine.py -k nested_runtime_capability_change`. See the [coding route capability flag regression](docs/regressions/debug-plan-execution-contract.md#coding-route-capability-flag-regression).

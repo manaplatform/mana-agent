@@ -210,6 +210,31 @@ the full route availability estimate.
 venv/bin/python -m pytest -q tests/gateway/test_context_budget_retention.py tests/gateway/test_astra_entry_route_budget.py tests/gateway/test_entry_routing.py tests/llm/test_engine.py
 ```
 
+## Media request on a non-media route
+
+On 2026-11-20, a repository edit request failed at entry routing with
+`media_request: value error` after two provider responses. The decision
+payloads were unavailable. The typed media validator can produce that error
+when an operation omits its required input. The router previously decoded
+the nested object before checking whether the selected route used media,
+and the correction gave no field-specific guidance.
+
+The provider schema and prompt direct non-media routes to send `null`.
+Typed routing checks the route before decoding a media request. On the media
+route, the decision names the exact operation and its required nonblank
+input. The existing same-format correction gets a precise reason without
+including rejected arguments. Valid saved media decisions retain their shape.
+
+**Do not reintroduce** accepting a media request on another route or hiding
+an operation's required input behind a generic validation error.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_engine.py -k invalid_media_request
+```
+
+The fixtures cover correction and repeated rejection for native structured
+output and decision tools. The agent did not run them or replay the live turn.
+
 ## Mode decision tool argument regression
 
 On 2026-11-19 at 22:30 Tehran time, workflow `task_20261119_000017`
@@ -358,6 +383,42 @@ AUTO and DEBUG now resolve a model-selected exact match to the original successf
 **Do not reintroduce** treating an exact successful match to saved inspection evidence as a fatal AUTO or DEBUG error. Do not execute the matched read again, create a second observation for it, or count reuse as new evidence.
 
 Run `venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'reuses_saved_layout or repeated_repository_results or duplicate_inspection or over_budget_read_batch'`. The fixtures cover a saved listing plus a new read under a one-call remaining budget, reuse-only loops, and rejection and correction of invalid duplicates. The agent did not run the fixtures or resume the live task.
+
+## DEBUG citations after repository reads stop
+
+At 00:03 Tehran time on 2026-11-20, DEBUG task `task_20261119_000020`
+blocked after its no-progress limit. The task recorded 56 workflow decisions
+and 108 executed repository reads. The final decision returned `diagnose`
+and cited unknown evidence. The gateway blocked before recording a repair
+plan, applying a patch, or verifying a change. The TUI later cancelled the
+task. The logs retain the failure and observations. The rejected citation
+itself is unavailable.
+
+The decision context included observation IDs and Evidence Board references.
+The prompt did not say which to use for `cause_evidence`. The membership
+check ran in the gateway after the model's one correction opportunity.
+Routed write requests also reached the gateway with a diagnosis-only action
+that could not satisfy the requested repair.
+
+The typed mode decision now validates citations against the task's observed
+IDs before handoff and tells the model to use those IDs on correction. A
+diagnosis-only action on a routed repair request also gets a correction.
+When inspection stops, the model can select a supported repair or report a
+concrete blocker. The patch still requires current supporting observations,
+write authority, a scoped plan, and a passing regression check. Existing task
+records need no migration.
+
+**Do not reintroduce** checking causal evidence only after the correction
+boundary, treating Evidence Board references as workflow observation IDs,
+or completing a routed repair request with diagnosis alone.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'corrects_evidence_after_inspection_stops or repeated_repository_results or debug_repair_uses_causal_evidence or diagnosis_from_reported_evidence'
+```
+
+The fixtures cover a corrected repair that invokes the coding backend and
+verification, and a repeated invalid citation that blocks before either.
+The agent did not run the tests or resume the live task.
 
 ## Text search query contract
 

@@ -166,6 +166,68 @@ def test_entry_route_corrects_nested_runtime_capability_change(native_profile, m
     assert "runtime_capability_change at the top level beside coding_workflow" in correction
 
 
+@pytest.mark.parametrize("route", ["conversation", "media"])
+@pytest.mark.parametrize("strategy", ["native", "tool"])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_entry_route_corrects_invalid_media_request(native_profile, monkeypatch, route, strategy, corrected):
+    import json
+
+    from mana_agent.gateway.entry_routing import (
+        EntryRouteContext,
+        EntryRouteRegistry,
+        EntryRouter,
+        EntryRoutingError,
+        RouteAvailability,
+        RouteRegistration,
+    )
+    from mana_agent.llm.messages import ToolCall
+
+    if strategy == "tool":
+        native_profile.facts.pop("native_structured_output")
+    requests = []
+
+    class Adapter:
+        async def generate(self, request):
+            requests.append(request)
+            media_request = {"operation": "voice.generate", "prompt": "private-rejected-argument"}
+            if corrected and len(requests) == 2:
+                media_request = {"operation": "voice.generate", "text": "Hello"} if route == "media" else None
+            decision = {
+                "route": route, "confidence": 0.9, "reason": "The user requested this action.",
+                "required_sources": ["media" if route == "media" else "none"], "media_request": media_request,
+            }
+            if request.tools:
+                return ModelResponse(tool_calls=[ToolCall(id="routing-decision", name="record_decision", args=decision)])
+            return ModelResponse(content=json.dumps(decision))
+
+    registry = EntryRouteRegistry()
+    registry.register(RouteRegistration(route, "Requested route", lambda: RouteAvailability(available=True)))
+    router = EntryRouter(llm=engine(native_profile, monkeypatch, Adapter()), registry=registry)
+    context = EntryRouteContext(session_id="s", conversation_id="s", turn_id="t")
+    prompt = "Read 'Hello' aloud" if route == "media" else "Say hello in chat"
+    error = "Provide nonblank text for voice.generate" if route == "media" else "Use null for media_request"
+
+    if corrected:
+        decision = router.route(user_prompt=prompt, context=context)
+        assert decision.route == route
+        if route == "media":
+            assert decision.media_request["text"] == "Hello"
+        else:
+            assert decision.media_request == {}
+    else:
+        with pytest.raises(EntryRoutingError) as exc:
+            router.route(user_prompt=prompt, context=context)
+        assert error in str(exc.value)
+        assert "private-rejected-argument" not in str(exc.value)
+
+    assert len(requests) == 2
+    assert requests[0].tools == requests[1].tools
+    assert requests[0].response_schema == requests[1].response_schema
+    correction = requests[1].messages[-1].content
+    assert error in correction
+    assert "private-rejected-argument" not in correction
+
+
 @pytest.mark.parametrize("strategy", ["native", "tool", "text"])
 @pytest.mark.parametrize("corrected", [True, False])
 def test_entry_route_reason_correction_stays_on_selected_strategy(
