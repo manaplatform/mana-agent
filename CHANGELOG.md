@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- Reject Git checkout checks in source-only verification and allow an automatic repair to reconsider an unavailable pre-patch check once while preserving required post-patch checks. Accept nested request arrays in strict scoped investigation decisions. See the [pre-patch verification incident and user verification command](docs/regressions/debug-plan-execution-contract.md#isolated-verification-before-the-first-patch).
 - Validate every inspection batch entry and execute identical reads once on the current Coding task. Reuse saved observations once per batch and charge only distinct uncached reads. See the [duplicate batch incident and user verification command](docs/regressions/debug-plan-execution-contract.md#repeated-reads-in-a-coding-decision).
 - Coding executes focused repository investigations on its existing task and returns oversized batches to Coding with the remaining allowance. The evidence tools reuse current source-backed reads and expose ranked evidence to Internal and Codex. New runtime changes include wiring in ordinary Coding steps and reuse isolated verification receipts for the completion gate. See the [budget incident and user verification commands](docs/regressions/repository-evidence-orchestration.md#scoped-coding-investigation-budget).
 

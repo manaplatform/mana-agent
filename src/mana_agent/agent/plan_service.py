@@ -10,7 +10,7 @@ from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Callable, Literal, get_args
 
-from pydantic import AfterValidator, Field, GetJsonSchemaHandler, ValidationError, ValidationInfo, model_validator
+from pydantic import AfterValidator, Field, GetJsonSchemaHandler, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, PydanticCustomError
 
@@ -452,25 +452,19 @@ class InvestigateDecision(_ModeAction):
     action: Literal["investigate"]
     objective: str = Field(pattern=r"\S", max_length=2000)
     scope: str = Field(pattern=r"\S", max_length=2000)
-    paths: tuple[str, ...] = Field(default=(), max_length=16, description="Bounded literal repository paths.")
+    paths: tuple[str, ...] = Field(default_factory=lambda data: (data.get("scope") or ".",), max_length=16,
+                                   description="Bounded literal repository paths.")
     task_kind: Literal["investigation", "understanding"] = "investigation"
     recovery: RecoveryDecision | None = None
     initial_repository_scope: Literal["", "explicit_audit", "architecture_wide"] = ""
     requests: tuple[FileReadEvidence | RepositorySearchEvidence, ...] = Field(default=(), max_length=MAX_INSPECTION_BATCH)
 
-    @model_validator(mode="before")
+    @field_validator("paths", mode="before")
     @classmethod
-    def _populate_paths(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        paths = data.get("paths")
+    def _populate_paths(cls, paths: Any, info: ValidationInfo) -> Any:
         if not paths:
-            scope = data.get("scope") or "."
-            paths = (scope,)
-        elif isinstance(paths, list):
-            # The model validator sees Python input even for a JSON response.
-            paths = tuple(paths)
-        return {**data, "paths": paths}
+            return (info.data.get("scope") or ".",)
+        return tuple(paths) if isinstance(paths, list) else paths
 
     @model_validator(mode="after")
     def validate_scoped_requests(self):
@@ -739,6 +733,7 @@ class ModeDecisionContext:
     required_verification: tuple[dict, ...] = ()
     saved_investigation: SavedInvestigation | None = None
     runtime_wiring_required: bool = False
+    defer_pre_patch_verification: bool = False
 
     def validate(self, decision: ModeAction) -> None:
         if isinstance(decision, RepairDecision) and not self.repair_authorized:
@@ -765,13 +760,20 @@ class ModeDecisionContext:
                                   "evidence and within the original task authority.")
         if isinstance(decision, RepairDecision) and not any(step.changes for step in decision.draft.steps):
             raise _mode_error(decision, "mode_repair_scope", "Repair requires a scoped file change and a passing regression check.")
+        if isinstance(decision, (DraftDecision, RepairDecision)) and self.defer_pre_patch_verification:
+            for step in decision.draft.steps:
+                if step.changes:
+                    break
+                if step.verification:
+                    raise _mode_error(decision, "mode_verify_after_patch",
+                                      "Put the required isolated checks after the changes. If the user required a pre-patch check, report the blocker.")
         if isinstance(decision, (DraftDecision, RepairDecision)) and self.repair_limits is not None:
             if any(operation not in self.repair_limits.get(path, ()) for step in decision.draft.steps
                    for path, operations in step.changes.items() for operation in operations):
                 raise _mode_error(decision, "mode_repair_scope", "The verification repair extends beyond the accepted file scope.")
             steps = decision.draft.steps
-            if not any(check.model_dump(mode="json") == self.required_recheck
-                       for step in steps for check in step.verification):
+            if self.required_recheck is not None and not any(check.model_dump(mode="json") == self.required_recheck
+                    for step in steps for check in step.verification):
                 raise _mode_error(decision, "mode_required_recheck", "The revised plan must rerun the failed verification command.")
             last_change = max((index for index, step in enumerate(steps) if step.changes), default=0)
             if not set(map(canonical_digest, self.required_verification)).issubset(
@@ -807,6 +809,11 @@ class ModeDecision(ModeContract):
     @model_validator(mode="after")
     def validate_handoff(self, info: ValidationInfo):
         context = info.context or {}
+        if isinstance(self.decision, (DraftDecision, RepairDecision)) and any(
+            check.uses_git_checkout for step in self.decision.draft.steps for check in step.verification
+        ):
+            raise _mode_error(self.decision, "mode_verification_checkout_git",
+                              "Isolated verification receives a source snapshot without .git. Replace checkout or branch checks with project checks. Mana-Agent manages the checkout and validates patch scope.")
         scope = context.get("investigation_scope")
         if scope is not None:
             validate_observation_references(self.decision, scope)
@@ -963,6 +970,12 @@ class PlanService:
             "Protected paths include .git, .mana, .ssh, .env files, and credential files. If a needed path is "
             "protected or outside the repository, use accessible evidence or report the gap in the next decision. "
             "Draft or repair as soon as you can name the files, intended change, and focused check. "
+            "Use verification for isolated project commands. The source snapshot has no .git or checkout metadata. "
+            "Branch setup requires the runtime's authorized Git or worktree operations. If required branch preparation "
+            "is unavailable, report that blocker and do not represent it as a project check. "
+            "When verification_unavailable is present, use saved causal evidence for a scoped repair if it supports one. "
+            "Move required passing checks after the patch. Omit an optional unavailable reproduction and describe the uncertainty. "
+            "If a pre-patch check is a user requirement or necessary for a safe repair, report the blocker. "
             "When runtime_capability_change is true, put any wiring edits in the ordinary draft or repair steps. "
             "Return runtime_wiring with the connected production reachability edges and their repository source paths. "
             "Include verification covering the production entrypoint in the draft. "
@@ -1009,8 +1022,8 @@ class PlanService:
             "It preserves the user mode and permissions. Include the current task_id and observed evidence_ids. "
             "Debug mode may investigate, clarify, diagnose, repair, research or block. "
             "Keep diagnostics-only requests read-only and use diagnose to report the finding. Repair requires an "
-            "evidence-backed hypothesis, the smallest fix, and goal-specific verification. If the intended "
-            "failure diagnostic is known, include a verification-only reproduction step before repair. "
+            "evidence-backed hypothesis, the smallest fix, and goal-specific verification. A pre-patch "
+            "reproduction is useful only when it establishes a necessary diagnostic and the verifier can run it. "
             f"{finding_guidance} "
             "Include a passing regression check after repair. Report remaining uncertainty. For an unfamiliar "
             "external dependency, research may submit a debugging report citing existing local "

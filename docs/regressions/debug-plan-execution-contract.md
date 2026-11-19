@@ -637,6 +637,43 @@ venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py test
 
 The agent reviewed the diff. The fixtures and live incident replay remain unverified.
 
+## Isolated verification before the first patch
+
+On 2026-11-20, DEBUG task `task_20261120_000012` completed 40 read-only
+operations and recorded a repair plan at 02:18:31 Tehran time. Its first
+step described branch preparation and selected `git rev-parse --abbrev-ref HEAD`
+as verification with no typed file changes. The daemon was available and
+`python:3.12` was absent. The verifier stopped before the first patch, and
+the saved task was later cancelled. No verification ran. The journal also
+recorded two earlier `tuple_type` rejections for `investigate.requests`.
+
+The source-only verifier deliberately excludes `.git`. Even with the image
+present, the branch check cannot establish the requested checkout state in
+that snapshot. Plan admission accepted the incompatible command, and any
+unavailable verification blocked the whole plan before the next step. The
+investigate model-wide pre-validator also coerced path input through a Python
+mapping, causing strict JSON parsing to reject nested request arrays.
+
+New plan decisions reject raw Git checkout commands in the isolated verifier.
+Legacy revisions remain readable and report the incompatible command before
+Docker lookup. Automatic repairs can make one bounded, model-selected
+revision if a check cannot run before the first patch. The revision uses
+current evidence, preserves the original write scope and required passing
+project checks, and runs those checks after edits. An explicitly approved
+PLAN retains its exact order. After a patch, verification unavailability
+leaves the applied file receipts and a pending result. Scoped investigation
+normalizes only the path field and keeps nested requests in strict JSON mode.
+
+**Do not reintroduce** Git checkout verification inside a source-only
+snapshot, treating a missing verifier as an executed failure, or reporting
+a patch as verified before the required project checks pass.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'scoped_investigation_accepts_nested or checkout_git_verification or unavailable_pre_patch_verification or missing_verification_image or resuming_failed_verification'
+```
+
+Test execution and replay of the live incident remain pending.
+
 ## Text search query contract
 
 On 2026-11-17, DEBUG task `task_20261117_000009` using OpenRouter DeepSeek saved 96 observations before decision validation rejected the second request in a proposed batch. The corrected `repo_search` request lacked a nonblank query. The journal retained the validation failure and the saved observations. It did not retain the rejected argument.

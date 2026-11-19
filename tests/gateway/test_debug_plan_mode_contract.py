@@ -2234,6 +2234,118 @@ def test_debug_corrects_evidence_after_inspection_stops(mode_gateway, monkeypatc
         assert checks == [("python", "app.py")]
 
 
+def test_scoped_investigation_accepts_nested_request_arrays_in_strict_json():
+    from mana_agent.agent.plan_service import InvestigationScope, ModeDecision
+
+    decision = investigation("Explain handler behavior",
+        evidence_call("source", paths=["src/app.py"]),
+        evidence_call("callers", "repo_search", paths=["src"], query="handler"), paths=["src"])
+    result = ModeDecision.model_validate_json(json.dumps({"decision": decision}), strict=True,
+        context={"investigation_scope": InvestigationScope({})})
+
+    assert result.decision.paths == ("src",)
+    assert [item.paths for item in result.decision.requests] == [("src/app.py",), ("src",)]
+
+
+def test_checkout_git_verification_is_invalid_before_docker(mode_gateway, monkeypatch):
+    import asyncio
+
+    import mana_agent.gateway.mode_workflow as mode_module
+    from mana_agent.agent.mode import VerificationCommand
+
+    gateway, workflow = mode_gateway
+    decision = draft()
+    decision["draft"]["steps"].insert(0, {"step_id": "branch", "instruction": "Check the current branch",
+        "verification": [{"argv": ["git", "rev-parse", "--abbrev-ref", "HEAD"]}],
+        "acceptance_criteria": ["The expected branch is active"]})
+    real_which = mode_module.shutil.which
+    monkeypatch.setattr(mode_module.shutil, "which",
+        lambda name, *a, **kw: pytest.fail("Checkout checks must fail before Docker lookup") if name == "docker"
+        else real_which(name, *a, **kw))
+
+    result = workflow.start("session", "Fix the handler", mode="auto", repair=True,
+                            workflow=workflow_choice(), llm=Decisions(decision))
+    assert result.data["phase"] == "blocked"
+    assert "source snapshot without .git" in result.message
+    assert result.data["changed_files"] == []
+    # A saved revision can still be decoded. Its stale checkout command gets
+    # the targeted runtime error instead of a missing-image diagnosis.
+    with pytest.raises(mode_module.VerificationUnavailable, match=r"no \.git metadata"):
+        asyncio.run(mode_module.run_isolated_verification(gateway.root,
+            VerificationCommand(argv=("git", "rev-parse", "--abbrev-ref", "HEAD")), task_id="legacy"))
+
+
+@pytest.mark.parametrize("revised_outcome", [
+    "patch_pending", "complete", "lost_required_check", "requires_pre_patch", "repeats_pre_patch",
+])
+def test_unavailable_pre_patch_verification_allows_model_directed_repair(mode_gateway, monkeypatch, revised_outcome):
+    import mana_agent.gateway.mode_workflow as mode_module
+    from mana_agent.approval.policy import set_approval_mode
+
+    set_approval_mode("full_access")
+    gateway, workflow = mode_gateway
+    precheck = {"step_id": "baseline", "instruction": "Confirm the diagnostic",
+        "verification": [{"argv": ["python", "baseline.py"], "expected": "fail", "output_marker": "old value"}],
+        "acceptance_criteria": ["The baseline diagnostic is reproduced"]}
+    first_plan = draft()
+    first_plan.update(action="repair", root_cause="The handler emits the old value", cause_evidence=["evidence-1"])
+    first_plan["draft"]["steps"].insert(0, precheck)
+    first_plan["draft"]["steps"][1]["depends_on"] = ["baseline"]
+    revised = draft()
+    revised.update(action="repair", root_cause=first_plan["root_cause"], cause_evidence=["evidence-1"],
+                   uncertainty="The baseline command could not run")
+    if revised_outcome == "lost_required_check":
+        revised["draft"]["steps"][-1]["verification"] = [{"argv": ["python", "unrelated.py"]}]
+    if revised_outcome == "requires_pre_patch":
+        revised = {"action": "block", "reason": "The requested baseline must run before editing."}
+    if revised_outcome == "repeats_pre_patch":
+        revised = first_plan
+    model = Decisions(inspection("app.py"), first_plan, revised,
+                      {"disposition": "in_scope", "reason": "Only the handler changes"})
+    gateway._entry_router.llm = model
+    operations = []
+    patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+
+    def propose(*args, **kwargs):
+        operations.append("patch")
+        return {"status": "completed", "output": json.dumps({"patch": patch})}
+
+    async def verify(root, command, **kwargs):
+        operations.append(command.argv[-1])
+        if command.argv[-1] == "baseline.py":
+            assert (root / "app.py").read_text() == "before\n"
+        else:
+            assert (root / "app.py").read_text() == "after\n"
+        if command.argv[-1] == "baseline.py" or revised_outcome == "patch_pending":
+            raise mode_module.VerificationUnavailable("Docker image missing")
+        return {"passed": True, "exit_code": 0, "output": "checked"}
+
+    gateway._coding_agent = SimpleNamespace(generate=propose)
+    monkeypatch.setattr(mode_module, "run_isolated_verification", verify)
+    result = workflow.start("session", "Fix the handler", mode="debug", repair=True,
+                            workflow=workflow_choice(mode="debug"))
+
+    review = model.inputs[2]
+    assert review["verification_unavailable"]["command"]["argv"] == ["python", "baseline.py"]
+    assert review["verification_failure"] is None
+    assert review["allowed_actions"] == ["block", "clarify", "repair"]
+    assert [item["id"] for item in review["evidence"]] == ["evidence-1"]
+    if revised_outcome in {"lost_required_check", "requires_pre_patch", "repeats_pre_patch"}:
+        assert result.data["phase"] == "blocked"
+        assert operations == ["baseline.py"]
+        assert result.data["changed_files"] == []
+        expected = {"lost_required_check": "required regression checks", "requires_pre_patch": "before editing",
+                    "repeats_pre_patch": "Put the required isolated checks after the changes"}
+        assert expected[revised_outcome] in result.message
+    else:
+        assert operations == ["baseline.py", "patch", "app.py"]
+        assert result.data["changed_files"] == ["app.py"]
+        assert result.data["goal_satisfied"] is (revised_outcome == "complete")
+        if revised_outcome == "patch_pending":
+            assert "**Verification pending.**" in result.message
+            assert result.data["verification"] == []
+
+
 def test_missing_verification_image_reports_applied_changes_and_can_resume(mode_gateway, monkeypatch):
     import mana_agent.gateway.mode_workflow as mode_module
     from mana_agent.approval.policy import set_approval_mode

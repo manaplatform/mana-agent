@@ -75,6 +75,10 @@ class ModeEvidenceWaiting(RuntimeError):
 class VerificationUnavailable(RuntimeError):
     """A verification prerequisite prevented the approved command from running."""
 
+    def __init__(self, message: str, *, command: VerificationCommand | None = None):
+        super().__init__(message)
+        self.command = command
+
 
 class VerificationFailed(RuntimeError):
     def __init__(self, command: VerificationCommand, outcome: dict):
@@ -534,6 +538,8 @@ class ModeWorkflow:
             and discovery.get("no_progress", 0) >= self.gateway._autonomous_controller.config.max_no_progress_cycles
         )
         pending = state.get("pending_repository_evidence")
+        unavailable_check = state.get("verification_unavailable")
+        defer_pre_patch_verification = bool(unavailable_check and not state.get("plan") and not pending)
         # Leave room for a draft, its first patch proposal and review, and an isolated check.
         # This is a minimum for one edit, while the selected plan still owns actual accounting.
         preparing_patch = not planning and state["repair"] and not state["no_code"] and not pending
@@ -544,9 +550,13 @@ class ModeWorkflow:
         can_inspect = inspection_tools > 0 and remaining_decisions > 0 and not stop and not patch_budget_stop
         can_investigate = (inspection_tools > 0 and remaining_decisions > model_reserve
                            and not stop and not discovery_stop)
+        if defer_pre_patch_verification:
+            can_inspect = can_investigate = False
         report = handoff.get("report") or {}
         cites = set(report.get("evidence_ids", []))
         visible_evidence = cites | set(reused_evidence_ids) | {row["id"] for row in evidence[-8:]}
+        if defer_pre_patch_verification:
+            visible_evidence.update(state.get("repair_cause_evidence", []))
         if not planning:
             # The shallow layout is useful after it ages out of the recent reads.
             layout = next((row for row in reversed(evidence)
@@ -598,6 +608,8 @@ class ModeWorkflow:
                 allowed.add("research")
         if state.get("coding_decision") and not pending:
             allowed.add("switch_workflow")
+        if defer_pre_patch_verification:
+            allowed.intersection_update({"draft", "repair", "clarify", "block"})
 
         refs = [row["board_ref"] for row in evidence if row.get("board_ref") and row["id"] in scope.evidence_levels]
         refs.extend({"evidence_id": record["evidence_id"], "revision": record["revision"]}
@@ -614,9 +626,12 @@ class ModeWorkflow:
             repair_limits=state.get("repair_limits"), required_recheck=state.get("required_recheck"),
             required_verification=tuple(state.get("required_verification", [])), saved_investigation=recovery_target,
             runtime_wiring_required=bool(state.get("runtime_capability_change") and state["repair"] and not state["no_code"]),
+            defer_pre_patch_verification=defer_pre_patch_verification,
         )
         inspection_stop = stop
-        if not inspection_stop and not planning and not can_inspect:
+        if defer_pre_patch_verification:
+            inspection_stop = "Use saved evidence to reassess the unavailable pre-patch check."
+        elif not inspection_stop and not planning and not can_inspect:
             inspection_stop = "Shared workflow budget reserved for patching and verification" if patch_budget_stop else "Shared workflow budget"
         decision = service.next_decision(strategy, {
             "task_id": task_id, "coding_workflow": state.get("coding_decision"),
@@ -627,6 +642,7 @@ class ModeWorkflow:
             "recheck_required": state.get("required_recheck"),
             "required_verification": state.get("required_verification", []),
             "verification_failure": state.get("verification_failure"),
+            "verification_unavailable": unavailable_check if defer_pre_patch_verification else None,
             "remaining_repair_steps": state.get("remaining_repair_steps", []),
             "repair_limits": state.get("repair_limits"),
             "request": state.get("request", state["goal"]), "resolved_request": state.get("resolved_request", ""),
@@ -758,6 +774,7 @@ class ModeWorkflow:
         if decision.action == "repair":
             state["root_cause"] = str(redact_secrets(decision.root_cause))
             state["uncertainty"] = str(redact_secrets(decision.uncertainty))
+            state["repair_cause_evidence"] = list(decision.cause_evidence)
         if decision.runtime_wiring is not None:
             state["runtime_wiring"] = redact_secrets(decision.runtime_wiring.model_dump(mode="json"))
         else:
@@ -1303,6 +1320,9 @@ class ModeWorkflow:
         ))
         self.lane.start(reservation)
         state = self.board.get_task(task_id).mode_workflow
+        if not state.get("plan"):
+            # An operator retry can make a previously unavailable verifier usable again.
+            state.pop("verification_unavailable", None)
         if revision_request:
             result = self._restart_draft(task_id, state, revision_request)
         elif retry_investigation or state.get("pending_repository_evidence") or not state.get("plan"):
@@ -1503,6 +1523,10 @@ class ModeWorkflow:
                 return self._restart_draft(task_id, state, str(exc))
             return self._block(task_id, state, str(exc))
         except VerificationUnavailable as exc:
+            if in_controller and self._reconsider_unavailable_pre_patch_check(task_id, state, exc):
+                return None
+            if exc.command and exc.command.uses_git_checkout:
+                return self._block(task_id, state, f"**Verification pending.** {exc}")
             return self._block(
                 task_id, state, f"**Verification pending.** {exc}\n\n"
                 f"Once Docker is ready, run `/task resume {task_id}` to continue.",
@@ -1518,6 +1542,41 @@ class ModeWorkflow:
             if in_controller:
                 raise
             return self._block(task_id, state, str(redact_secrets(str(exc))))
+
+    def _reconsider_unavailable_pre_patch_check(self, task_id, state, failure: VerificationUnavailable) -> bool:
+        if (failure.command is None or not state.get("coding_decision") or not state["repair"]
+                or state["mode"] == "plan" or state.get("verification_unavailable")
+                or state["files_changed"] or state.get("in_flight_mutation")
+                or self._remaining_decisions(state) < _PATCH_HANDOFF_MODEL_TURNS
+                or self._remaining_tools(state) < _PATCH_HANDOFF_TOOL_CALLS):
+            return False
+        plan = PlanRevision.model_validate(state["plan"])
+        if state.get("required_recheck") == failure.command.model_dump(mode="json"):
+            return False
+        first_change = next((i for i, step in enumerate(plan.draft.steps) if step.changes), 0)
+        if not any(step.step_id == state["step_id"] and failure.command in step.verification
+                   for step in plan.draft.steps[:first_change]):
+            return False
+        self._validate_approval(task_id, state, plan)
+        limits: dict[str, list[str]] = {}
+        for step in plan.draft.steps:
+            for path, operations in step.changes.items():
+                limits[path] = sorted(set(limits.get(path, ())).union(operations))
+        checks = [check.model_dump(mode="json") for step in plan.draft.steps for check in step.verification
+                  if check.expected == "pass" and not check.uses_git_checkout]
+        required = [*state.get("required_verification", []), *checks]
+        state.update(
+            verification_unavailable={"command": failure.command.model_dump(mode="json"),
+                                      "reason": str(redact_secrets(str(failure))),
+                                      "prior_finding": state.get("root_cause", "")},
+            repair_limits=state.get("repair_limits") or limits,
+            required_verification=list({canonical_digest(check): check for check in required}.values()),
+            preserved_file_digests={**plan.base_file_digests, **state.get("preserved_file_digests", {})},
+            remaining_repair_steps=[step.model_dump(mode="json") for step in plan.draft.steps
+                                    if step.step_id not in state["done_steps"]],
+        )
+        self._revise(task_id, state, "Reassess the unavailable pre-patch verification using saved evidence.")
+        return True
 
     def _record_failed_check(self, task_id, state, failure: VerificationFailed):
         plan = PlanRevision.model_validate(state["plan"])
@@ -2190,7 +2249,7 @@ class ModeWorkflow:
 
     def _verify(self, task_id: str, command: VerificationCommand, state: dict):
         self._charge_tool(task_id, state)
-        operation_id = f"{task_id}:verify:{len(state.get('verification', [])) + 1}"
+        operation_id = f"{task_id}:verify:{state['tool_operations']}"
         command_detail = f"{command.argv!r} in {command.cwd}"
         emit_activity("coding.progress", task_id=task_id, title="Running verification command",
                       summary=command_detail, status="running", operation_id=operation_id)
@@ -2206,7 +2265,7 @@ class ModeWorkflow:
                           summary=str(exc), detail=f"{exc}\n{command_detail}",
                           status="unverified", operation_id=operation_id,
                           metadata={"verification_status": "not_run"})
-            raise
+            raise VerificationUnavailable(str(exc), command=command) from exc
         activity = current_activity_context()
         with activity.publication():
             durable = self._check_live(task_id)
@@ -2370,6 +2429,8 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
     from mana_agent.execution.models import ExecutionRequest, NetworkMode, NetworkPolicy, SandboxSpec
     from mana_agent.execution.providers.local_docker import LocalDockerProvider
 
+    if command.uses_git_checkout:
+        raise VerificationUnavailable("The isolated source snapshot has no .git metadata. Revise the plan to use a project check.")
     if not shutil.which("docker"):
         raise VerificationUnavailable("The Docker CLI is unavailable. Install Docker and start its daemon.")
     cwd = root / command.cwd

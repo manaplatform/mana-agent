@@ -154,6 +154,15 @@ class VerificationCommand(ModeContract):
     output_marker: str = ""
     image: str = ""
 
+    @property
+    def uses_git_checkout(self) -> bool:
+        executable, *args = self.argv
+        if PurePosixPath(executable.replace("\\", "/")).name not in {"git", "git.exe"}:
+            return False
+        return args not in (["--version"], ["version"]) and not (
+            args[:1] == ["diff"] and "--no-index" in args
+        )
+
     @classmethod
     def __get_pydantic_json_schema__(
         cls, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler,
