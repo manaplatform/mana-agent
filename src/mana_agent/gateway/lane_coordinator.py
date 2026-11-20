@@ -47,6 +47,7 @@ from mana_agent.execution_supervisor.errors import (
     BudgetExceededError,
     CompletionVerificationError,
     ExecutionSupervisorError,
+    TaskDeadlineExceededError,
 )
 from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
@@ -1159,8 +1160,13 @@ class LaneCoordinator:
             if getattr(execution, "waiter_id", ""):
                 self._claiming_waiters.pop(execution.waiter_id, None)
             if state == LaneTaskState.COMPLETED and execution.heartbeat_failure:
-                state = LaneTaskState.FAILED
-                error = execution.heartbeat_failure
+                supervised = self.execution_supervisor.get_task(task_id)
+                if supervised.wall_clock_deadline_exceeded(self.execution_supervisor.clock()):
+                    state = LaneTaskState.TIMED_OUT
+                    error = "task wall-clock deadline exceeded"
+                else:
+                    state = LaneTaskState.FAILED
+                    error = execution.heartbeat_failure
             execution.changed_files = self.canonical_paths(changed_files)
             execution_had_usage = execution.budget.consumed_tokens > 0
             incremental_usage = consumed_input_tokens > 0 or consumed_output_tokens > 0
@@ -1341,6 +1347,14 @@ class LaneCoordinator:
                 except CompletionVerificationError as exc:
                     execution.error = str(exc)
                     state = LaneTaskState.VERIFYING
+                except TaskDeadlineExceededError as exc:
+                    execution.error = str(exc)
+                    supervised = self.execution_supervisor.transition(
+                        task_id, SupervisorState.FAILED, reason=execution.error,
+                        attempt_id=execution.supervisor_attempt_id,
+                    )
+                    state = (LaneTaskState.CANCELLED if supervised.state == SupervisorState.CANCELLED
+                             else LaneTaskState.TIMED_OUT)
                 except BudgetExceededError as exc:
                     # submit_result has already projected the durable task to its
                     # authoritative terminal budget state. Do not replace it with
@@ -1417,7 +1431,9 @@ class LaneCoordinator:
                     provider_metadata=effective_provider_metadata,
                 )
             supervised = self.execution_supervisor.store.get_task(task_id)
-            if supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
+            if state is LaneTaskState.TIMED_OUT and supervised.state is SupervisorState.CANCELLED:
+                state = LaneTaskState.CANCELLED
+            elif supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
                 self.execution_supervisor.transition(
                     task_id,
                     SupervisorState.FAILED,

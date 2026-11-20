@@ -37,6 +37,10 @@ class BudgetExceededError(ExecutionSupervisorError):
     pass
 
 
+class TaskDeadlineExceededError(BudgetExceededError):
+    """The attempt reached its absolute execution deadline."""
+
+
 class DecisionRequiredError(ExecutionSupervisorError):
     pass
 

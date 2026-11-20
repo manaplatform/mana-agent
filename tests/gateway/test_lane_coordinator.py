@@ -1006,6 +1006,25 @@ def test_completion_accepts_attempt_created_empty_files_and_directories(
     ] == ["file_exists", "directory_exists"]
 
 
+@pytest.mark.parametrize("heartbeat_failure", ["", "heartbeat renewal failed"])
+def test_finish_records_expired_deadline_as_timeout(coordinator: LaneCoordinator, monkeypatch, heartbeat_failure) -> None:
+    supervisor = coordinator.execution_supervisor
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(supervisor, "clock", lambda: now)
+    reservation = _reserve(coordinator, LaneId.CODING, intent="deadline during completion")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    reservation.execution.heartbeat_failure = heartbeat_failure
+    now = supervisor.get_task(task_id).deadline_at
+
+    finished = coordinator.finish(task_id, verification_state={"status": "passed"})
+
+    assert finished.state == LaneTaskState.TIMED_OUT
+    assert supervisor.get_task(task_id).state == SupervisorState.FAILED
+    assert not supervisor.get_verified_execution_result(task_id).is_verified
+    assert coordinator.taskboard.get_task(task_id).status == TaskStatus.FAILED
+
+
 def test_completion_failure_surfaces_the_persisted_contract_reason(
     coordinator: LaneCoordinator,
 ) -> None:

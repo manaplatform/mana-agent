@@ -16,9 +16,9 @@ from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase, PlanRevisio
 from mana_agent.agent.plan_service import EvidenceRequest, PlanService
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
 from mana_agent.execution.autonomous_controller import AutonomousExecutionController
-from mana_agent.execution_supervisor.models import ExecutionState
+from mana_agent.execution_supervisor.models import ExecutionState, utc_now
 from mana_agent.gateway.lane_coordinator import LaneCoordinator
-from mana_agent.gateway.lanes import LaneId
+from mana_agent.gateway.lanes import LaneId, LaneTaskState
 from mana_agent.gateway.mode_workflow import ModeWorkflow, validate_step_patch
 from mana_agent.human_inbox import default_human_inbox_service
 from mana_agent.human_inbox.models import InboxStatus, ResponseOperation
@@ -186,6 +186,73 @@ def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkey
     assert resumed.data["changed_files"] == ["app.py"]
     assert len(workflow.board.list_tasks(parent_task_id=task_id)) == 1
     assert resumed.data["verification"][0]["attempt_id"] != initial_attempt
+
+
+def test_adaptive_coding_deadline_stops_checkpointing_without_retry(mode_gateway, monkeypatch):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.gateway.chat_gateway import AgentChatGateway
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+    supervisor = workflow.lane.execution_supervisor
+    now = utc_now()
+    monkeypatch.setattr(supervisor, "clock", lambda: now)
+    checkpoint = workflow.lane.checkpoint
+    saved_checkpoints = []
+
+    def checkpoint_at_deadline(task_id, *, boundary, **kwargs):
+        nonlocal now
+        if boundary != "adaptive_coding_tools":
+            return checkpoint(task_id, boundary=boundary, **kwargs)
+        if saved_checkpoints:
+            now = supervisor.get_task(task_id).deadline_at
+        saved = checkpoint(task_id, boundary=boundary, **kwargs)
+        saved_checkpoints.append(saved)
+        return saved
+
+    monkeypatch.setattr(workflow.lane, "checkpoint", checkpoint_at_deadline)
+    actions = iter([
+        ("write_file", {"path": "app.py", "content": "fixed\n"}),
+        ("read_file", {"path": "app.py"}),
+    ])
+
+    class Model:
+        calls = 0
+
+        async def generate(self, messages, *, continuation):
+            self.calls += 1
+            tool, args = next(actions)
+            return SimpleNamespace(tool_calls=[{"id": f"deadline-{self.calls}", "name": tool, "args": args}])
+
+    model = Model()
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=model, programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Fix app.py", mode="debug", repair=True, workflow=workflow_choice(mode="debug"))
+
+    assert result.status == "error"
+    assert result.data["error_code"] == "DEADLINE_EXPIRED"
+    assert "new task" in result.message
+    assert result.data["changed_files"] == ["app.py"]
+    turn = AgentChatGateway._mode_turn_result(result)
+    assert turn.payload["status"] == "timed_out"
+    assert turn.error_code == "DEADLINE_EXPIRED"
+    assert turn.error_category == "deadline"
+    assert (gateway.root / "app.py").read_text() == "fixed\n"
+    task_id = result.data["task_id"]
+    child, = workflow.board.list_tasks(parent_task_id=task_id)
+    for expired_id in (task_id, child.task_id):
+        durable = supervisor.get_task(expired_id)
+        assert durable.state == ExecutionState.FAILED
+        assert not durable.lease_token
+        assert workflow.lane.inspect_task(expired_id).state == LaneTaskState.TIMED_OUT
+    assert saved_checkpoints == [supervisor.get_task(child.task_id).checkpoint_id]
+    assert saved_checkpoints[0]
+    assert "/task resume" not in workflow.describe(workflow.board.get_task(task_id)).message
+    retry = workflow.retry(task_id)
+    assert retry.data["error_code"] == "DEADLINE_EXPIRED"
+    assert "new task" in retry.message
+    assert model.calls == 2
 
 
 def test_adaptive_coding_rejects_unsupported_completion_and_read_only_write(mode_gateway):

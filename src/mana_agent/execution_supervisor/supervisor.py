@@ -28,6 +28,7 @@ from mana_agent.execution_supervisor.errors import (
     LeaseConflictError,
     RetrySafetyError,
     StaleLeaseError,
+    TaskDeadlineExceededError,
 )
 from mana_agent.execution_supervisor.models import (
     ActionEffectScope,
@@ -1120,7 +1121,7 @@ class ExecutionSupervisor:
             )
         if current.deadline_at is not None and current.deadline_at <= now:
             self.transition(task_id, ExecutionState.FAILED, reason="task wall-clock deadline exceeded")
-            raise BudgetExceededError("task wall-clock deadline exceeded")
+            raise TaskDeadlineExceededError("task wall-clock deadline exceeded")
 
         def claim(task: TaskRecord) -> AttemptRecord:
             if task.state not in {ExecutionState.QUEUED, ExecutionState.CREATED}:
@@ -1163,10 +1164,11 @@ class ExecutionSupervisor:
             or hmac.compare_digest(task.lease_token, lease_token)
         ):
             raise StaleLeaseError("lease token is stale or invalid")
-        if task.lease_expires_at is None or task.lease_expires_at <= self.clock():
+        now = self.clock()
+        if task.wall_clock_deadline_exceeded(now):
+            raise TaskDeadlineExceededError("task wall-clock deadline exceeded")
+        if task.lease_expires_at is None or task.lease_expires_at <= now:
             raise StaleLeaseError("lease has expired")
-        if task.deadline_at is not None and task.deadline_at <= self.clock():
-            raise BudgetExceededError("task wall-clock deadline exceeded")
 
     def start(self, task_id: str, *, attempt_id: str, lease_token: str) -> TaskRecord:
         def update(task: TaskRecord) -> None:

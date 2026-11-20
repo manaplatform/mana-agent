@@ -713,6 +713,49 @@ def test_scenario_q_concurrent_writers_and_conflicting_write_race(supervisor_run
         supervisor.store.save_result(res3)
 
 
+def test_checkpoint_escrow_scans_skip_unchanged_unrelated_payloads(tmp_path, monkeypatch):
+    store = LocalExecutionStore(tmp_path)
+    unrelated = EscrowResult(result_id="result_old", task_id="task_old")
+    child = EscrowResult(result_id="result_child", task_id="task_child", parent_task_id="task_live")
+    store.save_result(unrelated)
+    store.save_result(child)
+    assert store.get_result_by_execution_id("task_live") is None
+
+    loads = []
+    get_result = store.get_result
+
+    def track_load(result_id):
+        loads.append(result_id)
+        return get_result(result_id)
+
+    monkeypatch.setattr(store, "get_result", track_load)
+    assert store.get_result_by_execution_id("task_live") is None
+    assert [row.result_id for row in store.unacknowledged_results("task_live")] == [child.result_id]
+    assert unrelated.result_id not in loads
+    assert loads.count(child.result_id) == 1
+
+
+def test_checkpoint_escrow_scans_see_external_changes_and_validate_legacy_results(tmp_path):
+    store = LocalExecutionStore(tmp_path)
+    writer = LocalExecutionStore(tmp_path)
+    old = EscrowResult(result_id="result_old", task_id="task_old", parent_task_id="task_parent")
+    writer.save_result(old)
+    assert store.get_result_by_execution_id("task_new") is None
+    assert [row.result_id for row in store.unacknowledged_results("task_parent")] == [old.result_id]
+
+    writer.save_result(old.model_copy(update={"parent_task_id": "task_other"}))
+    new = EscrowResult(result_id="result_new", task_id="task_new", parent_task_id="task_parent")
+    writer.save_result(new)
+    # A legacy result, or an interruption between the result and index writes.
+    (tmp_path / "results_by_execution" / "task_new.json").unlink()
+    assert store.get_result_by_execution_id("task_new").result_id == new.result_id
+    assert [row.result_id for row in store.unacknowledged_results("task_parent")] == [new.result_id]
+
+    (tmp_path / "results" / "result_new.json").write_text("{", encoding="utf-8")
+    with pytest.raises(EscrowCorruptError):
+        store.unacknowledged_results("task_parent")
+
+
 def test_scenario_r_duplicate_result_replay_is_idempotent(supervisor_runtime):
     """Replaying save of the exact same result is safe and idempotent."""
     supervisor, clock, tmp_path = supervisor_runtime

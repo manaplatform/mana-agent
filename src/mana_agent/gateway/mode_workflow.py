@@ -60,6 +60,8 @@ if TYPE_CHECKING:
 _OWNER = "autonomous_loop"
 _PATCH_HANDOFF_MODEL_TURNS = 3  # Draft, proposal, and review for the first edit.
 _PATCH_HANDOFF_TOOL_CALLS = 3  # Proposal, apply, and focused verification.
+_DEADLINE_MESSAGE = ("This task reached its execution deadline. Review any existing changes and tool outcomes "
+                     "before submitting the request again as a new task.")
 logger = logging.getLogger(__name__)
 
 
@@ -508,7 +510,7 @@ class ModeWorkflow:
                     with self._activity(child.task_id, state, read_only=not write):
                         result = self._run_adaptive_model(task_id, child.task_id, state, root, write, configured)
                     if result.get("adaptive_result") is None:
-                        detail = result.get("errors") or result.get("answer") or "No coding result was returned."
+                        detail = "\n".join(result.get("errors") or []) or result.get("answer") or "No coding result was returned."
                         if result.get("human_input", {}).get("inbox_item_id"):
                             detail = f"{detail} Approval item {result['human_input']['inbox_item_id']}."
                         raise RuntimeError(safe_text(detail, limit=1500))
@@ -537,7 +539,12 @@ class ModeWorkflow:
                         raise RuntimeError(finished.error or "Supervisor verification is incomplete.")
                 except Exception as exc:
                     if self.lane.inspect_task(child.task_id).state == LaneTaskState.RUNNING:
-                        self.lane.mark_blocked(child.task_id, reason=safe_text(str(exc), limit=1500))
+                        durable_child = supervisor.get_task(child.task_id)
+                        if durable_child.wall_clock_deadline_exceeded(supervisor.clock()) and not durable_child.cancellation_status:
+                            self.lane.finish(child.task_id, state=LaneTaskState.TIMED_OUT, error=_DEADLINE_MESSAGE,
+                                             changed_files=[str(root / path) for path in state["files_changed"]])
+                        elif not durable_child.cancellation_status:
+                            self.lane.mark_blocked(child.task_id, reason=safe_text(str(exc), limit=1500))
                     raise
         self._adaptive_checks(state, root, write=write)
         if write and state.get("runtime_capability_change"):
@@ -1509,8 +1516,12 @@ class ModeWorkflow:
                 return self._describe_item(task.task_id, state, item)
         text = state.get("result") or f"{state['mode'].capitalize()} task {task.task_id} is {state['phase'].replace('_', ' ')}."
         if self._can_retry_investigation(state):
-            durable = self.lane.execution_supervisor.store.get_task_or_none(task.task_id)
-            if state["phase"] == Phase.BLOCKED or (durable and durable.state == ExecutionState.INTERRUPTED):
+            supervisor = self.lane.execution_supervisor
+            durable = supervisor.store.get_task_or_none(task.task_id)
+            if durable and durable.wall_clock_deadline_exceeded(supervisor.clock()):
+                if _DEADLINE_MESSAGE not in text:
+                    text += f"\n\n{_DEADLINE_MESSAGE}"
+            elif state["phase"] == Phase.BLOCKED or (durable and durable.state == ExecutionState.INTERRUPTED):
                 text += f"\n\nResume the investigation with `/task resume {task.task_id}`."
         if state["phase"] in {Phase.COMPLETED, Phase.BLOCKED}:
             return self._outcome(task.task_id, state, text, self._repository_report(state),
@@ -1602,6 +1613,12 @@ class ModeWorkflow:
         if state.get("inbox_id") or (state["mode"] == "plan" and not state.get("approved_digest")
                                     and not (revision_request or retry_investigation)):
             return self.describe(task)
+        supervisor = self.lane.execution_supervisor
+        durable = supervisor.store.get_task_or_none(task_id)
+        if (durable and durable.state not in {ExecutionState.COMPLETED, ExecutionState.CANCELLED}
+                and durable.wall_clock_deadline_exceeded(supervisor.clock())):
+            return self._outcome(task_id, {**state, "deadline_expired": True}, _DEADLINE_MESSAGE,
+                                 self._repository_report(state), completed=False)
         if state.get("in_flight_mutation") and not state["in_flight_mutation"].get("action_id"):
             return CommandResult(status="error", message="Reconcile the interrupted patch before resuming or revising this task.")
         lane_task = self.lane.ensure_recoverable_execution(task_id)
@@ -2696,6 +2713,12 @@ class ModeWorkflow:
         return self._outcome(task_id, state, message, report, completed=True)
 
     def _block(self, task_id, state, message):
+        supervisor = self.lane.execution_supervisor
+        durable = supervisor.get_task(task_id)
+        expired = (not durable.waiting_inbox_item_id and durable.wall_clock_deadline_exceeded(supervisor.clock()))
+        if expired:
+            state["deadline_expired"] = True
+            message = _DEADLINE_MESSAGE
         report = self._repository_report(state)
         sections = [_changed_files_summary(state["files_changed"]), message]
         if state["files_changed"] and state.get("isolated_workspace"):
@@ -2705,11 +2728,15 @@ class ModeWorkflow:
                 sections.append(detail)
         message = str(redact_secrets("\n\n".join(filter(None, sections))))
         state["result"] = message
-        durable = self.lane.execution_supervisor.get_task(task_id)
         if durable.cancellation_status is None and durable.state not in {ExecutionState.COMPLETED, ExecutionState.CANCELLED}:
             execution = self.lane.inspect_task(task_id)
             if execution.state in {LaneTaskState.RUNNING, LaneTaskState.QUEUED, LaneTaskState.WAITING}:
-                self.lane.mark_blocked(task_id, reason=message)
+                if expired:
+                    root = self._workspace_root(state)
+                    self.lane.finish(task_id, state=LaneTaskState.TIMED_OUT, error=message,
+                                     changed_files=[str(root / path) for path in state["files_changed"]])
+                else:
+                    self.lane.mark_blocked(task_id, reason=message)
             self._transition(task_id, state, Phase.BLOCKED)
         return self._outcome(task_id, state, message, report, completed=False)
 
@@ -2722,6 +2749,8 @@ class ModeWorkflow:
                 "verification": state.get("verification", []), "strategy": state.get("strategy", state["mode"])}
         if completed:
             data["integration"] = state.get("integration", {})
+        elif state.get("deadline_expired"):
+            data["error_code"] = "DEADLINE_EXPIRED"
         return CommandResult(status="success" if completed else "error", message=message, data=data)
 
     def _repository_report(self, state: dict) -> dict:

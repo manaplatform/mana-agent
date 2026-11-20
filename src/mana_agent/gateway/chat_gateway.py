@@ -4245,8 +4245,14 @@ class AgentChatGateway:
     @staticmethod
     def _mode_turn_result(rendered):
         status = {"success": "completed", "error": "blocked"}.get(rendered.status, "waiting")
+        deadline_code = rendered.data.get("error_code")
+        if deadline_code == "DEADLINE_EXPIRED":
+            status = "timed_out"
         return ChatTurnResult(
-            answer=rendered.message, error="mode_blocked" if rendered.status == "error" else None,
+            answer=rendered.message,
+            error=(deadline_code or "mode_blocked") if rendered.status == "error" else None,
+            error_code=deadline_code,
+            error_category="deadline" if status == "timed_out" else None,
             mode="repository-workflow", changed_files=rendered.data.get("changed_files", []),
             used_coding_agent=bool(rendered.data.get("used_coding_agent")),
             payload={**rendered.data, "next_prompt": rendered.next_prompt,

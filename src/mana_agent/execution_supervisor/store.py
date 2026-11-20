@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterator, Protocol, TypeVar
+from typing import Callable, Iterator, NamedTuple, Protocol, TypeVar
 
 from mana_agent.execution_supervisor.errors import (
     ConcurrentUpdateError,
@@ -48,6 +48,17 @@ _SAFE_TOKEN_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 # another module's ``os.replace`` do not accidentally intercept supervisor
 # persistence. Supervisor-specific fault injection patches this callable.
 _atomic_replace = os.replace
+
+
+class _ResultIdentity(NamedTuple):
+    task_id: str
+    execution_id: str
+    parent_task_id: str | None
+
+
+class _ResultFile(NamedTuple):
+    version: tuple[int, int, int, int, int]
+    identity: _ResultIdentity
 
 
 def _redact_for_persistence(payload):
@@ -184,6 +195,8 @@ class LocalExecutionStore:
         self._thread_lock = _thread_lock_for_store_path(self._lock_path)
         self._lock_depth = 0
         self._lock_handle = None
+        self._result_files_lock = threading.Lock()
+        self._result_files: dict[str, _ResultFile] = {}
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -552,6 +565,36 @@ class LocalExecutionStore:
                 f"Escrow result {result_id} failed validation: {exc}"
             ) from exc
 
+    def _find_results(
+        self, matches: Callable[[_ResultIdentity], bool], *, first_only: bool = False
+    ) -> list[EscrowResult]:
+        # Checkpoints frequently query active tasks with no result yet. Reuse
+        # identities for unchanged files and load matching payloads from disk.
+        with self._result_files_lock, os.scandir(self.root / "results") as entries:
+            files = {entry.name[:-5]: entry for entry in entries if entry.name.endswith(".json")}
+            for result_id in self._result_files.keys() - files.keys():
+                del self._result_files[result_id]
+            found: list[EscrowResult] = []
+            for result_id, entry in files.items():
+                try:
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                cached = self._result_files.get(result_id)
+                if cached is not None and cached.version == version and not matches(cached.identity):
+                    continue
+                item = self.get_result(result_id)
+                if item is None:
+                    continue
+                identity = _ResultIdentity(item.task_id, item.execution_id, item.parent_task_id)
+                self._result_files[result_id] = _ResultFile(version, identity)
+                if matches(identity):
+                    found.append(item)
+                    if first_only:
+                        break
+            return found
+
     def get_result_by_execution_id(self, execution_id: str) -> EscrowResult | None:
         if not execution_id:
             return None
@@ -573,18 +616,10 @@ class LocalExecutionStore:
             direct.execution_id == execution_id or direct.task_id == execution_id
         ):
             return direct
-        for path in (self.root / "results").glob("*.json"):
-            try:
-                item = self.get_result(path.stem)
-                if item is not None and (
-                    item.execution_id == execution_id or item.task_id == execution_id
-                ):
-                    return item
-            except (EscrowCorruptError, EscrowIncompatibleVersionError):
-                raise
-            except Exception:
-                continue
-        return None
+        matches = self._find_results(
+            lambda identity: execution_id in (identity.execution_id, identity.task_id), first_only=True
+        )
+        return matches[0] if matches else None
 
     def results_for_task(self, task_id: str) -> list[EscrowResult]:
         rows: list[EscrowResult] = []
@@ -646,18 +681,10 @@ class LocalExecutionStore:
             return None
 
     def unacknowledged_results(self, parent_task_id: str) -> list[EscrowResult]:
-        rows: list[EscrowResult] = []
-        for path in (self.root / "results").glob("*.json"):
-            try:
-                item = self.get_result(path.stem)
-            except (EscrowCorruptError, EscrowIncompatibleVersionError):
-                raise
-            except (ValueError, OSError, EscrowError):
-                continue
-            if item is not None and item.parent_task_id == parent_task_id:
-                ack = self.get_acknowledgement(item.result_id)
-                if ack is None and item.acknowledged_at is None:
-                    rows.append(item)
+        rows = [
+            item for item in self._find_results(lambda identity: identity.parent_task_id == parent_task_id)
+            if item.acknowledged_at is None and self.get_acknowledgement(item.result_id) is None
+        ]
         return sorted(rows, key=lambda item: (item.created_at, item.result_id))
 
 
