@@ -64,6 +64,40 @@ did not run this check.
 venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_corrects_a_missing_tool_call
 ```
 
+## Disconnected runtime wiring in a completion report
+
+At 00:21 Tehran time on November 21, Internal AUTO task
+`task_20261121_000006` edited `src/cli/cli_scan.c` and recorded two passing
+checkout checks. Its completion report was rejected after a correction because
+the runtime wiring edges formed a disconnected path. The retained logs do not
+identify the first rejection or the actual mismatched edge pairs.
+
+The validator required consecutive edges to have matching identifiers. The
+tool schema omitted that ordering rule and the correction only gave a generic
+connectivity error. The terminal traceback also included an excerpt of the
+rejected model payload. Existing rejection coverage exercised unsupported
+completion on a read-only task.
+
+The [wiring contract](../../src/mana_agent/repository_evidence/models.py)
+now describes the order in the schema and reports all disconnected pairs by
+their one-based edge numbers. [Internal Coding](../../src/mana_agent/coding/internal_engine.py)
+gives an example in its instructions and sends the same field-specific error
+to Coding Activity and the existing single correction. Rejected schema inputs
+stay out of diagnostics. A corrected path still needs the current passing
+checkout receipt and the existing runtime integration check.
+
+**Do not reintroduce** raw rejected inputs in correction messages or accept a
+completion report with disconnected wiring. Keep the model responsible for
+supplying source-backed links and keep correction within its allotted turns.
+
+The regression exercises a corrected chain and a second disconnected report
+after a passing check. Both cases keep the original edit and check receipts.
+The agent did not run the tests or replay the blocked task.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'corrects_runtime_wiring or rejects_unsupported_completion'
+```
+
 ## Evidence exhausted the edit budget
 
 On November 20 at 12:00:55 Tehran time, realtime Internal AUTO task
