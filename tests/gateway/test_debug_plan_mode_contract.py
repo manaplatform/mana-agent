@@ -240,6 +240,72 @@ def test_adaptive_coding_preserves_patch_budget_after_evidence_rejection(mode_ga
     assert parent.mode_workflow["tool_operations"] == 4
 
 
+@pytest.mark.parametrize(("search_scope", "scope_error"), [({}, "SCOPED_EVIDENCE_REQUIRED"),
+    ({"paths": ["src/*.py"]}, "INVALID_SEARCH_SCOPE")])
+def test_adaptive_coding_corrects_shell_and_search_scope_separately(mode_gateway, monkeypatch, search_scope, scope_error):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+    (gateway.root / "src").mkdir()
+    (gateway.root / "src/handler.py").write_text("before\n")
+    search = {"query": "before", "evidence_need": "Find the value to change in the handler."}
+    scoped_search = {**search, "paths": ["src"]}
+    selections = [
+        [("repo_search", scoped_search), ("run_script_once", {"script": "ls"})],
+        [("repo_search", {**search, **search_scope})],
+        [("ls", {"evidence_need": "Locate a top-level directory for the handler search."})],
+        [("repo_search", scoped_search)],
+        [("write_file", {"path": "src/handler.py", "content": "after\n"})],
+        [(ISOLATED_CHECK_TOOL, {"argv": ["python", "src/handler.py"]})],
+        [(CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Changed and checked the handler."})],
+    ]
+
+    async def check(root, command, *, task_id):
+        assert (root / "src/handler.py").read_text() == "after\n"
+        return {"passed": True, "exit_code": 0, "output": "passed"}
+
+    class Model:
+        turn = 0
+
+        def with_tools(self, tools):
+            self.offered = {tool["function"]["name"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            outputs = {message.tool_call_id: json.loads(message.content) for message in messages if message.role == "tool"}
+            if self.turn == 1:
+                assert outputs["0-0"]["rejected_call_id"] == "0-1"
+                assert outputs["0-0"]["executed"] == 0 and "resubmit" in outputs["0-0"]["error"]
+                assert outputs["0-1"]["error_code"] == "USE_REPOSITORY_TOOL"
+            if self.turn == 2:
+                assert outputs["1-0"]["error_code"] == scope_error
+                assert outputs["1-0"]["executed"] == 0 and "Use ls" in outputs["1-0"]["error"]
+                if search_scope:
+                    assert "must name literal files or directories" in outputs["1-0"]["error"]
+            if self.turn == 3:
+                assert "src" in outputs["2-0"]["directories"]
+            if self.turn == 4:
+                assert outputs["3-0"]["matches"][0]["file"] == "src/handler.py"
+            calls = [{"id": f"{self.turn}-{index}", "name": name, "args": args}
+                     for index, (name, args) in enumerate(selections[self.turn])]
+            assert all(call["name"] in self.offered for call in calls)
+            self.turn += 1
+            return SimpleNamespace(tool_calls=calls)
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=Model(), max_tool_calls=4, programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Fix the handler", mode="auto", repair=True, workflow=workflow_choice())
+
+    assert result.status == "success", result.message
+    assert result.data["changed_files"] == ["src/handler.py"]
+    parent = workflow.board.get_task(result.data["task_id"])
+    assert parent.mode_workflow["tool_operations"] == 4
+
+
 @pytest.mark.parametrize("authorized", [True, False])
 def test_adaptive_coding_renews_through_accounting_on_the_same_assignment(mode_gateway, monkeypatch, authorized):
     from mana_agent.coding.adaptive import BUDGET_RENEWAL_TOOL

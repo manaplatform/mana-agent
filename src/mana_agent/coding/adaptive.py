@@ -21,7 +21,7 @@ REPOSITORY_EVIDENCE_TOOLS = frozenset({
     "repo_search", "batch_search_files", "find_symbols", "call_graph",
     "repository_evidence_query", EVIDENCE_REFERENCE_TOOL, INVESTIGATE, INTEGRATE,
 })
-SCOPED_SOURCE_TOOLS = frozenset({"read_file", "repo_search"})
+SCOPED_SOURCE_TOOLS = frozenset({"ls", "read_file", "repo_search"})
 EVIDENCE_NEED = "evidence_need"
 EVIDENCE_NEED_MAX_LENGTH = 500
 EVIDENCE_NEED_DESCRIPTION = "Name the missing fact and the specific edit or check the answer could change."
@@ -77,8 +77,8 @@ class AdaptiveWriteBudget:
                         "in the same tool group.")
             return f"{allowance} Use the remaining capacity for an edit and focused verification, or report a blocker."
         return (f"{allowance} Include source reads or searches only when their answer could change an edit or check. "
-                f"Supply {EVIDENCE_NEED} with each read or search. Use existing observations and prefer an edit "
-                "or check whenever the work supports it.")
+                f"Supply {EVIDENCE_NEED} with each listing, read, or search. Use existing observations and prefer an edit "
+                "or check whenever the work supports it. If a search location is unknown, ls can list the top level.")
 
     def reject_group(self, names: list[str]) -> tuple[str, str] | None:
         if self.result_only:
@@ -174,7 +174,7 @@ def validate_adaptive_tool(name: str, arguments: dict[str, Any]) -> tuple[str, s
             if argv and (PurePosixPath(argv[0]).name in _SOURCE_INSPECTION_PROGRAMS
                          or (argv[0] == "git" and argv[1:2] in (["status"], ["diff"], ["ls-files"]))):
                 return ("USE_REPOSITORY_TOOL", "Use a scoped read_file or repo_search for source inspection. "
-                        "Use git_status or git_diff for checkout state.")
+                        "Use ls to locate an unknown top-level directory and git_status or git_diff for checkout state.")
     return None
 
 

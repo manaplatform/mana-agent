@@ -130,6 +130,35 @@ venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests
 venv/bin/python -m pytest -q tests/execution/test_autonomous_accounting_renewal.py tests/coding/test_coding_budget_renewal.py tests/test_repository_tools.py
 ```
 
+## Distinct tool errors shared one correction
+
+On November 20 at 12:48 Tehran time, Internal AUTO assignment
+`task_20261120_000027` selected a scoped search and shell inspection in one
+group. The shell inspection caused the whole group to be rejected. The next
+search failed scope validation, and the assignment stopped after seven tool
+calls with zero changed files.
+
+The native loop used one correction flag for every kind of rejected selection.
+It also returned the same diagnostic for every call in a rejected group and
+replaced search validation details with a generic scope message.
+
+Distinct validation errors now get separate, bounded corrections. The group
+result identifies the rejected call so the model can resubmit any still-needed
+sibling calls. Search errors describe the scope problem. A model that lacks a
+search location can select a top-level listing and use an observed directory.
+
+**Do not reintroduce** a shared one-shot correction flag across distinct
+validation errors, automatically choose a repository-wide search, or execute
+part of a rejected group.
+
+The regression covers a shell rejection followed by a missing or malformed
+search scope, a model-selected listing, and a repaired edit with a passing
+check. The agent did not run the regression or retry the live assignment.
+
+```sh
+venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/gateway/test_debug_plan_mode_contract.py -k 'corrects_shell_and_search_scope_separately or rejects_repeated_oversized_groups'
+```
+
 ## Verification
 
 Run the focused regressions first.

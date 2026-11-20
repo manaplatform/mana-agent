@@ -18,18 +18,21 @@ The native terminal decision can report completion, identify a blocker, or
 ask for material clarification. Production capability changes additionally
 require source-backed runtime reachability and existing integration verification.
 
-For a realtime Internal write task, `read_file` and `repo_search` are ordinary
-tool choices alongside edits and checks. Each source request supplies
+For a realtime Internal write task, `read_file`, `repo_search`, and the
+top-level `ls` are ordinary tool choices alongside edits and checks. Each source request supplies
 `evidence_need` with the missing fact and the edit or check it could affect.
-Searches name specific paths or a targeted glob. An edit or useful diagnostic
-can be the first action, and a failing check can lead to another scoped read.
+Searches name specific paths or a targeted glob. Use `ls` when the top-level
+location is unknown. An edit or useful diagnostic can be the first action, and
+a failing check can lead to another scoped read.
 
 The loop shows the remaining tool calls and model turns before each decision.
 It leaves capacity for an edit and a focused check before the first change and
 after a failed check. An unverified edit needs only the check reserve, and a
 passing check releases it. One model turn stays available for the typed
-result. An oversized group is rejected as a unit and gets one correction
-within the remaining model budget. See the [evidence budget regression](regressions/unified-adaptive-coding.md#evidence-exhausted-the-edit-budget).
+result. A rejected group dispatches nothing and identifies the invalid call
+when a specific call caused the rejection. Each distinct error can get one
+correction within the remaining model budget and the configured no-progress
+limit. See the [search correction regression](regressions/unified-adaptive-coding.md#distinct-tool-errors-shared-one-correction).
 
 When the assignment approaches its tool or model-turn limit, the model can
 request `renew_coding_budget` with the progress made and the edit or check it

@@ -764,7 +764,8 @@ class InternalCodingEngine(CodingEngine):
                     properties[EVIDENCE_NEED] = {"type": "string", "maxLength": EVIDENCE_NEED_MAX_LENGTH,
                                                  "description": EVIDENCE_NEED_DESCRIPTION}
                     if function["name"] == "repo_search":
-                        function["description"] = "Find a symbol or text in selected literal paths or a targeted filename glob."
+                        function["description"] = ("Find a symbol or text. Supply repository-relative files or directories in paths, "
+                                                   "or a targeted filename glob in glob. Use ls if the top-level location is unknown.")
                         properties.pop("repository_reason", None)
                     schema["properties"] = properties
                     function["parameters"] = schema
@@ -903,7 +904,7 @@ class InternalCodingEngine(CodingEngine):
             seen_evidence.update(saved_native.get("native_seen_evidence", []))
         terminal_rejections = 0
         missing_action_corrected = False
-        selection_corrected = False
+        selection_corrections: set[str] = set()
         renewal_available = callable(renew_budget)
         renewal_waiting_for_progress = False
         evidence_misses = 0
@@ -917,7 +918,6 @@ class InternalCodingEngine(CodingEngine):
                 )} | {"native_seen_evidence": sorted(seen_evidence)})
 
         def request_selection_correction(code: str, detail: str, budget: AdaptiveWriteBudget):
-            nonlocal selection_corrected
             session.state.native_messages = [message.model_dump(mode="json") for message in messages]
             session.state.native_pending_calls = []
             emit_activity("coding.progress", title="Coding tool selection rejected", summary=detail,
@@ -926,11 +926,13 @@ class InternalCodingEngine(CodingEngine):
                               "reason_code": code, "remaining_tool_calls": budget.remaining_tools,
                               "optional_tool_calls": budget.optional_calls, "remaining_model_turns": budget.remaining_turns - 1,
                           })
-            if selection_corrected:
+            if code in selection_corrections:
                 raise StructuredOutputError(f"Coding tool selection was rejected after correction. {detail}")
+            if len(selection_corrections) >= max_evidence_misses:
+                raise StructuredOutputError(f"The coding model reached its tool selection correction limit. {detail}")
             if budget.remaining_turns == 1:
                 raise StructuredOutputError(f"The model turn budget cannot cover a tool selection correction. {detail}")
-            selection_corrected = True
+            selection_corrections.add(code)
             checkpoint()
 
         while turn < max_turns:
@@ -1129,10 +1131,11 @@ class InternalCodingEngine(CodingEngine):
 
             compound = any(call.get("name") == INVESTIGATE for call in tool_calls)
             if write_budget:
-                from mana_agent.tools.repository import validate_delegated_discovery
+                from mana_agent.tools.repository import DiscoveryScopeRequired, validate_delegated_discovery
 
                 names = [call.get("name", "") for call in tool_calls]
                 rejection = None
+                rejected_call_id = None
                 if BUDGET_RENEWAL_TOOL in names:
                     call = tool_calls[0]
                     if (names != [BUDGET_RENEWAL_TOOL] or BUDGET_RENEWAL_TOOL not in offered_names or protocol_pending or protocol_events
@@ -1163,7 +1166,7 @@ class InternalCodingEngine(CodingEngine):
                             messages.append(ToolResultMessage(content=json.dumps(grant), tool_call_id=call["id"], caller=call.get("caller")))
                             session.state.native_messages = [message.model_dump(mode="json") for message in messages]
                             session.state.native_pending_calls = []
-                            selection_corrected = False
+                            selection_corrections.clear()
                             checkpoint()
                             if not grant["ok"] and write_budget.remaining_turns == 1:
                                 raise RuntimeError(grant["error"])
@@ -1180,6 +1183,7 @@ class InternalCodingEngine(CodingEngine):
                         arguments = dict(call.get("args") or {})
                         rejection = validate_adaptive_tool(name, arguments)
                         if rejection:
+                            rejected_call_id = call["id"]
                             break
                         if name not in SCOPED_SOURCE_TOOLS:
                             scoped_calls.append(call)
@@ -1188,18 +1192,29 @@ class InternalCodingEngine(CodingEngine):
                         need = arguments.pop(EVIDENCE_NEED, None)
                         if not isinstance(need, str) or not need.strip() or len(need) > EVIDENCE_NEED_MAX_LENGTH:
                             rejection = "EVIDENCE_NEED_REQUIRED", EVIDENCE_NEED_DESCRIPTION
+                            rejected_call_id = call["id"]
                             break
                         try:
                             validate_delegated_discovery(name, arguments)
-                        except ValueError:
-                            rejection = "SCOPED_EVIDENCE_REQUIRED", "Select explicit paths or a targeted glob for each search."
+                        except DiscoveryScopeRequired:
+                            rejection = ("SCOPED_EVIDENCE_REQUIRED", "Supply known repository-relative files or directories in paths, "
+                                         "or a specific filename pattern in glob. Use ls if the top-level location is unknown.")
+                            rejected_call_id = call["id"]
+                            break
+                        except ValueError as exc:
+                            rejection = ("INVALID_SEARCH_SCOPE", f"{exc} Use ls if the top-level location is unknown.")
+                            rejected_call_id = call["id"]
                             break
                         scoped_calls.append({"id": call["id"], "name": name, "args": arguments, "caller": call.get("caller")})
                 if rejection:
                     code, detail = rejection
                     for call in tool_calls:
+                        message = detail
+                        if rejected_call_id and call["id"] != rejected_call_id:
+                            message = "This call was not executed. Correct or omit the rejected call and resubmit the calls still needed."
                         messages.append(ToolResultMessage(content=json.dumps({
-                            "ok": False, "executed": 0, "error_code": code, "error": detail,
+                            "ok": False, "executed": 0, "error_code": code, "error": message,
+                            **({"rejected_call_id": rejected_call_id} if rejected_call_id else {}),
                             "remaining": remaining, "optional_remaining": write_budget.optional_calls,
                         }), tool_call_id=call["id"], caller=call.get("caller")))
                     request_selection_correction(code, detail, write_budget)
@@ -1504,7 +1519,7 @@ class InternalCodingEngine(CodingEngine):
             if not patch_proposal and not adaptive_mode and not evidence_only and session.state.tool_calls_executed >= session.state.max_tool_calls:
                 break
 
-            selection_corrected = False
+            selection_corrections.clear()
 
             if evidence_only or adaptive_mode:
                 if evidence_only:
