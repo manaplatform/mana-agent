@@ -73,6 +73,12 @@ turn budget. The model retains completed operations and their tool results.
 A second reply without a tool call stops the attempt. See the
 [missing tool call regression](regressions/unified-adaptive-coding.md#missing-tool-call-in-a-native-coding-response).
 
+When an assignment changes production runtime behavior, completion requires a
+passing check and one source-backed wiring chain in execution order. Every edge
+target must match the next edge's source. If a report breaks the chain, Coding
+returns the disconnected edge pairs to the model for one correction when a turn
+remains. The correction uses the existing edit and check receipts.
+
 Native file reads default to the whole source within the smaller of the
 remaining model context allowance and the 48,000-byte tool-content ceiling.
 Batch reads share that allowance. The result distinguishes full and scoped

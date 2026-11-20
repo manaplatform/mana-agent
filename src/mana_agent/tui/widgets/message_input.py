@@ -30,11 +30,24 @@ class MessageInput(TextArea):
         self._commands: list[tuple[str, str, tuple[str, ...]]] = []
         self._choices: list[tuple[str, str, tuple[str, ...]]] = []
         self._selected = 0
+        self._editing = False
 
-    def get_line(self, line_index):
-        if line_index == 0 and not self.text:
+    def get_line(self, line_index: int) -> Text:
+        if line_index == 0 and not self.text and not self._editing:
             return Text("Ask Mana anything...", style="dim")
         return super().get_line(line_index)
+
+    def _begin_editing(self) -> None:
+        if not self._editing:
+            self._editing = True
+            self.refresh()
+
+    def on_mouse_down(self, _: events.MouseDown) -> None:
+        self._begin_editing()
+
+    def on_blur(self, _: events.Blur) -> None:
+        self._editing = False
+        self.refresh()
 
     def set_commands(self, commands: list[tuple[str, str, tuple[str, ...]]]) -> None:
         self._commands = sorted({row[0]: row for row in commands}.values())
@@ -80,6 +93,8 @@ class MessageInput(TextArea):
         self.menu.update(Text("\n").join(lines))
 
     async def _on_key(self, event: events.Key) -> None:
+        if event.is_printable or event.key in self.NEWLINE_KEYS:
+            self._begin_editing()
         if event.key == "enter":
             event.stop()
             event.prevent_default()
@@ -110,6 +125,8 @@ class MessageInput(TextArea):
         await super()._on_key(event)
 
     def on_text_area_changed(self, _: TextArea.Changed) -> None:
+        if self.has_focus and self.text:
+            self._begin_editing()
         self._refresh_menu(reset=True)
         self.call_after_refresh(self._report_height)
 

@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 
 from mana_agent.agent.mode import VerificationCommand
 from mana_agent.agent.plan_service import Question
@@ -109,14 +110,16 @@ class AdaptiveCodingResult(BaseModel):
     disposition: Literal["complete", "clarify", "blocked"]
     summary: str = Field(pattern=r"\S", max_length=4000)
     questions: tuple[Question, ...] = Field(default=(), max_length=8)
-    wiring: RuntimeWiringEvidence | None = None
+    wiring: RuntimeWiringEvidence | None = Field(
+        default=None, description="Required for complete when the assignment changes production runtime behavior.",
+    )
 
     @model_validator(mode="after")
     def validate_questions(self):
         if bool(self.questions) != (self.disposition == "clarify"):
-            raise ValueError("Only the clarify disposition requires questions")
+            raise PydanticCustomError("coding_result_questions_required", "Only the clarify disposition requires questions")
         if len({question.field_id for question in self.questions}) != len(self.questions):
-            raise ValueError("Clarification field IDs must be unique")
+            raise PydanticCustomError("coding_result_question_ids", "Clarification field IDs must be unique")
         return self
 
 

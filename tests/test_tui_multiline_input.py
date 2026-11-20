@@ -10,6 +10,35 @@ from mana_agent.tui.app import ManaChatApp
 from mana_agent.tui.widgets.message_input import MessageInput
 
 
+def test_empty_composer_hides_placeholder_on_click_and_typing() -> None:
+    app = ManaChatApp(history=ChatHistory())
+
+    async def run() -> None:
+        async with app.run_test(size=(80, 24)) as pilot:
+            composer = app.query_one(MessageInput)
+            hint = "Ask Mana anything..."
+            assert hint in composer.render_line(0).text
+            assert app.focused is composer
+
+            await pilot.click("#chat-input")
+            assert hint not in composer.render_line(0).text
+            assert composer.text == ""
+
+            app.set_focus(None)
+            await pilot.pause()
+            assert hint in composer.render_line(0).text
+
+            composer.focus()
+            await pilot.press("m")
+            assert composer.text == "m"
+            assert hint not in composer.render_line(0).text
+            await pilot.press("backspace")
+            assert composer.text == ""
+            assert hint not in composer.render_line(0).text
+
+    asyncio.run(run())
+
+
 def test_multiline_composer_submits_exact_content_and_resets() -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
