@@ -352,6 +352,13 @@ MANA_MEMORY_TIMEOUT_SECONDS=15
 MANA_MEMORY_FALLBACK_TO_INTERNAL=false
 ```
 
+Supermemory uses the v5 API with Python SDK 5.0.1 or later in the 5.x series.
+Upgrade the Mana-Agent package and its `supermemory` extra together. Reuse the
+existing key or keyring reference. Mana-Agent uses each existing scope name as
+the v5 namespace, so hosted memories stay in place. A custom
+`SUPERMEMORY_BASE_URL` must serve the v5 API routes. See the
+[Supermemory v5 migration and verification notes](regressions/supermemory-v5.md).
+
 Invalid mode/provider pairs, missing credentials, missing optional dependencies,
 authentication failures, connectivity failures, and provider failures stop with
 typed errors. There is no silent fallback that rewrites **semantic / conversation

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import subprocess
 from threading import Event
@@ -142,6 +143,22 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     assert [check["exit_code"] for check in checks] == [1, 0]
     assert checks[0]["attempt_id"] == checks[1]["attempt_id"]
     assert children[0].evidence_refs
+
+
+def test_adaptive_coding_reconciles_legacy_mutation_paths(mode_gateway, monkeypatch):
+    from mana_agent.repository_evidence.tool_queue import ToolQueueStore
+
+    _, workflow = mode_gateway
+    receipts = [
+        {"mutations": [{"status": "applied", "path": os.path.join("pkg", "handler.py"),
+                        "old_path": os.path.join("src", "original.py"),
+                        "before_sha256": "original", "after_sha256": "original"}]},
+        {"mutations": [{"status": "applied", "path": "pkg/handler.py",
+                        "before_sha256": "original", "after_sha256": "updated"}]},
+    ]
+    monkeypatch.setattr(ToolQueueStore, "operation_receipts", lambda _store, _task_id: receipts)
+
+    assert workflow._adaptive_mutations("child") == {"pkg/handler.py": "updated", "src/original.py": "missing"}
 
 
 @pytest.mark.parametrize("rejected_kind", ["oversized_group", "missing_evidence_need", "unoffered_tool", "unscoped_search"])
@@ -2287,7 +2304,7 @@ def test_coding_inspection_reads_only_the_selected_follow_up_range(mode_gateway)
 
 def test_coding_inspection_does_not_stamp_a_character_truncated_line(mode_gateway):
     gateway, _workflow = mode_gateway
-    (gateway.root / "app.py").write_text("first\n" + "x" * 16_000 + "\nlast\n")
+    (gateway.root / "app.py").write_bytes(b"first\n" + b"x" * 16_000 + b"\nlast\n")
     request = EvidenceRequest.model_validate(evidence_call("source", paths=["app.py"]).args | {"tool": "read_file"})
 
     result = PlanService(gateway.root, llm=None).inspect(request)
@@ -3169,18 +3186,26 @@ def test_batch_proposal_wakes_only_the_bound_step(mode_gateway, monkeypatch, mal
     plan = workflow.start("session", "Fix the handler with Batch", save=False,
                           execution_policy={"mode": "batch", "required": True})
     task_id, item = plan.data["task_id"], plan.data["inbox_id"]
-    workflow.respond("session", item, ResponseOperation.APPROVE, frontend="cli")
-    import time
+    approval_finished = Event()
+    resume = workflow.resume
 
-    for _ in range(100):
-        children = gateway._lane_coordinator.execution_supervisor.store.list_tasks()
-        waiting = next((child for child in children if child.parent_task_id == task_id and child.waiting_reason == "waiting_for_batch"), None)
-        if waiting:
-            break
-        time.sleep(0.03)
-    assert waiting is not None
+    def resume_approval(*args):
+        try:
+            return resume(*args)
+        finally:
+            approval_finished.set()
+
+    monkeypatch.setattr(workflow, "resume", resume_approval)
+    workflow.respond("session", item, ResponseOperation.APPROVE, frontend="cli")
+
+    assert approval_finished.wait(15), "Approval did not reach the Batch wait"
+    child_id = workflow.board.get_task(task_id).mode_workflow.get("batch_child")
+    assert child_id
+    waiting = gateway._lane_coordinator.execution_supervisor.get_task(child_id)
+    assert waiting.parent_task_id == task_id
+    assert waiting.state is ExecutionState.WAITING
+    assert waiting.waiting_reason == "waiting_for_batch"
     assert (gateway.root / "app.py").read_text() == "before\n"
-    child_id = waiting.task_id
     with pytest.raises(PermissionError):
         workflow.resume_batch(task_id, child_id, "another operation", driver[child_id])
     workflow.resume_batch(task_id, child_id, "operation", driver[child_id])

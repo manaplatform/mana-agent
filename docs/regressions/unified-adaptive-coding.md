@@ -166,6 +166,45 @@ The agent did not run these tests or retry the live assignment.
 venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/gateway/test_debug_plan_mode_contract.py -k 'corrects_shell_and_search_scope_separately or rejects_repeated_oversized_groups'
 ```
 
+## Windows CI paths, source bytes, and Batch wait
+
+The Windows Python 3.12 CI run reported eight failures.
+
+- The ToolRunner snapshot serialized repository-relative paths using the host
+  separator. After a write to a nested file, AUTO rejected its own mutation
+  receipt at the checkpoint path validator. Top-level files avoided the
+  problem because their paths contain no separator. Snapshots now emit
+  slash-separated paths. The gateway converts native separators in older local
+  receipts before reconciling edits and moves. The checkout, path, and
+  file-digest checks still apply.
+  [ToolRunner snapshot](../../src/mana_agent/multi_agent/agents/tool_runner_agent.py)
+  [Gateway reconciliation](../../src/mana_agent/gateway/mode_workflow.py)
+- Python text-mode writes produced CRLF fixture bytes on Windows. Direct source
+  excerpts preserved those line endings, and source stamps hashed the bytes on
+  disk. The tests now write explicit bytes and cover both LF and CRLF for
+  multiline citations and native read stamps.
+- The Batch approval test listed durable task records while its approval worker
+  was still checkpointing. The log showed a Windows `PermissionError` opening a
+  task JSON file, consistent with a concurrent atomic replacement. The supervisor
+  store now applies the existing bounded replacement retry schedule to task reads.
+  Recovery still stops on persistent access errors or malformed task records.
+  The Batch test waits for the approval worker to publish the wait before
+  looking up and resuming the bound child step.
+  [Supervisor store](../../src/mana_agent/execution_supervisor/store.py)
+
+**Do not reintroduce** host-native separators into mutation receipts, infer a
+source stamp from displayed text, or skip unreadable task records during recovery.
+Keep Batch wake assertions synchronized with the completion of the approval
+worker's transition.
+
+User verification on Windows. The agent did not run these commands.
+
+```powershell
+python -m pytest -q tests/coding/test_investigation_engines.py tests/coding/test_tool_runner_execution.py tests/test_execution_modes.py tests/test_internal_coding_engine_workflow.py -k 'multiline_code_citation or rename_evidence or reads_only_selected_lines or whole_files'
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/execution_supervisor/test_supervisor_core.py -k 'edits_and_repairs_on_one_assignment or corrects_shell_and_search_scope_separately or legacy_mutation_paths or character_truncated_line or batch_proposal_wakes or retries_read_denial or retries_transient_replace_denial'
+python -m pytest -q
+```
+
 ## Verification
 
 Run the focused regressions first.

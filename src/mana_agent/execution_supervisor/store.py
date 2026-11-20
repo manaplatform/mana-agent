@@ -164,6 +164,21 @@ def _release_file_lock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _retry_on_permission_error(operation: Callable[[], T]) -> T:
+    """Allow a concurrent atomic replacement or read to release its Windows handle."""
+    for attempt in range(5):
+        try:
+            return operation()
+        except PermissionError:
+            time.sleep(0.01 * (2**attempt))
+    return operation()
+
+
+def _read_task_record(path: Path) -> TaskRecord:
+    content = _retry_on_permission_error(lambda: path.read_text(encoding="utf-8"))
+    return TaskRecord.model_validate_json(content)
+
+
 class LocalExecutionStore:
     """Cross-process, atomic JSON storage rooted below ``~/.mana/execution``."""
 
@@ -227,14 +242,7 @@ class LocalExecutionStore:
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            for attempt in range(6):
-                try:
-                    _atomic_replace(temporary, path)
-                    break
-                except PermissionError:
-                    if attempt == 5:
-                        raise
-                    time.sleep(0.01 * (2**attempt))
+            _retry_on_permission_error(lambda: _atomic_replace(temporary, path))
             if os.name != "nt":  # directory fsync makes the rename crash-durable
                 directory_descriptor = os.open(path.parent, os.O_RDONLY)
                 try:
@@ -251,7 +259,7 @@ class LocalExecutionStore:
         with self.locked():
             path = self._task_path(task.task_id)
             if path.exists():
-                existing = TaskRecord.model_validate_json(path.read_text(encoding="utf-8"))
+                existing = _read_task_record(path)
                 if existing.model_dump(mode="json") == task.model_dump(mode="json"):
                     return existing
                 raise ConcurrentUpdateError(f"execution task already exists: {task.task_id}")
@@ -263,7 +271,7 @@ class LocalExecutionStore:
         if not path.is_file():
             raise TaskNotFoundError(f"unknown execution task: {task_id}")
         try:
-            return TaskRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            return _read_task_record(path)
         except (ValueError, OSError) as exc:
             raise TaskNotFoundError(f"execution task is unreadable: {task_id}") from exc
 
@@ -279,7 +287,7 @@ class LocalExecutionStore:
         rows: list[TaskRecord] = []
         for path in sorted((self.root / "tasks").glob("*.json")):
             try:
-                task = TaskRecord.model_validate_json(path.read_text(encoding="utf-8"))
+                task = _read_task_record(path)
             except (ValueError, OSError) as exc:
                 raise ConcurrentUpdateError(
                     f"execution task record is unreadable; recovery stopped: {path.name}"

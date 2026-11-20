@@ -687,13 +687,17 @@ def test_external_supermemory_write_and_followup_recall(
         if method == "add":
             sm_writes.append({"kwargs": kwargs, "args": args})
             return types.SimpleNamespace(id="sm-doc-1", status="queued")
-        elif method in {"search", "search.memories"}:
+        if method == "search":
             sm_searches.append({"kwargs": kwargs, "args": args})
             return types.SimpleNamespace(
                 results=[
                     types.SimpleNamespace(
-                        id="sm-doc-1",
-                        content="Redis cache cluster configured with TLS",
+                        id="sm-memory-1",
+                        memory="Redis cache cluster configured with TLS",
+                        chunk=None,
+                        is_latest=True,
+                        is_inference=False,
+                        included=None,
                         similarity=0.92,
                         metadata={
                             "task_id": "task_sm_test",
@@ -701,11 +705,13 @@ def test_external_supermemory_write_and_followup_recall(
                             "scope": "private",
                             "title": "Task result task_sm_test",
                         },
-                        created_at="2026-10-02T10:00:00Z",
+                        system=types.SimpleNamespace(
+                            created_at="2026-10-02T10:00:00Z", updated_at="2026-10-02T10:00:00Z",
+                        ),
                     )
                 ]
             )
-        return types.SimpleNamespace(results=[])
+        raise AssertionError(f"Unexpected Supermemory method: {method}")
 
     mem_config = MemoryConfig(
         mode="external",
@@ -750,7 +756,7 @@ def test_external_supermemory_write_and_followup_recall(
         session_id=session_id,
         authenticated_user_id="user_test",
         capsule_service=gateway._stack.memory_service.capsules,
-        repository_id=str(tmp_path),
+        repository_id=str(gateway._stack.repository_id or ""),
         current_turn_id="turn_sm_read",
         selected_memory_task_id=binding,
         memory_task_candidates=candidates,
@@ -760,6 +766,9 @@ def test_external_supermemory_write_and_followup_recall(
     assert read_payload["status"] in {"ok", "matched"}
     assert read_payload["capsules_returned"] == 1
     assert "Redis cache cluster configured with TLS" in read_payload["capsules"][0]["summary"]
+    assert len(sm_searches) == 1
+    assert sm_searches[0]["args"] == sm_writes[0]["args"]
+    assert sm_searches[0]["kwargs"]["query"] == "redis cluster TLS"
 
     read_events = [e for e in events if e[0] == "provider_memory_read"]
     assert len(read_events) == 1

@@ -237,7 +237,8 @@ def test_investigation_uses_selected_engine_and_keeps_findings_as_inferences(tmp
 
 
 @pytest.mark.parametrize("include_excerpt", [False, True])
-def test_investigation_matches_multiline_code_citation(tmp_path, monkeypatch, include_excerpt):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_investigation_matches_multiline_code_citation(tmp_path, monkeypatch, include_excerpt, newline):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     code = (
@@ -247,8 +248,8 @@ def test_investigation_matches_multiline_code_citation(tmp_path, monkeypatch, in
         "    if (rc == NP_OK)\n"
         "        rc = np_recon_persist_flush(ctx);\n"
         "}\n"
-    )
-    (src_dir / "cli_recon.c").write_text(code)
+    ).replace("\n", newline)
+    (src_dir / "cli_recon.c").write_bytes(code.encode("utf-8"))
     db = WorkspaceDatabase("engine-test-multiline", db_path=tmp_path / "state.db")
     knowledge = RepositoryEvidenceBoard(db=db, repository_id="repo", root=tmp_path)
     task = TaskBoardItem(

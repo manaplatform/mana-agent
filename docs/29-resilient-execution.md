@@ -61,8 +61,10 @@ JSONL events are stored under:
 
 Temporary files are flushed and atomically replaced. A cross-process lock
 guards compare-and-set updates and lease acquisition on Windows, macOS, and
-Linux. Execution logs rotate to one bounded previous segment. Secret-shaped
-fields and payload values are redacted before persistence.
+Linux. Task record reads retry brief permission denials during replacement
+with bounded backoff. Recovery scans still stop on persistent read errors or
+invalid task records. Execution logs rotate to one bounded previous segment.
+Secret-shaped fields and payload values are redacted before persistence.
 
 A worker must present the current task ID, attempt ID, and unguessable lease
 token to start, heartbeat, checkpoint, or publish a result. Heartbeats extend a

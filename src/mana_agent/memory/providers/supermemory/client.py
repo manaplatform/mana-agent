@@ -67,7 +67,7 @@ class SupermemoryClient:
             from supermemory import Supermemory
         except ImportError as exc:
             raise MemoryDependencyError(
-                "Supermemory is selected but unavailable. Install it with: pip install 'mana-agent[supermemory]'."
+                "Supermemory v5 is unavailable. Install it with pip install -U 'mana-agent[supermemory]'."
             ) from exc
         kwargs: dict[str, Any] = {
             "api_key": self.config.api_key,
@@ -106,7 +106,12 @@ class SupermemoryClient:
         )
 
     async def healthcheck(self) -> None:
-        await self.call("documents.list", limit=1, operation="healthcheck")
+        try:
+            await self.call("namespaces.list", limit=1, operation="healthcheck")
+        except MemoryNotFoundError as exc:
+            raise MemoryProviderError(
+                "Supermemory v5 namespace listing is unavailable at the configured API URL."
+            ) from exc
 
     async def close(self) -> None:
         client, self._client = self._client, None

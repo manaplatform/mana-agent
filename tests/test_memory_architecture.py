@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
 from mana_agent.config.session import ConfigurationDraft
@@ -13,6 +19,8 @@ from mana_agent.memory import (
     MemoryConfigurationError,
     MemoryContent,
     MemoryHealthStatus,
+    MemoryNotFoundError,
+    MemoryProviderError,
     MemoryScope,
     MemorySearchRequest,
     MemoryService,
@@ -20,11 +28,7 @@ from mana_agent.memory import (
     MemoryWriteRequest,
 )
 from mana_agent.memory.providers.mem0.mapper import response_to_record, scope_to_filters, scope_to_mem0
-from mana_agent.memory.providers.shared import (
-    supermemory_container_tags,
-    supermemory_custom_id,
-    supermemory_primary_container_tag,
-)
+from mana_agent.memory.providers.shared import supermemory_document_id, supermemory_namespace
 from mana_agent.memory.providers.supermemory.backend import SupermemoryProvider
 
 
@@ -146,55 +150,288 @@ def test_mem0_response_normalization_preserves_provider_id_and_metadata() -> Non
     assert record.provider_metadata == {"categories": ["work"]}
 
 
-def test_supermemory_tags_and_custom_ids_are_deterministic() -> None:
-    scope = MemoryScope(user_id="u-1", workspace_id="workspace 1", repository_id="repo", agent_id="main", session_id="s1")
-    assert supermemory_primary_container_tag(scope) == supermemory_primary_container_tag(scope)
-    assert supermemory_container_tags(scope) == [
-        "mana",
-        "mana:user:u-1",
-        "mana:workspace:workspace-1",
-        "mana:repository:repo",
-        "mana:agent:main",
-        "mana:session:s1",
-    ]
-    custom_id = supermemory_custom_id(
-        scope=scope,
-        content="fact",
-        metadata={"memory_kind": "task", "fingerprint": "abc123"},
-    )
-    assert custom_id is not None
-    assert "." not in custom_id
-    assert custom_id.startswith("mana:task:")
-    assert custom_id == supermemory_custom_id(
-        scope=scope,
-        content="fact",
-        metadata={"memory_kind": "task", "fingerprint": "abc123"},
-    )
+_SUPERMEMORY_SCOPE = MemoryScope(
+    user_id="u-1", workspace_id="workspace 1", repository_id="repo", agent_id="main", session_id="s1",
+)
+_SUPERMEMORY_NAMESPACE = "mana:scope:e54cb13b86fe7a00e2aa775e"
+_SUPERMEMORY_DOCUMENT_PATH = f"/ns/{_SUPERMEMORY_NAMESPACE}/document"
+_SUPERMEMORY_METADATA = {"memory_kind": "task", "fingerprint": "abc123", "custom_id": "existing-hint"}
+_SUPERMEMORY_CALLER_ID = "mana:task:4ce0e8ad51d44406bf9b918a:f8859e938990"
+_SUPERMEMORY_TIMESTAMPS = {"createdAt": "2026-10-02T10:00:00Z", "updatedAt": "2026-10-03T10:00:00Z"}
+_SUPERMEMORY_DOCUMENT_SYSTEM = {"status": "done", "dreamingStatus": "dreaming", **_SUPERMEMORY_TIMESTAMPS}
+_SupermemoryHandler = Callable[[httpx.Request], httpx.Response]
+_SupermemoryBackendFactory = Callable[[_SupermemoryHandler], SupermemoryProvider]
 
 
-def test_supermemory_backend_uses_container_tag_without_deprecated_container_tags() -> None:
-    captured: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+@pytest.fixture
+def supermemory_backend(monkeypatch: pytest.MonkeyPatch) -> Iterator[_SupermemoryBackendFactory]:
+    sdk = pytest.importorskip("supermemory", minversion="5.0.1")
+    sdk_class = sdk.Supermemory
+    with ExitStack() as stack:
+        def create(handler: _SupermemoryHandler) -> SupermemoryProvider:
+            def client_factory(**kwargs: Any) -> Any:
+                assert kwargs["max_retries"] == 2
+                assert kwargs["timeout"] == 15.0
+                client = stack.enter_context(httpx.Client(transport=httpx.MockTransport(handler)))
+                return sdk_class(**{**kwargs, "max_retries": 0}, http_client=client)
 
-    async def fake_call(method: str, *args: object, operation: str, **kwargs: object) -> object:
-        captured.append((method, args, kwargs))
-        if method == "add":
-            return types.SimpleNamespace(id="doc-1", status="queued")
-        return types.SimpleNamespace(results=[])
+            monkeypatch.setattr(sdk, "Supermemory", client_factory)
+            return SupermemoryProvider(MemoryConfig(
+                mode="external", provider="supermemory", api_key="test", base_url="https://memory.example.test",
+            ))
 
-    backend = SupermemoryProvider(MemoryConfig(mode="external", provider="supermemory", api_key="test"))
-    backend.client.call = fake_call  # type: ignore[method-assign]
+        yield create
+
+
+def test_supermemory_namespace_and_document_id_preserve_legacy_values() -> None:
+    assert supermemory_namespace(_SUPERMEMORY_SCOPE) == _SUPERMEMORY_NAMESPACE
+    assert supermemory_document_id(
+        scope=_SUPERMEMORY_SCOPE, content="fact", metadata=_SUPERMEMORY_METADATA,
+    ) == _SUPERMEMORY_CALLER_ID
+
+
+def test_supermemory_v5_add_and_hybrid_search(supermemory_backend: _SupermemoryBackendFactory) -> None:
+    scope = _SUPERMEMORY_SCOPE
+    scope_metadata = {"source": "mana-agent", **scope.as_dict(), "mana_repository_id": "repo"}
+    search_metadata = {"reviewed": True, "priority": 3, "confidence": 0.75}
+    result_fields = {"isLatest": True, "isInference": False, "similarity": 0.91, "metadata": search_metadata}
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.host == "memory.example.test"
+        assert request.headers["Authorization"] == "Bearer test"
+        assert not request.url.params
+        requests.append(request.url.path)
+        body = json.loads(request.content)
+        if request.url.path == _SUPERMEMORY_DOCUMENT_PATH:
+            assert body == {
+                "id": _SUPERMEMORY_CALLER_ID,
+                "content": "fact",
+                "taskType": "memory",
+                "dreaming": "dynamic",
+                "metadata": {**scope_metadata, **_SUPERMEMORY_METADATA},
+            }
+            return httpx.Response(200, json={"id": "doc-1", "status": "queued"})
+
+        assert request.url.path == f"/ns/{_SUPERMEMORY_NAMESPACE}/search"
+        assert body == {
+            "query": "find fact",
+            "searchMode": "hybrid",
+            "threshold": 0.6,
+            "limit": 5,
+            "include": {"documents": True},
+            "filter": {
+                "operator": "and",
+                "operands": [
+                    {"field": key, "operator": "eq", "value": value}
+                    for key, value in {**scope_metadata, **search_metadata}.items()
+                ],
+            },
+        }
+        operands = {item["field"]: item["value"] for item in body["filter"]["operands"]}
+        assert operands["reviewed"] is True
+        assert type(operands["priority"]) is int
+        assert type(operands["confidence"]) is float
+        return httpx.Response(200, json={
+            "searchTime": 1,
+            "results": [
+                {
+                    **result_fields, "id": "mem-1", "memory": "fact", "system": _SUPERMEMORY_TIMESTAMPS,
+                    "included": {"document": {
+                        "id": "doc-1", "title": "Source", "type": "text", "metadata": {},
+                        "system": _SUPERMEMORY_TIMESTAMPS,
+                    }},
+                },
+                {
+                    **result_fields, "id": "chunk-1", "chunk": "source passage",
+                    "system": {"updatedAt": _SUPERMEMORY_TIMESTAMPS["updatedAt"]},
+                },
+            ],
+        })
+
+    backend = supermemory_backend(respond)
 
     async def run() -> None:
-        scope = MemoryScope(user_id="u", workspace_id="w", repository_id="r", session_id="s")
-        await backend.add(MemoryWriteRequest(MemoryContent("fact"), scope, {"memory_kind": "task"}))
-        await backend.search(MemorySearchRequest("fact", scope))
+        add = MemoryWriteRequest(MemoryContent("fact"), scope, _SUPERMEMORY_METADATA)
+        added = await backend.add(add)
+        assert added.id == "doc-1"
+        assert added.provider_metadata == {
+            "status": "queued", "namespace": _SUPERMEMORY_NAMESPACE, "caller_id": _SUPERMEMORY_CALLER_ID,
+        }
+        assert (await backend.add(add)).id == added.id
+        memory, chunk = await backend.search(MemorySearchRequest("find fact", scope, 5, search_metadata))
+        assert (memory.id, memory.content.text, memory.score) == ("mem-1", "fact", 0.91)
+        assert memory.metadata == search_metadata
+        assert memory.created_at == datetime(2026, 10, 2, 10, tzinfo=timezone.utc)
+        assert memory.updated_at == chunk.updated_at == datetime(2026, 10, 3, 10, tzinfo=timezone.utc)
+        assert memory.provider_metadata["document"] == {"id": "doc-1", "title": "Source", "type": "text"}
+        assert (chunk.id, chunk.content.text, chunk.created_at) == ("chunk-1", "source passage", None)
+        assert "document" not in chunk.provider_metadata
 
     asyncio.run(run())
+    assert requests == [_SUPERMEMORY_DOCUMENT_PATH] * 2 + [f"/ns/{_SUPERMEMORY_NAMESPACE}/search"]
 
-    assert captured
-    for method, _args, kwargs in captured:
-        assert "container_tag" in kwargs
-        assert "container_tags" not in kwargs
+
+def test_supermemory_v5_scoped_document_lifecycle(supermemory_backend: _SupermemoryBackendFactory) -> None:
+    document_path = f"{_SUPERMEMORY_DOCUMENT_PATH}/doc-1"
+    other_scope = MemoryScope(user_id="different-user")
+    patches: list[dict[str, Any]] = []
+    deleted: list[list[str]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            assert request.url.path == _SUPERMEMORY_DOCUMENT_PATH
+            body = json.loads(request.content)
+            assert body == {"ids": ["doc-1"]}
+            deleted.append(body["ids"])
+            return httpx.Response(200, json={"count": 1, "errors": []})
+        if request.url.path == f"/ns/{supermemory_namespace(other_scope)}/document/doc-1":
+            assert request.method == "GET"
+            return httpx.Response(404, json={"error": "Document not found"})
+        assert request.url.path == document_path
+        if request.method == "PATCH":
+            patches.append(json.loads(request.content))
+            status = "queued" if "content" in patches[-1] else "done"
+            return httpx.Response(200, json={"id": "doc-1", "status": status})
+        assert request.method == "GET"
+        return httpx.Response(200, json={
+            "id": "doc-1", "title": "Source", "type": "text", "content": "published", "metadata": {"category": "old"},
+            "system": _SUPERMEMORY_DOCUMENT_SYSTEM,
+        })
+
+    backend = supermemory_backend(respond)
+
+    async def run() -> None:
+        scope = _SUPERMEMORY_SCOPE
+        document = await backend.get("doc-1", scope)
+        assert document is not None
+        assert document.content.text == "published"
+        assert document.created_at == datetime(2026, 10, 2, 10, tzinfo=timezone.utc)
+        assert document.provider_metadata["status"] == "done"
+        assert document.provider_metadata["dreaming_status"] == "dreaming"
+        assert await backend.get("doc-1", other_scope) is None
+        with pytest.raises(MemoryNotFoundError):
+            await backend.update("doc-1", MemoryUpdateRequest(MemoryContent("new"), other_scope))
+        with pytest.raises(MemoryNotFoundError):
+            await backend.delete("doc-1", other_scope)
+        assert await backend.update("doc-1", MemoryUpdateRequest(scope=scope)) == document
+        assert patches == []
+        metadata_only = await backend.update("doc-1", MemoryUpdateRequest(scope=scope, metadata={"category": "new"}))
+        assert metadata_only.content.text == "published"
+        assert metadata_only.metadata["category"] == "new"
+        assert list(patches[0]) == ["metadata"]
+        assert patches[0]["metadata"]["mana_repository_id"] == "repo"
+        assert patches[0]["metadata"]["category"] == "new"
+
+        updated = await backend.update("doc-1", MemoryUpdateRequest(MemoryContent("replacement"), scope))
+        assert (updated.id, updated.content.text, updated.provider_metadata["status"]) == ("doc-1", "replacement", "queued")
+        assert patches[1:] == [{"content": "replacement", "taskType": "memory", "dreaming": "dynamic"}]
+        await backend.delete("doc-1", scope)
+
+    asyncio.run(run())
+    assert deleted == [["doc-1"]]
+
+
+def test_supermemory_v5_clear_batches_documents_and_reports_partial_failure(
+    supermemory_backend: _SupermemoryBackendFactory,
+) -> None:
+    requests: list[tuple[str, int]] = []
+    first_batch = [f"doc-{index}" for index in range(1, 101)]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.method == "POST":
+            assert request.url.path == f"/ns/{_SUPERMEMORY_NAMESPACE}/list/documents"
+            page = int(request.url.params["page"])
+            assert request.url.params["limit"] == "100"
+            assert request.url.params["sort"] == "createdAt"
+            assert request.url.params["order"] == "asc"
+            assert body["include"] == {"memoryCount": False}
+            assert body["filter"]["operator"] == "and"
+            assert {item["field"]: item["value"] for item in body["filter"]["operands"]} == {
+                "source": "mana-agent", **_SUPERMEMORY_SCOPE.as_dict(), "mana_repository_id": "repo",
+            }
+            requests.append(("list", page))
+            ids = first_batch if page == 1 else ["doc-100", "doc-101"]
+            return httpx.Response(200, json={
+                "documents": [
+                    {"id": doc_id, "title": None, "type": "text", "metadata": {}, "system": _SUPERMEMORY_DOCUMENT_SYSTEM}
+                    for doc_id in ids
+                ],
+                "memories": [], "chunks": [],
+                "pagination": {"currentPage": page, "totalPages": 2, "totalItems": 102},
+            })
+        assert request.method == "DELETE"
+        assert request.url.path == _SUPERMEMORY_DOCUMENT_PATH
+        ids = body["ids"]
+        requests.append(("delete", len(ids)))
+        if ids == first_batch:
+            return httpx.Response(200, json={"count": 99, "errors": [
+                {"id": "doc-100", "error": "Document is still processing"},
+            ]})
+        assert ids == ["doc-101"]
+        return httpx.Response(200, json={"count": 1, "errors": []})
+
+    backend = supermemory_backend(respond)
+    with pytest.raises(MemoryProviderError, match=r"deleted 100 of 101 documents.*still processing"):
+        asyncio.run(backend.clear(_SUPERMEMORY_SCOPE))
+    assert requests == [("list", 1), ("list", 2), ("delete", 100), ("delete", 1)]
+
+
+def test_supermemory_v5_clear_requires_scope_and_handles_empty_namespace(
+    supermemory_backend: _SupermemoryBackendFactory,
+) -> None:
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.method)
+        assert request.url.path == f"/ns/{_SUPERMEMORY_NAMESPACE}/list/documents"
+        return httpx.Response(200, json={
+            "documents": [], "chunks": [], "memories": [],
+            "pagination": {"currentPage": 1, "totalPages": 0, "totalItems": 0},
+        })
+
+    backend = supermemory_backend(respond)
+    with pytest.raises(MemoryProviderError, match="Refusing to clear"):
+        asyncio.run(backend.clear(MemoryScope()))
+    assert requests == []
+    asyncio.run(backend.clear(_SUPERMEMORY_SCOPE))
+    assert requests == ["POST"]
+
+
+@pytest.mark.parametrize(("status_code", "health_status"), [
+    (200, MemoryHealthStatus.HEALTHY),
+    (401, MemoryHealthStatus.AUTHENTICATION_ERROR),
+    (403, MemoryHealthStatus.PROVIDER_ERROR),
+    (404, MemoryHealthStatus.PROVIDER_ERROR),
+    (429, MemoryHealthStatus.NETWORK_ERROR),
+    (503, MemoryHealthStatus.NETWORK_ERROR),
+])
+def test_supermemory_v5_healthcheck(
+    supermemory_backend: _SupermemoryBackendFactory,
+    status_code: int,
+    health_status: MemoryHealthStatus,
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path in {"/ns", "/namespaces"}
+        assert dict(request.url.params) == {"limit": "1"}
+        if status_code != 200:
+            return httpx.Response(status_code, json={"error": "private provider details"})
+        return httpx.Response(200, json={
+            "namespaces": [], "pagination": {"currentPage": 1, "totalPages": 0, "totalItems": 0},
+        })
+
+    backend = supermemory_backend(respond)
+
+    async def run() -> None:
+        health = await backend.healthcheck()
+        assert health.status is health_status
+        assert "private provider details" not in health.detail
+        await backend.close()
+
+    asyncio.run(run())
 
 
 def test_mem0_search_requires_positive_entity_scope(tmp_path: Path) -> None:

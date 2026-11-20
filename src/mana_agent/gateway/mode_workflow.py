@@ -12,6 +12,7 @@ import getpass
 from hashlib import sha256
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -801,8 +802,9 @@ class ModeWorkflow:
             for mutation in receipt.get("mutations", []):
                 if mutation["status"] == "unknown":
                     raise PermissionError("Reconcile an uncertain mutation before completing or verifying the task.")
-                path = mutation["path"]
-                old_path = mutation.get("old_path")
+                # Older receipts used the host's path separator.
+                path = mutation["path"].replace(os.sep, "/")
+                old_path = (mutation.get("old_path") or "").replace(os.sep, "/")
                 if old_path:
                     before.setdefault(old_path, mutation["before_sha256"])
                     after[old_path] = "missing"

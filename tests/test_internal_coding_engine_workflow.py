@@ -14,14 +14,16 @@ from mana_agent.coding.models import AgentEvent, CodingTask, WorkspaceContext
 from mana_agent.coding.live_events import coding_event_scope
 
 
-def test_native_reads_whole_files_and_returns_exact_bounded_ranges(tmp_path):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_native_reads_whole_files_and_returns_exact_bounded_ranges(tmp_path, newline):
     from hashlib import sha256
     from mana_agent.coding.programmatic import ToolExecutionDispatcher
 
     small = "".join(f"setting_{line:04d} = 'default value for the module'\n" for line in range(400))
     large = small * 20
-    (tmp_path / "settings.py").write_text(small)
-    (tmp_path / "big.py").write_text(large)
+    source_bytes = small.replace("\n", newline).encode("utf-8")
+    (tmp_path / "settings.py").write_bytes(source_bytes)
+    (tmp_path / "big.py").write_bytes(source_bytes * 20)
     (tmp_path / "alias.py").symlink_to(tmp_path / "settings.py")
     dispatcher = ToolExecutionDispatcher.for_coding_task(repo_root=tmp_path, task_id="adaptive-read")
 
@@ -32,7 +34,7 @@ def test_native_reads_whole_files_and_returns_exact_bounded_ranges(tmp_path):
     assert complete["complete"] and not complete["truncated"]
     assert (complete["start_line"], complete["end_line"], complete["total_lines"]) == (1, 400, 400)
     assert complete["content"] == small
-    assert complete["source_evidence"]["sha256"] == sha256(small.encode()).hexdigest()
+    assert complete["source_evidence"]["sha256"] == sha256(source_bytes).hexdigest()
 
     scoped = read("big.py", start_line=7900, end_line=7910)
     assert scoped["partial"] and not scoped["truncated"]

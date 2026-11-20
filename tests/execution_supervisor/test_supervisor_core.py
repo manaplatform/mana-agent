@@ -6,6 +6,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from mana_agent.execution_supervisor.errors import (
     LeaseConflictError,
     RetrySafetyError,
     StaleLeaseError,
+    TaskNotFoundError,
     CompletionVerificationError,
 )
 from mana_agent.execution_supervisor.models import (
@@ -1575,6 +1577,43 @@ def test_atomic_store_retries_transient_replace_denial(runtime, monkeypatch):
 
     assert supervisor.store.get_task(task.task_id).task_id == task.task_id
     assert replace_calls == 2
+
+
+@pytest.mark.parametrize("reader", ["get_task", "list_tasks"])
+@pytest.mark.parametrize("denied_reads", [1, 6], ids=["transient", "persistent"])
+def test_task_store_retries_read_denial(runtime, monkeypatch, reader, denied_reads):
+    supervisor, _clock, tmp_path = runtime
+    store = supervisor.store
+    task = create(supervisor, tmp_path)
+    task_path = store.root / "tasks" / f"{task.task_id}.json"
+    read_text = Path.read_text
+    attempts = 0
+
+    def denied_then_read(path, *args, **kwargs):
+        nonlocal attempts
+        if path == task_path:
+            attempts += 1
+            if attempts <= denied_reads:
+                raise PermissionError(13, "Permission denied", str(path))
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied_then_read)
+    if reader == "get_task":
+        def read():
+            return [store.get_task(task.task_id)]
+        error = TaskNotFoundError
+    else:
+        read = store.list_tasks
+        error = ConcurrentUpdateError
+
+    if denied_reads == 1:
+        assert [item.task_id for item in read()] == [task.task_id]
+        assert attempts == 2
+    else:
+        with pytest.raises(error, match="unreadable") as failure:
+            read()
+        assert isinstance(failure.value.__cause__, PermissionError)
+        assert attempts == 6
 
 
 def test_consequential_action_duplicate_and_stale_generation_are_fenced(runtime):

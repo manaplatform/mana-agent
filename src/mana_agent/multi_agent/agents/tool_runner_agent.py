@@ -726,7 +726,7 @@ def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int)
         for directory, dirs, files in os.walk(root, followlinks=False):
             dirs[:] = [d for d in dirs if d not in {".git", ".mana", "node_modules", "venv", ".venv", "__pycache__"} and not (Path(directory) / d).is_symlink()]
             for name in files:
-                paths.add(str((Path(directory) / name).relative_to(root)))
+                paths.add((Path(directory) / name).relative_to(root).as_posix())
                 if len(paths) >= 5000:
                     complete = False
                     break
@@ -740,16 +740,17 @@ def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int)
         if not target.is_relative_to(root) or any(p in {".git", ".mana"} or p.startswith(".env") for p in Path(path).parts):
             snapshot.complete = False
             continue
+        relative = target.relative_to(root).as_posix()
         try:
             if target.is_file() and target.stat().st_size <= remaining:
                 body = target.read_bytes()
-                snapshot[str(target.relative_to(root))] = body
+                snapshot[relative] = body
                 remaining -= len(body)
             elif target.exists():
-                snapshot[str(target.relative_to(root))] = None
+                snapshot[relative] = None
                 snapshot.complete = False
         except OSError:
-            snapshot[str(target.relative_to(root))] = None
+            snapshot[relative] = None
     return snapshot
 
 

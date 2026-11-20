@@ -231,7 +231,7 @@ def test_shell_execution_engine_blocks_destructive_commands_in_plan_mode(tmp_pat
 def test_plan_service_requires_a_model_and_reads_only_selected_lines(tmp_path: Path) -> None:
     from mana_agent.agent.plan_service import EvidenceRequest
 
-    (tmp_path / "app.py").write_text("before\nfunction\nafter\n")
+    (tmp_path / "app.py").write_bytes(b"before\nfunction\nafter\n")
     service = PlanService(tmp_path, llm=None)
     read = EvidenceRequest(tool="read_file", level=1, paths=("app.py",),
                            start_line=2, end_line=2, reason="Reported location")

@@ -105,16 +105,18 @@ def test_mutation_diff_uses_immediate_dirty_baseline(tmp_path):
 
 
 def test_partial_failure_preserves_real_changes_and_rename_evidence(tmp_path):
+    (tmp_path / "src").mkdir()
     (tmp_path / "old.txt").write_text("content\n")
     runner = make_runner(tmp_path, effect="mutation")
     def partial(args):
-        (tmp_path / "old.txt").rename(tmp_path / "new.txt")
+        (tmp_path / "old.txt").rename(tmp_path / "src" / "new.txt")
         return {"ok": False, "error": "second operation failed"}
-    result = invoke(runner, {"moves": [{"source": "old.txt", "destination": "new.txt"}]}, partial)
+    result = invoke(runner, {"moves": [{"source": "old.txt", "destination": "src/new.txt"}]}, partial)
     assert result.status == "failed"
     assert len(result.mutations) == 1
     assert result.mutations[0].operation == "move"
     assert result.mutations[0].old_path == "old.txt"
+    assert result.mutations[0].path == "src/new.txt"
     assert result.mutations[0].status == "partial"
 
 
