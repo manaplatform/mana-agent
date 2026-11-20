@@ -340,6 +340,27 @@ venv/bin/python -m pytest -q tests/evidence/test_repository_evidence_board.py -k
 
 The agent did not run these tests.
 
+### UTF-8 detail fixture on Windows
+
+On Windows with Python 3.12 using cp1252 as its default text encoding, the
+detail pagination test raised `UnicodeEncodeError` while writing its Persian
+source fixture. The failure occurred before the Evidence Board read the file.
+UTF-8 defaults masked the fixture's dependency on the locale.
+
+The fixture now writes UTF-8 with LF line endings and checks that the exact
+source excerpt survives reconstruction from pages capped at 256 bytes. The
+Evidence Board already reads UTF-8 source, and the fix is confined to the test.
+
+**Do not reintroduce** locale-dependent encodings in Unicode source fixtures.
+
+Run the focused test on Windows with Python's UTF-8 mode disabled.
+
+```powershell
+python -X utf8=0 -m pytest -q tests/evidence/test_repository_evidence_board.py::test_detail_pages_preserve_utf8_and_bound_source_context
+```
+
+The agent did not run this test.
+
 ## Dynamic tasks, engines, and missing evidence
 
 An investigation/understanding task has its own objective, owner, bounded scope,

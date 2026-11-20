@@ -243,7 +243,9 @@ def test_pagination_does_not_skip_records_when_context_is_full(evidence):
 
 def test_detail_pages_preserve_utf8_and_bound_source_context(evidence):
     import json
-    (evidence.root / "app.py").write_text("value = 'مشاهده'\n")
+
+    source = "value = 'مشاهده'\n"
+    (evidence.root / "app.py").write_text(source, encoding="utf-8", newline="\n")
     observed = observe(evidence)
     text = ""
     offset = 0
@@ -254,7 +256,9 @@ def test_detail_pages_preserve_utf8_and_bound_source_context(evidence):
         if not page["has_more"]:
             break
         offset = page["next_offset"]
-    assert json.loads(text)["provenance"]["invocation_id"] == observed.provenance.invocation_id
+    detail = json.loads(text)
+    assert detail["provenance"]["invocation_id"] == observed.provenance.invocation_id
+    assert detail["sources"][0]["excerpt"] == source
 
 
 def test_requirements_enforce_actual_tools_and_supporting_observations(evidence):
