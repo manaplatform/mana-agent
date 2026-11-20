@@ -89,11 +89,13 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"]})
     selections = []
     if mode == "auto":
-        selections.append(("repo_search", {"query": "before", "paths": ["src"]}))
+        selections.append(("repo_search", {"query": "before", "paths": ["src"],
+            "evidence_need": "Locate the handler to edit."}))
     selections.extend([
-        ("read_file", {"path": filename}),
+        ("read_file", {"path": filename, "evidence_need": "Confirm the handler body before editing it."}),
         ("write_file", {"path": filename, "content": "first attempt\n"}),
         verify,
+        ("read_file", {"path": filename, "evidence_need": "Confirm the emitted value before repairing the failed check."}),
         ("write_file", {"path": filename, "content": "fixed\n"}),
     ])
     if mode == "auto":
@@ -108,11 +110,15 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
             return self
 
         async def generate(self, messages, *, continuation):
-            if self.index and selections[self.index - 1][0] == "repo_search":
-                assert any(match["file"] == filename for match in json.loads(messages[-1].content)["matches"])
-            if self.index and selections[self.index - 1][0] == ISOLATED_CHECK_TOOL:
-                observation = json.loads(messages[-1].content)
-                assert observation.get("exit_code") == int(self.index == selections.index(verify) + 1), observation
+            if self.index:
+                observation = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
+                previous = selections[self.index - 1][0]
+                if previous == "repo_search":
+                    assert any(match["file"] == filename for match in observation["matches"])
+                if previous == ISOLATED_CHECK_TOOL:
+                    assert observation.get("exit_code") == int(self.index == selections.index(verify) + 1), observation
+                if previous == "read_file" and self.index > selections.index(verify):
+                    assert observation["content"] == "first attempt\n"
             name, args = selections[self.index]
             self.index += 1
             assert name in self.tools
@@ -138,6 +144,102 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     assert children[0].evidence_refs
 
 
+@pytest.mark.parametrize("rejected_kind", ["oversized_group", "missing_evidence_need", "unoffered_tool", "unscoped_search"])
+def test_adaptive_coding_preserves_patch_budget_after_evidence_rejection(mode_gateway, monkeypatch, rejected_kind):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+    from mana_agent.llm.errors import InvalidResponseError
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+    (gateway.root / "caller.py").write_text("from app import handler\n")
+    patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-before\n+after\n*** End Patch"
+
+    def call(identity, name, args):
+        return {"id": identity, "name": name, "args": args}
+
+    if rejected_kind == "oversized_group":
+        rejected = [call("rejected-search", "batch_search_files", {"patterns": []}),
+                    call("rejected-list", "batch_list_files", {"queries": []})]
+        expected_error = "BUDGET_EXCEEDED"
+    elif rejected_kind == "missing_evidence_need":
+        rejected = [call("rejected-read", "read_file", {"path": "caller.py"})]
+        expected_error = "EVIDENCE_NEED_REQUIRED"
+    elif rejected_kind == "unscoped_search":
+        rejected = [call("rejected-search", "repo_search", {"query": "caller",
+            "evidence_need": "Find the caller before editing app.py."})]
+        expected_error = "SCOPED_EVIDENCE_REQUIRED"
+    else:
+        rejected = []
+        expected_error = "TOOL_NOT_OFFERED"
+
+    selections = [
+        [call("initial-read", "read_file", {"path": "app.py", "evidence_need": "Identify the value to patch."})],
+        rejected,
+        [call("focused-read", "read_file", {"path": "caller.py", "evidence_need": "Confirm the caller contract before changing app.py."})],
+        [call("patch", "apply_patch", {"patch": patch})],
+        [call("check", ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"]})],
+        [call("done", CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Applied and verified the fix."})],
+    ]
+    checks = []
+
+    async def check(root, command, *, task_id):
+        assert (root / "app.py").read_text() == "after\n"
+        checks.append(task_id)
+        return {"passed": True, "exit_code": 0, "output": "pass"}
+
+    class Model:
+        turn = 0
+
+        def with_tools(self, tools):
+            self.offered = {tool["function"]["name"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            if self.turn == 1:
+                assert {"read_file", "repo_search", "apply_patch", ISOLATED_CHECK_TOOL} <= self.offered
+                assert "investigate_repository" not in self.offered
+                assert "3 tool calls" in messages[-1].content
+                if rejected_kind == "unoffered_tool":
+                    self.turn += 1
+                    raise InvalidResponseError("Unregistered tool", reason_code="tool_not_offered")
+            elif self.turn == 2:
+                outputs = {message.tool_call_id: json.loads(message.content) for message in messages if message.role == "tool"}
+                assert outputs["initial-read"]["content"] == "before\n"
+                if rejected_kind == "unoffered_tool":
+                    assert "outside this turn's allowance" in messages[-2].content
+                for rejected_call in rejected:
+                    error = outputs[rejected_call["id"]]
+                    assert error["error_code"] == expected_error
+                    assert error["executed"] == 0 and error["optional_remaining"] == 1
+            elif self.turn == 3:
+                output = json.loads(messages[-2].content)
+                assert output["content"] == "from app import handler\n"
+                assert "read_file" not in self.offered
+            elif self.turn == 5:
+                assert self.offered == {CODING_RESULT_TOOL}
+            selected = selections[self.turn]
+            if self.turn != 1:
+                assert {item["name"] for item in selected} <= self.offered
+            self.turn += 1
+            return SimpleNamespace(tool_calls=selected)
+
+    model = Model()
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=model, max_tool_calls=4, programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Fix app.py", mode="auto", repair=True, workflow=workflow_choice())
+
+    assert result.status == "success", result.message
+    assert result.data["changed_files"] == ["app.py"]
+    parent = workflow.board.get_task(result.data["task_id"])
+    child, = workflow.board.list_tasks(parent_task_id=parent.task_id)
+    assert checks == [child.task_id]
+    assert model.turn == len(selections)
+    assert parent.mode_workflow["tool_operations"] == 4
+
+
 def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkeypatch):
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
@@ -146,7 +248,7 @@ def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkey
     gateway, workflow = mode_gateway
     gateway._entry_router.llm = Decisions()
     actions = iter([
-        ("read_file", {"path": "app.py"}),
+        ("read_file", {"path": "app.py", "evidence_need": "Confirm the body before editing."}),
         ("write_file", {"path": "app.py", "content": "fixed\n"}),
         None,
         (ISOLATED_CHECK_TOOL, {"argv": ["python", "app.py"]}),
@@ -155,6 +257,10 @@ def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkey
     calls = []
 
     class Model:
+        def with_tools(self, tools):
+            self.offered = {tool["function"]["name"] for tool in tools}
+            return self
+
         async def generate(self, messages, *, continuation):
             selection = next(actions)
             calls.append(selection)
@@ -164,6 +270,8 @@ def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkey
             if tool == ISOLATED_CHECK_TOOL:
                 assert any("same assignment" in message.content for message in messages)
                 assert any('"stale": true' in message.content for message in messages)
+                assert "read_file" in self.offered
+                assert "investigate_repository" not in self.offered
             return SimpleNamespace(tool_calls=[{"id": f"resume-{len(calls)}", "name": tool, "args": args}])
 
     async def check(root, command, *, task_id):
@@ -214,7 +322,7 @@ def test_adaptive_coding_deadline_stops_checkpointing_without_retry(mode_gateway
     monkeypatch.setattr(workflow.lane, "checkpoint", checkpoint_at_deadline)
     actions = iter([
         ("write_file", {"path": "app.py", "content": "fixed\n"}),
-        ("read_file", {"path": "app.py"}),
+        ("read_file", {"path": "app.py", "evidence_need": "Confirm the updated contents to choose a focused check."}),
     ])
 
     class Model:

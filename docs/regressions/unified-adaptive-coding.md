@@ -64,6 +64,39 @@ did not run this check.
 venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_corrects_a_missing_tool_call
 ```
 
+## Evidence exhausted the edit budget
+
+On November 20 at 12:00:55 Tehran time, realtime Internal AUTO task
+`task_20261120_000021` exhausted its 50 tool calls before its first edit. The
+write-enabled assignment ran 49 file reads, searches, and listings plus one
+Git status check. The checkpoint recorded zero changed files. Four more
+model responses exceeded the remaining budget.
+
+The [native loop](../../src/mana_agent/coding/internal_engine.py) counted a novel
+observation as progress even when the model had made no progress toward an edit.
+The allowance appeared only after a group was rejected. The earlier staged
+patch-handoff reserve did not apply to realtime write assignments.
+
+Realtime AUTO and DEBUG now admit targeted reads, edits, and focused checks in
+one loop. The model supplies an evidence need on the read or search itself.
+The runtime bounds each whole group, shows the remaining allowance before the
+next decision, and adjusts the reserve based on observed changes and focused
+checks. The same assignment retains current observations when a selection is
+rejected. The staged tool contracts and saved checkpoint format are unchanged.
+
+**Do not reintroduce** a mandatory discovery phase or allow optional tool work
+to consume the capacity needed to edit, check, and submit the result. Preserve
+the model's ability to select a scoped read after an edit or check.
+
+User-owned verification covers a reduced-budget replay, bounded rejection,
+interleaving reads and repairs, and resuming with source evidence. The agent
+did not run the checks or replay the live task.
+
+```sh
+venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/gateway/test_debug_plan_mode_contract.py -k adaptive_coding
+venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/coding/test_scoped_evidence_tools.py tests/gateway/test_debug_plan_mode_contract.py
+```
+
 ## Verification
 
 Run the focused regressions first.

@@ -176,6 +176,71 @@ def test_adaptive_coding_corrects_a_missing_tool_call(tmp_path, monkeypatch, out
         assert prose not in error
 
 
+def test_adaptive_coding_rejects_repeated_oversized_groups_without_dispatch(tmp_path):
+    from mana_agent.llm.messages import validate_conversation
+
+    target = tmp_path / "app.py"
+    target.write_text("before\n")
+
+    class Model:
+        turns = 0
+
+        async def generate(self, messages, *, continuation):
+            validate_conversation(messages)
+            if self.turns:
+                errors = [json.loads(message.content) for message in messages if message.role == "tool"]
+                assert len(errors) == 3
+                assert all(error["error_code"] == "BUDGET_EXCEEDED" for error in errors)
+                assert all(error["remaining"] == 3 and error["optional_remaining"] == 1 for error in errors)
+            self.turns += 1
+            selections = [
+                ("read_file", {"path": "app.py"}),
+                ("repo_search", {"query": "before", "paths": ["app.py"]}),
+                ("write_file", {"path": "app.py", "content": "unexpected\n"}),
+            ]
+            return SimpleNamespace(tool_calls=[{"id": f"{self.turns}-{index}", "name": name, "args": args}
+                                               for index, (name, args) in enumerate(selections)])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=3, programmatic_tool_calling_enabled=False)
+    task = CodingTask(task_id="oversized-group", goal="Fix app.py", context={"adaptive_mode": "auto"})
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="workspaceWrite")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "failed"
+    assert "rejected after correction" in result.errors[0]
+    assert model.turns == 2
+    assert result.continuation_context["executed_operations"] == []
+    assert target.read_text() == "before\n"
+
+
+def test_adaptive_coding_protects_model_turns_for_edit_check_and_result():
+    from mana_agent.coding.adaptive import AdaptiveWriteBudget
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+
+    budget = AdaptiveWriteBudget(remaining_tools=10, remaining_turns=3, tool_reserve=2)
+    assert budget.optional_calls == 0
+    assert not budget.allows("read_file")
+    assert budget.reject_group([ISOLATED_CHECK_TOOL])[0] == "BUDGET_EXCEEDED"
+    assert budget.reject_group(["apply_patch"]) is None
+
+    mixed = AdaptiveWriteBudget(remaining_tools=3, remaining_turns=4, tool_reserve=2)
+    assert mixed.allows("read_file")
+    assert mixed.reject_group(["read_file", "apply_patch", ISOLATED_CHECK_TOOL]) is None
+
+    last_tool_turn = AdaptiveWriteBudget(remaining_tools=10, remaining_turns=2, tool_reserve=2)
+    assert last_tool_turn.reject_group([ISOLATED_CHECK_TOOL, "apply_patch"])[0] == "VERIFICATION_RESERVE_REQUIRED"
+    assert last_tool_turn.reject_group(["apply_patch", ISOLATED_CHECK_TOOL]) is None
+
+    assert AdaptiveWriteBudget(remaining_tools=2, remaining_turns=3, tool_reserve=1).optional_calls == 1
+    assert AdaptiveWriteBudget(remaining_tools=2, remaining_turns=3, tool_reserve=2).optional_calls == 0
+    assert AdaptiveWriteBudget(remaining_tools=1, remaining_turns=2, tool_reserve=0).optional_calls == 1
+
+    final_turn = AdaptiveWriteBudget(remaining_tools=10, remaining_turns=1, tool_reserve=0)
+    assert final_turn.allows(CODING_RESULT_TOOL)
+    assert not final_turn.allows(ISOLATED_CHECK_TOOL)
+
+
 def test_slow_native_provider_is_measured_separately_from_duplicate_reads(tmp_path, monkeypatch):
     from mana_agent.coding import internal_engine
 

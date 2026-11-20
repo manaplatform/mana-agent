@@ -18,6 +18,19 @@ The native terminal decision can report completion, identify a blocker, or
 ask for material clarification. Production capability changes additionally
 require source-backed runtime reachability and existing integration verification.
 
+For a realtime Internal write task, `read_file` and `repo_search` are ordinary
+tool choices alongside edits and checks. Each source request supplies
+`evidence_need` with the missing fact and the edit or check it could affect.
+Searches name specific paths or a targeted glob. An edit or useful diagnostic
+can be the first action, and a failing check can lead to another scoped read.
+
+The loop shows the remaining tool calls and model turns before each decision.
+It leaves capacity for an edit and a focused check before the first change and
+after a failed check. An unverified edit needs only the check reserve, and a
+passing check releases it. One model turn stays available for the typed
+result. An oversized group is rejected as a unit and gets one correction
+within the remaining model budget. See the [evidence budget regression](regressions/unified-adaptive-coding.md#evidence-exhausted-the-edit-budget).
+
 Each model turn must select an offered coding tool or submit a terminal result
 with one direct `submit_coding_result` call. If the model replies with prose
 alone, Coding requests one correction from the same model within the remaining
