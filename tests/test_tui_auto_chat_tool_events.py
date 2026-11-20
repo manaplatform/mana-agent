@@ -168,7 +168,10 @@ def test_tui_new_conversation_uses_gateway_boundary_and_clears_visible_history(t
     assert events == []
 
 
-def test_tui_new_command_deletes_active_session_and_clears_mounted_log(tmp_path: Path) -> None:
+def test_tui_new_command_deletes_active_session_and_clears_mounted_log(
+    tmp_path: Path,
+    wait_for_tui_widgets,
+) -> None:
     class Gateway:
         config = SimpleNamespace(session_id="session_old")
 
@@ -204,17 +207,18 @@ def test_tui_new_command_deletes_active_session_and_clears_mounted_log(tmp_path:
     async def run() -> None:
         async with app.run_test() as pilot:
             assert app.chat_log is not None
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             assert len(app.chat_log.query(".user-message")) == 1
             composer = app.query_one(MessageInput)
             composer.value = "/new"
             await pilot.press("enter")
-            await pilot.pause()
+            transcript = ".user-message, .assistant-message, ExecutionPanel"
+            await wait_for_tui_widgets(pilot, transcript, count=0)
 
             assert gateway.deleted_session == "session_old"
             assert app._gateway_session_id == "session_new"
             assert history.get_events() == []
-            assert not list(app.chat_log.query(".user-message, .assistant-message, ExecutionPanel"))
+            assert not list(app.chat_log.query(transcript))
 
     asyncio.run(run())
 

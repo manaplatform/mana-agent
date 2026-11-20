@@ -42,7 +42,7 @@ class _PanelLayoutApp(App):
             yield Static("tool details", id="side-panel")
 
 
-def test_short_message_uses_full_initial_card_width() -> None:
+def test_short_message_uses_full_initial_card_width(wait_for_tui_widgets) -> None:
     """A line equal to the card width must not lose a cell to an edit cursor."""
     history = ChatHistory()
     history.add(UserMessageEvent(content="x" * 94))
@@ -50,7 +50,7 @@ def test_short_message_uses_full_initial_card_width() -> None:
 
     async def run() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             message = _message(app)
             assert message.scrollable_content_region.width == 94
             assert message.wrap_width == 94
@@ -59,14 +59,14 @@ def test_short_message_uses_full_initial_card_width() -> None:
     _run(run())
 
 
-def test_long_message_wraps_at_the_initial_container_width() -> None:
+def test_long_message_wraps_at_the_initial_container_width(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     history.add(UserMessageEvent(content="x" * 95))
     app = ManaChatApp(history=history)
 
     async def run() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             message = _message(app)
             assert message.wrap_width == message.scrollable_content_region.width
             assert message.wrapped_document.height == 2
@@ -75,14 +75,14 @@ def test_long_message_wraps_at_the_initial_container_width() -> None:
     _run(run())
 
 
-def test_existing_message_reflows_when_terminal_narrows() -> None:
+def test_existing_message_reflows_when_terminal_narrows(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     history.add(UserMessageEvent(content="x" * 94))
     app = ManaChatApp(history=history)
 
     async def run() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             message = _message(app)
             assert message.wrapped_document.height == 1
             await pilot.resize_terminal(70, 24)
@@ -94,14 +94,14 @@ def test_existing_message_reflows_when_terminal_narrows() -> None:
     _run(run())
 
 
-def test_existing_message_reflows_when_terminal_widens() -> None:
+def test_existing_message_reflows_when_terminal_widens(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     history.add(UserMessageEvent(content="x" * 94))
     app = ManaChatApp(history=history)
 
     async def run() -> None:
         async with app.run_test(size=(70, 24)) as pilot:
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             message = _message(app)
             assert message.wrapped_document.height == 2
             await pilot.resize_terminal(100, 24)
@@ -113,16 +113,16 @@ def test_existing_message_reflows_when_terminal_widens() -> None:
     _run(run())
 
 
-def test_new_message_uses_the_current_width_without_a_resize() -> None:
+def test_new_message_uses_the_current_width_without_a_resize(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     history.add(UserMessageEvent(content="first"))
     app = ManaChatApp(history=history)
 
     async def run() -> None:
         async with app.run_test(size=(70, 24)) as pilot:
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             history.add(UserMessageEvent(content="x" * 60))
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message", count=2)
             message = _message(app, 1)
             assert message.wrap_width == message.scrollable_content_region.width
             assert message.wrapped_document.height == 1
@@ -131,19 +131,14 @@ def test_new_message_uses_the_current_width_without_a_resize() -> None:
     _run(run())
 
 
-def test_message_reflows_when_a_surrounding_panel_changes_width() -> None:
+def test_message_reflows_when_a_surrounding_panel_changes_width(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     history.add(UserMessageEvent(content="x" * 70))
     app = _PanelLayoutApp(history)
 
     async def run() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause()
-            # History replay is deliberately deferred until its mounted
-            # VerticalScroll has completed a refresh. Windows' Proactor event
-            # loop may expose the app after that refresh but before the
-            # dynamically mounted message card is processed.
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             message = _message(app)
             panel = app.query_one("#side-panel", Static)
             initial_width = message.scrollable_content_region.width
@@ -165,14 +160,14 @@ def test_message_reflows_when_a_surrounding_panel_changes_width() -> None:
     _run(run())
 
 
-def test_consecutive_messages_do_not_retain_another_widgets_wrap_width() -> None:
+def test_consecutive_messages_do_not_retain_another_widgets_wrap_width(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     history.add(UserMessageEvent(content="x" * 94))
     app = ManaChatApp(history=history)
 
     async def run() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
             first = _message(app)
             assert first.wrapped_document.height == 1
 
@@ -183,7 +178,7 @@ def test_consecutive_messages_do_not_retain_another_widgets_wrap_width() -> None
             # the available width independently of the per-widget rewrap behavior
             # this regression covers.
             history.add(UserMessageEvent(content="x" * 50))
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message", count=2)
             second = _message(app, 1)
 
             assert first.wrap_width == first.scrollable_content_region.width

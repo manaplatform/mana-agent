@@ -11,8 +11,35 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from textual.pilot import Pilot
+
+
+@pytest.fixture
+def wait_for_tui_widgets():
+    """Wait for Textual's deferred mounts and layout before inspecting the DOM."""
+
+    async def wait(pilot: Pilot, selector: str, *, count: int = 1) -> None:
+        deadline = time.monotonic() + 5
+        while True:
+            await pilot.pause(0.01)
+            widgets = list(pilot.app.query(selector))
+            if len(widgets) == count and all(
+                widget.is_mounted and widget.region for widget in widgets
+            ):
+                return
+            if time.monotonic() >= deadline:
+                pytest.fail(
+                    f"Expected {count} mounted and laid-out widgets matching {selector!r}. "
+                    f"Found {len(widgets)} DOM matches with regions "
+                    f"{[widget.region for widget in widgets]}."
+                )
+
+    return wait
 
 
 @pytest.fixture

@@ -245,3 +245,33 @@ venv/bin/python -m pytest tests/test_tui_*.py tests/test_codex_tui_lifecycle.py 
 node --test tests/dashboard/live_chat_reducer.test.mjs tests/dashboard/live_chat_approval_ui.test.mjs
 venv/bin/mana-agent chat --tui
 ```
+
+### Windows CI transcript replay timing
+
+Six Windows CI tests failed while looking up preloaded user messages. The
+layout tests hit an empty query before measuring text, and the `/new` test
+found zero widgets before submitting the command.
+
+`ChatLog` defers the initial history replay with `call_after_refresh`. The
+replay mounts a `UserMessage` row, which then composes its nested
+`SelectableText`. Textual's `Pilot.pause()` drains messages for the widgets it
+can see when the pause starts. The replay callback and new descendants can
+finish in later cycles, so a single pause can return with an empty query on
+Windows. A fixed number of pauses makes the same assumption about scheduling.
+
+The shared `wait_for_tui_widgets` fixture polls for the expected widget count,
+completed mounting, and a nonempty layout region. It also waits for the DOM to
+empty after `/new`. The tests still assert the exact wrap dimensions and check
+the old session deletion, new session activation, and history clearing.
+
+**Do not reintroduce.** Wait for the expected transcript widgets and their
+layout before inspecting dynamically replayed or appended messages. Keep wrap
+expectations out of the readiness condition so incorrect layout still fails
+the regression assertion.
+
+Run from the checkout root on Windows with Python 3.12. The agent did not run
+these tests or rerun CI.
+
+```powershell
+python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_auto_chat_tool_events.py
+```

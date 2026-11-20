@@ -27,7 +27,7 @@ def _rendered_source(widget: SelectableText) -> str:
     return widget.text
 
 
-def test_message_widgets_support_textual_mouse_selection_and_copy() -> None:
+def test_message_widgets_support_textual_mouse_selection_and_copy(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
 
@@ -39,14 +39,15 @@ def test_message_widgets_support_textual_mouse_selection_and_copy() -> None:
                     content="# Copy this markdown\n\n```python\nvalue = 1\n```"
                 )
             )
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
+            await wait_for_tui_widgets(pilot, ".assistant-message")
 
             chat_log = app.query_one("#chat-log")
             user_message = chat_log.query_one(".user-message", SelectableText)
             reply = chat_log.query_one(AssistantReply)
             assert reply.markdown.display
             reply.copy_mode.press()
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".assistant-message > SelectableText")
             assistant_message = reply.source
 
             assert app.mouse_captured is None
@@ -99,9 +100,9 @@ def test_activity_updates_one_turn_scoped_row_live() -> None:
     _run(run())
 
 
-def test_history_messages_wrap_at_available_card_width_after_replay_append_and_resize() -> (
-    None
-):
+def test_history_messages_wrap_at_available_card_width_after_replay_append_and_resize(
+    wait_for_tui_widgets,
+) -> None:
     """Dynamically mounted history TextAreas must not retain a one-column wrap."""
     history = ChatHistory()
     history.add(UserMessageEvent(content="short user message"))
@@ -120,13 +121,14 @@ def test_history_messages_wrap_at_available_card_width_after_replay_append_and_r
 
     async def run() -> None:
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".user-message")
+            await wait_for_tui_widgets(pilot, ".assistant-message")
             chat_log = app.query_one("#chat-log")
             user_message = chat_log.query_one(".user-message", SelectableText)
             reply = chat_log.query_one(AssistantReply)
             assert reply.markdown.display
             reply.copy_mode.press()
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".assistant-message > SelectableText")
             assistant_message = reply.source
 
             # Replayed short text has the full message-card width rather than one
@@ -151,12 +153,8 @@ def test_history_messages_wrap_at_available_card_width_after_replay_append_and_r
             assert "```python" in assistant_message.text
 
             history.add(AssistantMessageEvent(content="short assistant message"))
-            await pilot.pause()
-            # A dynamic mount is a two-phase operation in Textual: the first
-            # idle cycle lays out the child and posts its Resize event, and the
-            # second processes that event and rewraps the TextArea. Windows'
-            # Proactor loop does not collapse both phases into one cycle.
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, ".assistant-message", count=2)
+            await wait_for_tui_widgets(pilot, ".assistant-message:last-of-type > Markdown")
             live_assistant = list(chat_log.query(AssistantReply))[-1].markdown
             assert live_assistant.region.height >= 1
 

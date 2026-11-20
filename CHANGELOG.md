@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-21 — Windows CI. Wait for Textual message widgets to mount and receive their first layout before checking transcript wrapping and `/new` behavior. See the [transcript replay regression and Windows verification command](docs/regressions/agent-activity-visibility.md#windows-ci-transcript-replay-timing). The agent did not run the tests.
 - 2026-11-21 — Internal Coding. Describe the runtime wiring chain in the result schema and identify disconnected edge pairs during correction without exposing rejected data. See the [wiring regression and verification command](docs/regressions/unified-adaptive-coding.md#disconnected-runtime-wiring-in-a-completion-report). The agent did not run the tests.
 - 2026-11-21 — Internal Coding. Stream file fingerprints beyond the preview budget and use Git source candidates for checkout commands. Keep interrupted or unreadable observations uncertain. See the [checkout checkpoint incident and verification commands](docs/regressions/unified-adaptive-coding.md#ignored-build-output-at-command-checkpoints). The agent did not run the tests.
 - 2026-11-21 — Textual chat. Consolidate per-turn activity, retain streamed output and diffs, offer inline approvals, and add a growing composer with searchable commands and interruption. Keep decisions and approvals on the existing gateway paths. See the [terminal chat regression and verification commands](docs/regressions/agent-activity-visibility.md#2026-11-21-textual-activity-and-inline-approvals).
