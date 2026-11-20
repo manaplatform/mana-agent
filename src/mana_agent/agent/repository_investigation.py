@@ -68,7 +68,15 @@ def compact_observation(row: dict) -> dict:
         result = {key: value for key, value in result.items()
                   if key not in {"execution", "mutations", "source_evidence"}}
         if isinstance(result.get("content"), str) and len(result["content"]) > 6000:
-            result["content"] = result["content"][:6000]
+            content = result["content"]
+            if "start_line" in result and "end_line" in result:
+                # A compact observation still describes the lines it actually contains.
+                preview = content[:6000].rsplit("\n", 1)[0] + "\n" if "\n" in content[:6000] else ""
+                result["end_line"] = result["start_line"] + len(preview.splitlines()) - 1
+                result.update(content=preview, complete=False, partial=True, truncated=True,
+                              next_start_line=result["end_line"] + 1)
+            else:
+                result["content"] = content[:6000]
             result["content_truncated"] = True
         if isinstance(result.get("directories"), list) and len(result["directories"]) > 50:
             result["directories"] = result["directories"][:50]

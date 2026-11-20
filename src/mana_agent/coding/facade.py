@@ -32,6 +32,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
     """Unified facade managing selectable Internal and External coding execution engines."""
 
     supports_gateway_task_identity = True
+    supports_adaptive_repository_loop = True
 
     def __init__(
         self,
@@ -239,8 +240,10 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
         engine._tool_runners = {}
         self._running_internal_engine = engine
         runtime = {**(kwargs.get("execution_runtime") or {}), **(kwargs.get("batch_runtime") or {})}
+        engine.extra_tools.update(runtime.get("registered_tools", {}))
         for name in ("execution_registry", "tool_authorize", "execution_supervisor", "taskboard", "batch_manager", "batch_authorize",
-                     "batch_authority", "batch_autonomous_config", "model", "provider", "charge_model", "charge_tool"):
+                     "batch_authority", "batch_autonomous_config", "model", "provider", "charge_model", "charge_tool",
+                     "save_native_continuation", "validate_adaptive_completion", "allowed_tools"):
             if name in runtime:
                 setattr(engine, name, runtime[name])
         engine.max_tool_calls = min(engine.max_tool_calls, int(runtime.get("remaining_tool_calls", engine.max_tool_calls)))
@@ -277,6 +280,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             task_id=task_id,
             goal=str(kwargs.get("coding_original_goal") or request),
             allowed_files=allowed_files,
+            requirements=list(kwargs.get("coding_requirements") or []),
             requires_repository_write=kwargs.get("execution_mode") not in {"plan", "read_only"},
             execution_policy=policy,
             execution_mode="batch" if policy.required else str(kwargs.get("execution_mode") or "auto"),
@@ -285,6 +289,8 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
                      "coding_resume_context": kwargs.get("coding_resume_context") or {},
                      "coding_research_context": kwargs.get("coding_research_context") or {},
                      "mode_patch_proposal": bool(kwargs.get("coding_mode_proposal")),
+                     "adaptive_mode": kwargs.get("adaptive_mode"),
+                     "runtime_capability_change": bool(kwargs.get("runtime_capability_change")),
                      "repository_investigation": kwargs.get("repository_investigation"),
                      "coding_continuation_id": kwargs.get("coding_continuation_id") or "",
                      "conversation_context_in_request": bool(kwargs.get("conversation_context_in_request"))},
@@ -355,6 +361,7 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
             "run_id": task_id,
             "flow_id": self._active_flow_id,
             "workspace_path": str(workspace.worktree_path),
+            "adaptive_result": res.adaptive_result,
         }
 
 

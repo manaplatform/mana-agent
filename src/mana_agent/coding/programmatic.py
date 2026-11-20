@@ -24,7 +24,7 @@ from typing import Any, Sequence
 
 from mana_agent.coding.evidence_tools import CodingEvidenceTools, INVESTIGATE
 from mana_agent.coding.live_events import publish_coding_event
-from mana_agent.coding.models import AgentEvent, WorkspaceContext
+from mana_agent.coding.models import AgentEvent, ISOLATED_CHECK_TOOL, WorkspaceContext
 from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
 
 logger = logging.getLogger(__name__)
@@ -117,11 +117,14 @@ class ToolExecutionDispatcher:
         self.model = model
         self.provider = provider
         self.llm = llm
+        from mana_agent.repository_evidence.observations import SOURCE_OUTPUT_BYTES
+        self.source_output_bytes = SOURCE_OUTPUT_BYTES
         from mana_agent.coding.scheduler import OperationReadCache
 
         self.read_cache = OperationReadCache(ttl_seconds=cache_ttl_seconds) if cache_enabled else None
         self._read_locks: dict[str, threading.Lock] = {}
         self.runner = None
+        self.allowed_tools: frozenset[str] | None = None
         self.evidence_tools: CodingEvidenceTools | None = None
         if execution_authority is not None:
             from mana_agent.multi_agent.agents.tool_runner_agent import ToolRunnerAgent
@@ -193,6 +196,8 @@ class ToolExecutionDispatcher:
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         name = tool_name.replace(".", "_")
+        if self.allowed_tools is not None and name not in self.allowed_tools:
+            return False
         if self.runner is None or name not in self.runner.authority.policies:
             return False
         policy = self.runner.authority.policies[name]
@@ -205,6 +210,8 @@ class ToolExecutionDispatcher:
         if self.runner is None:
             return {"ok": False, "error_code": "EXECUTION_AUTHORITY_REQUIRED", "error": "Tool execution requires a host-bound specialist task."}
         policy = self.runner.authority.policies.get(name)
+        if self.allowed_tools is not None and name not in self.allowed_tools:
+            return {"ok": False, "error_code": "TOOL_NOT_AUTHORIZED", "error": "Tool is unavailable in this assignment"}
         if policy is None:
             return {"ok": False, "error_code": "UNKNOWN_TOOL", "error": f"Tool has no registered execution capability: {tool_name}"}
         if policy.effect != "read_only" and operation_fingerprint(tool_name, arguments) in self._previous_operation_fingerprints:
@@ -249,7 +256,8 @@ class ToolExecutionDispatcher:
                 version = selected_file_versions(self.repo_root, paths)
                 if version is None:
                     return execute_once(selected_arguments)
-                cache_args = {"arguments": selected_arguments, "versions": version}
+                cache_args = {"arguments": selected_arguments, "versions": version,
+                              "source_output_bytes": self.source_output_bytes}
                 cached = self.read_cache.get(name, cache_args)
                 if cached is not None:
                     return {**cached, "cache_hit": True}
@@ -282,7 +290,6 @@ class ToolExecutionDispatcher:
             git_diff,
             git_status,
             list_repository_directories,
-            repo_batch_read,
             run_script_once,
             verify_project,
         )
@@ -296,7 +303,8 @@ class ToolExecutionDispatcher:
             if not target.is_relative_to(self.repo_root) or not target.is_file():
                 return {"ok": False, "error": f"File not found or outside workspace: {rel_path}"}
             from mana_agent.repository_evidence.observations import read_source
-            return read_source(self.repo_root, rel_path, start_line=args.get("start_line"), end_line=args.get("end_line"))
+            return read_source(self.repo_root, rel_path, start_line=args.get("start_line"),
+                               end_line=args.get("end_line"), max_chars=self.source_output_bytes)
 
         elif name == "read_skill":
             from mana_agent.skills.manager import read_skill
@@ -325,8 +333,38 @@ class ToolExecutionDispatcher:
                       "batch_search_files", "batch_list_files"}:
             return execute_repository_discovery(self.repo_root, name, args)
 
-        elif name == "repo_batch_read":
-            return repo_batch_read(self.repo_root, files=list(args.get("files") or []))
+        elif name in {"repo_batch_read", "batch_read_files"}:
+            from mana_agent.repository_evidence.observations import read_source
+            room = min(self.source_output_bytes, int(args.get("max_bytes") or self.source_output_bytes))
+            cap = min(room, int(args.get("max_bytes_per_file") or room))
+            rows = []
+            seen = set()
+            for selected in args.get("files", [])[:100]:
+                if not isinstance(selected, (str, dict)):
+                    rows.append({"ok": False, "path": "", "error": "Select a path or a file range object"})
+                    continue
+                spec = {"path": selected} if isinstance(selected, str) else selected
+                path = spec.get("path") or spec.get("file_path") or ""
+                start, end = spec.get("start_line"), spec.get("end_line")
+                if not isinstance(path, str) or any(value is not None and type(value) is not int for value in (start, end)):
+                    rows.append({"ok": False, "path": "", "error": "Select a file path and integer range bounds"})
+                    continue
+                identity = (path, start or 1, end)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                try:
+                    row = read_source(self.repo_root, path, start_line=start,
+                                      end_line=end, max_chars=min(room, cap))
+                except (OSError, ValueError) as exc:
+                    row = {"ok": False, "path": path, "error": str(exc)}
+                rows.append(row)
+                room -= row.get("bytes_read", 0)
+            errors = [row for row in rows if not row["ok"]]
+            return {"ok": not errors, "files": rows, "errors": [
+                {"path": row["path"], "error": row["error"]} for row in errors],
+                "total_files": len(rows), "successful_count": len(rows) - len(errors),
+                "truncated": any(row.get("truncated") for row in rows)}
 
         elif name == "write_file":
             path = str(args.get("path") or "")
@@ -368,20 +406,6 @@ class ToolExecutionDispatcher:
             patches = list(args.get("patches") or [])
             res = apply_patch_batch(self.repo_root, patches=patches)
             return json.loads(res) if isinstance(res, str) else res
-
-        elif name == "batch_read_files":
-            from mana_agent.tools.batch_file_ops import batch_read_files
-            files = list(args.get("files") or [])
-            max_bytes = int(args.get("max_bytes") or 2_000_000)
-            max_bytes_per_file = int(args.get("max_bytes_per_file") or 150_000)
-            concurrency = int(args.get("concurrency") or 8)
-            return batch_read_files(
-                self.repo_root,
-                files=files,
-                max_bytes=max_bytes,
-                max_bytes_per_file=max_bytes_per_file,
-                concurrency=concurrency,
-            )
 
         elif name == "batch_write_files":
             from mana_agent.tools.batch_file_ops import batch_write_files
@@ -870,7 +894,7 @@ class ProgrammaticExecutionSession:
         if result.get("ok") and tool_name in {"write_file", "create_file", "edit_file", "multi_edit_file", "delete_file",
                 "apply_patch", "apply_patch_batch", "batch_apply_patches", "batch_write_files", "batch_move_files", "batch_delete_files"}:
             self.state.verification_results.clear()
-        if tool_name in {"verify_project", "run_command", "run_script_once", "shell"}:
+        if tool_name in {"verify_project", ISOLATED_CHECK_TOOL, "run_command", "run_script_once", "shell"}:
             self.state.verification_results.append({"tool": tool_name, "arguments": arguments, "result": result})
 
         # Track mutations and commands

@@ -115,3 +115,9 @@ class ToolQueueStore:
             payload["result"]["mutations"] = [item.model_dump(exclude={"diff"}) for item in result.mutations]
             conn.execute("UPDATE tool_queue_jobs SET status=?,payload=?,row_version=row_version+1 WHERE job_id=? AND status='running'",
                          (result.status, json.dumps(payload), key))
+
+    def operation_receipts(self, task_id):
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT payload FROM tool_queue_jobs WHERE task_id=? AND kind='operation' ORDER BY rowid",
+                                (task_id,)).fetchall()
+        return [receipt for row in rows if (receipt := json.loads(row["payload"]).get("result"))]

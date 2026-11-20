@@ -17,8 +17,17 @@ class EvidenceContextTool:
 
 
 def context_tools(board):
+    def detail(query):
+        try:
+            return board.detail(query)
+        except KeyError:
+            return {"ok": False, "error_code": "UNKNOWN_EVIDENCE_REF",
+                    "error": (f"Evidence reference {query.evidence_id}:{query.revision} is unavailable in this repository. "
+                              "Use an evidence_id and revision returned together by repository_evidence_query, "
+                              "or use the original tool observation if it is still current.")}
+
     return [
         EvidenceContextTool("repository_evidence_query", "Query scoped repository evidence; results and context are bounded.", EvidenceQuery, board.query),
         EvidenceContextTool("repository_evidence_get", "Read a bounded page of a cited evidence revision and provenance.",
-                            EvidenceDetailQuery, board.detail),
+                            EvidenceDetailQuery, detail),
     ]

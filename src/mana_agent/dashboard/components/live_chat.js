@@ -1819,7 +1819,9 @@
         const groups = [];
         for (const ev of eventsToRender) {
           const lastGroup = groups[groups.length - 1];
-          const evTitle = ev.title || ev.tool_name || ev.type;
+          const action = ev.title || ev.tool_name || ev.type;
+          const activity = (ev.metadata || {}).coding_activity;
+          const evTitle = activity ? `${activity[0].toUpperCase()}${activity.slice(1)} · ${action}` : action;
           if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.events[0].id === ev.id && lastGroup.status === ev.status) {
             lastGroup.events.push(ev);
           } else {

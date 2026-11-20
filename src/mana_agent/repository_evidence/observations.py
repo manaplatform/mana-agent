@@ -6,6 +6,8 @@ from pathlib import Path
 
 from mana_agent.repository_evidence.models import EvidenceProvenance, EvidenceSource, InvestigationCitation, relative_source
 
+SOURCE_OUTPUT_BYTES = 48_000
+
 
 def read_directory(root: Path, path: str = ".") -> dict:
     from mana_agent.tools.repository import _is_skipped_dir
@@ -68,39 +70,53 @@ def read_source(root: Path, path: str, *, start_line=None, end_line=None, max_ch
     relative_source(path)
     root = Path(root).resolve()
     target = (root / path).resolve()
-    if not target.is_relative_to(root):
-        raise PermissionError("Source escapes assigned checkout")
+    if not target.is_relative_to(root) or target != root / path:
+        raise PermissionError("Source must stay inside the assigned checkout and cannot use symlinks")
     relative_source(target.relative_to(root).as_posix())
+    if not target.is_file():
+        raise ValueError("Source must be an existing regular file")
     with target.open("rb") as stream:
         data = stream.read(2_000_001)
     if len(data) > 2_000_000:
         raise ValueError("Source exceeds the bounded evidence read; select a smaller source artifact")
+    if b"\0" in data:
+        raise ValueError("Source is a binary file")
     text = data.decode("utf-8", errors="replace")
     lines = text.splitlines(keepends=True)
     start = max(1, int(start_line or 1))
     end = min(int(end_line or len(lines)), len(lines))
     if end_line is not None and int(end_line) < start:
         raise ValueError("Source range is reversed")
-    selected_lines = lines[start - 1:end]
-    content = "".join(selected_lines)
-    content_truncated = max_chars is not None and len(content) > max_chars
-    excerpt_length = len(content)
-    if content_truncated:
-        content = content[:max_chars]
-        excerpt_length = 0
-        end = start - 1
-        for line in selected_lines:
-            if excerpt_length + len(line) > max_chars:
+    if start > max(1, len(lines)):
+        return {"ok": False, "path": path, "total_lines": len(lines), "error_code": "SOURCE_RANGE_NOT_FOUND",
+                "error": f"Requested start line {start} is beyond the end of this file."}
+    requested_end = end
+    selected_lines = []
+    remaining = max_chars
+    for line in lines[start - 1:end]:
+        size = len(line.encode("utf-8"))
+        if remaining is not None:
+            if size > remaining:
                 break
-            excerpt_length += len(line)
-            end += 1
+            remaining -= size
+        selected_lines.append(line)
+    content = "".join(selected_lines)
+    end = start + len(selected_lines) - 1
+    content_truncated = end < requested_end
+    complete = start == 1 and end == len(lines)
     source = EvidenceSource(path=path, sha256=sha256(data).hexdigest(),
                             start_line=start if end >= start else None,
-                            end_line=end if end >= start else None, excerpt=content[:min(excerpt_length, 12000)])
+                            end_line=end if end >= start else None, excerpt=content[:12000])
     result = {"ok": True, "path": path, "content": content, "start_line": start,
-              "end_line": end, "total_lines": len(lines), "source_evidence": source.model_dump(mode="json")}
+              "end_line": end, "total_lines": len(lines), "sha256": source.sha256,
+              "file_size_bytes": len(data), "bytes_read": len(content.encode("utf-8")),
+              "complete": complete, "partial": not complete, "truncated": content_truncated,
+              "source_evidence": source.model_dump(mode="json")}
     if content_truncated:
-        result["content_truncated"] = True
+        result.update(content_truncated=True, next_start_line=end + 1)
+        if not selected_lines:
+            result.update(ok=False, error_code="SOURCE_LINE_EXCEEDS_BUDGET",
+                          error="No full line fits the remaining output budget. Use a focused search or a smaller tool group.")
     return result
 
 
@@ -125,6 +141,10 @@ def ingest_operation(authority, result) -> None:
         sources = (EvidenceSource.model_validate(result.result["source_evidence"]),)
     observation = {"tool": result.tool_name, "status": result.status, "exit_code": result.exit_code,
                    "operation_id": result.operation_id}
+    if result.tool_name in {"repo_search", "batch_search_files", "repo_batch_search"}:
+        matches = result.result.get("matches", result.result.get("results", []))
+        observation["content_digest"] = sha256(json.dumps(
+            [matches, result.result.get("truncated")], sort_keys=True).encode()).hexdigest()
     selected_policy = authority.policies.get(result.tool_name)
     category = "test_results" if selected_policy and selected_policy.capability == "test_execution" else "code_behavior" if sources and sources[0].source_kind == "file" else "error_observation" if result.status != "success" else "repository_structure"
     record = board.record_observation(
@@ -133,22 +153,24 @@ def ingest_operation(authority, result) -> None:
     )
     produced = [record.ref.model_dump(mode="json")]
     task = taskboard.get_task(result.task_id)
-    if (task.task_kind in {"investigation", "understanding"} and result.tool_name == "batch_read_files"
-            and result.status in {"success", "failed"}):
+    if result.tool_name in {"batch_read_files", "repo_batch_read"} and result.status in {"success", "failed"}:
         from mana_agent.repository_evidence.service import StaleEvidenceSource
 
-        # Each result row has the hash calculated from the bytes actually read.
-        # A truncated row has no reliable end-line boundary for its excerpt.
+        # Each stamped row identifies the bytes and full lines actually read.
+        # Older truncated batch rows lack this reliable line boundary.
         files = result.result.get("files", [])
         for index, row in enumerate(files[:20]):
-            if not row.get("ok") or row.get("truncated") or not row.get("content") or row.get("file_size_bytes", 0) > 2_000_000:
+            if not row.get("ok") or not row.get("content") or row.get("file_size_bytes", 0) > 2_000_000:
+                continue
+            stamp = row.get("source_evidence")
+            if not stamp and (row.get("truncated") or not row.get("sha256") or "total_lines" not in row):
                 continue
             start = row.get("start_line", 1)
             end = row.get("end_line", row["total_lines"])
             if end < start:
                 continue
-            source = EvidenceSource(path=row["path"], sha256=row["sha256"], start_line=start, end_line=end,
-                                    excerpt=row["content"][:12000])
+            source = EvidenceSource.model_validate(stamp) if stamp else EvidenceSource(
+                path=row["path"], sha256=row["sha256"], start_line=start, end_line=end, excerpt=row["content"][:12000])
             try:
                 file_record = board.record_observation(provenance=provenance, category="code_behavior",
                     statement="batch_read_files returned a file", sources=(source,),

@@ -34,7 +34,9 @@ class OperationRow(Collapsible):
         status = str(event.get("status") or "running")
         marker = "✓" if status in {"success", "completed", "done"} else "✗" if status in {"failed", "timed_out"} else "●"
         action = event.get("command") or meta.get("command") or event.get("path") or meta.get("path") or event.get("tool_name") or event.get("title")
-        self.title = f"{marker} {action} · {status} · {event.get('duration_ms') or 0}ms"
+        activity = str(meta.get("coding_activity") or "").capitalize()
+        label = f"{activity} · {action}" if activity else action
+        self.title = f"{marker} {label} · {status} · {event.get('duration_ms') or 0}ms"
         body = operation_details(event)
         if self._loaded:
             body += "\n" + "\n".join(f"--- retained {channel} ---\n{text}" for channel, text in self._loaded.items())

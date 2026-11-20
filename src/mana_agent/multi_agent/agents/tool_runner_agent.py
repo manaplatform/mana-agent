@@ -160,27 +160,40 @@ def _protected_text(authority: ToolExecutionAuthority) -> tuple[str, ...]:
 
 def model_result(result: ToolOperationResult, authority: ToolExecutionAuthority) -> dict[str, Any]:
     """Bound/redact model context; full execution evidence stays in scoped artifacts."""
+    from mana_agent.repository_evidence.observations import SOURCE_OUTPUT_BYTES
+
     remaining = 64_000
     truncated = False
-    def bounded(value, depth=0):
+    source_read = result.tool_name in {"read_file", "batch_read_files", "repo_batch_read", "investigate_repository"}
+    def bounded(value, depth=0, key=""):
         nonlocal remaining, truncated
         if depth > 12 or remaining <= 0:
             truncated = True
             return "[retained detail omitted from model context]"
         if isinstance(value, str):
-            length = min(len(value), remaining, 16_000)
+            limit = SOURCE_OUTPUT_BYTES if source_read and key == "content" else 16_000
+            length = min(len(value), remaining, limit)
             remaining -= length
             if length < len(value):
                 truncated = True
             return value[:length] + ("\n[open retained details for remaining content]" if length < len(value) else "")
         if isinstance(value, dict):
             truncated = truncated or len(value) > 100
-            return {key: bounded(item, depth + 1) for key, item in list(value.items())[:100]}
+            return {key: bounded(item, depth + 1, key) for key, item in list(value.items())[:100]}
         if isinstance(value, list):
             truncated = truncated or len(value) > 100
             return [bounded(item, depth + 1) for item in value[:100]]
         return value
-    public = bounded(_public_value(result.result, _protected_text(authority)))
+    payload = _public_value(result.result, _protected_text(authority))
+    if source_read:
+        # Keep the stamp, but don't duplicate the returned source in model context.
+        rows = payload.get("files", [payload])
+        if result.tool_name == "investigate_repository":
+            rows = [item.get("result", {}) for item in payload.get("observations", [])]
+        for row in rows:
+            if isinstance(row.get("source_evidence"), dict):
+                row["source_evidence"].pop("excerpt", None)
+    public = bounded(payload)
     if truncated:
         public["model_context_truncated"] = True
         public["retained_detail_identity"] = {"execution_id": result.execution_id,
@@ -218,6 +231,8 @@ class RunningOperation:
 
     def _details(self) -> dict[str, Any]:
         from mana_agent.utils.shell_argv import local_shell_argv
+        from mana_agent.coding.models import CodingActivity, ISOLATED_CHECK_TOOL
+        from mana_agent.coding.scheduler import classify_tool_operation, OperationKind
         import shlex
         args = self.request.arguments
         action = args.get("action") if isinstance(args.get("action"), dict) else {}
@@ -230,8 +245,21 @@ class RunningOperation:
             argv = local_shell_argv(str(command))
         cwd = (Path(self.request.workspace_root) / str(args.get("cwd") or ".")).resolve()
         path = args.get("path") or args.get("file_path") or ""
+        tool = self.request.tool_name
+        kind = classify_tool_operation(tool)
+        activity = (
+            CodingActivity.VERIFYING if tool in {ISOLATED_CHECK_TOOL, "verify_project"}
+            else CodingActivity.INVESTIGATING if tool in {"investigate_repository", "integrate_repository_evidence"}
+            else CodingActivity.REVIEWING if tool == "git_diff"
+            else CodingActivity.SEARCHING if "search" in tool or tool in {"find_symbols", "call_graph"}
+            else {
+                OperationKind.READ: CodingActivity.READING, OperationKind.WRITE: CodingActivity.EDITING,
+                OperationKind.EXECUTE: CodingActivity.EXECUTING,
+            }.get(kind)
+        )
         return _public_value({"command": str(command), "display_argv": argv or [], "cwd": str(cwd),
-            "path": str(path), "display_arguments": {key: value for key, value in args.items() if key in {
+            "path": str(path), "coding_activity": activity.value if activity else "",
+            "display_arguments": {key: value for key, value in args.items() if key in {
                 "path", "paths", "file_path", "query", "glob", "regex", "start_line", "end_line", "limit",
                 "command", "script", "cwd", "argv", "timeout", "timeout_ms", "revision", "staged"}}, "timeout_seconds": self.request.timeout_seconds,
             "provenance": "native_tool_runner", "streaming": True,
@@ -449,14 +477,17 @@ class ToolRunnerAgent:
                 if isinstance(value, dict):
                     for key, item in value.items():
                         if key in {"path", "file_path", "repo_path", "repo_root", "execution_repo_root", "source", "destination", "src", "dst"} and isinstance(item, str) and item:
-                            target = (a.workspace.worktree_path / item).resolve()
+                            requested = a.workspace.worktree_path / item
+                            target = requested.resolve()
                             if not target.is_relative_to(a.workspace.worktree_path.resolve()):
                                 raise ExecutionAuthorityError("Tool target escapes its assigned workspace")
                             if allowed_scope and "." not in allowed_scope and not any(
                                 target == (a.workspace.worktree_path / scope).resolve() or target.is_relative_to((a.workspace.worktree_path / scope).resolve())
                                 for scope in allowed_scope):
                                 raise ExecutionAuthorityError("Repository target exceeds its assigned scope")
-                            if any(part.startswith(".env") or part in {".ssh", "secrets.toml", "id_rsa", "id_ed25519"} for part in target.relative_to(a.workspace.worktree_path.resolve()).parts):
+                            if policy.effect == "mutation" and requested != target:
+                                raise ExecutionAuthorityError("Mutation targets cannot use symlinks or noncanonical paths")
+                            if any(part.startswith(".env") or part in {".git", ".mana", ".ssh", "secrets.toml", "credentials.json", "id_rsa", "id_ed25519"} for part in target.relative_to(a.workspace.worktree_path.resolve()).parts):
                                 raise ExecutionAuthorityError("Tool target is protected credential material")
                         elif key in {"paths", "files"} and isinstance(item, list):
                             for entry in item:
@@ -609,10 +640,12 @@ class ToolRunnerAgent:
                 request_state=ActionRequestState.SUCCEEDED if status == "success" else ActionRequestState.OUTCOME_UNKNOWN if status in {"cancelled", "timed_out", "interrupted"} or mutations else ActionRequestState.FAILED,
                 result_reference=next((item["reference"] for item in operation.references.get("result", []) if item["reference"]), ""),
                 verification_state={"operation_attempt_id": request.operation_attempt_id, "status": status})
+        activity_update = {"coding_activity": "debugging"} if status == "failed" and operation.public.get("coding_activity") == "verifying" else {}
         operation.emit("tool.completed" if status == "success" else "tool.waiting" if status == "waiting_approval" else "tool.cancelled" if status == "cancelled" else "tool.failed",
             status=status, exit_code=result.exit_code, termination_reason=result.termination_reason,
             result_summary=str(public_result.get("summary") or public_result.get("error") or status),
-            changed_files=[m.path for m in mutations], output_references=operation.references)
+            output_preview=public_result.get("output", "") if operation.public.get("coding_activity") == "verifying" else "",
+            changed_files=[m.path for m in mutations], output_references=operation.references, **activity_update)
         result.trace_complete = operation.trace_complete
         result.result["execution"] = result.model_dump(mode="json", exclude={"result", "mutations"})
         result.result["mutations"] = _public_value([m.model_dump() for m in mutations], operation.protected)
@@ -622,9 +655,17 @@ class ToolRunnerAgent:
         if (self.authority.taskboard is not None and self.authority.record_taskboard_evidence
                 and context is not None and context.attempt_id
                 and (policy.repository or mutations or policy.effect == "command")):
+            import sqlite3
             from mana_agent.repository_evidence.observations import ingest_operation
+            from mana_agent.repository_evidence.service import EvidenceConflict, StaleEvidenceSource
             with context.publication():
-                ingest_operation(self.authority, result)
+                try:
+                    ingest_operation(self.authority, result)
+                except (EvidenceConflict, StaleEvidenceSource, ValueError, sqlite3.Error):
+                    result.result["repository_evidence_warning"] = (
+                        "Evidence could not be saved. The executed tool result is available on this turn."
+                    )
+                    logger.warning("Could not record repository evidence for %s", request.operation_id)
         return result
 
 

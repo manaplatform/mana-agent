@@ -427,13 +427,13 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="read_file",
-            description="Safely read a repository file by full file or line range, using run evidence memory before disk.",
+            description="Read a known repository file. Omit the range to read the whole file if it fits the output budget; use line bounds for focused or oversized files.",
             input_schema=_schema(
                 {
                     "path": {"type": "string"},
                     "mode": {"enum": ["line", "full"]},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
                 },
                 ["path"],
             ),
@@ -442,6 +442,14 @@ def coding_tool_contracts() -> list[ToolContract]:
                     "file_path": {"type": "string"},
                     "normalized_path": {"type": "string"},
                     "content": {"type": "string"},
+                    "total_lines": {"type": "integer"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "next_start_line": {"type": "integer"},
+                    "complete": {"type": "boolean"},
+                    "partial": {"type": "boolean"},
+                    "truncated": {"type": "boolean"},
+                    "sha256": {"type": "string"},
                     "cache_hit": {"type": "boolean"},
                     "source": {"enum": ["memory", "tool"]},
                     "covered_range": {"type": "array"},
@@ -499,7 +507,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="batch_read_files",
-            description="Read multiple repository files concurrently in a single batch with per-file SHA-256 hashes, line slicing, and size bounding.",
+            description="Read multiple repository files with per-file SHA-256 hashes and line ranges within a shared output budget.",
             input_schema=_schema(
                 {
                     "files": {"type": "array", "description": "Array of file paths or spec objects with optional start_line/end_line"},

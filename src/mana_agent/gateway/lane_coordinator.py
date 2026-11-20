@@ -1139,6 +1139,7 @@ class LaneCoordinator:
         *,
         state: LaneTaskState = LaneTaskState.COMPLETED,
         changed_files: Sequence[str] = (),
+        reconciled_file_versions: Mapping[str, str] | None = None,
         consumed_input_tokens: int = 0,
         consumed_output_tokens: int = 0,
         actual_cost: float | None = None,
@@ -1266,13 +1267,15 @@ class LaneCoordinator:
                     path = Path(changed)
                     path = (workspace_root / path).resolve() if not path.is_absolute() else path.resolve()
                     relative = path.relative_to(workspace_root.resolve())
+                    version = (reconciled_file_versions or {}).get(relative.as_posix())
                     if path.is_file():
                         contracts.append(
                             CompletionContract(
                                 contract_type=CompletionContractType.FILE_EXISTS,
                                 path=str(relative),
                                 minimum_size=0,
-                                require_attempt_change=True,
+                                expected_sha256=version or "",
+                                require_attempt_change=version is None,
                             )
                         )
                     elif path.is_dir():

@@ -65,6 +65,205 @@ def workflow_choice(*, mode="auto", effect="write"):
     )
 
 
+@pytest.mark.parametrize("mode", ["auto", "debug"])
+def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monkeypatch, mode):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+
+    gateway, workflow = mode_gateway
+    filename = "src/handler.py" if mode == "auto" else "app.py"
+    if mode == "auto":
+        (gateway.root / "src").mkdir()
+        (gateway.root / "app.py").rename(gateway.root / filename)
+    (gateway.root / "other.py").write_text("other = 0\n")
+    gateway._entry_router.llm = Decisions()  # No ModeDecision draft or investigator.
+    verify_calls = []
+
+    async def check(root, command, *, task_id):
+        verify_calls.append((task_id, command.argv))
+        passed = (root / filename).read_text() == "fixed\n"
+        return {"passed": passed, "exit_code": int(not passed), "output": "passed" if passed else "wrong value"}
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"]})
+    selections = []
+    if mode == "auto":
+        selections.append(("repo_search", {"query": "before", "paths": ["src"]}))
+    selections.extend([
+        ("read_file", {"path": filename}),
+        ("write_file", {"path": filename, "content": "first attempt\n"}),
+        verify,
+        ("write_file", {"path": filename, "content": "fixed\n"}),
+    ])
+    if mode == "auto":
+        selections.append(("write_file", {"path": "other.py", "content": "other = 1\n"}))
+    selections.extend([verify, (CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Fixed and checked."})])
+
+    class Model:
+        index = 0
+
+        def with_tools(self, tools):
+            self.tools = {tool["function"]["name"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            if self.index and selections[self.index - 1][0] == "repo_search":
+                assert any(match["file"] == filename for match in json.loads(messages[-1].content)["matches"])
+            if self.index and selections[self.index - 1][0] == ISOLATED_CHECK_TOOL:
+                observation = json.loads(messages[-1].content)
+                assert observation.get("exit_code") == int(self.index == selections.index(verify) + 1), observation
+            name, args = selections[self.index]
+            self.index += 1
+            assert name in self.tools
+            return SimpleNamespace(tool_calls=[{"id": f"call-{self.index}", "name": name, "args": args}])
+
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=Model(), programmatic_tool_calling_enabled=False))
+    request = "Integrate the replacement handler for the old behavior" if mode == "auto" else "Fix app.py"
+    result = workflow.start("session", request, mode=mode, repair=True, workflow=workflow_choice(mode=mode))
+
+    assert result.status == "success", result.message
+    assert (gateway.root / filename).read_text() == "fixed\n"
+    assert sorted(result.data["changed_files"]) == (["other.py", filename] if mode == "auto" else [filename])
+    parent = workflow.board.get_task(result.data["task_id"])
+    children = workflow.board.list_tasks(parent_task_id=parent.task_id)
+    assert len(children) == 1
+    assert [task_id for task_id, _ in verify_calls] == [children[0].task_id] * 2
+    assert not parent.mode_workflow.get("plan")
+    assert not gateway._entry_router.llm.inputs
+    checks = result.data["verification"]
+    assert [check["exit_code"] for check in checks] == [1, 0]
+    assert checks[0]["attempt_id"] == checks[1]["attempt_id"]
+    assert children[0].evidence_refs
+
+
+def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkeypatch):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+    actions = iter([
+        ("read_file", {"path": "app.py"}),
+        ("write_file", {"path": "app.py", "content": "fixed\n"}),
+        None,
+        (ISOLATED_CHECK_TOOL, {"argv": ["python", "app.py"]}),
+        (CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Fixed and checked."}),
+    ])
+    calls = []
+
+    class Model:
+        async def generate(self, messages, *, continuation):
+            selection = next(actions)
+            calls.append(selection)
+            if selection is None:
+                raise TimeoutError("Provider attempt interrupted")
+            tool, args = selection
+            if tool == ISOLATED_CHECK_TOOL:
+                assert any("same assignment" in message.content for message in messages)
+                assert any('"stale": true' in message.content for message in messages)
+            return SimpleNamespace(tool_calls=[{"id": f"resume-{len(calls)}", "name": tool, "args": args}])
+
+    async def check(root, command, *, task_id):
+        assert (root / "app.py").read_text() == "fixed\n"
+        return {"passed": True, "exit_code": 0, "output": "passed"}
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=Model(), programmatic_tool_calling_enabled=False))
+    first = workflow.start("session", "Fix app.py", mode="debug", repair=True, workflow=workflow_choice(mode="debug"))
+    task_id = first.data["task_id"]
+    child, = workflow.board.list_tasks(parent_task_id=task_id)
+    initial_attempt = workflow.lane.execution_supervisor.get_task(child.task_id).attempt_id
+    assert first.status == "error"
+    assert first.data["changed_files"] == ["app.py"]
+    assert child.evidence_refs
+
+    resumed = workflow.retry(task_id)
+    assert resumed.status == "success", resumed.message
+    assert resumed.data["changed_files"] == ["app.py"]
+    assert len(workflow.board.list_tasks(parent_task_id=task_id)) == 1
+    assert resumed.data["verification"][0]["attempt_id"] != initial_attempt
+
+
+def test_adaptive_coding_rejects_unsupported_completion_and_read_only_write(mode_gateway):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+    finish = {"disposition": "complete", "summary": "Claimed completion."}
+    selections = iter([(CODING_RESULT_TOOL, finish), ("write_file", {"path": "app.py", "content": "forbidden"}),
+                       (CODING_RESULT_TOOL, finish)])
+
+    class Model:
+        calls = 0
+
+        def with_tools(self, tools):
+            assert "write_file" not in {tool["function"]["name"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            if self.calls:
+                result = json.loads(messages[-1].content)
+                assert result["error_code"] == ("CODING_RESULT_REJECTED" if self.calls == 1 else "TOOL_NOT_AUTHORIZED")
+            tool, args = next(selections)
+            self.calls += 1
+            return SimpleNamespace(tool_calls=[{"id": f"denied-{self.calls}", "name": tool, "args": args}])
+
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=Model(), programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Diagnose app.py", mode="debug", workflow=workflow_choice(mode="debug", effect="read"))
+    assert result.status == "error"
+    assert "after correction" in result.message
+    assert not result.data["goal_satisfied"]
+    assert (gateway.root / "app.py").read_text() == "before\n"
+
+
+def test_adaptive_coding_corrects_evidence_reference_and_reuses_the_read(mode_gateway):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+
+    class Model:
+        step = 0
+
+        async def generate(self, messages, *, continuation):
+            self.step += 1
+            if self.step == 1:
+                name, args = "read_file", {"path": "app.py"}
+            elif self.step == 2:
+                first = json.loads(messages[-1].content)
+                self.ref, = first["repository_evidence_refs"]
+                name, args = "repository_evidence_get", {**self.ref, "revision": 999}
+            elif self.step == 3:
+                error = json.loads(messages[-1].content)
+                assert error["error_code"] == "UNKNOWN_EVIDENCE_REF" and ":999" in error["error"]
+                name, args = "repository_evidence_get", self.ref
+            elif self.step == 4:
+                assert json.loads(messages[-1].content)["evidence_id"] == self.ref["evidence_id"]
+                name, args = "read_file", {"path": "app.py"}
+            else:
+                duplicate = json.loads(messages[-1].content)
+                assert duplicate["reused"] and "content" not in duplicate
+                assert duplicate["repository_evidence_refs"] == [self.ref]
+                name, args = CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Observed the current value."}
+            return SimpleNamespace(tool_calls=[{"id": f"evidence-{self.step}", "name": name, "args": args}])
+
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=Model(), programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Diagnose app.py", mode="debug",
+                            workflow=workflow_choice(mode="debug", effect="read"))
+    assert result.status == "success", result.message
+    assert result.data["repository_observations"]["evidence_ids"]
+
+
 @pytest.fixture
 def mode_gateway(tmp_path):
     root = tmp_path / "project"
@@ -1748,7 +1947,8 @@ def test_coding_inspection_reads_only_the_selected_follow_up_range(mode_gateway)
 
     assert result.status == "success", result.message
     first, second = [row["result"] for row in model.inputs[-1]["evidence"]]
-    assert (first["start_line"], first["end_line"], first["total_lines"]) == (1, 120, 131)
+    assert (first["start_line"], first["end_line"], first["total_lines"]) == (1, 131, 131)
+    assert first["complete"]
     assert (second["start_line"], second["end_line"], second["total_lines"]) == (121, 129, 131)
     assert second["content"] == "".join(content[120:129])
 

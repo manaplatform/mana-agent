@@ -35,8 +35,9 @@ class RepositoryEvidenceBoard:
         return self.publication() if self.publication else nullcontext()
 
     def _source_current(self, source: EvidenceSource) -> bool:
-        target = (self.root / source.path).resolve()
-        if not target.is_relative_to(self.root):
+        requested = self.root / source.path
+        target = requested.resolve()
+        if not target.is_relative_to(self.root) or target != requested:
             return False
         try:
             if source.source_kind == "directory":
@@ -103,7 +104,8 @@ class RepositoryEvidenceBoard:
         with self._fence(), self.db.transaction() as conn:
             prior = conn.execute("SELECT payload FROM repository_evidence WHERE evidence_id=? ORDER BY revision DESC LIMIT 1", (record.evidence_id,)).fetchone()
             latest = EvidenceRecord.model_validate_json(prior["payload"]) if prior else None
-            if deduplicate and latest is not None and latest.freshness == "current":
+            if (deduplicate and latest is not None and (latest.freshness == "current"
+                    or latest.freshness == "unknown" and record.classification == "observed")):
                 conn.execute("INSERT OR IGNORE INTO task_evidence_links VALUES (?, ?, ?, ?)",
                              (task_id, latest.evidence_id, latest.revision, role))
                 conn.execute("INSERT INTO task_events(task_id,event_type,payload,created_at) VALUES (?,?,?,?)",
@@ -145,13 +147,16 @@ class RepositoryEvidenceBoard:
             raise ValueError("Repository observation requires an executed result digest")
         if not all(self._source_current(s) for s in sources):
             raise StaleEvidenceSource("Observation sources no longer match the executed read")
+        identity = json.dumps([self.repository_id, str(self.root), category, statement,
+            [source.model_dump(mode="json") for source in sources] if sources else
+            [provenance.task_id, observation.get("content_digest") or provenance.result_digest]], sort_keys=True)
         record = EvidenceRecord(
-            evidence_id=f"repo_ev_{uuid.uuid4().hex}", revision=1, workspace_id=self.db.workspace_id,
+            evidence_id=f"repo_ev_{sha256(identity.encode()).hexdigest()}", revision=1, workspace_id=self.db.workspace_id,
             repository_id=self.repository_id, source_view=str(self.root), category=category, statement=statement,
             classification="observed", validation="supported", freshness="current" if sources else "unknown",
             confidence=1, sources=sources, observation=observation, provenance=provenance,
         )
-        return self._persist(record, task_id=provenance.task_id, role="produced")
+        return self._persist(record, task_id=provenance.task_id, role="produced", deduplicate=True)
 
     def submit_findings(self, candidate: EvidenceCandidate, *, provenance: EvidenceProvenance) -> EvidenceRecord:
         supports = [self.get(ref) for ref in candidate.supporting_evidence]

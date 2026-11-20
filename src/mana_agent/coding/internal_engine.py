@@ -62,6 +62,8 @@ from mana_agent.coding.live_events import (
 )
 from mana_agent.coding.models import (
     AgentEvent,
+    CODING_RESULT_TOOL,
+    ISOLATED_CHECK_TOOL,
     CodingEngineMode,
     CodingStatus,
     CodingTask,
@@ -112,17 +114,39 @@ def _evidence_result_fingerprint(content: str) -> str | None:
         return None
     if not isinstance(result, dict) or result.get("ok") is False:
         return None
-    result = {key: value for key, value in result.items() if key not in {
-        "cache_hit", "retained_detail_identity", "tool_execution", "operation_id", "execution_id",
-    }}
-    if isinstance(result.get("files"), list):
-        result["files"] = [
-            {key: value for key, value in row.items() if key != "repository_evidence_refs"}
-            if isinstance(row, dict) else row for row in result["files"]
-        ]
+    def stable(value):
+        if isinstance(value, dict):
+            return {key: stable(item) for key, item in value.items() if key not in {
+                "cache_hit", "retained_detail_identity", "tool_execution", "operation_id", "execution_id",
+                "execution", "repository_evidence_refs", "repository_evidence_warning", "reused", "evidence",
+            }}
+        if isinstance(value, list):
+            return [stable(item) for item in value]
+        return value
+
+    result = stable(result)
+    if isinstance(result.get("observations"), list):
+        rows = [_evidence_result_fingerprint(json.dumps(row.get("result"))) for row in result["observations"]]
+        ids = sorted({row for row in rows if row is not None})
+        return canonical_digest(ids) if ids else None
     if result.get("records"):
         return canonical_digest([(row["evidence_id"], row["revision"]) for row in result["records"]])
     return observation_fingerprint({"result": result})
+
+
+def _coding_action_fingerprint(content: str) -> str | None:
+    from mana_agent.human_inbox.models import canonical_digest
+
+    result = json.loads(content)
+    if not isinstance(result, dict):
+        return None
+    mutations = [(row["path"], row.get("before_sha256"), row.get("after_sha256"))
+                 for row in result.get("mutations", []) if isinstance(row, dict) and row.get("path")]
+    diagnostics = {key: result[key] for key in (
+        "argv", "cwd", "returncode", "exit_code", "stdout", "stderr", "output", "error_code", "error",
+    ) if key in result}
+    return canonical_digest([mutations, diagnostics]) if mutations or diagnostics else None
+
 
 logger = logging.getLogger(__name__)
 
@@ -355,6 +379,7 @@ class InternalCodingEngine(CodingEngine):
             cache_ttl_seconds=self.cache_ttl_seconds,
         )
         dispatcher.charge_tool = getattr(self, "charge_tool", None)
+        dispatcher.allowed_tools = getattr(self, "allowed_tools", None)
         session = ProgrammaticExecutionSession(
             task_id=task_id, dispatcher=dispatcher, max_tool_calls=self.max_tool_calls, backend_name=self.name,
         )
@@ -420,6 +445,7 @@ class InternalCodingEngine(CodingEngine):
             debugging_report = None
             investigation_result = None
             missing_evidence = []
+            adaptive_result = None
 
             ctx_mode = ""
             if hasattr(task, "context") and isinstance(task.context, dict):
@@ -444,7 +470,14 @@ class InternalCodingEngine(CodingEngine):
                 else:
                     final_summary = await self._run_direct_tool_workflow(task, workspace, session, cancel_ev)
 
-                if task.context.get("repository_investigation"):
+                if task.context.get("adaptive_mode"):
+                    from mana_agent.coding.adaptive import AdaptiveCodingResult
+                    outcome = AdaptiveCodingResult.model_validate_json(final_summary)
+                    adaptive_result = outcome.model_dump(mode="json")
+                    final_summary = outcome.summary
+                    if outcome.disposition != "complete":
+                        status = "waiting" if outcome.disposition == "clarify" else "failed"
+                elif task.context.get("repository_investigation"):
                     from mana_agent.repository_evidence.handoff import parse_investigation_result
                     investigation_result = parse_investigation_result(final_summary).model_dump(mode="json")
                     missing_evidence = investigation_result["missing_evidence"]
@@ -456,7 +489,8 @@ class InternalCodingEngine(CodingEngine):
                     if any(item["task_id"] != task_id for item in missing_evidence):
                         raise ValueError("Missing evidence request belongs to another task")
                     status = "waiting"
-                final_summary, debugging_report = parse_debugging_envelope(final_summary)
+                if not adaptive_result:
+                    final_summary, debugging_report = parse_debugging_envelope(final_summary)
                 if debugging_report is not None:
                     status = "waiting"
 
@@ -536,7 +570,8 @@ class InternalCodingEngine(CodingEngine):
                 changed_files = list(saved_run.get("changed_files", changed_files))
                 session.state.commands_run = list(saved_run.get("commands_run", session.state.commands_run))
                 verification_results = list(saved_run.get("verification_results", []))
-            if not changed_files and execution_mode != "batch" and task.requires_repository_write and workspace.worktree_path.is_dir():
+            if (not changed_files and execution_mode != "batch" and not task.context.get("adaptive_mode")
+                    and task.requires_repository_write and workspace.worktree_path.is_dir()):
                 try:
                     from mana_agent.tools.repository import git_status
                     st = git_status(workspace.worktree_path)
@@ -555,6 +590,7 @@ class InternalCodingEngine(CodingEngine):
                 backend=self.name,
                 status=status,  # type: ignore[arg-type]
                 summary=final_summary or f"Task {status}",
+                adaptive_result=adaptive_result,
                 investigation_result=investigation_result,
                 missing_evidence=missing_evidence,
                 changed_files=changed_files,
@@ -700,8 +736,12 @@ class InternalCodingEngine(CodingEngine):
         )
         from mana_agent.repository_evidence.models import CodingAssignment
         from mana_agent.coding.evidence_tools import INVESTIGATE
+        from mana_agent.coding.adaptive import AdaptiveCodingResult, result_tool
+        from mana_agent.context_cost.estimator import estimate_value_tokens
+        from mana_agent.repository_evidence.observations import SOURCE_OUTPUT_BYTES
 
         investigation = task.context.get("repository_investigation")
+        adaptive_mode = task.context.get("adaptive_mode")
         patch_proposal = bool(task.context.get("mode_patch_proposal"))
         tool_defs = self._build_tool_definitions(session.dispatcher)
         if investigation:
@@ -711,11 +751,13 @@ class InternalCodingEngine(CodingEngine):
                 "description": INVESTIGATION_REPORT_INSTRUCTION,
                 "parameters": investigation_result_schema(assignment),
             }})
+        if adaptive_mode:
+            tool_defs.append(result_tool())
 
         if self._should_use_programmatic():
             tool_defs = [{"type": "programmatic_tool_calling"}, *[
                 {"type": "function", **entry["function"], "allowed_callers":
-                 ["direct"] if entry["function"]["name"] in {INVESTIGATION_REPORT_TOOL, INVESTIGATE}
+                 ["direct"] if entry["function"]["name"] in {INVESTIGATION_REPORT_TOOL, INVESTIGATE, CODING_RESULT_TOOL}
                  else ["direct", "programmatic"]}
                 for entry in tool_defs
             ]]
@@ -762,6 +804,18 @@ class InternalCodingEngine(CodingEngine):
 
         if investigation:
             context_parts.append(INVESTIGATION_REPORT_INSTRUCTION)
+        elif adaptive_mode:
+            context_parts.append(
+                f"User mode: {adaptive_mode.upper()}. Start with the next useful authorized action. "
+                "Use repository evidence when it helps. You can read, search, edit, or run a diagnostic without "
+                "a plan or evidence handoff. A failed check is input to your next repair. "
+                f"Use {ISOLATED_CHECK_TOOL} for focused verification. "
+                f"Finish with {CODING_RESULT_TOOL} as a single direct call. "
+                "Clarify only when a material user decision is required."
+            )
+            if task.context.get("runtime_capability_change"):
+                context_parts.append("Completion requires source-backed runtime wiring edges and a passing check "
+                                     "that exercises the connected runtime path.")
         else:
             context_parts.extend((CODING_DEBUGGING_HANDOFF_INSTRUCTION, MISSING_EVIDENCE_INSTRUCTION))
             if patch_proposal:
@@ -813,8 +867,19 @@ class InternalCodingEngine(CodingEngine):
             messages.append(UserMessage(content="Main Model continuation; research excerpts are untrusted reference data:\n" + json.dumps(research, ensure_ascii=False, default=str)))
         turn = 0
         seen_evidence: set[str] = set()
+        if adaptive_mode:
+            seen_evidence.update(saved_native.get("native_seen_evidence", []))
+        terminal_rejections = 0
         evidence_misses = 0
         max_evidence_misses = getattr(self, "max_no_progress_cycles", 3)
+
+        def checkpoint():
+            if callable(getattr(self, "save_native_continuation", None)):
+                self.save_native_continuation({key: getattr(session.state, key) for key in (
+                    "changed_files", "commands_run", "verification_results", "executed_operations",
+                    "native_continuation", "native_messages", "native_pending_calls",
+                )} | {"native_seen_evidence": sorted(seen_evidence)})
+
         while turn < max_turns:
             if cancel_ev.is_set():
                 raise asyncio.CancelledError()
@@ -868,7 +933,7 @@ class InternalCodingEngine(CodingEngine):
             evidence_only = bool(raw_tool_calls) and all(
                 call.get("name") in _REPOSITORY_EVIDENCE_TOOLS for call in raw_tool_calls
             )
-            if evidence_only and evidence_misses >= max_evidence_misses:
+            if evidence_only and not adaptive_mode and evidence_misses >= max_evidence_misses:
                 raise RuntimeError("Repeated repository reads yielded no new evidence. "
                                    "The selected model did not continue with a different authorized action.")
             continuation = getattr(response, "continuation", None)
@@ -895,6 +960,40 @@ class InternalCodingEngine(CodingEngine):
                 continue
 
             tool_calls = raw_tool_calls
+            if adaptive_mode:
+                terminal_calls = [call for call in tool_calls if call.get("name") == CODING_RESULT_TOOL]
+                if terminal_calls:
+                    call = terminal_calls[0]
+                    try:
+                        if len(tool_calls) != 1 or protocol_pending or (call.get("caller") or {}).get("type") not in {None, "direct"}:
+                            raise ValueError("Submit one direct terminal result by itself.")
+                        outcome = AdaptiveCodingResult.model_validate(call.get("args"))
+                        if outcome.disposition == "complete" and task.requires_repository_write:
+                            from mana_agent.coding.verification_evidence import verification_evidence
+                            if not verification_evidence(session.state.verification_results, [])[1]:
+                                raise ValueError("Completion requires passing isolated verification after the last change.")
+                            if task.context.get("runtime_capability_change") and outcome.wiring is None:
+                                raise ValueError("Completion requires source-backed runtime wiring.")
+                            if callable(getattr(self, "validate_adaptive_completion", None)):
+                                self.validate_adaptive_completion()
+                        if (outcome.disposition == "complete" and not task.requires_repository_write
+                                and not any(row.get("ok") for row in session.state.executed_operations)):
+                            raise ValueError("Complete the diagnosis using an observed tool result.")
+                        return outcome.model_dump_json()
+                    except ValueError as exc:
+                        terminal_rejections += 1
+                        if terminal_rejections > 1:
+                            raise RuntimeError(f"Coding result was rejected after correction. {exc}") from exc
+                        from mana_agent.llm.messages import AssistantMessage
+                        messages.append(getattr(response, "message", None) or AssistantMessage(content="", tool_calls=tool_calls))
+                        for requested in tool_calls:
+                            messages.append(ToolResultMessage(content=json.dumps({
+                                "ok": False, "error_code": "CODING_RESULT_REJECTED", "error": str(exc),
+                            }), tool_call_id=requested["id"], caller=requested.get("caller")))
+                        turn += 1
+                        continue
+                if not tool_calls:
+                    raise StructuredOutputError(f"The coding model must select an action or call {CODING_RESULT_TOOL}")
             if not tool_calls:
                 content_val = getattr(response, "content", response)
                 if isinstance(content_val, list):
@@ -923,7 +1022,33 @@ class InternalCodingEngine(CodingEngine):
 
             remaining = max(0, session.state.max_tool_calls - session.state.tool_calls_executed)
             compound = any(call.get("name") == INVESTIGATE for call in tool_calls)
-            if len(tool_calls) > 1 and (compound or len(tool_calls) > remaining and evidence_only):
+            session.dispatcher.source_output_bytes = SOURCE_OUTPUT_BYTES
+            if isinstance(model_with_tools, NativeLLMEngine) and any(
+                call.get("name") in _REPOSITORY_EVIDENCE_TOOLS for call in tool_calls
+            ):
+                profile = model_with_tools.profile()
+                limits = [limit for limit in (profile.context_window, profile.value("max_input_tokens")) if limit]
+                if limits:
+                    from mana_agent.config.settings import Settings
+                    default_output = profile.max_output_tokens or 0
+                    if model_with_tools.adapter is None:
+                        default_output = max(1, int(default_output * Settings().mana_context_default_output_ratio))
+                    output = next((model_with_tools.parameters[key] for key in
+                        ("max_output_tokens", "max_tokens", "max_completion_tokens") if model_with_tools.parameters.get(key)),
+                        default_output)
+                    history = [message.model_dump(mode="json") for message in messages]
+                    if continuation is not None and continuation.mode == "stateless":
+                        history = [*continuation.items, *history[continuation.message_count:]]
+                    input_limits = [limit for limit in (profile.value("max_input_tokens"),) if limit]
+                    if profile.context_window:
+                        input_limits.append(profile.context_window - output)
+                    room = min(input_limits) - estimate_value_tokens(history) - estimate_value_tokens(model_with_tools.tools)
+                    count = 4 if compound else len(tool_calls)
+                    session.dispatcher.source_output_bytes = max(0, min(SOURCE_OUTPUT_BYTES, room // count // 2 - 512))
+            elif adaptive_mode and compound:
+                session.dispatcher.source_output_bytes = SOURCE_OUTPUT_BYTES // 4
+            over_budget = len(tool_calls) > remaining and (adaptive_mode or evidence_only)
+            if (len(tool_calls) > 1 and compound) or (over_budget and not compound):
                 for call in tool_calls:
                     detail = {"ok": False, "remaining": remaining, "executed": 0,
                               "error_code": "SELECT_INVESTIGATION_ALONE" if compound else "BUDGET_EXCEEDED",
@@ -933,6 +1058,8 @@ class InternalCodingEngine(CodingEngine):
                 session.state.native_messages = [message.model_dump(mode="json") for message in messages]
                 session.state.native_pending_calls = []
                 evidence_misses += 1
+                if adaptive_mode and evidence_misses > max_evidence_misses:
+                    raise RuntimeError("The coding model repeatedly selected tool groups larger than its remaining budget")
                 turn += 1
                 continue
 
@@ -1056,7 +1183,7 @@ class InternalCodingEngine(CodingEngine):
                     node = graph.nodes[call_id]
                     if node.kind == OperationKind.WRITE and node.status == "completed":
                         session.state.verification_results.clear()
-                    if node.tool_name in {"verify_project", "run_command", "run_script_once", "shell"} and node.result:
+                    if node.tool_name in {"verify_project", ISOLATED_CHECK_TOOL, "run_command", "run_script_once", "shell"} and node.result:
                         session.state.verification_results.append({
                             "tool": node.tool_name, "arguments": node.arguments, "result": node.result,
                         })
@@ -1087,7 +1214,7 @@ class InternalCodingEngine(CodingEngine):
                     except Exception:
                         pass
 
-                if session.state.tool_calls_executed >= session.state.max_tool_calls and not evidence_only:
+                if not adaptive_mode and session.state.tool_calls_executed >= session.state.max_tool_calls and not evidence_only:
                     renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
                         task=task,
                         session=session,
@@ -1137,7 +1264,7 @@ class InternalCodingEngine(CodingEngine):
                             break
 
                     call_spec = {"call_id": call_id, "name": fn_name, "arguments": args, "caller": tc.get("caller")}
-                    fn_output = session.handle_function_call(call_spec)
+                    fn_output = await asyncio.to_thread(session.handle_function_call, call_spec) if adaptive_mode else session.handle_function_call(call_spec)
                     output_str = fn_output.get("output", "")
 
                     messages.append(ToolResultMessage(content=output_str, tool_call_id=call_id, caller=tc.get("caller")))
@@ -1145,7 +1272,7 @@ class InternalCodingEngine(CodingEngine):
                     session.state.native_pending_calls = [identity for identity in session.state.native_pending_calls if identity != call_id]
                     _check_action_approval(output_str)
 
-                    if session.state.tool_calls_executed >= session.state.max_tool_calls and not evidence_only:
+                    if not adaptive_mode and session.state.tool_calls_executed >= session.state.max_tool_calls and not evidence_only:
                         renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
                             task=task,
                             session=session,
@@ -1190,26 +1317,48 @@ class InternalCodingEngine(CodingEngine):
                     except Exception:
                         pass
 
-            if not patch_proposal and not evidence_only and session.state.tool_calls_executed >= session.state.max_tool_calls:
+            if not patch_proposal and not adaptive_mode and not evidence_only and session.state.tool_calls_executed >= session.state.max_tool_calls:
                 break
 
-            if evidence_only:
-                session.state.native_evidence_elapsed_ms += round((time.monotonic() - tools_started) * 1000)
-                observed = {_evidence_result_fingerprint(message.content) for message in messages[result_start:]
-                            if isinstance(message, ToolResultMessage)} - {None}
+            if evidence_only or adaptive_mode:
+                if evidence_only:
+                    session.state.native_evidence_elapsed_ms += round((time.monotonic() - tools_started) * 1000)
+                observed = set()
+                call_names = {call.get("id"): call.get("name") for call in tool_calls}
+                for index in range(result_start, len(messages)):
+                    message = messages[index]
+                    if not isinstance(message, ToolResultMessage):
+                        continue
+                    is_evidence = call_names.get(message.tool_call_id) in _REPOSITORY_EVIDENCE_TOOLS
+                    fingerprint = (_evidence_result_fingerprint(message.content) if is_evidence or not adaptive_mode
+                                   else _coding_action_fingerprint(message.content))
+                    if fingerprint is None:
+                        continue
+                    if adaptive_mode and is_evidence and fingerprint in seen_evidence | observed:
+                        result = json.loads(message.content)
+                        detail = {"ok": True, "reused": True, "path": result.get("path"),
+                                  "repository_evidence_refs": result.get("repository_evidence_refs", []),
+                                  "summary": "Identical observation already present in this assignment. Use the earlier result."}
+                        messages[index] = message.model_copy(update={"content": json.dumps(detail)})
+                    observed.add(fingerprint)
                 novel = observed - seen_evidence
                 seen_evidence.update(observed)
                 evidence_misses = 0 if novel else evidence_misses + 1
+                if adaptive_mode and evidence_misses > max_evidence_misses:
+                    raise RuntimeError("Repeated coding actions produced no new information or change after the model was asked to replan")
                 if not patch_proposal and evidence_misses == max_evidence_misses:
                     messages.append(UserMessage(
-                        "Repository reads stopped producing new evidence. Use current observations to proceed, "
-                        "return the investigation report, or identify the exact unresolved requirement."
+                        "Recent actions stopped producing new evidence or changes. Use existing observations to select "
+                        "an edit, a focused diagnostic, a materially different read, or a precise blocker."
                     ))
             else:
                 evidence_misses = 0
 
+            if adaptive_mode:
+                session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+                checkpoint()
             turn += 1
-            if turn >= max_turns and not final_summary:
+            if turn >= max_turns and not final_summary and not adaptive_mode:
                 renewed, renewal_reason = await self._evaluate_progress_and_renew_budget(
                     task=task,
                     session=session,

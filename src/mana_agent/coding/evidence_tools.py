@@ -125,10 +125,8 @@ class CodingEvidenceTools:
                 args = operation.model_dump(exclude={"tool"}, exclude_none=True)
                 if isinstance(operation, ReadFile):
                     args["path"] = scoped_paths(self.root, (operation.path,), authority=paths)[0]
-                    end = operation.end_line or operation.start_line + 119
-                    if end < operation.start_line:
+                    if operation.end_line is not None and operation.end_line < operation.start_line:
                         raise ValueError("end_line cannot precede start_line")
-                    args["end_line"] = min(end, operation.start_line + 119)
                 else:
                     args["paths"] = list(scoped_paths(self.root, operation.paths, authority=paths))
                     args["limit"] = 30
@@ -147,14 +145,19 @@ class CodingEvidenceTools:
 
             rows, pending = [], []
             for index, (key, tool, args) in enumerate(selected):
-                saved_ref = receipts.get(key)
-                if saved_ref:
-                    record = knowledge.get(EvidenceRef.model_validate(saved_ref))
+                saved = receipts.get(key) or {}
+                saved_ref, metadata = saved.get("ref"), saved.get("read")
+                if saved_ref and metadata:
+                    try:
+                        record = knowledge.get(EvidenceRef.model_validate(saved_ref))
+                    except KeyError:
+                        receipts.pop(key)
+                        pending.append((index, key, tool, args))
+                        continue
                     if record.freshness == "current" and record.validation == "supported" and record.sources:
                         source = record.sources[0]
                         rows.append({"tool": tool, "index": index, "reused": True, "evidence": [saved_ref],
-                                     "result": {"ok": True, "path": source.path, "content": source.excerpt,
-                                                "start_line": source.start_line, "end_line": source.end_line}})
+                                     "result": {**metadata, "content": source.excerpt}})
                         continue
                 pending.append((index, key, tool, args))
 
@@ -171,8 +174,12 @@ class CodingEvidenceTools:
                 rows.append({"tool": tool, "index": index, "evidence": refs, "result": result})
                 # A source-backed exact read can be reused across attempts. Search results may gain
                 # matches when other files change, so the whole search is never treated as current.
-                if tool == "read_file" and result.get("ok") and refs:
-                    receipts[key] = refs[0]
+                if (tool == "read_file" and result.get("ok") and refs and not result.get("truncated")
+                        and len(result.get("content", "")) <= 12_000 and not result.get("model_context_truncated")):
+                    receipts[key] = {"ref": refs[0], "read": {
+                        k: v for k, v in result.items() if k in {
+                            "ok", "path", "start_line", "end_line", "total_lines", "sha256", "complete", "partial", "truncated"
+                        }}}
                     with activity.publication():
                         state = dict(self.taskboard.get_task(self.task_id).mode_workflow)
                         self.taskboard.update_task(self.task_id, mode_workflow={**state, "coding_investigation": {

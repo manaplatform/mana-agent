@@ -35,6 +35,7 @@ from mana_agent.agent.repository_investigation import (
 from mana_agent.batch.policy import BatchPending, TaskExecutionPolicy
 from mana_agent.chat.activity import safe_text
 from mana_agent.chat_commands.models import CommandResult
+from mana_agent.coding.models import ISOLATED_CHECK_TOOL
 from mana_agent.execution_supervisor.errors import StaleLeaseError
 from mana_agent.execution_supervisor.models import ExecutionState, RecoveryAction, TaskRecord
 from mana_agent.gateway.lane_coordinator import LaneReservation
@@ -96,7 +97,8 @@ _TRANSITIONS = {
     Phase.DRAFTING_PLAN: {Phase.AWAITING_APPROVAL, Phase.APPROVED, Phase.COMPLETED},
     Phase.AWAITING_APPROVAL: {Phase.APPROVED, Phase.ACTIVE},
     Phase.APPROVED: {Phase.EXECUTING, Phase.ACTIVE},
-    Phase.EXECUTING: {Phase.EXECUTING, Phase.VERIFYING, Phase.REVIEWING, Phase.ACTIVE, Phase.COMPLETED},
+    Phase.EXECUTING: {Phase.EXECUTING, Phase.VERIFYING, Phase.REVIEWING, Phase.ACTIVE, Phase.COMPLETED,
+                      Phase.CLARIFICATION_REQUIRED},
     Phase.VERIFYING: {Phase.EXECUTING, Phase.REVIEWING, Phase.COMPLETED, Phase.ACTIVE},
     Phase.REVIEWING: {Phase.EXECUTING, Phase.COMPLETED},
     Phase.BLOCKED: {Phase.ACTIVE, Phase.EXECUTING},
@@ -341,6 +343,10 @@ class ModeWorkflow:
                 "runtime_capability_change": runtime_capability_change,
                 "model": model, "provider": provider,
             })
+            configured = self.gateway._coding_agent
+            if (not policy.required and getattr(configured, "active_engine_mode", "") == "internal"
+                    and getattr(configured, "supports_adaptive_repository_loop", False) is True):
+                state["adaptive_coding"] = True
         self._persist(task_id, state)
         if workflow and state["repair"] and not policy.required:
             coding = self.gateway._coding_agent
@@ -447,7 +453,7 @@ class ModeWorkflow:
                         # Preserve prior charges and reuse only saved reads.
                         handoff["status"] = "interrupted"
                         self._persist(task_id, state)
-                if service is None:
+                if service is None and not state.get("adaptive_coding"):
                     service = self._service(state=state, llm=llm)
                 return self.gateway._autonomous_controller.drive_repository_workflow(
                     advance=lambda: self._advance(task_id, state, service),
@@ -463,10 +469,293 @@ class ModeWorkflow:
             return self._block(task_id, state, str(redact_secrets(str(exc))))
 
     def _advance(self, task_id, state, service) -> CommandResult | None:
+        if state.get("adaptive_coding"):
+            return self._execute_adaptive(task_id, state)
         if (state["mode"] != "plan" and state.get("plan")
                 and (not state.get("pending_repository_evidence") or state.get("evidence_resume"))):
             return self._execute(task_id, state, service, in_controller=True)
         return self._advance_decision(task_id, state, service)
+
+    def _execute_adaptive(self, task_id, state):
+        from mana_agent.coding.adaptive import AdaptiveCodingResult
+
+        configured = self.gateway._coding_agent
+        if (getattr(configured, "active_engine_mode", "") != "internal"
+                or getattr(configured, "supports_adaptive_repository_loop", False) is not True):
+            raise PermissionError("Resume with the originally selected internal coding backend.")
+        parent = self.board.get_task(task_id)
+        root = self._workspace_root(state).resolve()
+        write = state["repair"] and not state["no_code"]
+        identity = "adaptive-coding"
+        child = next((row for row in self.board.list_tasks(parent_task_id=task_id)
+                      if row.decomposition_local_id == identity), None)
+        if child is None:
+            child = self.board.create_child_task(task_id, title=f"Coding Agent · {state['mode'].upper()}",
+                user_request=state["goal"], owner_agent_id="coding_agent", decomposition_local_id=identity)
+        state["used_coding_agent"] = True
+        self._transition(task_id, state, Phase.EXECUTING, f"Coding Agent · {state['mode'].upper()}")
+        supervisor = self.lane.execution_supervisor
+        saved = supervisor.store.get_task_or_none(child.task_id)
+        if saved and saved.state == ExecutionState.COMPLETED:
+            receipt = supervisor.get_verified_execution_result(child.task_id)
+            if not receipt.is_verified:
+                raise PermissionError("The saved coding result has no verified supervisor receipt.")
+            outcome = AdaptiveCodingResult.model_validate(state["adaptive_outcome"])
+        else:
+            with self.lane.workflow_step_capacity(task_id, child.task_id):
+                self._start_adaptive_child(parent, child, saved, state, root, write)
+                try:
+                    with self._activity(child.task_id, state, read_only=not write):
+                        result = self._run_adaptive_model(task_id, child.task_id, state, root, write, configured)
+                    if result.get("adaptive_result") is None:
+                        detail = result.get("errors") or result.get("answer") or "No coding result was returned."
+                        if result.get("human_input", {}).get("inbox_item_id"):
+                            detail = f"{detail} Approval item {result['human_input']['inbox_item_id']}."
+                        raise RuntimeError(safe_text(detail, limit=1500))
+                    outcome = AdaptiveCodingResult.model_validate(result["adaptive_result"])
+                    if outcome.disposition == "blocked":
+                        raise RuntimeError(outcome.summary)
+                    if outcome.disposition == "clarify":
+                        self.lane.mark_blocked(child.task_id, reason=outcome.summary)
+                        count = state["questions_asked"] + len(outcome.questions)
+                        if state["question_limit"] is not None and count > state["question_limit"]:
+                            raise RuntimeError("The clarification limit was reached.")
+                        state["questions_asked"] = count
+                        self._transition(task_id, state, Phase.CLARIFICATION_REQUIRED)
+                        item = self._wait(task_id, state, questions=[
+                            redact_secrets(question.model_dump(mode="json")) for question in outcome.questions
+                        ])
+                        return self._describe_item(task_id, state, item)
+                    self._adaptive_checks(state, root, write=write)
+                    state["adaptive_outcome"] = redact_secrets(outcome.model_dump(mode="json"))
+                    self._persist(task_id, state)
+                    finished = self.lane.finish(child.task_id,
+                        changed_files=[str(root / path) for path in state["files_changed"]],
+                        reconciled_file_versions=state.get("adaptive_file_versions", {}),
+                        verification_state={"goal_satisfied": True, "verification": state.get("verification", [])})
+                    if finished.state != LaneTaskState.COMPLETED:
+                        raise RuntimeError(finished.error or "Supervisor verification is incomplete.")
+                except Exception as exc:
+                    if self.lane.inspect_task(child.task_id).state == LaneTaskState.RUNNING:
+                        self.lane.mark_blocked(child.task_id, reason=safe_text(str(exc), limit=1500))
+                    raise
+        self._adaptive_checks(state, root, write=write)
+        if write and state.get("runtime_capability_change"):
+            if outcome.wiring is None:
+                raise RuntimeError("The coding result did not identify runtime reachability evidence.")
+            state["runtime_wiring"] = outcome.wiring.model_dump(mode="json")
+            self._require_runtime_evidence(task_id, state, None)
+        return self._complete(task_id, state, outcome.summary)
+
+    def _start_adaptive_child(self, parent, child, saved, state, root, write):
+        from mana_agent.context_cost.estimator import estimate_value_tokens
+        from mana_agent.execution_supervisor.models import ActionRequestState, RecoveryDecision, RetryCategory
+
+        if saved:
+            context = state.get("adaptive_continuation", {})
+            completed = {row["call_id"] for row in context.get("executed_operations", [])}
+            actions = self.lane.execution_supervisor.store.actions_for_task(child.task_id)
+            if any(action.verification_state.get("operation_attempt_id") not in completed or action.request_state in {
+                ActionRequestState.PREPARED, ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN,
+            } for action in actions):
+                raise PermissionError("Reconcile the coding action receipts before resuming this checkout.")
+            self._adaptive_checks(state, root, write=False)
+            recovery = RecoveryDecision(
+                decision_id=f"adaptive-retry:{child.task_id}:{time.time_ns()}", task_id=child.task_id,
+                action=RecoveryAction.RESUME_CHECKPOINT if saved.checkpoint_id else RecoveryAction.RETRY,
+                resume_checkpoint_id=saved.checkpoint_id or "", retry_category=RetryCategory.MODEL,
+                reason="Resume coding with reconciled operation receipts", same_task_retry_authorized=True,
+                safe_to_continue=True,
+            )
+            resume = self.lane.resume_checkpoint if saved.checkpoint_id else self.lane.retry_task
+            reservation = resume(child.task_id, session_id=parent.session_id, decision=recovery)
+        else:
+            capabilities = ["repository_read", "git_read", "test_execution"]
+            if write:
+                capabilities.extend(("repository_write", "shell_read", "shell_write"))
+            parent_budget = self.lane.inspect_task(parent.task_id).budget
+            reservation = self.lane.reserve(
+                normalized_intent=f"{parent.task_id}:{state['mode']}:adaptive", lane_id=LaneId.CODING,
+                session_id=parent.session_id, workspace_id=parent.workspace_id, repository_id=parent.primary_repository_id,
+                parent_task_id=parent.task_id, taskboard_task_id=child.task_id, execution_workspace=root,
+                capabilities=capabilities,
+                requested_input_tokens=max(estimate_value_tokens(state["goal"]), parent_budget.reserved_input_tokens
+                                           - parent_budget.consumed_input_tokens),
+                requested_output_tokens=max(0, parent_budget.reserved_output_tokens - parent_budget.consumed_output_tokens),
+            )
+        self.lane.start(reservation)
+
+    def _run_adaptive_model(self, task_id, child_id, state, root, write, configured):
+        from mana_agent.gateway.lanes import TOOL_CAPABILITIES
+        from mana_agent.repository_evidence.tasks import assignment_for
+        from mana_agent.tools.contracts import ToolContract
+
+        child = self.board.get_task(child_id)
+        self._adaptive_checks(state, root, write=False)
+        if not child.coding_assignment:
+            assignment_for(self.board, child_id, backend="internal",
+                           decision_id=state.get("routing_decision_id") or f"{task_id}:mode")
+
+        def authorize(name):
+            parent_attempt = self._check_live(task_id)
+            self._check_live(child_id)
+            if any(item.get("status") == "pending" and item.get("attempt_id") == parent_attempt.attempt_id
+                   for item in parent_attempt.steering_inputs):
+                raise PermissionError("Coding received new steering. Reconcile the task request before continuing.")
+            return self.lane.authorize_tool(child_id, name)
+
+        def charge(operation):
+            with current_activity_context().publication():
+                self._check_live(task_id)
+                self._check_live(child_id)
+                operation(task_id, state)
+
+        def save(context):
+            activity = current_activity_context()
+            with activity.publication():
+                self._check_live(task_id)
+                versions = self._adaptive_mutations(child_id)
+                if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
+                    raise PermissionError("A changed file no longer matches its tool receipt.")
+                state["files_changed"] = sorted(versions)
+                state["adaptive_file_versions"] = versions
+                state["adaptive_evidence_refs"] = self.board.get_task(child_id).evidence_refs[-12:]
+                serialized = json.dumps(redact_secrets(context), ensure_ascii=False)
+                clean = safe_text(serialized, limit=None, protected=activity.protected_text)
+                if clean != json.dumps(context, ensure_ascii=False):
+                    # Never replay a provider continuation whose containing history was redacted.
+                    context = {key: context[key] for key in (
+                        "changed_files", "commands_run", "verification_results", "executed_operations"
+                    )}
+                    context["executed_operations"] = [
+                        {key: row[key] for key in ("tool", "call_id", "fingerprint") if key in row}
+                        for row in context["executed_operations"]
+                    ]
+                    clean = safe_text(json.dumps(redact_secrets(context), ensure_ascii=False),
+                                      limit=None, protected=activity.protected_text)
+                state["adaptive_continuation"] = json.loads(clean)
+                self._persist(task_id, state)
+            self.lane.checkpoint(child_id, boundary="adaptive_coding_tools",
+                resume_payload={"mode_task_id": task_id, "changed_files": state["files_changed"]})
+
+        resume = state.get("adaptive_continuation", {})
+        if resume:
+            resume = self._refresh_adaptive_history(root, resume)
+
+        def verify(**arguments):
+            return self._verify_adaptive(task_id, child_id, root, state, VerificationCommand.model_validate(arguments))
+
+        verify.input_model = VerificationCommand
+        verify.tool_contract = ToolContract(name=ISOLATED_CHECK_TOOL,
+            description="Run a focused verification argv in a network-disabled source snapshot. Returns the exact exit code and output.",
+            input_schema=VerificationCommand.model_json_schema(), output_schema={}, error_format={},
+            required_capability="test_execution", effect="read_only", repository_operation=True)
+        caps = set(self.lane.inspect_task(child_id).capabilities)
+        allowed = frozenset(name for name, required in TOOL_CAPABILITIES.items()
+                            if required <= caps and name != "verify_project")
+        worker = configured.for_assignment(root=root, task_id=child_id)
+        try:
+            return worker.generate(state["goal"], gateway_task_id=child_id, adaptive_mode=state["mode"],
+                execution_mode=state["mode"] if write else "read_only",
+                runtime_capability_change=state.get("runtime_capability_change", False),
+                coding_requirements=state["coding_decision"]["verification_requirements"],
+                relevant_context=json.dumps({"routing": state["coding_decision"], "user_answers": state["constraints"],
+                    "conversation": state.get("conversation_context", []),
+                    "revision_request": state.get("revision_request", "")}, ensure_ascii=False),
+                coding_resume_context=resume,
+                coding_continuation_id=f"{child_id}:{state['decision_count']}",
+                execution_runtime={"taskboard": self.board, "execution_supervisor": self.lane.execution_supervisor,
+                    "execution_registry": current_activity_context().execution_registry, "tool_authorize": authorize,
+                    "allowed_tools": allowed, "registered_tools": {ISOLATED_CHECK_TOOL: verify},
+                    "charge_model": lambda: charge(self._charge_model), "charge_tool": lambda: charge(self._charge_tool),
+                    "save_native_continuation": save, "remaining_model_turns": self._remaining_decisions(state),
+                    "validate_adaptive_completion": lambda: self._adaptive_checks(state, root, write=write),
+                    "remaining_tool_calls": self._remaining_tools(state),
+                    "max_no_progress_cycles": self.gateway._autonomous_controller.config.max_no_progress_cycles})
+        finally:
+            worker.close()
+
+    def _refresh_adaptive_history(self, root, resume):
+        messages = []
+        stale = False
+        versions = {}
+        for message in resume.get("native_messages", []):
+            if message.get("role") != "tool":
+                messages.append(message)
+                continue
+            result = json.loads(message["content"])
+            for row in result.get("files", [result]):
+                source = row.get("source_evidence") or {}
+                path, revision = source.get("path"), source.get("sha256")
+                if path and revision and source.get("source_kind") == "file":
+                    if path not in versions:
+                        try:
+                            versions[path] = self._file_digest(root, path)
+                        except ValueError:
+                            versions[path] = "unavailable"
+                    if versions[path] != revision:
+                        row.pop("content", None)
+                        row.update(ok=False, stale=True, error="The file changed since this observation. Refresh only if needed.")
+                        stale = True
+            messages.append({**message, "content": json.dumps(result, ensure_ascii=False)})
+        if stale:
+            return {**resume, "native_messages": messages, "native_continuation": None, "native_seen_evidence": []}
+        return resume
+
+    def _verify_adaptive(self, task_id, child_id, root, state, command):
+        from mana_agent.multi_agent.agents.tool_runner_agent import assert_tool_runner, current_operation
+
+        assert_tool_runner(ISOLATED_CHECK_TOOL)
+        operation = current_operation()
+        versions = self._adaptive_mutations(child_id)
+        if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
+            raise PermissionError("Verification requires reconciling a change outside its tool receipt.")
+        outcome = asyncio.run(run_isolated_verification(root, command, task_id=child_id))
+        activity = current_activity_context()
+        with activity.publication():
+            self._check_live(task_id)
+            self._check_live(child_id)
+            if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
+                raise PermissionError("Verification inputs changed while the check was running.")
+            receipt = {**outcome, "argv": list(command.argv), "cwd": command.cwd, "expected": command.expected,
+                "operation_id": operation.request.operation_id, "attempt_id": activity.attempt_id,
+                "source_versions": versions, "image": command.image,
+                "output": safe_text(outcome["output"], protected=activity.protected_text)}
+            state.setdefault("verification", []).append(receipt)
+            self._persist(task_id, state)
+        return {"ok": receipt["passed"], **receipt}
+
+    def _adaptive_mutations(self, child_id) -> dict[str, str]:
+        from mana_agent.repository_evidence.tool_queue import ToolQueueStore
+
+        before, after = {}, {}
+        for receipt in ToolQueueStore(self.board.store.db).operation_receipts(child_id):
+            for mutation in receipt.get("mutations", []):
+                if mutation["status"] == "unknown":
+                    raise PermissionError("Reconcile an uncertain mutation before completing or verifying the task.")
+                path = mutation["path"]
+                old_path = mutation.get("old_path")
+                if old_path:
+                    before.setdefault(old_path, mutation["before_sha256"])
+                    after[old_path] = "missing"
+                before.setdefault(path, "missing" if old_path else mutation["before_sha256"] or "missing")
+                after[path] = mutation["after_sha256"] or "missing"
+        return {path: digest for path, digest in after.items() if before[path] != digest}
+
+    def _adaptive_checks(self, state, root, *, write):
+        versions = state.get("adaptive_file_versions", {})
+        if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
+            raise PermissionError("Files from the saved coding assignment changed. Reconcile the checkout before continuing.")
+        checks = {}
+        for row in state.get("verification", []):
+            if row["expected"] == "pass":
+                checks[(tuple(row["argv"]), row["cwd"], row["image"])] = (
+                    row["source_versions"] == versions and row["passed"] and row["exit_code"] == 0
+                )
+        if write and (not checks or not all(checks.values())):
+            missing = [f"{shlex.join(argv)} in {cwd}" for (argv, cwd, _), passed in checks.items() if not passed]
+            raise ValueError("Completion requires passing focused verification against the current changes."
+                             + (f" Re-run {', '.join(missing)}." if missing else ""))
 
     def _saved_investigation(self, task_id: str, child_id: str) -> tuple[TaskBoardItem, TaskRecord, SavedInvestigation] | None:
         child = self.board.store.repository.get_task_or_none(child_id) if child_id else None
@@ -1757,7 +2046,7 @@ class ModeWorkflow:
                     self.lane.mark_blocked(child_id, reason=str(redact_secrets(str(exc))))
                 raise
 
-    def _require_runtime_evidence(self, task_id: str, state: dict, plan: PlanRevision) -> None:
+    def _require_runtime_evidence(self, task_id: str, state: dict, plan: PlanRevision | None) -> None:
         from mana_agent.gateway.feature_integration import FeatureIntegrationCoordinator, IntegrationAuthority, WiringDecision
 
         authority = IntegrationAuthority.from_taskboard(self.board, task_id)
@@ -1775,9 +2064,10 @@ class ModeWorkflow:
                     raise VerificationUnavailable(f"Runtime reachability source is unavailable in the Coding checkout: {edge.path}")
                 reference = f"{edge.path}:{edge.line}" if edge.line else edge.path
                 edges.append({"from": edge.source, "to": edge.target, "relation": edge.relation, "source_reference": reference})
-            checks = {(tuple(command.argv), command.cwd) for step in plan.draft.steps
-                      for command in step.verification if command.expected == "pass"}
-            targets = set(plan.base_file_digests) | set(state["files_changed"])
+            checks = ({(tuple(command.argv), command.cwd) for step in plan.draft.steps
+                       for command in step.verification if command.expected == "pass"} if plan else
+                      {(tuple(row["argv"]), row["cwd"]) for row in state["verification"] if row["expected"] == "pass"})
+            targets = set(plan.base_file_digests if plan else ()) | set(state["files_changed"])
             receipts = [row for row in state.get("verification", []) if row["passed"] and row["exit_code"] == 0
                         and row.get("operation_id") and row.get("attempt_id")
                         and (tuple(row["argv"]), row["cwd"]) in checks
@@ -2389,6 +2679,7 @@ class ModeWorkflow:
         report = self._repository_report(state)
         root = self._workspace_root(state)
         finished = self.lane.finish(task_id, changed_files=[str(root / path) for path in state["files_changed"]],
+                         reconciled_file_versions=state.get("adaptive_file_versions") if state.get("adaptive_coding") else None,
                          verification_state={"goal_satisfied": True, "answer": message,
                                              "verification": state.get("verification", []),
                                              "repository_observations": report,
@@ -2444,7 +2735,9 @@ class ModeWorkflow:
         native_report = state.get("investigation", {}).get("report", {})
         plan_findings = (state.get("plan") or {}).get("draft", {}).get("findings")
         findings = state.get("root_cause") or plan_findings or native_report.get("findings", "")
-        return {"evidence_ids": list(investigation_scope(state["evidence"]).evidence_levels)[-12:],
+        evidence_ids = ([ref["evidence_id"] for ref in state.get("adaptive_evidence_refs", [])]
+                        if state.get("adaptive_coding") else list(investigation_scope(state["evidence"]).evidence_levels)[-12:])
+        return {"evidence_ids": evidence_ids,
                 "findings": findings, "gaps": state.get("uncertainty") or native_report.get("gaps", ""),
                 "workflow_model_decisions": state.get("decision_count", 0),
                 "workflow_tool_operations": state.get("tool_operations", len(state["evidence"])),

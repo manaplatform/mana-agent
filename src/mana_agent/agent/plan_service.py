@@ -1066,14 +1066,12 @@ class PlanService:
             result = execute_repository_discovery(root, request.tool, request.discovery_arguments())
         else:
             relative = request.paths[0]
-            path = root / relative
-            start = request.start_line
-            stop = min(request.end_line or start + 119, start + 119)
             try:
                 from mana_agent.repository_evidence.observations import read_source
-                result = read_source(root, relative, start_line=start, end_line=stop, max_chars=16_000)
-            except (OSError, UnicodeError) as exc:
-                result = {"ok": False, "path": relative, "error": type(exc).__name__}
+                result = read_source(root, relative, start_line=request.start_line,
+                                     end_line=request.end_line, max_chars=16_000)
+            except (OSError, ValueError) as exc:
+                result = {"ok": False, "path": relative, "error": str(exc)}
 
         return redact_secrets(result)
 

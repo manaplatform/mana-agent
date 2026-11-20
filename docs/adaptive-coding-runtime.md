@@ -2,43 +2,38 @@
 
 ## Supervised AUTO and DEBUG
 
-The gateway starts AUTO and DEBUG with a typed decision for the current request.
-AUTO can record a scoped implementation plan on the first decision. Known files
-can be read directly through ToolRunner or during a read-only patch proposal.
-The model can also select saved evidence, a scoped group of reads and searches,
-or research for an unresolved dependency. The Autonomous Execution Controller
-drives decisions and execution for the same parent task. PLAN retains approval
-of the exact reviewed revision.
+After the gateway validates an AUTO or DEBUG decision, realtime Internal
+Coding receives one Coding-lane assignment. The native loop chooses its tools
+from the authority of that assignment. It can read, edit, run a diagnostic,
+or verify immediately. TaskBoard retains progress and tool receipts, and the
+Execution Supervisor fences the attempt and confirms completion. Explicit PLAN
+retains its exact-revision approval boundary. External Codex, explicit Batch,
+and existing staged tasks keep their staged execution contracts.
 
-An implementation step that needs evidence saves its continuation on the
-existing supervisor checkpoint and releases its child capacity. The model must
-bind current evidence to the exact requirement and select that task and
-checkpoint to resume. Coding selects its own reads and searches during the
-current invocation. Supervisor completion still requires resolution of admitted
-children and consequential actions.
+`verify_coding_change` runs selected arguments through the existing isolated
+Docker verifier. A failed check returns its exit code and bounded output to
+Coding, which can repair the implementation in the same attempt. Passing
+checks must match the current changed-file hashes from durable tool receipts.
+The native terminal decision can report completion, identify a blocker, or
+ask for material clarification. Production capability changes additionally
+require source-backed runtime reachability and existing integration verification.
 
-Checks run through the existing isolated verifier. A failed check returns its
-command, exit code, bounded output, and attempt receipt to the next decision.
-The model can inspect, research, or submit a scoped repair. The repair retains
-prior writes and must run the failed command and the required regression checks
-against the resulting revision. Repeated identical failures stop within the
-configured no-progress limit. Switching strategy preserves the original user
-mode and permissions.
+Native file reads default to the whole source within the smaller of the
+remaining model context allowance and the 48,000-byte tool-content ceiling.
+Batch reads share that allowance. The result distinguishes full and scoped
+reads from budget-truncated ranges, returns the actual line boundaries and
+file hash, and provides the next line when needed. Files beyond the
+2,000,000-byte source-provenance limit require a narrower artifact or search.
 
-The Repository Evidence Board ranks bounded results by checkout and support,
-then checks source hashes and supporting references before reuse. Configuration
-and architecture findings from investigation retain their citations and
-classification. Executed verification results are kept on TaskBoard, and
-enabled Coding Memory records them as historical receipts with checkout and
-file versions. A historical receipt cannot complete a later coding task.
+The Repository Evidence Board saves source-backed observations as tools return
+and checks their hashes before reuse. Duplicate observations reference existing
+results, and invalid references return a correction diagnostic. On recovery,
+the supervisor resumes the saved Coding assignment when action receipts reconcile.
+Source reads whose hashes changed are marked stale in the recovered history.
+Coding Activity labels reads, searches, edits, diagnostics, checks, and review
+in one stream. See the [unified coding regression](regressions/unified-adaptive-coding.md).
 
-Coding Activity shows task status, searches, reads, evidence reuse, available tool
-budget, and model and tool time. It also shows patches, verification commands,
-and strategy changes. See the
-[optional evidence regression](regressions/repository-evidence-orchestration.md#optional-evidence-and-verification-recovery)
-for the traced failures and replay commands.
-
-## Unresolved bugs and external evidence
+## Unresolved bugs and external evidence in staged workflows
 
 The Main Model can select research at coding turn/yield boundaries after evaluating a typed debugging report, local evidence, attempted fixes and installed versions. Both engines return a report as pending work. Research uses the existing autonomous controller and search providers, then returns an untrusted, sourced recommendation to the same task/backend. A fixed number of failures never triggers a search.
 
@@ -143,5 +138,5 @@ All operations stream structured events into a single persistent `CodingActivity
 - Active operation groups (parallel groups, batch counts).
 - Per-tool duration and status icons (`✓`, `◌`, `✗`, `■`).
 - Active concurrency meter.
-- Current phase (`Exploration`, `Implementation`, `Verification`, `Review`).
+- Current activity, such as reading, editing, debugging, or verifying.
 - Automatic error signature recording into `GlobalMemory`.
