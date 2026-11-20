@@ -168,8 +168,10 @@ throughout recovery.
   evidence; it does not declare logical success.
 - `TaskBoard` is a compatibility/UI projection. `DONE` is accepted only through
   a supervisor completion projection containing the durable result ID and passed
-  verification manifest. Duplicate memory matches remain advisory and are never
-  created as `SKIPPED` work.
+  verification manifest. The projection holds the TaskBoard write lock from
+  cached-row lookup through persistence, so a compound scheduler's refresh
+  cannot replace the row mid-update. Duplicate memory matches remain advisory
+  and are never created as `SKIPPED` work.
 - `ExecutionManager` owns provider-neutral sandbox/process lifecycle only. Its
   spec, handle, request, result, and events carry execution, root task, attempt,
   checkpoint, session, workspace, and repository identity; sandbox readiness or
@@ -187,6 +189,34 @@ through defaulted typed models; new records add attempt generations, execution
 scope/linkage, expanded checkpoint references, escrow lifecycle, and action
 receipts. TaskBoard context compaction stores the complete redacted source in the
 existing context artifact store and returns a hash-checked retrieval envelope.
+
+### Compound child completion during TaskBoard refresh
+
+The 2026-11-20 CI report showed a completed private-memory child followed by a
+blocked reporting child. The assertion output omitted the reporting child's
+blocker. The TaskBoard refresh path introduced in `bcc7714` can cause this
+symptom when it replaces an unchanged cached row after the completion worker
+has obtained that row but before the worker mutates it. Previously only the
+final `save()` was locked. It iterated the replacement row, dropping the
+verified update to the detached object. `MultiTaskOrchestrator` then correctly
+blocked the child's completion when it could not find the verified TaskBoard
+record.
+
+`TaskBoard.project_supervisor_completion()` now uses the existing write lock
+around the entire projection. Supervisor evidence requirements and stored
+formats are unchanged. The regression test pauses a worker after it reads the
+cached row, attempts a refresh on the scheduler thread, and checks the cached
+and persisted completion against the actual supervisor receipt. The memory
+workflow test also reports the child blocker if the status assertion fails.
+
+**Do not reintroduce** a gap between the completion row lookup and its save
+where refresh can replace that row.
+
+User-owned verification (pending)
+
+```bash
+python -m pytest -q tests/gateway/test_multi_task_orchestration.py -k 'taskboard_refresh_preserves_supervised_child_completion or multi_task_child_inherits_authorized_memory_routing_context'
+```
 
 ## Completion contracts
 

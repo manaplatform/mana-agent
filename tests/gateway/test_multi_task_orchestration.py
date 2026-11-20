@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -268,6 +269,53 @@ def test_resume_materialization_does_not_duplicate_persisted_children(tmp_path: 
 
     assert first == second
     assert len(board.get_task(root.task_id).child_task_ids) == 2
+
+
+def test_taskboard_refresh_preserves_supervised_child_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, complete_supervised_task
+) -> None:
+    board = TaskBoard(tmp_path)
+    root = _root(board)
+    child = board.create_child_task(
+        root.task_id, title="Report result", user_request="Report result"
+    )
+    board.update_status(child.task_id, TaskStatus.ROUTED)
+    board.update_status(child.task_id, TaskStatus.IN_PROGRESS)
+
+    cached_task_read = threading.Event()
+    continue_projection = threading.Event()
+    original_get_task = board.get_task
+
+    def pause_after_task_read(task_id: str):
+        task = original_get_task(task_id)
+        if task_id == child.task_id and not cached_task_read.is_set():
+            cached_task_read.set()
+            assert continue_projection.wait(timeout=5)
+        return task
+
+    monkeypatch.setattr(board, "get_task", pause_after_task_read)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        completion = pool.submit(complete_supervised_task, board, child.task_id)
+        try:
+            assert cached_task_read.wait(timeout=5)
+            # Without the write lock, refresh replaces the cached row the worker holds.
+            if board._save_lock.acquire(blocking=False):
+                try:
+                    board.refresh()
+                finally:
+                    board._save_lock.release()
+        finally:
+            continue_projection.set()
+        supervised = completion.result(timeout=5)
+
+    board.refresh()
+    assert board.get_task(child.task_id).status is TaskStatus.DONE
+    persisted = board.store.repository.get_task(child.task_id)
+    assert persisted.status is TaskStatus.DONE
+    assert persisted.supervisor_state == "completed"
+    assert persisted.verification_status == "passed"
+    assert persisted.supervisor_verification_evidence["result_id"] == supervised.result_id
+    assert persisted.supervisor_verification_evidence["verification"]
 
 
 def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path, complete_supervised_task) -> None:
@@ -966,7 +1014,10 @@ def test_multi_task_child_inherits_authorized_memory_routing_context(
     assert "capsule-whoami-1" in by_local_id["who-am-i-memory"]["result"]
 
     # 4. Verify dependent child was subsequently eligible and completed
-    assert by_local_id["report-memory-status"]["status"] == "completed"
+    report = by_local_id["report-memory-status"]
+    assert report["status"] == "completed", report["blocker"]
+    assert report["verification_status"] == "passed"
+    assert report["result"] == "status reported successfully"
     assert result.payload.get("overall_status") == "done"
 
 

@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- Serialize TaskBoard completion projections with scheduler refreshes so a verified compound child keeps its saved result. See the [completion race and user verification command](docs/29-resilient-execution.md#compound-child-completion-during-taskboard-refresh). The agent did not run the tests.
 - Codex uses the current workspace snapshot signature before and after write turns. Update the shell discovery regression to check that read-only commands still skip snapshots. See the [snapshot regression and user verification commands](docs/regressions/hierarchical-tool-execution.md#workspace-snapshot-signature). The agent did not run the tests.
 - Pause generic shell tools during correction of a rejected source-inspection call in realtime Internal AUTO and DEBUG. Give the model exact `ls` arguments and a separate build-check option. See the [incident and user verification command](docs/regressions/unified-adaptive-coding.md#shell-inspection-repeated-during-correction). The agent did not run the tests.
 - Reconcile failed realtime checkout checks with a recorded exit and unchanged source so AUTO and DEBUG can complete after a successful repair. Fix the build renewal fixture's activity hook. See the [checkout verification regression and test command](docs/regressions/unified-adaptive-coding.md#failed-checkout-checks-during-successful-repairs).

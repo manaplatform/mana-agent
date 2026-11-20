@@ -737,6 +737,7 @@ class TaskBoard:
             raise InvalidTaskTransition("INCOMPLETE_FEATURE_WIRING: runtime evidence provenance is absent")
         task.wiring_outcome = "completed"
 
+    @taskboard_write
     def project_supervisor_completion(
         self,
         task_id: str,
