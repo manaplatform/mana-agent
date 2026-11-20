@@ -131,8 +131,9 @@ def test_plain_shell_operation_does_not_take_repository_snapshots(checkout, monk
     root, opens, walks = checkout
     worker = ToolExecutionDispatcher.for_coding_task(repo_root=root, task_id="shell-no-discovery")
     calls = []
-    def observe(root, arguments, tool, limit):
-        calls.append(tool)
+
+    def observe(root, arguments, limit, *, source_candidates=False):
+        calls.append((arguments["cmd"], source_candidates))
         return tool_runner_agent.FileSnapshot()
 
     monkeypatch.setattr(tool_runner_agent, "_snapshot", observe)
@@ -145,8 +146,9 @@ def test_plain_shell_operation_does_not_take_repository_snapshots(checkout, monk
     assert result["ok"], result
     assert not calls and not opens and not walks
     # Potential writes still enter the existing observation and approval path.
-    result = worker.dispatch("run_command", {"cmd": "echo output > result.txt"})
-    assert calls == ["run_command", "run_command"]
+    command = "echo output > result.txt"
+    result = worker.dispatch("run_command", {"cmd": command})
+    assert calls == [(command, False), (command, False)]
     assert result.get("permission_required") or not result["ok"]
     assert not (root / "result.txt").exists()
 

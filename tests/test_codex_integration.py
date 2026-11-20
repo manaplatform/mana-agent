@@ -196,23 +196,33 @@ def test_invalid_backend_decision_stops_safely() -> None:
         )
 
 
-def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    app = workspace.worktree_path / "src" / "app.py"
+    app.parent.mkdir()
+    app.write_text("enabled = False\n", encoding="utf-8")
+    (workspace.worktree_path / "preexisting.txt").write_text("unchanged\n", encoding="utf-8")
     fake: _FakeClient | None = None
+
+    class WritingClient(_FakeClient):
+        async def notifications(self, thread_id: str):
+            app.write_text("enabled = True\n", encoding="utf-8")
+            async for notification in super().notifications(thread_id):
+                yield notification
 
     def factory(command: tuple[str, ...]) -> _FakeClient:
         nonlocal fake
-        fake = _FakeClient(command)
+        fake = WritingClient(command)
         return fake
 
-    # Write-required turns require a non-empty diff to complete successfully.
-    monkeypatch.setattr(
-        "mana_agent.integrations.codex.backend._git_changed_files",
-        lambda *args, **kwargs: ["src/app.py"],
-    )
     backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory)
-    result = asyncio.run(backend.execute(_task(), _workspace(tmp_path)))
+    task = _task()
+
+    async def collect_events() -> list[AgentEvent]:
+        return [event async for event in backend.stream(task, workspace)]
+
+    events = asyncio.run(collect_events())
+    result = backend.result_for(task.task_id)
 
     assert result.status == "completed"
     assert result.backend == "codex"
@@ -220,6 +230,10 @@ def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(
     assert result.tests_passed is True
     assert result.changed_files == ["src/app.py"]
     assert result.thread_id == "thread-1"
+    workspace_diff, = [event for event in events if event.payload.get("diff_scope") == "turn"]
+    assert workspace_diff.payload["changed_files"] == ["src/app.py"]
+    assert "-enabled = False" in workspace_diff.payload["diff"]
+    assert "+enabled = True" in workspace_diff.payload["diff"]
     assert fake is not None
     assert [method for method, _params in fake.requests] == ["thread/start", "turn/start"]
     turn_payload = fake.requests[1][1]

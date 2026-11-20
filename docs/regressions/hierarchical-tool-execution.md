@@ -100,6 +100,37 @@ file details have provider provenance. A separately observed workspace diff is
 scoped to the entire turn, not one Codex operation. No Mana Decisions call is
 inserted into Codex's inner tool loop.
 
+### Workspace snapshot signature
+
+After checkout verification added the keyword-only `source_candidates` option
+and removed the unused `tool_name` argument from `_snapshot`, Codex write turns
+raised `TypeError` before starting or resuming the thread. Both the initial and
+final [Codex snapshot calls](../../src/mana_agent/integrations/codex/backend.py)
+still passed the removed argument. Python did not check those arguments until
+the worker invoked the helper. The shell discovery test double also retained
+the old signature and raised `TypeError` when the potentially mutating test
+command reached the observation path. Its read-only command skipped snapshots
+as expected.
+
+Codex uses the current signature before and after a write turn. The protocol
+regression exercises a real file edit, checks the resulting turn-wide diff,
+and excludes a pre-existing unchanged file. The shell regression uses the
+current signature and checks that `pwd` takes no snapshots and a potentially
+mutating command takes both snapshots without opting into checkout verification
+source selection. No persisted data or configuration migration is required.
+
+**Do not reintroduce** the removed positional tool-name argument in callers or
+test doubles. Keep snapshot observation conditional on the operation's effect.
+
+The agent did not run these commands. The first two run the direct regression
+cases, and the last covers the surrounding Codex and shell workflows.
+
+```sh
+python -m pytest -q tests/test_codex_integration.py::test_codex_backend_uses_thread_turn_protocol_and_normalizes_result
+python -m pytest -q tests/test_intent_driven_discovery.py::test_plain_shell_operation_does_not_take_repository_snapshots
+python -m pytest -q tests/test_codex_integration.py tests/test_codex_runtime_lifecycle.py tests/test_intent_driven_discovery.py
+```
+
 ## Shared trace, API, and UI
 
 Events continue through `ExecutionEventHub` and its existing journal/cursors.

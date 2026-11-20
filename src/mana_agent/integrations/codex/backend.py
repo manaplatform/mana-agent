@@ -251,9 +251,13 @@ class CodexCodingBackend:
                 else {}
             )
             from mana_agent.services.operation_trace import BackendTraceRecorder
-            from mana_agent.multi_agent.agents.tool_runner_agent import _snapshot, _mutations
+            from mana_agent.multi_agent.agents.tool_runner_agent import FileSnapshot, _mutations, _snapshot
             backend_trace = BackendTraceRecorder()
-            before_files = await asyncio.to_thread(_snapshot, workspace.worktree_path.resolve(), {}, "codex-turn", 10_485_760) if task.requires_repository_write else {}
+            before_files = (
+                await asyncio.to_thread(_snapshot, workspace.worktree_path.resolve(), {}, limit=10_485_760)
+                if task.requires_repository_write
+                else FileSnapshot()
+            )
             notifications: list[dict[str, Any]] = []
             seen_event_ids: set[str] = set()
             sequence = 0
@@ -835,7 +839,7 @@ class CodexCodingBackend:
                 )
 
             if task.requires_repository_write:
-                after_files = await asyncio.to_thread(_snapshot, workspace.worktree_path.resolve(), {}, "codex-turn", 10_485_760)
+                after_files = await asyncio.to_thread(_snapshot, workspace.worktree_path.resolve(), {}, limit=10_485_760)
                 observed = _mutations(before_files, after_files, partial=self._results[task.task_id].status != "completed")
                 diff = "\n".join(item.diff for item in observed if item.diff)
                 if observed:
