@@ -317,6 +317,29 @@ edits, deletions, renames, and changed checkout contents. Other worktrees can
 reuse a finding only if its declared source/dependency versions match. Unknown
 or oversized source coverage remains an explicit limitation.
 
+### Pagination and source read regressions
+
+The pagination fixtures populated the board by repeatedly reading the same
+source. `record_observation` reuses the evidence identity for an equivalent
+source-backed read, so the board contained one row. The first-page test failed
+and the cursor test only exercised one page. The fixtures now observe distinct
+paths, and the cursor test fits one summary per page and checks that every ID
+appears exactly once. A separate test checks identity reuse and task links.
+
+The protected-source test creates `public.py` as a symlink to `.env`. The
+`read_source` path check rejects the symlink before opening the file and raises
+`PermissionError`. The test now checks that denial. Direct protected paths
+still fail repository-relative path validation.
+
+**Do not reintroduce** repeated identical reads as pagination fixtures or
+permit symlink aliases in file evidence reads.
+
+```sh
+venv/bin/python -m pytest -q tests/evidence/test_repository_evidence_board.py -k 'large_board_context or pagination_does_not_skip or equivalent_source_observations or symlink_to_protected_source'
+```
+
+The agent did not run these tests.
+
 ## Dynamic tasks, engines, and missing evidence
 
 An investigation/understanding task has its own objective, owner, bounded scope,

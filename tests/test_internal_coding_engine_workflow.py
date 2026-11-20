@@ -179,7 +179,11 @@ def test_adaptive_coding_corrects_a_missing_tool_call(tmp_path, monkeypatch, out
 def test_adaptive_coding_rejects_repeated_oversized_groups_without_dispatch(tmp_path):
     from mana_agent.llm.messages import validate_conversation
 
-    target = tmp_path / "app.py"
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "app.py"
     target.write_text("before\n")
 
     class Model:
@@ -191,11 +195,13 @@ def test_adaptive_coding_rejects_repeated_oversized_groups_without_dispatch(tmp_
                 errors = [json.loads(message.content) for message in messages if message.role == "tool"]
                 assert len(errors) == 3
                 assert all(error["error_code"] == "BUDGET_EXCEEDED" for error in errors)
+                assert all(not error["ok"] and error["executed"] == 0 for error in errors)
                 assert all(error["remaining"] == 3 and error["optional_remaining"] == 1 for error in errors)
             self.turns += 1
             selections = [
-                ("read_file", {"path": "app.py"}),
-                ("repo_search", {"query": "before", "paths": ["app.py"]}),
+                ("read_file", {"path": "app.py", "evidence_need": "Confirm the value to edit."}),
+                ("repo_search", {"query": "before", "paths": ["app.py"],
+                                 "evidence_need": "Find other occurrences that may require the same edit."}),
                 ("write_file", {"path": "app.py", "content": "unexpected\n"}),
             ]
             return SimpleNamespace(tool_calls=[{"id": f"{self.turns}-{index}", "name": name, "args": args}
@@ -203,8 +209,9 @@ def test_adaptive_coding_rejects_repeated_oversized_groups_without_dispatch(tmp_
 
     model = Model()
     engine = InternalCodingEngine(llm_client=model, max_tool_calls=3, programmatic_tool_calling_enabled=False)
+    engine.max_model_turns = 5
     task = CodingTask(task_id="oversized-group", goal="Fix app.py", context={"adaptive_mode": "auto"})
-    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="workspaceWrite")
+    workspace = WorkspaceContext(repository_path=repository, worktree_path=worktree, sandbox="workspaceWrite")
     result = asyncio.run(engine.execute(task, workspace))
 
     assert result.status == "failed"

@@ -153,7 +153,14 @@ part of a rejected group.
 
 The regression covers a shell rejection followed by a missing or malformed
 search scope, a model-selected listing, and a repaired edit with a passing
-check. The agent did not run the regression or retry the live assignment.
+check. The repeated oversized-group test originally passed the same directory
+as the repository and worktree, so `WorkspaceContext` rejected it before the
+budget guard ran. The fixture now uses separate temporary directories. With
+two optional calls and capacity for one, it checks that every call receives a
+budget rejection, the repeated group fails after one correction, and the source
+is untouched. **Do not reintroduce** in-place workspace setup for this test.
+
+The agent did not run these tests or retry the live assignment.
 
 ```sh
 venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/gateway/test_debug_plan_mode_contract.py -k 'corrects_shell_and_search_scope_separately or rejects_repeated_oversized_groups'

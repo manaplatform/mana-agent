@@ -34,10 +34,19 @@ def provenance(task="task-1"):
         result_digest="observed-result-digest")
 
 
-def observe(board, path="app.py"):
+def observe(board, path="app.py", *, task="task-1"):
     source = EvidenceSource.model_validate(read_source(board.root, path)["source_evidence"])
-    return board.record_observation(provenance=provenance(), category="code_behavior",
+    return board.record_observation(provenance=provenance(task), category="code_behavior",
         statement="The registered read returned the handler source", observation={"tool": "read_file"}, sources=(source,))
+
+
+def observe_distinct_files(board, count):
+    records = []
+    for index in range(count):
+        path = f"handler_{index:02d}.py"
+        (board.root / path).write_text("def handler():\n    return 1\n")
+        records.append(observe(board, path))
+    return records
 
 
 def inference(board, observed, **kwargs):
@@ -149,12 +158,22 @@ def test_relationship_and_dependency_queries_are_bounded(evidence):
 
 
 def test_large_board_context_is_bounded_and_paginated(evidence):
-    for _ in range(30):
-        observe(evidence)
+    observe_distinct_files(evidence, 30)
     page = evidence.query(EvidenceQuery(limit=3, max_context_tokens=1500))
-    assert len(page["records"]) <= 3
+    assert 1 <= len(page["records"]) <= 3
     assert page["context_bytes"] <= 1500
-    assert 0 < page["next_offset"] <= 3 and page["has_more"]
+    assert page["next_offset"] == len(page["records"])
+    assert page["has_more"]
+
+
+def test_equivalent_source_observations_share_one_record(evidence):
+    first = observe(evidence)
+    repeat = observe(evidence, task="other-task")
+    assert repeat.ref == first.ref
+    for task in ("", "task-1", "other-task"):
+        page = evidence.query(EvidenceQuery(task_id=task))
+        assert [row["evidence_id"] for row in page["records"]] == [first.evidence_id]
+        assert not page["has_more"]
 
 
 def test_unknown_custom_category_preserves_structured_sources(evidence):
@@ -206,15 +225,18 @@ def test_task_row_compare_and_set_rejects_lost_updates(evidence):
 
 
 def test_pagination_does_not_skip_records_when_context_is_full(evidence):
-    expected = {observe(evidence).evidence_id for _ in range(8)}
+    expected = {record.evidence_id for record in observe_distinct_files(evidence, 8)}
+    budget = evidence.query(EvidenceQuery(limit=1))["context_bytes"]
     offset, seen = 0, set()
     while True:
-        page = evidence.query(EvidenceQuery(limit=3, offset=offset, max_context_tokens=1500))
-        seen.update(row["evidence_id"] for row in page["records"])
-        assert page["context_bytes"] <= 1500
+        page = evidence.query(EvidenceQuery(limit=3, offset=offset, max_context_tokens=budget))
+        record, = page["records"]
+        assert record["evidence_id"] not in seen
+        seen.add(record["evidence_id"])
+        assert page["context_bytes"] <= budget
+        assert page["next_offset"] == offset + 1
         if not page["has_more"]:
             break
-        assert page["next_offset"] > offset
         offset = page["next_offset"]
     assert seen == expected
 
@@ -261,7 +283,7 @@ def test_equivalent_concurrent_findings_keep_one_identity_and_both_task_links(ev
 def test_symlink_to_protected_source_is_rejected(evidence):
     (evidence.root / ".env").write_text("PRIVATE_VALUE=not-for-models")
     (evidence.root / "public.py").symlink_to(evidence.root / ".env")
-    with pytest.raises(ValueError, match="Protected"):
+    with pytest.raises(PermissionError, match="cannot use symlinks"):
         read_source(evidence.root, "public.py")
 
 
