@@ -729,7 +729,7 @@ class InternalCodingEngine(CodingEngine):
         """Run iterative model-driven tool-calling loop until the task is complete."""
         from mana_agent.llm.engine import NativeLLMEngine
         from mana_agent.llm.errors import StructuredOutputError
-        from mana_agent.llm.messages import UserMessage, SystemMessage, ToolResultMessage
+        from mana_agent.llm.messages import AssistantMessage, SystemMessage, ToolResultMessage, UserMessage
         from mana_agent.repository_evidence.handoff import (
             INVESTIGATION_REPORT_INSTRUCTION, INVESTIGATION_REPORT_TOOL, MISSING_EVIDENCE_INSTRUCTION,
             investigation_result_schema, validate_investigation_report_arguments,
@@ -739,6 +739,7 @@ class InternalCodingEngine(CodingEngine):
         from mana_agent.coding.adaptive import AdaptiveCodingResult, result_tool
         from mana_agent.context_cost.estimator import estimate_value_tokens
         from mana_agent.repository_evidence.observations import SOURCE_OUTPUT_BYTES
+        from mana_agent.services.activity_context import emit_activity
 
         investigation = task.context.get("repository_investigation")
         adaptive_mode = task.context.get("adaptive_mode")
@@ -802,6 +803,10 @@ class InternalCodingEngine(CodingEngine):
             except Exception as gm_exc:
                 logger.debug("InternalCodingEngine memory retrieval failed safely: %s", gm_exc)
 
+        action_instruction = (
+            "Respond with a tool call. Call an offered coding tool to continue, or call "
+            f"{CODING_RESULT_TOOL} by itself as a direct call to finish, ask for clarification, or report a blocker."
+        )
         if investigation:
             context_parts.append(INVESTIGATION_REPORT_INSTRUCTION)
         elif adaptive_mode:
@@ -809,8 +814,7 @@ class InternalCodingEngine(CodingEngine):
                 f"User mode: {adaptive_mode.upper()}. Start with the next useful authorized action. "
                 "Use repository evidence when it helps. You can read, search, edit, or run a diagnostic without "
                 "a plan or evidence handoff. A failed check is input to your next repair. "
-                f"Use {ISOLATED_CHECK_TOOL} for focused verification. "
-                f"Finish with {CODING_RESULT_TOOL} as a single direct call. "
+                f"Use {ISOLATED_CHECK_TOOL} for focused verification. {action_instruction} "
                 "Clarify only when a material user decision is required."
             )
             if task.context.get("runtime_capability_change"):
@@ -870,6 +874,7 @@ class InternalCodingEngine(CodingEngine):
         if adaptive_mode:
             seen_evidence.update(saved_native.get("native_seen_evidence", []))
         terminal_rejections = 0
+        missing_action_corrected = False
         evidence_misses = 0
         max_evidence_misses = getattr(self, "max_no_progress_cycles", 3)
 
@@ -952,7 +957,6 @@ class InternalCodingEngine(CodingEngine):
             if protocol_pending and not raw_tool_calls:
                 response_msg = getattr(response, "message", None)
                 if response_msg is None:
-                    from mana_agent.llm.messages import AssistantMessage
                     response_msg = AssistantMessage(content=str(getattr(response, "content", "") or ""))
                 messages.append(response_msg)
                 session.state.native_messages = [message.model_dump(mode="json") if hasattr(message, "model_dump") else message for message in messages]
@@ -984,7 +988,6 @@ class InternalCodingEngine(CodingEngine):
                         terminal_rejections += 1
                         if terminal_rejections > 1:
                             raise RuntimeError(f"Coding result was rejected after correction. {exc}") from exc
-                        from mana_agent.llm.messages import AssistantMessage
                         messages.append(getattr(response, "message", None) or AssistantMessage(content="", tool_calls=tool_calls))
                         for requested in tool_calls:
                             messages.append(ToolResultMessage(content=json.dumps({
@@ -993,7 +996,27 @@ class InternalCodingEngine(CodingEngine):
                         turn += 1
                         continue
                 if not tool_calls:
-                    raise StructuredOutputError(f"The coding model must select an action or call {CODING_RESULT_TOOL}")
+                    if continuation is not None:
+                        # The provider's continuation fingerprint includes its assistant reply.
+                        messages.append(
+                            getattr(response, "message", None)
+                            or AssistantMessage(content=getattr(response, "content", "") or "")
+                        )
+                        session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+                    detail = f"The coding model must select an action or call {CODING_RESULT_TOOL}."
+                    if missing_action_corrected:
+                        raise StructuredOutputError(f"{detail} The model still returned no tool call after one correction.")
+                    if turn + 1 >= max_turns:
+                        raise StructuredOutputError(f"{detail} The model turn budget cannot cover a correction.")
+                    missing_action_corrected = True
+                    messages.append(UserMessage("The previous reply contained no coding tool call. " + action_instruction))
+                    session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+                    emit_activity("coding.progress", title="Coding response needs correction", summary=detail,
+                                  status="rejected", task_id=task.task_id, backend=self.name,
+                                  operation_id=f"coding-action-{task.task_id}-{turn}",
+                                  metadata={"reason_code": "missing_coding_tool_call"})
+                    turn += 1
+                    continue
             if not tool_calls:
                 content_val = getattr(response, "content", response)
                 if isinstance(content_val, list):
@@ -1012,7 +1035,6 @@ class InternalCodingEngine(CodingEngine):
 
             response_msg = getattr(response, "message", None)
             if response_msg is None:
-                from mana_agent.llm.messages import AssistantMessage
                 response_msg = AssistantMessage(
                     content=str(getattr(response, "content", "") or ""),
                     tool_calls=tool_calls,

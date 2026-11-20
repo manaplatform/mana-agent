@@ -18,6 +18,13 @@ The native terminal decision can report completion, identify a blocker, or
 ask for material clarification. Production capability changes additionally
 require source-backed runtime reachability and existing integration verification.
 
+Each model turn must select an offered coding tool or submit a terminal result
+with one direct `submit_coding_result` call. If the model replies with prose
+alone, Coding requests one correction from the same model within the remaining
+turn budget. The model retains completed operations and their tool results.
+A second reply without a tool call stops the attempt. See the
+[missing tool call regression](regressions/unified-adaptive-coding.md#missing-tool-call-in-a-native-coding-response).
+
 Native file reads default to the whole source within the smaller of the
 remaining model context allowance and the 48,000-byte tool-content ceiling.
 Batch reads share that allowance. The result distinguishes full and scoped

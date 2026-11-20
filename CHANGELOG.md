@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- Realtime Internal AUTO and DEBUG require a tool call on each model turn and allow one budgeted correction for a prose-only reply. See the [missing tool call regression and user verification command](docs/regressions/unified-adaptive-coding.md#missing-tool-call-in-a-native-coding-response). The agent did not run the tests.
 - Reuse validated escrow identities during coding checkpoints and record actual deadline expiry as a timeout with fresh-task recovery guidance. See the [deadline incident and user verification commands](docs/29-resilient-execution.md#realtime-coding-deadline-during-checkpointing). The agent did not run the tests.
 - Run realtime Internal AUTO and DEBUG on one supervised coding assignment with optional investigation, budgeted whole-file and range reads, and isolated verification that feeds failures back into the same loop. Preserve PLAN revision approval and reconcile tool receipts on recovery. See the [unified coding regression and verification commands](docs/regressions/unified-adaptive-coding.md).
 - Validate Codex patch syntax before review or context matching. Report the patch line for an early terminator and allow one budgeted correction on the same realtime coding assignment. See the [malformed patch regression and user verification command](docs/regressions/debug-plan-execution-contract.md#premature-patch-terminator).

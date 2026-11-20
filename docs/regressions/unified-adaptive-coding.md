@@ -35,6 +35,35 @@ draft, or patch-proposal handoff on the realtime Internal AUTO or DEBUG path.
 Preserve ToolRunner authorization and verified completion at their existing
 boundaries.
 
+## Missing tool call in a native coding response
+
+In realtime Internal AUTO or DEBUG, a model could reply in prose after a tool
+result or on its first turn. The prompt told the model how to submit a final
+result, but the loop immediately raised "The coding model must select an action
+or call submit_coding_result" when the reply contained no tool call. Prior tests
+exercised rejected terminal results and provider timeouts. Their fixtures
+always returned a tool call for successful inference in an adaptive turn.
+
+The [Internal Coding loop](../../src/mana_agent/coding/internal_engine.py)
+now states the per-turn requirement and offers one same-format correction on
+the existing assignment. The correction consumes a model turn and uses the same
+offered tools. It retains previous tool results and includes the provider's
+assistant message when needed to keep its continuation fingerprint valid.
+Coding Activity records the missing call in a fixed diagnostic. A second omission
+or an exhausted turn budget yields an explicit error. Completion still requires
+the typed `submit_coding_result` call and its applicable evidence checks.
+
+**Do not reintroduce** prose as implicit completion or select a replacement
+action in the host. Keep corrections bounded by the existing model turn budget.
+
+User verification covers correction with and without a provider continuation,
+repeated prose, the turn budget, and preservation of the earlier read. The agent
+did not run this check.
+
+```sh
+venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_corrects_a_missing_tool_call
+```
+
 ## Verification
 
 Run the focused regressions first.

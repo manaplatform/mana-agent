@@ -92,6 +92,90 @@ def test_native_oversized_read_group_can_be_narrowed(tmp_path):
     assert result.summary == "The handler is enabled."
 
 
+@pytest.mark.parametrize(("outcome", "use_continuation"), [
+    ("recovered", False), ("recovered", True), ("repeated", False), ("budget", True),
+])
+def test_adaptive_coding_corrects_a_missing_tool_call(tmp_path, monkeypatch, outcome, use_continuation):
+    from mana_agent.coding.models import CODING_RESULT_TOOL
+    from mana_agent.llm.engine import _conversation_fingerprint
+    from mana_agent.llm.messages import ToolCall, validate_conversation
+    from mana_agent.llm.types import ContinuationState, ModelResponse
+
+    (tmp_path / "handler.py").write_text("enabled = True\n")
+    prose = '{"disposition": "complete", "summary": "Unsubmitted result"}'
+    events = []
+    monkeypatch.setattr("mana_agent.services.activity_context.emit_activity",
+                        lambda kind, **fields: events.append((kind, fields)))
+
+    class Model:
+        turns = 0
+        receipt = None
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            validate_conversation(messages)
+            if self.turns == 1:
+                assert "Respond with a tool call" in messages[-1].content
+                return ModelResponse(tool_calls=[ToolCall(id="read", name="read_file", args={"path": "handler.py"})])
+            if self.turns == 2:
+                assert messages[-1].tool_call_id == "read"
+                assert "enabled = True" in messages[-1].content
+                response = ModelResponse(content=prose)
+                if use_continuation:
+                    self.receipt = ContinuationState(
+                        provider="openai", model="fixture", endpoint="responses", mode="server",
+                        response_id="receipt", message_count=len(messages) + 1,
+                        message_fingerprint=_conversation_fingerprint([*messages, response.message]),
+                    )
+                    response.continuation = self.receipt
+                return response
+            assert self.turns == 3
+            assert continuation == self.receipt
+            if continuation:
+                assert _conversation_fingerprint(messages[:continuation.message_count]) == continuation.message_fingerprint
+            else:
+                assert all(message.content != prose for message in messages)
+            assert sum(message.tool_call_id == "read" for message in messages) == 1
+            assert messages[-1].role == "user"
+            assert f"{CODING_RESULT_TOOL} by itself as a direct call" in messages[-1].content
+            if outcome == "repeated":
+                return ModelResponse(content=prose)
+            return ModelResponse(tool_calls=[ToolCall(id="done", name=CODING_RESULT_TOOL, args={
+                "disposition": "complete", "summary": "Observed the enabled handler.",
+            })])
+
+    model = Model()
+    charges = []
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=1, programmatic_tool_calling_enabled=False)
+    engine.max_model_turns = 2 if outcome == "budget" else 5
+    engine.charge_model = lambda: charges.append("model")
+    task = CodingTask(task_id="adaptive-missing-action", goal="Confirm the handler state",
+                      requires_repository_write=False, context={"adaptive_mode": "debug"})
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    read, = result.continuation_context["executed_operations"]
+    assert read["call_id"] == "read" and read["ok"]
+    assert model.turns == len(charges) == (2 if outcome == "budget" else 3)
+    corrections = [fields for kind, fields in events if kind == "coding.progress"]
+    if outcome == "budget":
+        assert not corrections
+    else:
+        correction, = corrections
+        assert correction["status"] == "rejected"
+        assert correction["metadata"]["reason_code"] == "missing_coding_tool_call"
+        assert prose not in correction["summary"]
+    if outcome == "recovered":
+        assert result.status == "completed", result.errors
+        assert result.summary == "Observed the enabled handler."
+    else:
+        assert result.status == "failed"
+        assert result.adaptive_result is None
+        error, = result.errors
+        assert ("budget cannot cover a correction" if outcome == "budget" else "after one correction") in error
+        assert prose not in error
+
+
 def test_slow_native_provider_is_measured_separately_from_duplicate_reads(tmp_path, monkeypatch):
     from mana_agent.coding import internal_engine
 
