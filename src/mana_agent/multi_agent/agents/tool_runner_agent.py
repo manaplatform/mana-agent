@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from stat import S_ISREG
 import threading
 import time
 from typing import Any
@@ -25,7 +26,7 @@ from types import MappingProxyType
 import uuid
 
 from mana_agent.chat.activity import safe_text
-from mana_agent.coding.models import AgentEvent, WorkspaceContext
+from mana_agent.coding.models import AgentEvent, ISOLATED_CHECK_TOOL, WorkspaceContext
 from mana_agent.multi_agent.core.types import AgentRole, AgentState
 from mana_agent.multi_agent.queue.locks import LockTable
 from mana_agent.multi_agent.tools.operation_policy import OperationPolicy, validate_arguments
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 _LOCKS = LockTable()
 _ACTIVE: ContextVar["RunningOperation | None"] = ContextVar("mana_running_operation", default=None)
 _SEAL = object()
+_MAX_MUTATION_HASH_BYTES = 100 * 1024 * 1024
 
 
 class ExecutionAuthorityError(PermissionError):
@@ -571,7 +573,10 @@ class ToolRunnerAgent:
         observe_mutations = policy.effect == "mutation" or (
             policy.effect == "command" and not _is_read_only_observation(request.tool_name, request.arguments)
         )
-        before = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
+        root = Path(request.workspace_root)
+        source_candidates = request.tool_name == ISOLATED_CHECK_TOOL and (root / ".git").exists()
+        before = _snapshot(root, request.arguments, self.capture_limit,
+                           source_candidates=source_candidates) if observe_mutations else FileSnapshot()
         queue_store = None
         operation_key = ""
         if self.authority.taskboard is not None and hasattr(self.authority.taskboard, "store"):
@@ -605,11 +610,16 @@ class ToolRunnerAgent:
             status = "interrupted" if getattr(exc, "outcome_unknown", False) else "timed_out" if isinstance(exc, subprocess.TimeoutExpired) else "failed"
             raw = {"ok": False, "error": safe_text(str(exc), protected=operation.protected), "error_code": type(exc).__name__,
                    "stdout": str(getattr(exc, "stdout", "") or ""), "stderr": str(getattr(exc, "stderr", "") or "")}
-        after = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
+        after = _snapshot(root, request.arguments, self.capture_limit,
+                          source_candidates=source_candidates) if observe_mutations else FileSnapshot()
         mutations = _mutations(before, after, partial=status != "success")
-        if not getattr(before, "complete", True) or not getattr(after, "complete", True) or any(value is None for value in (*before.values(), *after.values())):
+        if not before.complete or not after.complete or any(
+            version is None or version.content is None for version in (*before.values(), *after.values())
+        ):
             operation.trace_complete = False
         for mutation in mutations:
+            if mutation.status == "unknown":
+                continue
             operation.retain("diff", mutation.diff)
             operation.emit("file.edit.applied", status="running",
                 mutation=mutation.model_dump(exclude={"diff"}), path=mutation.path,
@@ -645,7 +655,7 @@ class ToolRunnerAgent:
             status=status, exit_code=result.exit_code, termination_reason=result.termination_reason,
             result_summary=str(public_result.get("summary") or public_result.get("error") or status),
             output_preview=public_result.get("output", "") if operation.public.get("coding_activity") == "verifying" else "",
-            changed_files=[m.path for m in mutations], output_references=operation.references, **activity_update)
+            changed_files=[m.path for m in mutations if m.status != "unknown"], output_references=operation.references, **activity_update)
         result.trace_complete = operation.trace_complete
         result.result["execution"] = result.model_dump(mode="json", exclude={"result", "mutations"})
         result.result["mutations"] = _public_value([m.model_dump() for m in mutations], operation.protected)
@@ -693,11 +703,37 @@ def _is_read_only_observation(tool_name: str, arguments: dict[str, Any]) -> bool
     return isinstance(cmd, str) and "\n" not in cmd and "\r" not in cmd and is_plan_mode_read_only_command(cmd)
 
 
-class FileSnapshot(dict):
+@dataclass(frozen=True)
+class _FileVersion:
+    sha256: str
+    content: bytes | None
+
+
+class FileSnapshot(dict[str, _FileVersion | None]):
+    # Whether discovery covered the candidate paths. A None value means an
+    # individual path was seen but could not be fingerprinted.
     complete: bool = True
 
 
-def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int) -> dict[str, bytes | None]:
+def _file_version(path: Path, size: int, *, capture_content: bool) -> _FileVersion | None:
+    with path.open("rb") as stream:
+        if capture_content:
+            content = stream.read(size + 1)
+            return _FileVersion(hashlib.sha256(content).hexdigest(), content) if len(content) == size else None
+        digest = hashlib.sha256()
+        remaining = size
+        while remaining:
+            block = stream.read(min(remaining, 65_536))
+            if not block:
+                return None
+            digest.update(block)
+            remaining -= len(block)
+        if stream.read(1):
+            return None
+    return _FileVersion(digest.hexdigest(), None)
+
+
+def _snapshot(root: Path, arguments: dict[str, Any], limit: int, *, source_candidates: bool = False) -> FileSnapshot:
     """Bounded observation within the worker lock; never execute another tool."""
     import os
     paths: set[str] = set()
@@ -721,8 +757,15 @@ def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int)
                 for prefix in ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "):
                     if line.startswith(prefix):
                         paths.add(line[len(prefix):])
-    collect(arguments)
-    if not paths:
+    if source_candidates:
+        from mana_agent.tools.repository import checkout_file_candidates
+
+        candidates = checkout_file_candidates(root)
+        paths.update(candidates[:5000])
+        complete = len(candidates) <= 5000
+    else:
+        collect(arguments)
+    if not paths and not source_candidates:
         for directory, dirs, files in os.walk(root, followlinks=False):
             dirs[:] = [d for d in dirs if d not in {".git", ".mana", "node_modules", "venv", ".venv", "__pycache__"} and not (Path(directory) / d).is_symlink()]
             for name in files:
@@ -734,7 +777,8 @@ def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int)
                 break
     snapshot = FileSnapshot()
     snapshot.complete = complete
-    remaining = limit
+    content_remaining = limit
+    hash_remaining = _MAX_MUTATION_HASH_BYTES
     for path in sorted(paths):
         target = (root / path).resolve()
         if not target.is_relative_to(root) or any(p in {".git", ".mana"} or p.startswith(".env") for p in Path(path).parts):
@@ -742,43 +786,57 @@ def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int)
             continue
         relative = target.relative_to(root).as_posix()
         try:
-            if target.is_file() and target.stat().st_size <= remaining:
-                body = target.read_bytes()
-                snapshot[relative] = body
-                remaining -= len(body)
-            elif target.exists():
-                snapshot[relative] = None
-                snapshot.complete = False
+            info = target.stat()
+        except FileNotFoundError:
+            continue
         except OSError:
             snapshot[relative] = None
+            continue
+        size = info.st_size
+        if not S_ISREG(info.st_mode) or size > hash_remaining:
+            snapshot[relative] = None
+            continue
+        hash_remaining -= size
+        try:
+            version = _file_version(target, size, capture_content=size <= content_remaining)
+        except OSError:
+            version = None
+        snapshot[relative] = version
+        if version is not None and version.content is not None:
+            content_remaining -= size
     return snapshot
 
 
-def _mutations(before: dict[str, bytes | None], after: dict[str, bytes | None], *, partial: bool) -> list[FileMutationEvidence]:
+def _mutations(before: FileSnapshot, after: FileSnapshot, *, partial: bool) -> list[FileMutationEvidence]:
     result = []
     for path in sorted(before.keys() | after.keys()):
-        old, new = before.get(path, b""), after.get(path, b"")
-        if old == new and (path in before) == (path in after):
+        existed, exists = path in before, path in after
+        old, new = before.get(path), after.get(path)
+        old_digest, new_digest = old.sha256 if old else "", new.sha256 if new else ""
+        unknown = (old is None and (existed or not before.complete)
+                   or new is None and (exists or not after.complete))
+        if not unknown and old_digest == new_digest:
             continue
-        unknown = old is None or new is None or (path not in before and not getattr(before, "complete", True)) or (path not in after and not getattr(after, "complete", True))
-        binary = unknown or b"\0" in (old or b"") or b"\0" in (new or b"")
-        try:
-            (old or b"").decode("utf-8")
-            (new or b"").decode("utf-8")
-        except UnicodeDecodeError:
-            binary = True
-        old_lines = (old or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
-        new_lines = (new or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
-        diff = "" if binary else "".join(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}" if path in before else "/dev/null", tofile=f"b/{path}" if path in after else "/dev/null"))
-        result.append(FileMutationEvidence(path=path, operation="delete" if path not in after else "create" if path not in before else "edit",
-            before_sha256=hashlib.sha256(old).hexdigest() if old is not None and path in before else "",
-            after_sha256=hashlib.sha256(new).hexdigest() if new is not None and path in after else "",
+        old_body, new_body = old.content if old else b"", new.content if new else b""
+        binary, diff = True, ""
+        if not unknown and old_body is not None and new_body is not None and b"\0" not in old_body and b"\0" not in new_body:
+            try:
+                old_lines = old_body.decode("utf-8").splitlines(keepends=True)
+                new_lines = new_body.decode("utf-8").splitlines(keepends=True)
+            except UnicodeDecodeError:
+                pass
+            else:
+                binary = False
+                diff = "".join(difflib.unified_diff(old_lines, new_lines,
+                    fromfile=f"a/{path}" if existed else "/dev/null", tofile=f"b/{path}" if exists else "/dev/null"))
+        result.append(FileMutationEvidence(path=path, operation="delete" if not exists else "create" if not existed else "edit",
+            before_sha256=old_digest, after_sha256=new_digest,
             diff=diff, added_lines=sum(line.startswith("+") and not line.startswith("+++") for line in diff.splitlines()),
             removed_lines=sum(line.startswith("-") and not line.startswith("---") for line in diff.splitlines()),
             binary=binary, status="unknown" if unknown else "partial" if partial else "applied"))
-    deleted = [item for item in result if item.operation == "delete" and item.before_sha256]
+    deleted = [item for item in result if item.operation == "delete" and item.status != "unknown"]
     for created in list(result):
-        if created.operation != "create":
+        if created.operation != "create" or created.status == "unknown":
             continue
         match = next((item for item in deleted if item.before_sha256 == created.after_sha256), None)
         if match is not None:

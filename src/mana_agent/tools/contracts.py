@@ -1002,7 +1002,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="shell",
-            description="Run one non-interactive shell command in the local workspace. Multiple commands in one call are not supported.",
+            description="Run one non-interactive shell command. Use action.commands with one command and an optional repository-relative cwd.",
             input_schema=_schema(
                 {
                     "action": {
@@ -1011,7 +1011,9 @@ def coding_tool_contracts() -> list[ToolContract]:
                             "commands": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "The shell commands to execute sequentially.",
+                                "minItems": 1,
+                                "maxItems": 1,
+                                "description": "The one shell command to execute.",
                             },
                             "timeout_ms": {
                                 "type": "integer",
@@ -1028,8 +1030,11 @@ def coding_tool_contracts() -> list[ToolContract]:
                     "commands": {
                         "type": "array",
                         "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 1,
                         "description": "Optional top-level shorthand for commands.",
                     },
+                    "cwd": {"type": "string", "description": "Optional working directory relative to the assigned checkout."},
                     "timeout_ms": {"type": "integer"},
                     "max_output_length": {"type": "integer"},
                     "environment": {
@@ -1091,7 +1096,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 {
                     "input": {
                         "action": {
-                            "commands": ["ls -la", "git status --short"],
+                            "commands": ["git status --short"],
                             "timeout_ms": 60000,
                             "max_output_length": 4096,
                         }

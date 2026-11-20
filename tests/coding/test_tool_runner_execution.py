@@ -207,6 +207,46 @@ def test_unknown_binary_and_overflow_have_honest_evidence(tmp_path):
     assert result.trace_complete is False
 
 
+def test_mutation_digests_survive_exhausted_diff_capture(tmp_path):
+    from hashlib import sha256
+
+    (tmp_path / "a.txt").write_bytes(b"a" * 32)
+    (tmp_path / "b.txt").write_bytes(b"b" * 32)
+    runner = make_runner(tmp_path, effect="command")
+    runner.capture_limit = 8
+
+    def edit(_arguments):
+        (tmp_path / "b.txt").write_bytes(b"c" * 32)
+        (tmp_path / "c.txt").write_bytes(b"new")
+        return {"ok": True}
+
+    result = invoke(runner, {}, edit)
+
+    changed, created = result.mutations
+    assert (changed.path, changed.status) == ("b.txt", "applied")
+    assert changed.before_sha256 == sha256(b"b" * 32).hexdigest()
+    assert changed.after_sha256 == sha256(b"c" * 32).hexdigest()
+    assert not changed.diff
+    assert (created.path, created.operation, created.status) == ("c.txt", "create", "applied")
+    assert not result.trace_complete
+
+
+def test_unobserved_file_versions_remain_uncertain(tmp_path, monkeypatch):
+    monkeypatch.setattr("mana_agent.multi_agent.agents.tool_runner_agent._MAX_MUTATION_HASH_BYTES", 8)
+    (tmp_path / "large.txt").write_bytes(b"x" * 32)
+    runner = make_runner(tmp_path, effect="mutation")
+
+    def edit(_arguments):
+        (tmp_path / "large.txt").write_bytes(b"y" * 32)
+        return {"ok": True}
+
+    result = invoke(runner, {"path": "large.txt"}, edit)
+
+    mutation, = result.mutations
+    assert (mutation.path, mutation.status) == ("large.txt", "unknown")
+    assert not mutation.after_sha256
+
+
 def test_registered_actor_revocation_and_path_confinement(tmp_path):
     from mana_agent.multi_agent.core.types import AgentState
     runner = make_runner(tmp_path)

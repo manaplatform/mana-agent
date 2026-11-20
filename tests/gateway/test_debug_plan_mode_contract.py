@@ -86,7 +86,7 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
         passed = (root / filename).read_text() == "fixed\n"
         return {"passed": passed, "exit_code": int(not passed), "output": "passed" if passed else "wrong value"}
 
-    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
     verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"]})
     selections = []
     if mode == "auto":
@@ -161,7 +161,9 @@ def test_adaptive_coding_reconciles_legacy_mutation_paths(mode_gateway, monkeypa
     assert workflow._adaptive_mutations("child") == {"pkg/handler.py": "updated", "src/original.py": "missing"}
 
 
-@pytest.mark.parametrize("rejected_kind", ["oversized_group", "missing_evidence_need", "unoffered_tool", "unscoped_search"])
+@pytest.mark.parametrize("rejected_kind", [
+    "oversized_group", "missing_evidence_need", "unoffered_tool", "unscoped_search", "shell_schema",
+])
 def test_adaptive_coding_preserves_patch_budget_after_evidence_rejection(mode_gateway, monkeypatch, rejected_kind):
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
@@ -221,11 +223,17 @@ def test_adaptive_coding_preserves_patch_budget_after_evidence_rejection(mode_ga
                 if rejected_kind == "unoffered_tool":
                     self.turn += 1
                     raise InvalidResponseError("Unregistered tool", reason_code="tool_not_offered")
+                if rejected_kind == "shell_schema":
+                    self.turn += 1
+                    raise InvalidResponseError("Invalid shell arguments", public_detail="Shell arguments failed validation.",
+                                               reason_code="tool_arguments_invalid")
             elif self.turn == 2:
                 outputs = {message.tool_call_id: json.loads(message.content) for message in messages if message.role == "tool"}
                 assert outputs["initial-read"]["content"] == "before\n"
                 if rejected_kind == "unoffered_tool":
                     assert "outside this turn's allowance" in messages[-2].content
+                if rejected_kind == "shell_schema":
+                    assert '{"action":{"commands":["one command"]},"cwd":"."}' in messages[-2].content
                 for rejected_call in rejected:
                     error = outputs[rejected_call["id"]]
                     assert error["error_code"] == expected_error
@@ -243,7 +251,7 @@ def test_adaptive_coding_preserves_patch_budget_after_evidence_rejection(mode_ga
             return SimpleNamespace(tool_calls=selected)
 
     model = Model()
-    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
     gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
         internal_engine=InternalCodingEngine(llm_client=model, max_tool_calls=4, programmatic_tool_calling_enabled=False))
     result = workflow.start("session", "Fix app.py", mode="auto", repair=True, workflow=workflow_choice())
@@ -312,7 +320,7 @@ def test_adaptive_coding_corrects_shell_and_search_scope_separately(mode_gateway
             self.turn += 1
             return SimpleNamespace(tool_calls=calls)
 
-    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
     gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
         internal_engine=InternalCodingEngine(llm_client=Model(), max_tool_calls=4, programmatic_tool_calling_enabled=False))
     result = workflow.start("session", "Fix the handler", mode="auto", repair=True, workflow=workflow_choice())
@@ -353,7 +361,7 @@ def test_adaptive_coding_renews_through_accounting_on_the_same_assignment(mode_g
         passed = (root / "caller.py").read_text() == "after\n"
         return {"passed": passed, "exit_code": 0 if passed else 7, "output": "passed" if passed else "caller needs repair"}
 
-    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
     correct = {"argv": ["ctest", "--test-dir", "build", "--output-on-failure"], "setup_argv": [["make"]]}
     patch = "*** Begin Patch\n*** Update File: caller.py\n@@\n-before\n+after\n*** End Patch"
     choices = [("write_file", {"path": "app.py", "content": "first change\n"}),
@@ -414,6 +422,94 @@ def test_adaptive_coding_renews_through_accounting_on_the_same_assignment(mode_g
     assert seen_checks == [child.task_id] * (2 if authorized else 1)
 
 
+@pytest.mark.parametrize("repairs_until_success", [4, None], ids=["success", "repeat"])
+def test_adaptive_checkout_build_renews_or_alarms_on_repeat(mode_gateway, monkeypatch, repairs_until_success):
+    from mana_agent.coding.adaptive import BUDGET_RENEWAL_TOOL
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+    from mana_agent.config.autonomous_config import AutoRenewConfig
+
+    gateway, workflow = mode_gateway
+    subprocess.run(["git", "init", "--quiet"], cwd=gateway.root, check=True)
+    (gateway.root / ".gitignore").write_text("build/\n")
+    (gateway.root / "build").mkdir()
+    gateway._entry_router.llm = Decisions()
+    controller = gateway._autonomous_controller
+    controller.config = AutonomousExecutionConfig(max_tool_calls=2 if repairs_until_success else 8,
+        max_model_turns=6, max_no_progress_cycles=1,
+        auto_renew=AutoRenewConfig(renew_tool_calls=2, renew_model_turns=2))
+    renewals, builds, alarms = [], [], []
+
+    def authorize_renewal(**request):
+        renewals.append(request)
+        return True, "Authorized"
+
+    def run(_gateway, adapter):
+        assert adapter.cwd == gateway.root.resolve()
+        if adapter.argv == ["cmake", "-S", ".", "-B", "build"]:
+            (adapter.cwd / "build" / "configured").touch()
+            return {"ok": True, "returncode": 0}
+        assert adapter.argv == ["cmake", "--build", "build"]
+        assert (adapter.cwd / "build" / "configured").is_file()
+        builds.append((adapter.parent_task_id, adapter.idempotency_key))
+        (adapter.cwd / "build" / "output").write_text(str(len(builds)))
+        passed = repairs_until_success is not None and len(builds) > repairs_until_success
+        return {"ok": passed, "returncode": 0 if passed else 2, "stderr": f"Build output {len(builds)}"}
+
+    def activity(_event, *, title, **fields):
+        if fields.get("metadata", {}).get("reason_code") == "CODING_NO_PROGRESS":
+            alarms.append(title)
+
+    controller.accounting_service = SimpleNamespace(validate_autonomous_renewal=authorize_renewal)
+    monkeypatch.setattr("mana_agent.coding.programmatic.execute_coding_shell_action", run)
+    monkeypatch.setattr("mana_agent.coding.internal_engine.emit_activity", activity)
+    verify = (ISOLATED_CHECK_TOOL, {"argv": ["cmake", "--build", "build"],
+                                  "setup_argv": [["cmake", "-S", ".", "-B", "build"]]})
+    if repairs_until_success is None:
+        groups = [[verify], [verify], [verify]]
+    else:
+        groups = []
+        for index in range(repairs_until_success + 1):
+            if index:
+                groups.append([(BUDGET_RENEWAL_TOOL, {"reason": "Another source repair and build are needed."})])
+            groups.append([("write_file", {"path": "app.py", "content": f"repair = {index}\n"}), verify])
+        groups.append([(CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Build passed."})])
+
+    class Model:
+        turn = 0
+
+        def with_tools(self, tools):
+            self.offered = {tool["function"]["name"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            group = groups[self.turn]
+            self.turn += 1
+            assert all(name in self.offered for name, _ in group)
+            return SimpleNamespace(tool_calls=[{"id": f"build-{self.turn}-{index}", "name": name, "args": args}
+                                              for index, (name, args) in enumerate(group)])
+
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=Model(), max_tool_calls=controller.config.max_tool_calls,
+                                            programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Repair and build", mode="auto", repair=True, workflow=workflow_choice())
+
+    assert len({task_id for task_id, _ in builds}) == 1
+    assert len({key for _, key in builds}) == len(builds)
+    if repairs_until_success is None:
+        assert result.status == "error"
+        assert len(builds) == 3
+        assert len(alarms) == 1
+        assert not renewals
+    else:
+        assert result.status == "success", result.message
+        assert len(renewals) == repairs_until_success
+        assert result.data["changed_files"] == ["app.py"]
+        assert [row["exit_code"] for row in result.data["verification"]] == [2] * repairs_until_success + [0]
+        assert not alarms
+
+
 def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkeypatch):
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
@@ -452,7 +548,7 @@ def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkey
         assert (root / "app.py").read_text() == "fixed\n"
         return {"passed": True, "exit_code": 0, "output": "passed"}
 
-    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
     gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
         internal_engine=InternalCodingEngine(llm_client=Model(), programmatic_tool_calling_enabled=False))
     first = workflow.start("session", "Fix app.py", mode="debug", repair=True, workflow=workflow_choice(mode="debug"))

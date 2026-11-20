@@ -56,6 +56,7 @@ from mana_agent.utils.redaction import redact_secrets
 from mana_agent.repository_evidence.models import EvidenceRef, MissingEvidenceRequest, RuntimeWiringEvidence
 
 if TYPE_CHECKING:
+    from mana_agent.coding.adaptive import AdaptiveVerificationCommand
     from mana_agent.repository_evidence.service import RepositoryEvidenceBoard
 
 _OWNER = "autonomous_loop"
@@ -611,6 +612,8 @@ class ModeWorkflow:
             if any(item.get("status") == "pending" and item.get("attempt_id") == parent_attempt.attempt_id
                    for item in parent_attempt.steering_inputs):
                 raise PermissionError("Coding received new steering. Reconcile the task request before continuing.")
+            if write and name == ISOLATED_CHECK_TOOL:
+                self.lane.authorize_tool(child_id, "run_command")
             return self.lane.authorize_tool(child_id, name)
 
         def charge(operation):
@@ -658,8 +661,8 @@ class ModeWorkflow:
         verify.input_model = verifier
         verify.tool_contract = ToolContract(name=ISOLATED_CHECK_TOOL,
             description=VERIFICATION_DESCRIPTION if write else "Run a focused verification argv in a network-disabled source snapshot.",
-            input_schema=verifier.model_json_schema(), output_schema={}, error_format={},
-            required_capability="test_execution", effect="read_only", repository_operation=True)
+            input_schema=verifier.model_json_schema(), output_schema={}, error_format={}, required_capability="test_execution",
+            effect="command" if write else "read_only", repository_operation=True)
         controller = self.gateway._autonomous_controller
         renewal = controller.config.auto_renew
         accounting_runtime = {}
@@ -667,7 +670,7 @@ class ModeWorkflow:
             accounting_runtime = {"adaptive_tool_calls_used": state.get("tool_operations", len(state["evidence"])),
                                   "adaptive_tool_calls_added": self._renewed_budget(state, "tool_calls")}
         if (write and renewal.enabled and renewal.strategy == "accounting_based" and controller.accounting_service is not None
-                and len(state.get("adaptive_budget_renewals", [])) < renewal.max_auto_renewals):
+                and renewal.adaptive_renewals_remaining(len(state.get("adaptive_budget_renewals", []))) != 0):
             accounting_runtime.update(
                 renew_coding_budget=lambda decision_id, reason: self._renew_adaptive_budget(task_id, child_id, state, decision_id, reason),
                 renewal_tool_headroom=controller.config.soft_limit_tools_headroom,
@@ -710,15 +713,22 @@ class ModeWorkflow:
                 return {"ok": False, "error": "This budget decision was already applied."}
             if not renewal.enabled or renewal.strategy != "accounting_based" or controller.accounting_service is None:
                 return {"ok": False, "error": "Accounting-backed renewal is unavailable."}
-            if len(grants) >= renewal.max_auto_renewals:
+            if renewal.adaptive_renewals_remaining(len(grants)) == 0:
                 return {"ok": False, "error": "The assignment reached its accounting renewal limit."}
 
             versions = self._adaptive_mutations(child_id)
             checks = {canonical_digest([row["argv"], row["cwd"], row["image"], row["source_versions"], row["exit_code"]])
                       for row in state.get("verification", [])}
             progress = canonical_digest([versions, sorted(checks)])
-            if renewal.require_progress and (not (versions or checks) or any(row["progress"] == progress for row in grants)):
-                return {"ok": False, "error": "Renewal needs a new observed change or isolated check.", "retry_after_progress": True}
+            verification_progress = canonical_digest(sorted({
+                row["verification_progress_digest"] for row in state.get("verification", [])
+                if row.get("verification_progress_digest")
+            }))
+            repeated = any(row["progress"] == progress
+                           and row.get("verification_progress", verification_progress) == verification_progress
+                           for row in grants)
+            if renewal.require_progress and (not (versions or checks) or repeated):
+                return {"ok": False, "error": "Renewal needs a new observed change or check.", "retry_after_progress": True}
 
             capacity = [task.token_budget - task.token_usage for task in (parent, child) if task.token_budget is not None]
             budget = self.lane.inspect_task(child_id).budget
@@ -736,13 +746,13 @@ class ModeWorkflow:
             if not valid:
                 return {"ok": False, "error": safe_text(str(redact_secrets(str(detail))), limit=240, protected=activity.protected_text)}
 
-            grant = {"decision_id": decision_id, "progress": progress,
+            grant = {"decision_id": decision_id, "progress": progress, "verification_progress": verification_progress,
                      "reason": safe_text(str(redact_secrets(reason)), limit=500, protected=activity.protected_text),
                      "model_turns": renewal.renew_model_turns, "tool_calls": renewal.renew_tool_calls}
             state["adaptive_budget_renewals"] = [*grants, grant]
             self._persist(task_id, state)
             return {"ok": True, "model_turns": grant["model_turns"], "tool_calls": grant["tool_calls"],
-                    "renewals_remaining": renewal.max_auto_renewals - len(grants) - 1}
+                    "renewals_remaining": renewal.adaptive_renewals_remaining(len(grants) + 1)}
 
     def _refresh_adaptive_history(self, root, resume):
         messages = []
@@ -772,6 +782,7 @@ class ModeWorkflow:
         return resume
 
     def _verify_adaptive(self, task_id, child_id, root, state, command):
+        from mana_agent.coding.adaptive import AdaptiveVerificationCommand
         from mana_agent.multi_agent.agents.tool_runner_agent import assert_tool_runner, current_operation
 
         assert_tool_runner(ISOLATED_CHECK_TOOL)
@@ -779,7 +790,10 @@ class ModeWorkflow:
         versions = self._adaptive_mutations(child_id)
         if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
             raise PermissionError("Verification requires reconciling a change outside its tool receipt.")
-        outcome = asyncio.run(run_isolated_verification(root, command, task_id=child_id))
+        run = run_checkout_verification if isinstance(command, AdaptiveVerificationCommand) else run_isolated_verification
+        outcome = asyncio.run(run(root, command, task_id=child_id))
+        if outcome.get("permission_required"):
+            return outcome
         activity = current_activity_context()
         with activity.publication():
             self._check_live(task_id)
@@ -790,6 +804,11 @@ class ModeWorkflow:
                 "operation_id": operation.request.operation_id, "attempt_id": activity.attempt_id,
                 "source_versions": versions, "image": command.image,
                 "output": safe_text(outcome["output"], protected=activity.protected_text)}
+            receipt["verification_progress_digest"] = canonical_digest([
+                command.argv, command.cwd, command.image, command.expected, command.output_marker,
+                getattr(command, "setup_argv", ()), versions, outcome["passed"], outcome["exit_code"],
+                [setup["exit_code"] for setup in outcome.get("setup_receipts", ())],
+            ])
             state.setdefault("verification", []).append(receipt)
             self._persist(task_id, state)
         return {"ok": receipt["passed"], **receipt}
@@ -800,10 +819,13 @@ class ModeWorkflow:
         before, after = {}, {}
         for receipt in ToolQueueStore(self.board.store.db).operation_receipts(child_id):
             for mutation in receipt.get("mutations", []):
-                if mutation["status"] == "unknown":
-                    raise PermissionError("Reconcile an uncertain mutation before completing or verifying the task.")
                 # Older receipts used the host's path separator.
                 path = mutation["path"].replace(os.sep, "/")
+                if mutation["status"] == "unknown":
+                    protected = getattr(current_activity_context(), "protected_text", ())
+                    label = _code_span(safe_text(path, limit=200, protected=protected))
+                    raise PermissionError(f"Reconcile an uncertain mutation for {label}. "
+                                          "Review the checkout before resuming the build.")
                 old_path = (mutation.get("old_path") or "").replace(os.sep, "/")
                 if old_path:
                     before.setdefault(old_path, mutation["before_sha256"])
@@ -2865,9 +2887,51 @@ def validate_step_patch(root: Path, step: PlanStep, patch: str) -> list[tuple[st
     return operations
 
 
+async def run_checkout_verification(root: Path, command: AdaptiveVerificationCommand, *, task_id: str) -> dict:
+    from mana_agent.coding.programmatic import execute_coding_shell_action
+    from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
+    from mana_agent.transactional_actions.adapters import ShellActionAdapter
+    from mana_agent.transactional_actions.runtime import default_action_gateway
+
+    operation = current_operation()
+    if operation is None or operation.request.task_id != task_id:
+        raise PermissionError("Checkout verification requires the active Coding tool operation.")
+    cwd = root / command.cwd
+    if cwd.resolve() != cwd or not cwd.is_dir():
+        raise ValueError("Verification cwd must be a real directory inside the checkout")
+    gateway = default_action_gateway(root)
+    setup_receipts = []
+    setup_commands = command.setup_argv
+    for index, argv in enumerate((*setup_commands, command.argv)):
+        operation.validate_live()
+        adapter = ShellActionAdapter(
+            argv=list(argv), cwd=cwd, environment={}, expected_outputs=[],
+            parent_task_id=task_id, actor="user", originating_agent="internal_coding",
+            policy_context={"tool": ISOLATED_CHECK_TOOL}, allow_command_result_verification=True,
+            idempotency_key=f"checkout-verification:{operation.request.operation_attempt_id}:{index}",
+            timeout_seconds=command.timeout,
+        )
+        result = execute_coding_shell_action(gateway, adapter)
+        if result.get("permission_required"):
+            return result
+        exit_code = result.get("returncode")
+        output = "\n".join(str(result.get(key) or "") for key in ("stdout", "stderr", "error")).strip()
+        output = safe_text(output, limit=None, protected=operation.protected)
+        command_receipt = {"exit_code": exit_code, "output": output[-2000:], "action_id": result.get("action_id")}
+        if index == len(setup_commands):
+            passed = (exit_code == 0 and result.get("ok") is True if command.expected == "pass"
+                      else type(exit_code) is int and exit_code not in {0, 126, 127} and command.output_marker in output)
+            return {**command_receipt, "passed": passed, "setup_receipts": setup_receipts}
+        setup_receipts.append(command_receipt)
+        if exit_code != 0 or result.get("ok") is not True:
+            return {**command_receipt, "exit_code": None, "passed": False, "setup_receipts": setup_receipts,
+                    "output": f"Build prerequisite {index + 1} failed.\n{command_receipt['output']}"}
+
+
 async def run_isolated_verification(root: Path, command: VerificationCommand, *, task_id: str) -> dict:
     from mana_agent.execution.models import ExecutionRequest, NetworkMode, NetworkPolicy, SandboxSpec
     from mana_agent.execution.providers.local_docker import LocalDockerProvider
+    from mana_agent.tools.repository import checkout_file_candidates
 
     setup_argv = getattr(command, "setup_argv", ())
     if command.uses_git_checkout or any(VerificationCommand(argv=argv).uses_git_checkout for argv in setup_argv):
@@ -2879,10 +2943,7 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
         raise ValueError("Verification cwd must be a real directory inside the checkout")
     # Copy only versioned source and non-ignored candidate files. Do not mount
     # the task checkout, its .git metadata, host credentials, or runtime state.
-    listed = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-        cwd=root, check=True, stdout=subprocess.PIPE,
-    )
+    candidates = checkout_file_candidates(root)
     provider = LocalDockerProvider()
     image = command.image or provider.default_image
     image_lookup = subprocess.run([provider.docker_binary, "image", "inspect", "--format", "{{.Id}}", image],
@@ -2894,7 +2955,7 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
     with TemporaryDirectory(prefix="mana-mode-verify-") as temporary:
         snapshot = Path(temporary).resolve()
         (snapshot / command.cwd).mkdir(parents=True, exist_ok=True)
-        for name in dict.fromkeys(listed.stdout.decode().split("\0")):
+        for name in candidates:
             try:
                 path = root / repository_relative_path(name)
             except ValueError:

@@ -304,7 +304,8 @@ class NativeLLMEngine:
                     detail = f"Provider tool arguments violate the registered schema for {call.name}"
                     if validator is None:
                         detail += f" ({exc})"
-                    raise StructuredOutputError(detail, public_detail=detail) from None
+                    raise StructuredOutputError(detail, public_detail=detail,
+                                                reason_code="tool_arguments_invalid") from None
                 seen.add(call.id)
         except InvalidResponseError as exc:
             exc.provider_usage, exc.response_accepted = response.usage.model_dump(), True
@@ -360,7 +361,7 @@ class NativeLLMEngine:
         summary = error.public_detail if isinstance(error, (InvalidResponseError, ProviderRequestError)) else ""
         if isinstance(error, StructuredOutputError) and getattr(error, "response_accepted", False):
             title = "Model response failed validation"
-            metadata["reason_code"] = "response_schema_invalid"
+            metadata["reason_code"] = error.reason_code or "response_schema_invalid"
             if decision_correction_available:
                 title, status = "Decision needs correction", "rejected"
         elif isinstance(error, InvalidResponseError):

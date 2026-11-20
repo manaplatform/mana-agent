@@ -35,6 +35,15 @@ _SKIP_DIRS = {
 }
 
 
+def checkout_file_candidates(repo_root: Path) -> list[str]:
+    """List tracked and non-ignored candidate files in the checkout."""
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=repo_root, check=True, stdout=subprocess.PIPE, timeout=15,
+    )
+    return list(dict.fromkeys(os.fsdecode(name) for name in result.stdout.split(b"\0") if name))
+
+
 @dataclass(frozen=True)
 class VerificationCheck:
     name: str

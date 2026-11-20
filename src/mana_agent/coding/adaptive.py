@@ -27,8 +27,8 @@ EVIDENCE_NEED_MAX_LENGTH = 500
 EVIDENCE_NEED_DESCRIPTION = "Name the missing fact and the specific edit or check the answer could change."
 BUDGET_RENEWAL_TOOL = "renew_coding_budget"
 VERIFICATION_DESCRIPTION = (
-    "Run one direct argv in a network-disabled source snapshot. Set cwd to '.' or a repository-relative directory. "
-    "Use setup_argv for prerequisite commands such as a build in the same snapshot. Use file editing tools for source changes."
+    "Run a direct build or check in the assigned checkout. Set cwd to '.' or a repository-relative directory. "
+    "Use setup_argv for prerequisites in the same checkout. Use file editing tools for source changes."
 )
 _PATCH_TOOLS = frozenset({"apply_patch", "apply_patch_batch", "batch_apply_patches"})
 _SHELL_TOOLS = frozenset({"run_command", "run_script_once", "shell"})
@@ -122,9 +122,12 @@ class AdaptiveBudgetRenewal(BaseModel):
 
 class AdaptiveVerificationCommand(VerificationCommand):
     setup_argv: tuple[tuple[str, ...], ...] = Field(default=(), max_length=4)
+    timeout: int = Field(default=120, ge=1, le=3600)
 
     @model_validator(mode="after")
     def validate_direct_commands(self):
+        if self.image:
+            raise ValueError("Checkout verification runs locally without an image.")
         for argv in (*self.setup_argv, self.argv):
             if not argv or not argv[0].strip() or any("\x00" in argument for argument in argv):
                 raise ValueError("Each setup or verification command needs a literal argv array.")
@@ -158,7 +161,7 @@ def validate_adaptive_tool(name: str, arguments: dict[str, Any]) -> tuple[str, s
         except ValueError:
             return "INVALID_VERIFICATION_COMMAND", VERIFICATION_DESCRIPTION
         if command.uses_git_checkout or any(VerificationCommand(argv=argv).uses_git_checkout for argv in command.setup_argv):
-            return "INVALID_VERIFICATION_COMMAND", "The isolated source snapshot has no .git metadata. Use a project check."
+            return "INVALID_VERIFICATION_COMMAND", "Use a project build or check for verification."
     elif name in _SHELL_TOOLS:
         from mana_agent.tools.shell_exec import split_shell_command
 

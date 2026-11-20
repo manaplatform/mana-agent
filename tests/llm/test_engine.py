@@ -586,6 +586,22 @@ def test_model_response_rejects_unregistered_and_invalid_tool_calls(native_profi
     assert "PRIVATE_FIXTURE" not in str(error.value)
     assert "for echo" in str(error.value)
     assert issue in error.value.public_detail
+    assert error.value.reason_code == "tool_arguments_invalid"
+
+
+def test_native_shell_schema_accepts_one_command_with_checkout_cwd(native_profile, monkeypatch):
+    from mana_agent.llm.messages import ToolCall
+    from mana_agent.tools.contracts import coding_tool_contracts
+
+    arguments = {"action": {"commands": ["make"]}, "cwd": "src"}
+
+    class Adapter:
+        async def generate(self, request):
+            return ModelResponse(tool_calls=[ToolCall(id="call", name="shell", args=arguments)])
+
+    shell = next(contract for contract in coding_tool_contracts() if contract.name == "shell")
+    model = engine(native_profile, monkeypatch, Adapter()).with_tools([{"name": "shell", "parameters": shell.input_schema}])
+    assert model.generate_sync("Run the build").tool_calls[0].args == arguments
 
 
 @pytest.mark.parametrize("classification", [" Observed ", "PRIVATE_FIXTURE"])

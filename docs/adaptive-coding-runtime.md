@@ -37,16 +37,21 @@ limit. See the [search correction regression](regressions/unified-adaptive-codin
 When the assignment approaches its tool or model-turn limit, the model can
 request `renew_coding_budget` with the progress made and the edit or check it
 still needs. Renewal uses the active accounting reservation, the configured
-increments, and the task's renewal limit. Granted allowances and consumed
-calls survive resume. Each subsequent provider call still passes the existing
-token and spending checks.
+increments, and any explicitly configured renewal count. Further renewals
+remain available while work advances and the reservation has capacity.
+Granted allowances and consumed calls survive resume. Failed build results
+on new source versions can show progress toward the next renewal. Coding
+Activity alerts the user when actions repeat without advancing the task.
 
 Source inspection uses the repository tools. The adaptive loop validates
 Codex patch syntax and isolated check inputs before charging a tool call.
 Use a direct command argv and `cwd` of `.` or a repository-relative directory.
-For a check that needs a build, supply the build argv in `setup_argv`. Setup
-and the final check share the same network-disabled snapshot. A failed setup
-stops the sequence and records its own result.
+Realtime Internal write assignments run verification through the shell action
+policy in the assigned checkout. Use `setup_argv` for configuration or build
+prerequisites. Setup and the final check share the checkout and its build
+outputs. A failed prerequisite stops that sequence and returns its output for
+the next repair. A required build must pass against the current source versions
+before the assignment can report success.
 
 Each model turn must select an offered coding tool or submit a terminal result
 with one direct `submit_coding_result` call. If the model replies with prose

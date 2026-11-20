@@ -23,9 +23,9 @@ repeated work from no-progress detection.
   reports full and partial coverage, the total line count, the content hash,
   and whether the output stopped early. Evidence publication is opportunistic.
   Repeated reads return an observation reference without echoing the content.
-- Verification runs against an isolated source snapshot. A failed check
+- Realtime write verification runs in the assigned checkout. A failed check
   returns to Coding. Completion validates observed passing checks against the
-  latest changed-file receipts. A model assertion of success is insufficient.
+  latest changed-file receipts.
 - Recovery reconciles tool operation identities with supervisor action receipts
   before continuing. A revoked lease or an uncertain operation stops execution.
   Previously completed writes retain their verified source hashes.
@@ -203,6 +203,68 @@ User verification on Windows. The agent did not run these commands.
 python -m pytest -q tests/coding/test_investigation_engines.py tests/coding/test_tool_runner_execution.py tests/test_execution_modes.py tests/test_internal_coding_engine_workflow.py -k 'multiline_code_citation or rename_evidence or reads_only_selected_lines or whole_files'
 python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/execution_supervisor/test_supervisor_core.py -k 'edits_and_repairs_on_one_assignment or corrects_shell_and_search_scope_separately or legacy_mutation_paths or character_truncated_line or batch_proposal_wakes or retries_read_denial or retries_transient_replace_denial'
 python -m pytest -q
+```
+
+## Checkout builds and repeated renewal
+
+On November 20, two Internal AUTO assignments stopped at the checkpoint after
+running builds in the assigned checkout. In the second attempt, the worker
+recorded both source edits and build artifacts. When a generated file grew,
+the bounded content snapshot no longer retained several other files. The
+worker treated gaps in diff capture as unknown file versions, so the gateway
+could neither checkpoint the work nor evaluate another build or renewal.
+
+ToolRunner compares content digests independently of the bytes held for
+diffs. If a file genuinely cannot be observed within the hashing budget, the
+checkpoint identifies the uncertain path. Existing uncertain receipts still
+require review. [ToolRunner](../../src/mana_agent/multi_agent/agents/tool_runner_agent.py)
+
+For realtime Internal write assignments, `verify_coding_change` runs the
+model-selected build or check and optional prerequisites in the assigned
+checkout through the transactional shell gate. Git-ignored build output stays
+available for incremental builds. The source receipt includes tracked paths
+and non-ignored candidates. Checks bind to the observed source versions.
+[Gateway workflow](../../src/mana_agent/gateway/mode_workflow.py)
+
+The model can repair and rerun a failed build on the same assignment. The
+default realtime renewal policy uses accounting capacity and observed
+progress instead of a fixed renewal count. An explicit configuration cap
+still applies. The same failed build against the same source and setup
+registers as repeated work even if timestamps or other output vary. Coding
+Activity reports the condition before the no-progress stop.
+
+**Do not reintroduce** dependence on diff capture for mutation certainty, a
+fixed default renewal count for progressing realtime repair, or treating
+identical failed builds as progress because their output text changed.
+
+The agent did not run these checks or replay either cancelled assignment.
+
+```sh
+python -m pytest -q tests/coding/test_tool_runner_execution.py -k 'digests_survive or unobserved_file_versions'
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'adaptive_checkout_build or adaptive_coding_renews or model_wait_failure'
+```
+
+## Provider rejected shell arguments
+
+The provider returned a shell tool call that failed the closed argument schema
+before any shell action ran. Internal Coding stopped after completing two source
+reads. The rejected inputs were redacted. The registered schema omitted
+`cwd`, which the execution handler already supported. The loop offered a
+correction for an unavailable tool name and had no correction path for schema
+rejection.
+
+The shell schema now declares its repository-relative working directory.
+The provider validator gives Coding a typed error for rejected arguments.
+On the same assignment, Coding gives the model one opportunity to select
+valid calls, using remaining model turns and retaining completed observations.
+**Do not reintroduce** dispatch of an invalid group or sanitize rejected input
+into an inferred command.
+
+The agent did not run these checks.
+
+```sh
+python -m pytest -q tests/llm/test_engine.py -k 'native_shell_schema or unregistered_and_invalid_tool_calls'
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k preserves_patch_budget_after_evidence_rejection
 ```
 
 ## Verification

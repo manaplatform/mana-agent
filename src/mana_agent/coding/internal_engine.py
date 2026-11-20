@@ -134,6 +134,9 @@ def _coding_action_fingerprint(content: str) -> str | None:
     result = json.loads(content)
     if not isinstance(result, dict):
         return None
+    digest = result.get("verification_progress_digest")
+    if isinstance(digest, str) and digest:
+        return digest
     mutations = [(row["path"], row.get("before_sha256"), row.get("after_sha256"))
                  for row in result.get("mutations", []) if isinstance(row, dict) and row.get("path")]
     diagnostics = {key: result[key] for key in (
@@ -843,7 +846,10 @@ class InternalCodingEngine(CodingEngine):
                     "Apply the smallest coherent change that fixes the cause and fits existing code. Use current "
                     "observations, including relevant caller and test contracts. Add focused regression coverage where "
                     "the behavior changes, and let failures guide the next repair. Inspect further only when a specific "
-                    "answer could change the implementation or verification."
+                    "answer could change the implementation or verification. Run a required build with verify_coding_change "
+                    "in the assigned checkout. Reuse build outputs for incremental builds. Pass prerequisites in setup_argv "
+                    "and group a ready repair before its check when possible. Repair and rerun a failed build. Request a "
+                    "budget renewal when offered if the repair or required check still needs capacity."
                 )
             if task.context.get("runtime_capability_change"):
                 context_parts.append("Completion requires source-backed runtime wiring edges and a passing check "
@@ -990,11 +996,18 @@ class InternalCodingEngine(CodingEngine):
                 finally:
                     session.state.native_model_wait_ms += round((time.monotonic() - started) * 1000)
             except InvalidResponseError as exc:
-                if not write_budget or exc.reason_code != "tool_not_offered":
+                if not write_budget or exc.reason_code not in {"tool_not_offered", "tool_arguments_invalid"}:
                     raise
-                detail = "The previous reply selected a tool outside this turn's allowance. Choose from the tools offered now."
+                if exc.reason_code == "tool_arguments_invalid":
+                    code = "TOOL_ARGUMENTS_INVALID"
+                    detail = (f"{exc.public_detail or 'The previous tool arguments failed validation.'} "
+                              "Resubmit needed calls using the schemas offered this turn. For shell, use "
+                              '{"action":{"commands":["one command"]},"cwd":"."} or select the offered build check.')
+                else:
+                    code = "TOOL_NOT_OFFERED"
+                    detail = "The previous reply selected a tool outside this turn's allowance. Choose from the tools offered now."
                 messages.append(UserMessage(detail))
-                request_selection_correction("TOOL_NOT_OFFERED", detail, write_budget)
+                request_selection_correction(code, detail, write_budget)
                 turn += 1
                 continue
             usage = getattr(response, "usage", None)
@@ -1062,7 +1075,7 @@ class InternalCodingEngine(CodingEngine):
                         outcome = AdaptiveCodingResult.model_validate(call.get("args"))
                         if outcome.disposition == "complete" and task.requires_repository_write:
                             if not verification_evidence(session.state.verification_results, [])[1]:
-                                raise ValueError("Completion requires passing isolated verification after the last change.")
+                                raise ValueError("Completion requires passing verification after the last change.")
                             if task.context.get("runtime_capability_change") and outcome.wiring is None:
                                 raise ValueError("Completion requires source-backed runtime wiring.")
                             if callable(getattr(self, "validate_adaptive_completion", None)):
@@ -1149,7 +1162,7 @@ class InternalCodingEngine(CodingEngine):
                         else:
                             grant = renew_budget(call["id"], request.reason)
                             if grant["ok"]:
-                                renewal_available = grant["renewals_remaining"] > 0
+                                renewal_available = grant["renewals_remaining"] != 0
                                 session.state.max_tool_calls += grant["tool_calls"]
                                 max_turns += grant["model_turns"]
                                 emit_activity("coding.progress", title="Accounting renewed coding budget", status="success",
@@ -1554,6 +1567,12 @@ class InternalCodingEngine(CodingEngine):
                 if adaptive_mode and evidence_misses > max_evidence_misses:
                     raise RuntimeError("Repeated coding actions produced no new information or change after the model was asked to replan")
                 if not patch_proposal and evidence_misses == max_evidence_misses:
+                    if adaptive_mode:
+                        emit_activity("coding.progress", title="Repeated coding actions are not progressing",
+                                      summary="Use the last build result or source observation to choose a different repair or check.",
+                                      status="warning", task_id=task.task_id, backend=self.name,
+                                      operation_id=f"coding-no-progress-{task.task_id}-{turn}",
+                                      metadata={"reason_code": "CODING_NO_PROGRESS", "cycles": evidence_misses})
                     messages.append(UserMessage(
                         "Recent actions stopped producing new evidence or changes. Use existing observations to select "
                         "an edit, a focused diagnostic, a materially different read, or a precise blocker."
