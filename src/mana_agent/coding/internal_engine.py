@@ -731,8 +731,9 @@ class InternalCodingEngine(CodingEngine):
         from mana_agent.repository_evidence.models import CodingAssignment
         from mana_agent.coding.evidence_tools import INVESTIGATE
         from mana_agent.coding.adaptive import (
-            EVIDENCE_NEED, EVIDENCE_NEED_DESCRIPTION, EVIDENCE_NEED_MAX_LENGTH, REPOSITORY_EVIDENCE_TOOLS, SCOPED_SOURCE_TOOLS,
-            AdaptiveCodingResult, AdaptiveWriteBudget, result_tool,
+            BUDGET_RENEWAL_TOOL, EVIDENCE_NEED, EVIDENCE_NEED_DESCRIPTION, EVIDENCE_NEED_MAX_LENGTH,
+            REPOSITORY_EVIDENCE_TOOLS, SCOPED_SOURCE_TOOLS, AdaptiveBudgetRenewal, AdaptiveCodingResult,
+            AdaptiveWriteBudget, renewal_tool, result_tool, validate_adaptive_tool,
         )
         from mana_agent.coding.verification_evidence import verification_evidence
         from mana_agent.context_cost.estimator import estimate_value_tokens
@@ -742,6 +743,7 @@ class InternalCodingEngine(CodingEngine):
         investigation = task.context.get("repository_investigation")
         adaptive_mode = task.context.get("adaptive_mode")
         adaptive_write = bool(adaptive_mode and task.requires_repository_write)
+        renew_budget = getattr(self, "renew_coding_budget", None) if adaptive_write else None
         patch_proposal = bool(task.context.get("mode_patch_proposal"))
         tool_defs = self._build_tool_definitions(session.dispatcher)
         if investigation:
@@ -771,7 +773,7 @@ class InternalCodingEngine(CodingEngine):
 
         def bind_tools(definitions):
             if use_programmatic:
-                direct_tools = {INVESTIGATION_REPORT_TOOL, INVESTIGATE, CODING_RESULT_TOOL}
+                direct_tools = {INVESTIGATION_REPORT_TOOL, INVESTIGATE, CODING_RESULT_TOOL, BUDGET_RENEWAL_TOOL}
                 definitions = [
                     {"type": "function", **entry["function"], "allowed_callers":
                      ["direct"] if entry["function"]["name"] in direct_tools else ["direct", "programmatic"]}
@@ -867,7 +869,8 @@ class InternalCodingEngine(CodingEngine):
             self.provider,
         )
 
-        max_turns = min(MAX_INTERNAL_MODEL_TURNS, getattr(self, "max_model_turns", MAX_INTERNAL_MODEL_TURNS))
+        configured_turns = getattr(self, "max_model_turns", MAX_INTERNAL_MODEL_TURNS)
+        max_turns = configured_turns if adaptive_write else min(MAX_INTERNAL_MODEL_TURNS, configured_turns)
         final_summary = ""
 
         saved_native = task.context.get("coding_resume_context") or {}
@@ -901,6 +904,8 @@ class InternalCodingEngine(CodingEngine):
         terminal_rejections = 0
         missing_action_corrected = False
         selection_corrected = False
+        renewal_available = callable(renew_budget)
+        renewal_waiting_for_progress = False
         evidence_misses = 0
         max_evidence_misses = getattr(self, "max_no_progress_cycles", 3)
 
@@ -946,9 +951,20 @@ class InternalCodingEngine(CodingEngine):
                         tool_reserve = 0
                 write_budget = AdaptiveWriteBudget(remaining, max_turns - turn, tool_reserve)
                 definitions = [entry for entry in tool_defs if write_budget.allows(entry["function"]["name"])]
+                instruction = write_budget.instruction()
+                if (renewal_available and (
+                    remaining <= max(tool_reserve, getattr(self, "renewal_tool_headroom", 0))
+                    or write_budget.remaining_turns <= max(2, getattr(self, "renewal_turn_headroom", 0))
+                )):
+                    definitions.append(renewal_tool())
+                    if write_budget.result_only:
+                        instruction = (f"{remaining} tool calls remain. Call {BUDGET_RENEWAL_TOOL} alone if an edit or check "
+                                       f"still needs capacity, or call {CODING_RESULT_TOOL} alone with the current outcome.")
+                    else:
+                        instruction += f" If the remaining edits and checks need more capacity, call {BUDGET_RENEWAL_TOOL} alone."
                 offered_names = {entry["function"]["name"] for entry in definitions}
                 model_with_tools = bind_tools(definitions)
-                messages.append(UserMessage(write_budget.instruction()))
+                messages.append(UserMessage(instruction))
 
             finish_proposal = patch_proposal and (
                 max_turns - turn == 1 or session.state.tool_calls_executed >= session.state.max_tool_calls
@@ -1116,18 +1132,59 @@ class InternalCodingEngine(CodingEngine):
                 from mana_agent.tools.repository import validate_delegated_discovery
 
                 names = [call.get("name", "") for call in tool_calls]
-                rejection = write_budget.reject_group(names)
+                rejection = None
+                if BUDGET_RENEWAL_TOOL in names:
+                    call = tool_calls[0]
+                    if (names != [BUDGET_RENEWAL_TOOL] or BUDGET_RENEWAL_TOOL not in offered_names or protocol_pending or protocol_events
+                            or (call.get("caller") or {}).get("type") not in {None, "direct"}):
+                        rejection = "INVALID_BUDGET_RENEWAL", "Select an offered budget renewal as a standalone direct call."
+                    else:
+                        try:
+                            request = AdaptiveBudgetRenewal.model_validate(call.get("args"))
+                        except ValueError:
+                            rejection = "INVALID_BUDGET_RENEWAL", "Explain the progress made and the edit or check that needs budget."
+                        else:
+                            grant = renew_budget(call["id"], request.reason)
+                            if grant["ok"]:
+                                renewal_available = grant["renewals_remaining"] > 0
+                                session.state.max_tool_calls += grant["tool_calls"]
+                                max_turns += grant["model_turns"]
+                                emit_activity("coding.progress", title="Accounting renewed coding budget", status="success",
+                                              task_id=task.task_id, backend=self.name, operation_id=f"renewal-{task.task_id}-{turn}",
+                                              metadata={"decision_id": call["id"], "tool_calls_added": grant["tool_calls"],
+                                                        "model_turns_added": grant["model_turns"]})
+                            else:
+                                renewal_available = False
+                                renewal_waiting_for_progress = bool(grant.get("retry_after_progress"))
+                                grant["error_code"] = "BUDGET_RENEWAL_DENIED"
+                                emit_activity("coding.progress", title="Coding budget renewal denied", summary=grant["error"],
+                                              status="rejected", task_id=task.task_id, backend=self.name,
+                                              operation_id=f"renewal-{task.task_id}-{turn}", metadata={"decision_id": call["id"]})
+                            messages.append(ToolResultMessage(content=json.dumps(grant), tool_call_id=call["id"], caller=call.get("caller")))
+                            session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+                            session.state.native_pending_calls = []
+                            selection_corrected = False
+                            checkpoint()
+                            if not grant["ok"] and write_budget.remaining_turns == 1:
+                                raise RuntimeError(grant["error"])
+                            turn += 1
+                            continue
+                else:
+                    rejection = write_budget.reject_group(names)
                 if rejection is None and not offered_names.issuperset(names):
                     rejection = "TOOL_NOT_OFFERED", "Select an offered tool within this assignment and its remaining budget."
                 scoped_calls = []
                 if rejection is None:
                     for call in tool_calls:
                         name = call.get("name")
+                        arguments = dict(call.get("args") or {})
+                        rejection = validate_adaptive_tool(name, arguments)
+                        if rejection:
+                            break
                         if name not in SCOPED_SOURCE_TOOLS:
                             scoped_calls.append(call)
                             continue
                         # Keep the model's evidence need in history and send only tool arguments to the worker.
-                        arguments = dict(call.get("args") or {})
                         need = arguments.pop(EVIDENCE_NEED, None)
                         if not isinstance(need, str) or not need.strip() or len(need) > EVIDENCE_NEED_MAX_LENGTH:
                             rejection = "EVIDENCE_NEED_REQUIRED", EVIDENCE_NEED_DESCRIPTION
@@ -1472,6 +1529,12 @@ class InternalCodingEngine(CodingEngine):
                     observed.add(fingerprint)
                 novel = observed - seen_evidence
                 seen_evidence.update(observed)
+                if renewal_waiting_for_progress and novel and any(
+                    name == ISOLATED_CHECK_TOOL or classify_tool_operation(name) == OperationKind.WRITE
+                    for name in call_names.values()
+                ):
+                    renewal_available = True
+                    renewal_waiting_for_progress = False
                 evidence_misses = 0 if novel else evidence_misses + 1
                 if adaptive_mode and evidence_misses > max_evidence_misses:
                     raise RuntimeError("Repeated coding actions produced no new information or change after the model was asked to replan")

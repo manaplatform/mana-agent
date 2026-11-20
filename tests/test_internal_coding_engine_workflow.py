@@ -241,6 +241,19 @@ def test_adaptive_coding_protects_model_turns_for_edit_check_and_result():
     assert not final_turn.allows(ISOLATED_CHECK_TOOL)
 
 
+def test_adaptive_coding_routes_shell_inspection_and_rejects_inline_verification():
+    from mana_agent.coding.adaptive import validate_adaptive_tool
+    from mana_agent.coding.models import ISOLATED_CHECK_TOOL
+
+    assert validate_adaptive_tool("run_command", {"command": "grep -n handler src/app.py"})[0] == "USE_REPOSITORY_TOOL"
+    inspection = {"action": {"commands": ["git diff -- src/app.py"]}}
+    assert validate_adaptive_tool("shell", inspection)[0] == "USE_REPOSITORY_TOOL"
+    assert validate_adaptive_tool("run_command", {"command": "cc --version"}) is None
+    assert validate_adaptive_tool(ISOLATED_CHECK_TOOL, {"argv": ["bash", "-lc", "make && ctest"]})[0] == "INVALID_VERIFICATION_COMMAND"
+    assert validate_adaptive_tool(ISOLATED_CHECK_TOOL, {"argv": ["ctest"], "setup_argv": [["make"]]}) is None
+    assert validate_adaptive_tool(ISOLATED_CHECK_TOOL, {"argv": ["bash", "scripts/check.sh"]}) is None
+
+
 def test_slow_native_provider_is_measured_separately_from_duplicate_reads(tmp_path, monkeypatch):
     from mana_agent.coding import internal_engine
 

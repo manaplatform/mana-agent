@@ -97,6 +97,39 @@ venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests
 venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/coding/test_scoped_evidence_tools.py tests/gateway/test_debug_plan_mode_contract.py
 ```
 
+## Accounting renewal after partial edits
+
+On November 20 at 12:29 Tehran time, realtime Internal AUTO assignment
+`task_20261120_000023` exhausted its 50-call allowance after two successful
+edits. It spent 46 calls on inspection, including 21 shell commands. An edit
+group could not fit with verification. A unified diff sent to the Codex batch
+patch tool consumed another call. Verification received an absolute working
+directory and a shell script that mixed edits and checks. No check ran.
+
+The adaptive loop had no route to the accounting renewal policy. It also
+charged before checking patch syntax or the verification command contract.
+Direct shell inspection bypassed the source tools and their evidence needs.
+
+The model can now request renewal near the limit, including at zero remaining
+tool calls. The gateway checks live task authority, observed progress,
+remaining accounting capacity, and the configured renewal count. The grant
+persists with the assignment. It extends tool and model-turn counts within
+existing token and monetary enforcement. Replaying a grant cannot add it
+twice. Patch syntax, shell source inspection, and invalid verification inputs
+are checked before dispatch. Direct setup commands and the final check can
+share one isolated snapshot. A failed setup leaves the final command unrun.
+
+**Do not reintroduce** attempt-local renewal allowances, charges for rejected
+tool selections, or mixed edit and verification scripts in the isolated
+checker. Keep approved mutations and check receipts on the same assignment.
+
+The agent did not run these checks or replay the live assignment.
+
+```sh
+venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/gateway/test_debug_plan_mode_contract.py -k adaptive_coding
+venv/bin/python -m pytest -q tests/execution/test_autonomous_accounting_renewal.py tests/coding/test_coding_budget_renewal.py tests/test_repository_tools.py
+```
+
 ## Verification
 
 Run the focused regressions first.

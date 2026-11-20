@@ -705,7 +705,8 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="apply_patch_batch",
-            description="Validate and apply multiple related Codex patch payloads in one call.",
+            description=("Apply related Codex patches. Each patches entry contains a patch string beginning with "
+                         "*** Begin Patch and ending with *** End Patch. Use *** Update File, *** Add File, or *** Delete File headers."),
             input_schema=_schema({"patches": {"type": "array"}}, ["patches"]),
             output_schema=_schema({"ok": {"type": "boolean"}, "results": {"type": "array"}, "changed_files": {"type": "array"}}),
             error_format=common_error,

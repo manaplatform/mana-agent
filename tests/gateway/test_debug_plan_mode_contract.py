@@ -240,6 +240,97 @@ def test_adaptive_coding_preserves_patch_budget_after_evidence_rejection(mode_ga
     assert parent.mode_workflow["tool_operations"] == 4
 
 
+@pytest.mark.parametrize("authorized", [True, False])
+def test_adaptive_coding_renews_through_accounting_on_the_same_assignment(mode_gateway, monkeypatch, authorized):
+    from mana_agent.coding.adaptive import BUDGET_RENEWAL_TOOL
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+    from mana_agent.config.autonomous_config import AutoRenewConfig
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+    controller = gateway._autonomous_controller
+    controller.config = AutonomousExecutionConfig(max_tool_calls=2, max_model_turns=6,
+        auto_renew=AutoRenewConfig(renew_tool_calls=2, renew_model_turns=2, max_auto_renewals=1))
+    accounting_requests = []
+
+    def account(**values):
+        accounting_requests.append(values)
+        return authorized, "Accounting denied the extension." if not authorized else "Authorized."
+
+    controller.accounting_service = SimpleNamespace(validate_autonomous_renewal=account)
+    (gateway.root / "caller.py").write_text("before\n")
+    seen_checks = []
+
+    async def check(root, command, *, task_id):
+        assert (root / "app.py").read_text() == "first change\n"
+        assert command.setup_argv == (("make",),)
+        seen_checks.append(task_id)
+        passed = (root / "caller.py").read_text() == "after\n"
+        return {"passed": passed, "exit_code": 0 if passed else 7, "output": "passed" if passed else "caller needs repair"}
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_isolated_verification", check)
+    correct = {"argv": ["ctest", "--test-dir", "build", "--output-on-failure"], "setup_argv": [["make"]]}
+    patch = "*** Begin Patch\n*** Update File: caller.py\n@@\n-before\n+after\n*** End Patch"
+    choices = [("write_file", {"path": "app.py", "content": "first change\n"}),
+               (ISOLATED_CHECK_TOOL, correct),
+               (BUDGET_RENEWAL_TOOL, {"reason": "The first file changed. Finish caller.py and verify the integrated result."})]
+    if authorized:
+        choices.extend([
+            ("apply_patch_batch", {"patches": [{"patch": "--- a/caller.py\n+++ b/caller.py\n"}]}),
+            ("apply_patch_batch", {"patches": [{"patch": patch}]}),
+            (ISOLATED_CHECK_TOOL, {**correct, "cwd": str(gateway.root)}),
+            (ISOLATED_CHECK_TOOL, correct),
+            (CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Changed both files and verified."}),
+        ])
+    else:
+        choices.append((CODING_RESULT_TOOL, {"disposition": "blocked", "summary": "Accounting denied the extension."}))
+
+    class Model:
+        turn = 0
+
+        def with_tools(self, tools):
+            self.offered = {tool["function"]["name"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            if self.turn == 2:
+                assert "0 tool calls remain" in messages[-1].content
+                assert self.offered == {BUDGET_RENEWAL_TOOL, CODING_RESULT_TOOL}
+            elif self.turn == 3:
+                renewal = json.loads(messages[-2].content)
+                assert renewal["ok"] is authorized
+                if authorized:
+                    assert renewal["tool_calls"] == 2 and "2 tool calls" in messages[-1].content
+                else:
+                    assert renewal["error_code"] == "BUDGET_RENEWAL_DENIED" and BUDGET_RENEWAL_TOOL not in self.offered
+            elif self.turn in {4, 6}:
+                rejection = json.loads(messages[-2].content)
+                assert rejection["executed"] == 0
+                assert rejection["error_code"] == ("INVALID_PATCH_FORMAT" if self.turn == 4 else "INVALID_VERIFICATION_COMMAND")
+            tool, args = choices[self.turn]
+            assert tool in self.offered
+            self.turn += 1
+            return SimpleNamespace(tool_calls=[{"id": f"renewal-{self.turn}", "name": tool, "args": args}])
+
+    model = Model()
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=model, max_tool_calls=2, programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Fix the two files", mode="auto", repair=True, workflow=workflow_choice())
+
+    assert result.status == ("success" if authorized else "error"), result.message
+    parent = workflow.board.get_task(result.data["task_id"])
+    child, = workflow.board.list_tasks(parent_task_id=parent.task_id)
+    request, = accounting_requests
+    assert request["respect_budget"] and request["task_budget_remaining"] > 0
+    assert request["renew_turns"] == request["renew_tool_calls"] == 2
+    assert parent.mode_workflow["tool_operations"] == (4 if authorized else 2)
+    assert len(parent.mode_workflow.get("adaptive_budget_renewals", [])) == int(authorized)
+    assert model.turn == len(choices)
+    assert seen_checks == [child.task_id] * (2 if authorized else 1)
+
+
 def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkeypatch):
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
@@ -2725,6 +2816,64 @@ def test_checkout_git_verification_is_invalid_before_docker(mode_gateway, monkey
     with pytest.raises(mode_module.VerificationUnavailable, match=r"no \.git metadata"):
         asyncio.run(mode_module.run_isolated_verification(gateway.root,
             VerificationCommand(argv=("git", "rev-parse", "--abbrev-ref", "HEAD")), task_id="legacy"))
+
+
+@pytest.mark.parametrize("setup_exit", [0, 7])
+def test_adaptive_coding_verification_runs_setup_in_the_same_snapshot(tmp_path, monkeypatch, setup_exit):
+    import asyncio
+
+    import mana_agent.execution.providers.local_docker as docker
+    import mana_agent.gateway.mode_workflow as mode_module
+    from mana_agent.coding.adaptive import AdaptiveVerificationCommand
+    from mana_agent.execution.models import ExecutionResult, NetworkMode
+
+    root = tmp_path.resolve()
+    (root / "app.py").write_text("source\n")
+    calls = []
+    cleanups = []
+
+    def run(argv, **kwargs):
+        return SimpleNamespace(stdout=b"app.py\0" if argv[0] == "git" else "fixture-image", returncode=0)
+
+    class Provider:
+        docker_binary = "docker"
+        default_image = "fixture"
+
+        async def provision(self, spec):
+            assert spec.network.mode == NetworkMode.DENY_ALL and spec.read_only_root
+            assert spec.repository_source != root
+            return spec.repository_source
+
+        async def start(self, handle):
+            return handle
+
+        async def execute(self, handle, request):
+            calls.append(request.argv)
+            assert (handle / request.environment["TMPDIR"].removeprefix("/workspace/")).is_dir()
+            if request.argv == ["make"]:
+                (handle / "build-marker").touch()
+                exit_code = setup_exit
+            else:
+                assert (handle / "build-marker").is_file()
+                exit_code = 0
+            return ExecutionResult(exit_code=exit_code, started_at=utc_now(), completed_at=utc_now(),
+                                   provider="fixture", sandbox_id="fixture")
+
+        async def cleanup(self, handle):
+            cleanups.append(handle)
+
+    monkeypatch.setattr(mode_module.shutil, "which", lambda name: "/bin/docker")
+    monkeypatch.setattr(mode_module.subprocess, "run", run)
+    monkeypatch.setattr(docker, "LocalDockerProvider", Provider)
+    result = asyncio.run(mode_module.run_isolated_verification(root,
+        AdaptiveVerificationCommand(argv=("ctest",), setup_argv=(("make",),)), task_id="fixture"))
+
+    assert result["passed"] is (setup_exit == 0)
+    assert result["exit_code"] == (None if setup_exit else 0)
+    assert result["setup_receipts"][0]["exit_code"] == setup_exit
+    assert calls == ([["make"]] if setup_exit else [["make"], ["ctest"]])
+    assert len(cleanups) == 1
+    assert not (root / "build-marker").exists()
 
 
 @pytest.mark.parametrize("revised_outcome", [

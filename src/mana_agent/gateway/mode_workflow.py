@@ -593,6 +593,7 @@ class ModeWorkflow:
         self.lane.start(reservation)
 
     def _run_adaptive_model(self, task_id, child_id, state, root, write, configured):
+        from mana_agent.coding.adaptive import AdaptiveVerificationCommand, VERIFICATION_DESCRIPTION
         from mana_agent.gateway.lanes import TOOL_CAPABILITIES
         from mana_agent.repository_evidence.tasks import assignment_for
         from mana_agent.tools.contracts import ToolContract
@@ -650,13 +651,27 @@ class ModeWorkflow:
             resume = self._refresh_adaptive_history(root, resume)
 
         def verify(**arguments):
-            return self._verify_adaptive(task_id, child_id, root, state, VerificationCommand.model_validate(arguments))
+            return self._verify_adaptive(task_id, child_id, root, state, verifier.model_validate(arguments))
 
-        verify.input_model = VerificationCommand
+        verifier = AdaptiveVerificationCommand if write else VerificationCommand
+        verify.input_model = verifier
         verify.tool_contract = ToolContract(name=ISOLATED_CHECK_TOOL,
-            description="Run a focused verification argv in a network-disabled source snapshot. Returns the exact exit code and output.",
-            input_schema=VerificationCommand.model_json_schema(), output_schema={}, error_format={},
+            description=VERIFICATION_DESCRIPTION if write else "Run a focused verification argv in a network-disabled source snapshot.",
+            input_schema=verifier.model_json_schema(), output_schema={}, error_format={},
             required_capability="test_execution", effect="read_only", repository_operation=True)
+        controller = self.gateway._autonomous_controller
+        renewal = controller.config.auto_renew
+        accounting_runtime = {}
+        if write:
+            accounting_runtime = {"adaptive_tool_calls_used": state.get("tool_operations", len(state["evidence"])),
+                                  "adaptive_tool_calls_added": self._renewed_budget(state, "tool_calls")}
+        if (write and renewal.enabled and renewal.strategy == "accounting_based" and controller.accounting_service is not None
+                and len(state.get("adaptive_budget_renewals", [])) < renewal.max_auto_renewals):
+            accounting_runtime.update(
+                renew_coding_budget=lambda decision_id, reason: self._renew_adaptive_budget(task_id, child_id, state, decision_id, reason),
+                renewal_tool_headroom=controller.config.soft_limit_tools_headroom,
+                renewal_turn_headroom=controller.config.soft_limit_turns_headroom,
+            )
         caps = set(self.lane.inspect_task(child_id).capabilities)
         allowed = frozenset(name for name, required in TOOL_CAPABILITIES.items()
                             if required <= caps and name != "verify_project")
@@ -678,9 +693,55 @@ class ModeWorkflow:
                     "save_native_continuation": save, "remaining_model_turns": self._remaining_decisions(state),
                     "validate_adaptive_completion": lambda: self._adaptive_checks(state, root, write=write),
                     "remaining_tool_calls": self._remaining_tools(state),
-                    "max_no_progress_cycles": self.gateway._autonomous_controller.config.max_no_progress_cycles})
+                    "max_no_progress_cycles": controller.config.max_no_progress_cycles, **accounting_runtime})
         finally:
             worker.close()
+
+    def _renew_adaptive_budget(self, task_id, child_id, state, decision_id, reason):
+        controller = self.gateway._autonomous_controller
+        renewal = controller.config.auto_renew
+        activity = current_activity_context()
+        with activity.publication():
+            parent = self._check_live(task_id)
+            child = self._check_live(child_id)
+            grants = state.get("adaptive_budget_renewals", [])
+            if any(row["decision_id"] == decision_id for row in grants):
+                return {"ok": False, "error": "This budget decision was already applied."}
+            if not renewal.enabled or renewal.strategy != "accounting_based" or controller.accounting_service is None:
+                return {"ok": False, "error": "Accounting-backed renewal is unavailable."}
+            if len(grants) >= renewal.max_auto_renewals:
+                return {"ok": False, "error": "The assignment reached its accounting renewal limit."}
+
+            versions = self._adaptive_mutations(child_id)
+            checks = {canonical_digest([row["argv"], row["cwd"], row["image"], row["source_versions"], row["exit_code"]])
+                      for row in state.get("verification", [])}
+            progress = canonical_digest([versions, sorted(checks)])
+            if renewal.require_progress and (not (versions or checks) or any(row["progress"] == progress for row in grants)):
+                return {"ok": False, "error": "Renewal needs a new observed change or isolated check.", "retry_after_progress": True}
+
+            capacity = [task.token_budget - task.token_usage for task in (parent, child) if task.token_budget is not None]
+            budget = self.lane.inspect_task(child_id).budget
+            capacity.append(budget.reserved_tokens - budget.consumed_tokens)
+            cost_exhausted = any(task.monetary_budget is not None and task.actual_cost >= task.monetary_budget
+                                 for task in (parent, child))
+            if min(capacity) <= 0 or cost_exhausted or not self.lane.can_continue_turn(child_id, required_reserve=1):
+                return {"ok": False, "error": "The active accounting reservation has no remaining capacity."}
+
+            valid, detail = controller.accounting_service.validate_autonomous_renewal(
+                task_id=task_id, session_id=parent.session_id, renew_turns=renewal.renew_model_turns,
+                renew_tool_calls=renewal.renew_tool_calls, token_estimate=max(parent.token_usage, budget.consumed_tokens),
+                task_budget_remaining=min(capacity), respect_budget=True,
+            )
+            if not valid:
+                return {"ok": False, "error": safe_text(str(redact_secrets(str(detail))), limit=240, protected=activity.protected_text)}
+
+            grant = {"decision_id": decision_id, "progress": progress,
+                     "reason": safe_text(str(redact_secrets(reason)), limit=500, protected=activity.protected_text),
+                     "model_turns": renewal.renew_model_turns, "tool_calls": renewal.renew_tool_calls}
+            state["adaptive_budget_renewals"] = [*grants, grant]
+            self._persist(task_id, state)
+            return {"ok": True, "model_turns": grant["model_turns"], "tool_calls": grant["tool_calls"],
+                    "renewals_remaining": renewal.max_auto_renewals - len(grants) - 1}
 
     def _refresh_adaptive_history(self, root, resume):
         messages = []
@@ -1335,24 +1396,28 @@ class ModeWorkflow:
         state["investigation"]["status"] = "budget_limited" if state["inspection"].get("budget_rejection") else "returned"
         self._persist(task_id, state)
 
+    @staticmethod
+    def _renewed_budget(state: dict, key: str) -> int:
+        return sum(row[key] for row in state.get("adaptive_budget_renewals", []))
+
     def _remaining_tools(self, state: dict) -> int:
-        return self.gateway._autonomous_controller.config.max_tool_calls - state.get("tool_operations", len(state["evidence"]))
+        limit = self.gateway._autonomous_controller.config.max_tool_calls + self._renewed_budget(state, "tool_calls")
+        return limit - state.get("tool_operations", len(state["evidence"]))
 
     def _remaining_decisions(self, state: dict) -> int:
-        return self.gateway._autonomous_controller.config.max_model_turns - state.get("decision_count", 0)
+        limit = self.gateway._autonomous_controller.config.max_model_turns + self._renewed_budget(state, "model_turns")
+        return limit - state.get("decision_count", 0)
 
     def _charge_tool(self, task_id: str, state: dict) -> None:
-        used = state.get("tool_operations", len(state["evidence"]))
-        if used >= self.gateway._autonomous_controller.config.max_tool_calls:
+        if self._remaining_tools(state) <= 0:
             raise RuntimeError("The configured workflow tool budget was exhausted.")
-        state["tool_operations"] = used + 1
+        state["tool_operations"] = state.get("tool_operations", len(state["evidence"])) + 1
         self._persist(task_id, state)
 
     def _charge_model(self, task_id: str, state: dict) -> None:
-        used = state.get("decision_count", 0)
-        if used >= self.gateway._autonomous_controller.config.max_model_turns:
+        if self._remaining_decisions(state) <= 0:
             raise RuntimeError("The configured workflow model decision budget was exhausted.")
-        state["decision_count"] = used + 1
+        state["decision_count"] = state.get("decision_count", 0) + 1
         self._persist(task_id, state)
 
     def _research(self, task_id, state, report) -> CommandResult | None:
@@ -2802,7 +2867,8 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
     from mana_agent.execution.models import ExecutionRequest, NetworkMode, NetworkPolicy, SandboxSpec
     from mana_agent.execution.providers.local_docker import LocalDockerProvider
 
-    if command.uses_git_checkout:
+    setup_argv = getattr(command, "setup_argv", ())
+    if command.uses_git_checkout or any(VerificationCommand(argv=argv).uses_git_checkout for argv in setup_argv):
         raise VerificationUnavailable("The isolated source snapshot has no .git metadata. Revise the plan to use a project check.")
     if not shutil.which("docker"):
         raise VerificationUnavailable("The Docker CLI is unavailable. Install Docker and start its daemon.")
@@ -2835,13 +2901,29 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
                 destination = snapshot / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, destination)
-        handle = await provider.provision(SandboxSpec(
+        spec = SandboxSpec(
             repository_source=snapshot, task_id=task_id, base_image=image_lookup.stdout.strip(),
             network=NetworkPolicy(mode=NetworkMode.DENY_ALL), read_only_root=True,
-        ))
+        )
+        environment = {}
+        if setup_argv:
+            scratch = ".mana/verification-tmp"
+            (snapshot / scratch).mkdir(parents=True)
+            environment["TMPDIR"] = f"{spec.workspace_mount_path}/{scratch}"
+        handle = await provider.provision(spec)
+        setup_receipts = []
         try:
             handle = await provider.start(handle)
-            result = await provider.execute(handle, ExecutionRequest(argv=list(command.argv), cwd=command.cwd))
+            for argv in setup_argv:
+                setup = await provider.execute(handle, ExecutionRequest(argv=list(argv), cwd=command.cwd, environment=environment))
+                output = str(redact_secrets(setup.stdout + "\n" + setup.stderr))[-2000:]
+                setup_receipts.append({"exit_code": setup.exit_code, "output": output,
+                    "execution_receipt": setup.model_dump(mode="json", exclude={"stdout", "stderr", "resource_usage"})})
+                if setup.exit_code != 0 or setup.timed_out or setup.cancelled:
+                    return {"argv": list(command.argv), "cwd": command.cwd, "exit_code": None, "passed": False,
+                            "output": f"Verification setup command {len(setup_receipts)} did not complete successfully.\n{output}",
+                            "setup_receipts": setup_receipts}
+            result = await provider.execute(handle, ExecutionRequest(argv=list(command.argv), cwd=command.cwd, environment=environment))
         finally:
             await provider.cleanup(handle)
     output = str(redact_secrets(result.stdout + "\n" + result.stderr))
@@ -2850,4 +2932,5 @@ async def run_isolated_verification(root: Path, command: VerificationCommand, *,
                result.exit_code not in {0, 126, 127} and command.output_marker in output))
     return {"argv": list(command.argv), "cwd": command.cwd, "exit_code": result.exit_code,
             "passed": passed, "output": output[-2000:],
-            "execution_receipt": result.model_dump(mode="json", exclude={"stdout", "stderr", "resource_usage"})}
+            "execution_receipt": result.model_dump(mode="json", exclude={"stdout", "stderr", "resource_usage"}),
+            **({"setup_receipts": setup_receipts} if setup_receipts else {})}

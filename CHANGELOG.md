@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- Realtime Internal AUTO and DEBUG can request accounting-backed renewal on the same assignment. Reject malformed patches, shell source inspection, and invalid check inputs before charging a tool call. Build prerequisites and their check can share an isolated snapshot. See the [renewal regression and user verification commands](docs/regressions/unified-adaptive-coding.md#accounting-renewal-after-partial-edits). The agent did not run the tests.
 - Realtime Internal AUTO and DEBUG select targeted reads, edits, and checks in one loop. Tool budget reserved for repair and verification adjusts to the latest result. See the [evidence budget regression and user verification commands](docs/regressions/unified-adaptive-coding.md#evidence-exhausted-the-edit-budget). The agent did not run the tests.
 - Realtime Internal AUTO and DEBUG require a tool call on each model turn and allow one budgeted correction for a prose-only reply. See the [missing tool call regression and user verification command](docs/regressions/unified-adaptive-coding.md#missing-tool-call-in-a-native-coding-response). The agent did not run the tests.
 - Reuse validated escrow identities during coding checkpoints and record actual deadline expiry as a timeout with fresh-task recovery guidance. See the [deadline incident and user verification commands](docs/29-resilient-execution.md#realtime-coding-deadline-during-checkpointing). The agent did not run the tests.

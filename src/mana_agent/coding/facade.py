@@ -243,10 +243,12 @@ class UnifiedCodingAgentFacade(CodexCodingAgentShim):
         engine.extra_tools.update(runtime.get("registered_tools", {}))
         for name in ("execution_registry", "tool_authorize", "execution_supervisor", "taskboard", "batch_manager", "batch_authorize",
                      "batch_authority", "batch_autonomous_config", "model", "provider", "charge_model", "charge_tool",
-                     "save_native_continuation", "validate_adaptive_completion", "allowed_tools"):
+                     "save_native_continuation", "validate_adaptive_completion", "allowed_tools", "renew_coding_budget",
+                     "renewal_tool_headroom", "renewal_turn_headroom"):
             if name in runtime:
                 setattr(engine, name, runtime[name])
-        engine.max_tool_calls = min(engine.max_tool_calls, int(runtime.get("remaining_tool_calls", engine.max_tool_calls)))
+        available_calls = engine.max_tool_calls + runtime.get("adaptive_tool_calls_added", 0) - runtime.get("adaptive_tool_calls_used", 0)
+        engine.max_tool_calls = max(0, min(available_calls, int(runtime.get("remaining_tool_calls", available_calls))))
         engine.max_model_turns = int(runtime.get("remaining_model_turns", 120))
         if "max_no_progress_cycles" in runtime:
             engine.max_no_progress_cycles = runtime["max_no_progress_cycles"]

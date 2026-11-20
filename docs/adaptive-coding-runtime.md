@@ -31,6 +31,20 @@ passing check releases it. One model turn stays available for the typed
 result. An oversized group is rejected as a unit and gets one correction
 within the remaining model budget. See the [evidence budget regression](regressions/unified-adaptive-coding.md#evidence-exhausted-the-edit-budget).
 
+When the assignment approaches its tool or model-turn limit, the model can
+request `renew_coding_budget` with the progress made and the edit or check it
+still needs. Renewal uses the active accounting reservation, the configured
+increments, and the task's renewal limit. Granted allowances and consumed
+calls survive resume. Each subsequent provider call still passes the existing
+token and spending checks.
+
+Source inspection uses the repository tools. The adaptive loop validates
+Codex patch syntax and isolated check inputs before charging a tool call.
+Use a direct command argv and `cwd` of `.` or a repository-relative directory.
+For a check that needs a build, supply the build argv in `setup_argv`. Setup
+and the final check share the same network-disabled snapshot. A failed setup
+stops the sequence and records its own result.
+
 Each model turn must select an offered coding tool or submit a terminal result
 with one direct `submit_coding_result` call. If the model replies with prose
 alone, Coding requests one correction from the same model within the remaining
