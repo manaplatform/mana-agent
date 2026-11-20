@@ -34,6 +34,13 @@ when a specific call caused the rejection. Each distinct error can get one
 correction within the remaining model budget and the configured no-progress
 limit. See the [search correction regression](regressions/unified-adaptive-coding.md#distinct-tool-errors-shared-one-correction).
 
+After a source-inspection shell rejection, Coding pauses the generic shell
+tools while the model corrects its selection. The model can use offered
+repository tools, edits, or `verify_coding_change` with direct arguments.
+For a top-level `ls`, supply only `evidence_need`. Provider argument errors
+refer to the offered schema for the affected tool. The pending correction
+survives a saved continuation. See the [shell inspection incident](regressions/unified-adaptive-coding.md#shell-inspection-repeated-during-correction).
+
 When the assignment approaches its tool or model-turn limit, the model can
 request `renew_coding_budget` with the progress made and the edit or check it
 still needs. Renewal uses the active accounting reservation, the configured

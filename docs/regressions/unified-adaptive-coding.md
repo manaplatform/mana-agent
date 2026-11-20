@@ -166,6 +166,44 @@ The agent did not run these tests or retry the live assignment.
 venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py tests/gateway/test_debug_plan_mode_contract.py -k 'corrects_shell_and_search_scope_separately or rejects_repeated_oversized_groups'
 ```
 
+## Shell inspection repeated during correction
+
+At 17:28 Tehran time on November 20, Internal DEBUG assignment
+`task_20261120_000046` stopped with `USE_REPOSITORY_TOOL` after two successive
+shell selections. Coding Activity recorded seven completed repository tool
+calls and the saved assignment had zero changed files. The saved history
+shows a rejected compound shell command starting with `ls` and including a
+CMake invocation. Earlier in the same attempt, the provider rejected extra
+`ls` arguments, and the correction presented a shell example.
+
+The shell inspection guard correctly rejected the group, but the correction
+offered the same generic shell tools and described only the inspection half
+of the rejected work. The provider argument error added shell syntax guidance
+regardless of which tool failed. Earlier tests corrected distinct reason
+codes without checking which tools the model received during correction.
+
+The [adaptive validator](../../src/mana_agent/coding/adaptive.py) now describes
+the scoped repository arguments and directs builds to a separate direct
+verification call. The [native loop](../../src/mana_agent/coding/internal_engine.py)
+suppresses the generic shell tools during that correction and checkpoints its
+pending reason codes. An accepted tool group or processed budget renewal
+ends the correction sequence. Repository scope, group atomicity, approvals,
+and the existing turn and correction limits still apply. Older checkpoints
+can resume without the new optional field.
+
+**Do not reintroduce** generic shell offers during correction of shell source
+inspection or shell syntax advice for an unrelated provider schema error.
+Keep the replacement action model-selected and reject the entire invalid group.
+
+The regression fixtures cover a malformed `ls` response, a later mixed
+inspection and build request, completion through a direct check, and rejection
+when a model repeatedly ignores the narrowed offers after resume. The agent
+did not run the fixtures or replay the original assignment.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/test_internal_coding_engine_workflow.py -k 'recovers_from_shell_inspection or rejects_shell_during_saved_inspection or corrects_shell_and_search_scope or preserves_patch_budget_after_evidence_rejection or rejects_repeated_oversized_groups'
+```
+
 ## Windows CI paths, source bytes, and Batch wait
 
 The Windows Python 3.12 CI run reported eight failures.
@@ -242,6 +280,31 @@ The agent did not run these checks or replay either cancelled assignment.
 ```sh
 python -m pytest -q tests/coding/test_tool_runner_execution.py -k 'digests_survive or unobserved_file_versions'
 python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'adaptive_checkout_build or adaptive_coding_renews or model_wait_failure'
+```
+
+### Failed checkout checks during successful repairs
+
+After checkout verification became a supervised command, AUTO and DEBUG could
+repair a failed check and later pass it, yet still stop at the supervisor's
+completion gate. The runner recorded the earlier check as a failed action even
+when its verification receipt contained a known exit and the source snapshot
+showed no mutation. The build renewal fixture also intercepted activity at the
+wrong module, so it failed before exercising the workflow.
+
+The runner marks a failed checkout check as reconciled after it records a
+normal exit for the command or its prerequisite and observes no changes across
+complete source snapshots. The check still reports failure to the model and
+the gateway still requires passing verification against the current files.
+Interrupted commands, incomplete source observations, and failed checks that
+change source still block completion. Historical action receipts retain their
+recorded state. The fixture listens at the activity function used by Coding.
+
+**Do not reintroduce** treating an observed negative check as an unresolved
+side effect when its source is unchanged. Keep unresolved actions blocking
+completion when their outcome or source effects are uncertain.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py
 ```
 
 ## Provider rejected shell arguments

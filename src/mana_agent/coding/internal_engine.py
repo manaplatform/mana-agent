@@ -735,7 +735,8 @@ class InternalCodingEngine(CodingEngine):
         from mana_agent.coding.evidence_tools import INVESTIGATE
         from mana_agent.coding.adaptive import (
             BUDGET_RENEWAL_TOOL, EVIDENCE_NEED, EVIDENCE_NEED_DESCRIPTION, EVIDENCE_NEED_MAX_LENGTH,
-            REPOSITORY_EVIDENCE_TOOLS, SCOPED_SOURCE_TOOLS, AdaptiveBudgetRenewal, AdaptiveCodingResult,
+            REPOSITORY_EVIDENCE_TOOLS, REPOSITORY_INSPECTION_DESCRIPTION, SCOPED_SOURCE_TOOLS,
+            SHELL_TOOL_NAMES, USE_REPOSITORY_TOOL, AdaptiveBudgetRenewal, AdaptiveCodingResult,
             AdaptiveWriteBudget, renewal_tool, result_tool, validate_adaptive_tool,
         )
         from mana_agent.coding.verification_evidence import verification_evidence
@@ -770,6 +771,8 @@ class InternalCodingEngine(CodingEngine):
                         function["description"] = ("Find a symbol or text. Supply repository-relative files or directories in paths, "
                                                    "or a targeted filename glob in glob. Use ls if the top-level location is unknown.")
                         properties.pop("repository_reason", None)
+                    elif function["name"] == "ls":
+                        function["description"] = "List top-level repository entries. Supply only evidence_need."
                     schema["properties"] = properties
                     function["parameters"] = schema
 
@@ -851,6 +854,7 @@ class InternalCodingEngine(CodingEngine):
                     "and group a ready repair before its check when possible. Repair and rerun a failed build. Request a "
                     "budget renewal when offered if the repair or required check still needs capacity."
                 )
+                context_parts.append(REPOSITORY_INSPECTION_DESCRIPTION)
             if task.context.get("runtime_capability_change"):
                 context_parts.append("Completion requires source-backed runtime wiring edges and a passing check "
                                      "that exercises the connected runtime path.")
@@ -910,7 +914,7 @@ class InternalCodingEngine(CodingEngine):
             seen_evidence.update(saved_native.get("native_seen_evidence", []))
         terminal_rejections = 0
         missing_action_corrected = False
-        selection_corrections: set[str] = set()
+        selection_corrections = set(saved_native.get("native_selection_corrections", ())) if adaptive_write else set()
         renewal_available = callable(renew_budget)
         renewal_waiting_for_progress = False
         evidence_misses = 0
@@ -921,7 +925,8 @@ class InternalCodingEngine(CodingEngine):
                 self.save_native_continuation({key: getattr(session.state, key) for key in (
                     "changed_files", "commands_run", "verification_results", "executed_operations",
                     "native_continuation", "native_messages", "native_pending_calls",
-                )} | {"native_seen_evidence": sorted(seen_evidence)})
+                )} | {"native_seen_evidence": sorted(seen_evidence),
+                      "native_selection_corrections": sorted(selection_corrections)})
 
         def request_selection_correction(code: str, detail: str, budget: AdaptiveWriteBudget):
             session.state.native_messages = [message.model_dump(mode="json") for message in messages]
@@ -959,6 +964,8 @@ class InternalCodingEngine(CodingEngine):
                         tool_reserve = 0
                 write_budget = AdaptiveWriteBudget(remaining, max_turns - turn, tool_reserve)
                 definitions = [entry for entry in tool_defs if write_budget.allows(entry["function"]["name"])]
+                if USE_REPOSITORY_TOOL in selection_corrections:
+                    definitions = [entry for entry in definitions if entry["function"]["name"] not in SHELL_TOOL_NAMES]
                 instruction = write_budget.instruction()
                 if (renewal_available and (
                     remaining <= max(tool_reserve, getattr(self, "renewal_tool_headroom", 0))
@@ -1001,8 +1008,7 @@ class InternalCodingEngine(CodingEngine):
                 if exc.reason_code == "tool_arguments_invalid":
                     code = "TOOL_ARGUMENTS_INVALID"
                     detail = (f"{exc.public_detail or 'The previous tool arguments failed validation.'} "
-                              "Resubmit needed calls using the schemas offered this turn. For shell, use "
-                              '{"action":{"commands":["one command"]},"cwd":"."} or select the offered build check.')
+                              "Resubmit needed calls using only the arguments declared in each offered tool schema.")
                 else:
                     code = "TOOL_NOT_OFFERED"
                     detail = "The previous reply selected a tool outside this turn's allowance. Choose from the tools offered now."

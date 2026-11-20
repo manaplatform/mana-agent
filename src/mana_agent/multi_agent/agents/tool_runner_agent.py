@@ -645,11 +645,29 @@ class ToolRunnerAgent:
             mutations=mutations, retained_bytes=operation.retained_bytes, omitted_bytes=operation.omitted_bytes,
             trace_complete=operation.trace_complete)
         if action is not None and status != "waiting_approval":
+            action_state = ActionRequestState.FAILED
+            verification_state: dict[str, Any] = {"operation_attempt_id": request.operation_attempt_id, "status": status}
+            if status == "success":
+                action_state = ActionRequestState.SUCCEEDED
+            elif status in {"cancelled", "timed_out", "interrupted"} or mutations:
+                action_state = ActionRequestState.OUTCOME_UNKNOWN
+            elif (request.tool_name == ISOLATED_CHECK_TOOL and policy.effect == "command"
+                    and before.complete and after.complete and raw.get("passed") is False
+                    and raw.get("operation_id") == request.operation_id and raw.get("verification_progress_digest")):
+                exit_code = raw.get("exit_code")
+                if exit_code is None and raw.get("setup_receipts"):
+                    setup_exit_code = raw["setup_receipts"][-1].get("exit_code")
+                    if type(setup_exit_code) is int and setup_exit_code > 0:
+                        exit_code = setup_exit_code
+                if type(exit_code) is int and exit_code >= 0:
+                    # The check failed, but its recorded exit and unchanged source settle the action.
+                    action_state = ActionRequestState.RECONCILED
+                    verification_state.update(operation_id=request.operation_id, exit_code=exit_code)
             supervisor.update_action(action.action_id,
                 attempt_id=attempt_id, lease_token=lease_token,
-                request_state=ActionRequestState.SUCCEEDED if status == "success" else ActionRequestState.OUTCOME_UNKNOWN if status in {"cancelled", "timed_out", "interrupted"} or mutations else ActionRequestState.FAILED,
+                request_state=action_state,
                 result_reference=next((item["reference"] for item in operation.references.get("result", []) if item["reference"]), ""),
-                verification_state={"operation_attempt_id": request.operation_attempt_id, "status": status})
+                verification_state=verification_state)
         activity_update = {"coding_activity": "debugging"} if status == "failed" and operation.public.get("coding_activity") == "verifying" else {}
         operation.emit("tool.completed" if status == "success" else "tool.waiting" if status == "waiting_approval" else "tool.cancelled" if status == "cancelled" else "tool.failed",
             status=status, exit_code=result.exit_code, termination_reason=result.termination_reason,

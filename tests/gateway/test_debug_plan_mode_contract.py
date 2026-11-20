@@ -17,7 +17,7 @@ from mana_agent.agent.mode import CodingWorkflowDecision, ModePhase, PlanRevisio
 from mana_agent.agent.plan_service import EvidenceRequest, PlanService
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
 from mana_agent.execution.autonomous_controller import AutonomousExecutionController
-from mana_agent.execution_supervisor.models import ExecutionState, utc_now
+from mana_agent.execution_supervisor.models import ActionRequestState, ExecutionState, utc_now
 from mana_agent.gateway.lane_coordinator import LaneCoordinator
 from mana_agent.gateway.lanes import LaneId, LaneTaskState
 from mana_agent.gateway.mode_workflow import ModeWorkflow, validate_step_patch
@@ -66,8 +66,14 @@ def workflow_choice(*, mode="auto", effect="write"):
     )
 
 
-@pytest.mark.parametrize("mode", ["auto", "debug"])
-def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monkeypatch, mode):
+@pytest.mark.parametrize(("mode", "first_check"), [
+    pytest.param("auto", "failure", id="auto"),
+    pytest.param("debug", "failure", id="debug"),
+    pytest.param("debug", "setup_failure", id="debug-setup-fails"),
+    pytest.param("debug", "missing_exit", id="debug-check-missing-exit"),
+    pytest.param("debug", "mutates_source", id="debug-check-mutates-source"),
+])
+def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monkeypatch, mode, first_check):
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
     from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
@@ -80,14 +86,24 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     (gateway.root / "other.py").write_text("other = 0\n")
     gateway._entry_router.llm = Decisions()  # No ModeDecision draft or investigator.
     verify_calls = []
+    check_changes_source = first_check == "mutates_source"
+    check_has_setup = first_check in {"setup_failure", "missing_exit"}
+    failed_exit_code = None if check_has_setup else 1
 
     async def check(root, command, *, task_id):
         verify_calls.append((task_id, command.argv))
         passed = (root / filename).read_text() == "fixed\n"
-        return {"passed": passed, "exit_code": int(not passed), "output": "passed" if passed else "wrong value"}
+        if not passed and check_changes_source:
+            (root / "other.py").write_text("other = 2\n")
+        outcome = {"passed": passed, "exit_code": 0 if passed else failed_exit_code,
+                   "output": "passed" if passed else "check failed"}
+        if check_has_setup:
+            outcome["setup_receipts"] = [{"exit_code": 1 if not passed and first_check == "setup_failure" else 0}]
+        return outcome
 
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
-    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"]})
+    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"],
+                                  **({"setup_argv": [["python", "setup.py"]]} if check_has_setup else {})})
     selections = []
     if mode == "auto":
         selections.append(("repo_search", {"query": "before", "paths": ["src"],
@@ -117,7 +133,8 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
                 if previous == "repo_search":
                     assert any(match["file"] == filename for match in observation["matches"])
                 if previous == ISOLATED_CHECK_TOOL:
-                    assert observation.get("exit_code") == int(self.index == selections.index(verify) + 1), observation
+                    is_first_check = self.index == selections.index(verify) + 1
+                    assert observation.get("exit_code") == (failed_exit_code if is_first_check else 0), observation
                 if previous == "read_file" and self.index > selections.index(verify):
                     assert observation["content"] == "first attempt\n"
             name, args = selections[self.index]
@@ -130,19 +147,34 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     request = "Integrate the replacement handler for the old behavior" if mode == "auto" else "Fix app.py"
     result = workflow.start("session", request, mode=mode, repair=True, workflow=workflow_choice(mode=mode))
 
-    assert result.status == "success", result.message
+    blocked = first_check in {"missing_exit", "mutates_source"}
+    assert result.status == ("error" if blocked else "success"), result.message
     assert (gateway.root / filename).read_text() == "fixed\n"
-    assert sorted(result.data["changed_files"]) == (["other.py", filename] if mode == "auto" else [filename])
+    expected_files = [filename, "other.py"] if mode == "auto" or check_changes_source else [filename]
+    assert sorted(result.data["changed_files"]) == sorted(expected_files)
     parent = workflow.board.get_task(result.data["task_id"])
     children = workflow.board.list_tasks(parent_task_id=parent.task_id)
     assert len(children) == 1
-    assert [task_id for task_id, _ in verify_calls] == [children[0].task_id] * 2
+    expected_exits = [failed_exit_code] if check_changes_source else [failed_exit_code, 0]
+    assert [task_id for task_id, _ in verify_calls] == [children[0].task_id] * len(expected_exits)
     assert not parent.mode_workflow.get("plan")
     assert not gateway._entry_router.llm.inputs
     checks = result.data["verification"]
-    assert [check["exit_code"] for check in checks] == [1, 0]
-    assert checks[0]["attempt_id"] == checks[1]["attempt_id"]
+    assert [check["exit_code"] for check in checks] == expected_exits
+    assert len({check["attempt_id"] for check in checks}) == 1
     assert children[0].evidence_refs
+    actions = workflow.lane.execution_supervisor.store.actions_for_task(children[0].task_id)
+    failed_check, = [action for action in actions if action.tool_name == ISOLATED_CHECK_TOOL
+                     and action.verification_state["status"] == "failed"]
+    if check_changes_source:
+        assert failed_check.request_state == ActionRequestState.OUTCOME_UNKNOWN
+        assert "reconcile its durable receipt before retry" in result.message
+    elif first_check == "missing_exit":
+        assert failed_check.request_state == ActionRequestState.FAILED
+        assert "supervisor_completion_gate" in result.message
+    else:
+        assert failed_check.request_state == ActionRequestState.RECONCILED
+        assert failed_check.verification_state["exit_code"] == 1
 
 
 def test_adaptive_coding_reconciles_legacy_mutation_paths(mode_gateway, monkeypatch):
@@ -233,7 +265,8 @@ def test_adaptive_coding_preserves_patch_budget_after_evidence_rejection(mode_ga
                 if rejected_kind == "unoffered_tool":
                     assert "outside this turn's allowance" in messages[-2].content
                 if rejected_kind == "shell_schema":
-                    assert '{"action":{"commands":["one command"]},"cwd":"."}' in messages[-2].content
+                    assert "Shell arguments failed validation." in messages[-2].content
+                    assert "arguments declared in each offered tool schema" in messages[-2].content
                 for rejected_call in rejected:
                     error = outputs[rejected_call["id"]]
                     assert error["error_code"] == expected_error
@@ -329,6 +362,88 @@ def test_adaptive_coding_corrects_shell_and_search_scope_separately(mode_gateway
     assert result.data["changed_files"] == ["src/handler.py"]
     parent = workflow.board.get_task(result.data["task_id"])
     assert parent.mode_workflow["tool_operations"] == 4
+
+
+def test_adaptive_coding_recovers_from_shell_inspection_and_checks_build(mode_gateway, monkeypatch):
+    from mana_agent.coding.adaptive import SHELL_TOOL_NAMES
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+    from mana_agent.llm.errors import InvalidResponseError
+
+    gateway, workflow = mode_gateway
+    subprocess.run(["git", "init", "--quiet"], cwd=gateway.root, check=True)
+    gateway._entry_router.llm = Decisions()
+    ls = ("ls", {"evidence_need": "Locate the source and build files."})
+    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "app.py"]})
+    edit = ("write_file", {"path": "app.py", "content": "after\n"})
+    selections = [
+        [("run_command", {"cmd": "ls -la && git status --short"}), ls],
+        None,
+        [ls, ("git_status", {})],
+        [("read_file", {"path": "app.py", "evidence_need": "Confirm the initial behavior."})],
+        [("shell", {"action": {"commands": ["ls -la && python app.py"]}, "cwd": "."}), edit],
+        [edit, verify],
+        [(CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Repaired and checked app.py."})],
+    ]
+    checks = []
+
+    async def check(root, command, *, task_id):
+        assert command.argv == ("python", "app.py")
+        contents = (root / "app.py").read_text()
+        checks.append(contents)
+        return {"passed": contents == "after\n", "exit_code": int(contents != "after\n"), "output": contents}
+
+    class Model:
+        turn = 0
+
+        def with_tools(self, tools):
+            self.offered = {tool["function"]["name"]: tool["function"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            turn = self.turn
+            self.turn += 1
+            outputs = {message.tool_call_id: json.loads(message.content) for message in messages if message.role == "tool"}
+            if turn in {0, 3, 4}:
+                assert SHELL_TOOL_NAMES <= self.offered.keys()
+            if turn in {1, 2, 5}:
+                assert SHELL_TOOL_NAMES.isdisjoint(self.offered)
+                assert {"ls", "git_status", "read_file", ISOLATED_CHECK_TOOL} <= self.offered.keys()
+                assert set(self.offered["ls"]["parameters"]["properties"]) == {"evidence_need"}
+            if turn == 1:
+                assert outputs["0-1"]["executed"] == 0 and outputs["0-1"]["rejected_call_id"] == "0-0"
+                assert "call ls with only evidence_need" in outputs["0-0"]["error"]
+                raise InvalidResponseError("Unexpected ls argument", reason_code="tool_arguments_invalid",
+                    public_detail="Provider tool arguments violate the registered schema for ls")
+            if turn == 2:
+                assert "registered schema for ls" in messages[-2].content
+                assert "shell" not in messages[-2].content
+            if turn == 3:
+                assert outputs["2-0"]["ok"] and outputs["2-1"]["ok"]
+            if turn == 5:
+                assert outputs["3-0"]["content"] == "before\n"
+                assert outputs["4-0"]["error_code"] == "USE_REPOSITORY_TOOL"
+                assert f"Select {ISOLATED_CHECK_TOOL} separately" in outputs["4-0"]["error"]
+                assert outputs["4-1"]["executed"] == 0
+            selected = selections[turn]
+            assert selected and all(name in self.offered for name, _ in selected)
+            return SimpleNamespace(tool_calls=[{"id": f"{turn}-{index}", "name": name, "args": args}
+                                              for index, (name, args) in enumerate(selected)])
+
+    model = Model()
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=model, max_tool_calls=6, programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Fix the failing build", mode="debug", repair=True,
+                            workflow=workflow_choice(mode="debug"))
+
+    assert result.status == "success", result.message
+    assert result.data["changed_files"] == ["app.py"]
+    assert model.turn == len(selections)
+    assert checks == ["after\n"]
+    parent = workflow.board.get_task(result.data["task_id"])
+    assert parent.mode_workflow["tool_operations"] == 5
 
 
 @pytest.mark.parametrize("authorized", [True, False])
@@ -463,7 +578,7 @@ def test_adaptive_checkout_build_renews_or_alarms_on_repeat(mode_gateway, monkey
 
     controller.accounting_service = SimpleNamespace(validate_autonomous_renewal=authorize_renewal)
     monkeypatch.setattr("mana_agent.coding.programmatic.execute_coding_shell_action", run)
-    monkeypatch.setattr("mana_agent.coding.internal_engine.emit_activity", activity)
+    monkeypatch.setattr("mana_agent.services.activity_context.emit_activity", activity)
     verify = (ISOLATED_CHECK_TOOL, {"argv": ["cmake", "--build", "build"],
                                   "setup_argv": [["cmake", "-S", ".", "-B", "build"]]})
     if repairs_until_success is None:

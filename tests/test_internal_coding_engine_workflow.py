@@ -223,6 +223,48 @@ def test_adaptive_coding_rejects_repeated_oversized_groups_without_dispatch(tmp_
     assert target.read_text() == "before\n"
 
 
+def test_adaptive_coding_rejects_shell_during_saved_inspection_correction(tmp_path):
+    from mana_agent.coding.adaptive import SHELL_TOOL_NAMES, USE_REPOSITORY_TOOL
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "app.py"
+    target.write_text("before\n")
+
+    class Model:
+        turns = 0
+
+        def with_tools(self, tools):
+            offered = {tool["function"]["name"] for tool in tools}
+            assert SHELL_TOOL_NAMES.isdisjoint(offered)
+            assert {"read_file", "write_file"} <= offered
+            return self
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            return SimpleNamespace(tool_calls=[
+                {"id": f"shell-{self.turns}", "name": "shell", "args": {"action": {"commands": ["ls"]}}},
+                {"id": f"write-{self.turns}", "name": "write_file", "args": {"path": "app.py", "content": "unexpected\n"}},
+            ])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=4, programmatic_tool_calling_enabled=False)
+    engine.max_model_turns = 6
+    task = CodingTask(task_id="saved-inspection-correction", goal="Fix app.py", context={
+        "adaptive_mode": "debug", "coding_resume_context": {"native_selection_corrections": [USE_REPOSITORY_TOOL]},
+    })
+    workspace = WorkspaceContext(repository_path=repository, worktree_path=worktree, sandbox="workspaceWrite")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "failed"
+    assert "rejected after correction" in result.errors[0]
+    assert model.turns == 2
+    assert result.continuation_context["executed_operations"] == []
+    assert target.read_text() == "before\n"
+
+
 def test_adaptive_coding_protects_model_turns_for_edit_check_and_result():
     from mana_agent.coding.adaptive import AdaptiveWriteBudget
     from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL

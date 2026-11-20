@@ -26,12 +26,18 @@ EVIDENCE_NEED = "evidence_need"
 EVIDENCE_NEED_MAX_LENGTH = 500
 EVIDENCE_NEED_DESCRIPTION = "Name the missing fact and the specific edit or check the answer could change."
 BUDGET_RENEWAL_TOOL = "renew_coding_budget"
+SHELL_TOOL_NAMES = frozenset({"run_command", "run_script_once", "shell"})
+USE_REPOSITORY_TOOL = "USE_REPOSITORY_TOOL"
+REPOSITORY_INSPECTION_DESCRIPTION = (
+    "Use read_file with a path or repo_search with literal paths or a targeted glob for source inspection. "
+    "For the top-level layout, call ls with only evidence_need. Use git_status or git_diff for checkout state. "
+    f"Select {ISOLATED_CHECK_TOOL} separately with direct argv for a build or check."
+)
 VERIFICATION_DESCRIPTION = (
     "Run a direct build or check in the assigned checkout. Set cwd to '.' or a repository-relative directory. "
     "Use setup_argv for prerequisites in the same checkout. Use file editing tools for source changes."
 )
 _PATCH_TOOLS = frozenset({"apply_patch", "apply_patch_batch", "batch_apply_patches"})
-_SHELL_TOOLS = frozenset({"run_command", "run_script_once", "shell"})
 _SOURCE_INSPECTION_PROGRAMS = frozenset({"cat", "find", "grep", "egrep", "fgrep", "head", "ls", "rg", "sed", "tail", "wc"})
 _POSIX_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
 _WINDOWS_SHELLS = frozenset({"cmd", "powershell", "pwsh"})
@@ -78,7 +84,7 @@ class AdaptiveWriteBudget:
             return f"{allowance} Use the remaining capacity for an edit and focused verification, or report a blocker."
         return (f"{allowance} Include source reads or searches only when their answer could change an edit or check. "
                 f"Supply {EVIDENCE_NEED} with each listing, read, or search. Use existing observations and prefer an edit "
-                "or check whenever the work supports it. If a search location is unknown, ls can list the top level.")
+                "or check whenever the work supports it. If a search location is unknown, call ls with only evidence_need.")
 
     def reject_group(self, names: list[str]) -> tuple[str, str] | None:
         if self.result_only:
@@ -162,7 +168,7 @@ def validate_adaptive_tool(name: str, arguments: dict[str, Any]) -> tuple[str, s
             return "INVALID_VERIFICATION_COMMAND", VERIFICATION_DESCRIPTION
         if command.uses_git_checkout or any(VerificationCommand(argv=argv).uses_git_checkout for argv in command.setup_argv):
             return "INVALID_VERIFICATION_COMMAND", "Use a project build or check for verification."
-    elif name in _SHELL_TOOLS:
+    elif name in SHELL_TOOL_NAMES:
         from mana_agent.tools.shell_exec import split_shell_command
 
         action = arguments.get("action")
@@ -176,8 +182,7 @@ def validate_adaptive_tool(name: str, arguments: dict[str, Any]) -> tuple[str, s
                 return None  # The ordinary shell tool owns command-format errors.
             if argv and (PurePosixPath(argv[0]).name in _SOURCE_INSPECTION_PROGRAMS
                          or (argv[0] == "git" and argv[1:2] in (["status"], ["diff"], ["ls-files"]))):
-                return ("USE_REPOSITORY_TOOL", "Use a scoped read_file or repo_search for source inspection. "
-                        "Use ls to locate an unknown top-level directory and git_status or git_diff for checkout state.")
+                return USE_REPOSITORY_TOOL, REPOSITORY_INSPECTION_DESCRIPTION
     return None
 
 
