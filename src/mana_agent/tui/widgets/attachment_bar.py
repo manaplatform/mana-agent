@@ -8,7 +8,8 @@ from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widgets import Static
 
-from mana_agent.chat.attachments import ChatAttachment, format_size
+from mana_agent.chat.attachments import ChatAttachment
+from mana_agent.tui.presentation import glyph
 
 
 class AttachmentChip(Static):
@@ -18,23 +19,23 @@ class AttachmentChip(Static):
     AttachmentChip {
         width: auto;
         height: 1;
-        background: #312e81;
-        color: #e0e7ff;
+        background: $surface;
+        color: $text;
         padding: 0 1;
         margin-right: 1;
         text-style: bold;
     }
     AttachmentChip:hover {
-        background: #4338ca;
-        color: #ffffff;
+        background: $panel;
+        color: $text;
     }
     """
 
     def __init__(self, attachment: ChatAttachment, index: int, **kwargs: Any) -> None:
         self.attachment = attachment
         self.index = index
-        label = f"📎 {attachment.filename} ({attachment.format_size()}) ✕"
-        super().__init__(label, **kwargs)
+        label = f"{glyph('📎', '+')} {attachment.filename} ({attachment.format_size()}) {glyph('✕', 'x')}"
+        super().__init__(label, markup=False, **kwargs)
 
     def on_click(self) -> None:
         if self.parent and hasattr(self.parent, "remove_attachment"):

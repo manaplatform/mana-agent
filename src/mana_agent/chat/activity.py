@@ -270,7 +270,7 @@ def accepts_activity_update(previous: dict[str, Any], event: dict[str, Any]) -> 
         return False
     old_type = str(previous.get("type") or previous.get("event_type") or "")
     new_type = str(event.get("type") or event.get("event_type") or "")
-    return (old_type not in {"steering.applied", "steering.rejected", "steering.superseded"}
+    return (old_type not in {"steering.applied", "steering.rejected", "steering.superseded", "steering.failed"}
             or old_type == new_type or not old_sequence and new_sequence > 0)
 
 

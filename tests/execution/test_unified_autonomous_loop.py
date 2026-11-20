@@ -38,7 +38,7 @@ from mana_agent.execution_supervisor.models import ExecutionState
 from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
 from mana_agent.multi_agent.core.types import TaskStatus
 from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
-from mana_agent.tui.widgets.activity_boxes import MainActivityBox
+from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.chat.execution_trace import ExecutionTrace
 
 
@@ -588,7 +588,7 @@ def test_independent_goal_verification_rejects_premature_finalize(tmp_path: Path
 
 def test_unified_tui_activity_event_stream_rendering() -> None:
     trace = ExecutionTrace(turn_id="turn-tui")
-    box = MainActivityBox(turn_id="turn-tui")
+    panel = ExecutionPanel(turn_id="turn-tui")
 
     events = [
         {"event_type": "loop.turn_received", "title": "User turn received", "status": "running"},
@@ -607,17 +607,17 @@ def test_unified_tui_activity_event_stream_rendering() -> None:
 
     for ev in events:
         trace.apply_event(ev)
-        box.update_event(ev)
+        panel.update_event(ev)
 
-    rendered_text = box.activity_log.text
+    rendered_text = "\n".join(record["title"] for record in panel.events)
 
     # Verify chronological order and sub-operation indentation
     assert "User turn received" in rendered_text
     assert "Autonomous Loop initialized" in rendered_text
     assert "Strategy: multi_task" in rendered_text
     assert "TaskBoard updated" in rendered_text
-    assert "  ↳ Tool A — Running" in rendered_text
-    assert "  ↳ Tool B — Running" in rendered_text
+    assert "Tool A — Running" in rendered_text
+    assert "Tool B — Running" in rendered_text
     assert "Parallel operations completed" in rendered_text
     assert "Goal satisfied" in rendered_text
     assert "Execution completed" in rendered_text

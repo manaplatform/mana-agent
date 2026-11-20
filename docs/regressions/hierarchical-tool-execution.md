@@ -116,8 +116,8 @@ Codex uses the current signature before and after a write turn. The protocol
 regression exercises a real file edit, checks the resulting turn-wide diff,
 and excludes a pre-existing unchanged file. The shell regression uses the
 current signature and checks that `pwd` takes no snapshots and a potentially
-mutating command takes both snapshots without opting into checkout verification
-source selection. No persisted data or configuration migration is required.
+mutating command outside a Git checkout takes both filesystem snapshots. No
+persisted data or configuration migration is required.
 
 **Do not reintroduce** the removed positional tool-name argument in callers or
 test doubles. Keep snapshot observation conditional on the operation's effect.

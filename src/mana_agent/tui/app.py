@@ -1,43 +1,4 @@
-"""
-ManaChatApp — Production-quality Textual Chat TUI for mana-agent.
-
-Layout:
-  Header
-  ─────────────────────────────────────
-  ChatLog  (scrollable, subscribes to history)
-  ─────────────────────────────────────
-  Input bar  (type + Enter)
-  Footer     (status, model placeholder, ready for token counts)
-
-Keyboard:
-  Ctrl+C / q     quit
-  Ctrl+L         clear log
-  Up/Down        history navigation (future)
-
-Streaming + Tools:
-  The app wires a ChatHistory. All messages, tool calls, results and
-  tokens go through history.add(...). The ChatLog reacts live.
-
-Integration notes for the rest of mana-agent:
-------------------------------------------------
-Instead of:
-    console.print("[tool] ...")
-    print(result)
-
-Do:
-    from mana_agent.chat.history import get_history
-    from mana_agent.chat.events import ToolCallEvent, ToolResultEvent, AssistantMessageEvent, StreamTokenEvent
-
-    h = get_history()
-    h.add(ToolCallEvent(tool_name="read_file", args={"path": p}, call_id=cid))
-    ...
-    h.add(ToolResultEvent(call_id=cid, tool_name=..., success=True, result=...))
-    h.add(AssistantMessageEvent(content=answer))
-    # for streaming responses:
-    h.add(StreamTokenEvent(token=chunk, assistant_event_id=aid))
-
-This guarantees tool visibility on *every* turn, not just the first message.
-"""
+"""Textual conversation frontend for Mana-Agent."""
 
 from __future__ import annotations
 
@@ -46,18 +7,20 @@ from datetime import datetime, timezone
 import getpass
 import json
 import logging
+import os
 from pathlib import Path
 import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
-from textual.css.query import NoMatches
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Static
 
 from mana_agent.chat.events import (
     AssistantMessageEvent,
@@ -69,6 +32,7 @@ from mana_agent.chat.events import (
 )
 from mana_agent.chat.history import ChatHistory, get_history
 from mana_agent.chat.activity import delivery_key, project_activity, safe_text
+from mana_agent.tui.presentation import glyph
 from mana_agent.tui.widgets.attachment_bar import AttachmentBar
 from mana_agent.tui.widgets.chat_log import ChatLog
 from mana_agent.tui.widgets.message_input import MessageInput
@@ -80,12 +44,14 @@ class ManaChatApp(App):
     CSS_PATH = "app.tcss"
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=True),
+        Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("q", "quit", "Quit", show=False),
-        Binding("ctrl+l", "clear_log", "Clear", show=True),
-        Binding("ctrl+r", "simulate_response", "Simulate Agent", show=True),
-        Binding("ctrl+o", "attach_file", "Attach File", show=True),
-        Binding("ctrl+end", "latest_activity", "Latest activity", show=True),
+        Binding("ctrl+l", "clear_log", "Clear", show=False),
+        Binding("ctrl+r", "simulate_response", "Simulate Agent", show=False),
+        Binding("ctrl+o", "attach_file", "Attach File", show=False),
+        Binding("ctrl+end", "latest_activity", "Latest activity", show=False),
+        Binding("escape", "interrupt_execution", "Interrupt", show=False),
+        Binding("ctrl+g", "focus_approval", "Focus approval", show=False),
     ]
 
     # Reactive status for footer
@@ -184,6 +150,14 @@ class ManaChatApp(App):
         self._planning_questions: list[str] = []
         self._planning_answers: list[str] = []
         self._turn_in_progress = False
+        self.interrupt_requested = False
+        self._active_approval = None
+        self._approval_drawer = Vertical(id="approval-drawer")
+        self._approval_drawer.display = False
+        self._footer = Static("", id="chat-status", markup=False)
+        self._branch = ""
+        self._permission_text = ""
+        self._mode_text = ""
         self._computer_permission_requests_shown: set[str] = set()
         self._transactional_modal_queue: list[str] = []
         self._transactional_modal_active = False
@@ -199,6 +173,12 @@ class ManaChatApp(App):
         self._unsubscribe_session_events = None
         self._unsubscribe_api_approval_events = None
         self._delivered_coding_event_ids: set[str] = set()
+        self._activity_revisions: set[tuple[str, str, str, str]] = set()
+        self._hub_receipt_lock = threading.Lock()
+        self._replay_deliveries: list[dict[str, Any]] | None = None
+        self._transcript_ready = asyncio.Event()
+        self._transcript_ready.set()
+        self.activity_visibility = "normal"
         self._execution_to_frontend_turn: dict[str, str] = {}
         self._current_frontend_turn_id: str | None = None
         self._ui_thread_id: int | None = None
@@ -207,115 +187,115 @@ class ManaChatApp(App):
     def _resolved_approvals(self) -> set[str]:
         return self._resolved_inline_approvals
 
-    @property
-    def _toast_request_ids(self) -> set[str]:
-        return self._drawer_request_ids
-
-    @property
-    def _approval_toast_generation(self) -> int:
-        return self._approval_drawer_generation
-
-    @_approval_toast_generation.setter
-    def _approval_toast_generation(self, value: int) -> None:
-        self._approval_drawer_generation = value
-
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-
-        # Body takes the space between docked Header and docked Footer.
-        # Log gets 1fr, input bar is fixed at the bottom of the body so it cannot
-        # go below the footer.
         with Vertical(id="body"):
             self.chat_log = ChatLog(history=self.history, id="chat-log")
             yield self.chat_log
-
-            # Bottom input bar (message box)
+            yield self._approval_drawer
             with Vertical(id="input-bar"):
                 self.attachment_bar = AttachmentBar(id="attachment-bar")
                 yield self.attachment_bar
-                self.input = MessageInput(
-                    id="chat-input",
-                )
-                yield self.input
-                yield Static(
-                    "Enter sends · Tab completes commands · Shift+Enter adds a line · "
-                    "Ctrl+J / Alt+Enter also add a line · Ctrl+O attaches file",
-                    id="input-help",
-                )
+                with Horizontal(id="composer"):
+                    yield Static(glyph("❯", ">"), id="prompt-indicator", markup=False)
+                    self.input = MessageInput(id="chat-input")
+                    yield self.input
+                yield Static("", id="command-menu", markup=False)
+                yield self._footer
 
-        yield Footer()
+    @staticmethod
+    def _permission_label() -> str:
+        from mana_agent.approval.policy import get_approval_policy
+
+        return {
+            "full_access": "Full access",
+            "auto_approve_safe": "Auto-approve safe",
+            "default": "Approval required",
+        }[get_approval_policy().mode.value]
+
+    @property
+    def has_pending_execution_approval(self) -> bool:
+        return self._active_approval is not None
+
+    @property
+    def can_interrupt(self) -> bool:
+        return bool(self._gateway_session_id and callable(getattr(self.gateway, "cancel", None))
+                    and (self._turn_in_progress or self.has_pending_execution_approval))
+
+    def _update_startup(self) -> None:
+        from mana_agent import __version__
+
+        if self.chat_log is None:
+            return
+        sep = glyph(" · ", " | ")
+        fields = [self.model, self._permission_label()]
+        if self._branch:
+            fields.append(self._branch)
+        self.chat_log.startup.update(
+            f"Mana-Agent {__version__}\n{self.repo_root}\n" + sep.join(field for field in fields if field)
+        )
+        self.chat_log.startup.display = True
+
+    async def _load_startup_branch(self) -> None:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "git", "symbolic-ref", "--quiet", "--short", "HEAD",
+                cwd=self.repo_root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await process.communicate()
+        except OSError:
+            return
+        if process.returncode == 0:
+            self._branch = safe_text(stdout.decode(errors="replace").strip(), 120)
+            self._update_startup()
+
+    ACTIVE_CHAT_COMMANDS = frozenset({"cancel", "status", "help", "steer"})
+    LOCAL_COMMANDS = {
+        "attach": "Attach a file to the next message",
+        "detach": "Remove a pending attachment",
+        "clear-attachments": "Remove all pending attachments",
+        "models": "Manage configured models",
+        "steer": "Steer the current execution",
+    }
+
+    def _refresh_command_menu(self) -> None:
+        if self.input is None:
+            return
+        definitions = getattr(getattr(self.gateway, "command_registry", None), "definitions", None)
+        local = dict(self.LOCAL_COMMANDS)
+        if self._turn_in_progress:
+            local.pop("models")
+        rows = [(name, description, ()) for name, description in local.items()]
+        if definitions:
+            rows.extend(
+                (definition.canonical_name, definition.description, definition.aliases)
+                for definition in definitions()
+                if "tui" in definition.frontends
+                and (not self._turn_in_progress or definition.canonical_name in self.ACTIVE_CHAT_COMMANDS)
+            )
+        self.input.set_commands(rows)
 
     def on_mount(self) -> None:
-        """Focus input and show a welcome message. Seed initial prompt if provided by CLI."""
-        if self.input:
-            registry = getattr(self.gateway, "command_registry", None)
-            cmd_names = [definition.canonical_name for definition in registry.definitions()] if registry is not None else []
-            cmd_names.extend(["attach", "detach", "clear-attachments"])
-            self.input.set_command_completions(cmd_names)
-            self.input.focus()
+        if not os.environ.get("COLORTERM") and os.environ.get("TERM") in {"linux", "vt100", "ansi", "xterm", "dumb"}:
+            self.theme = "textual-ansi"
         self._ui_thread_id = threading.get_ident()
-        try:
-            self.query_one("#approval-drawer", VerticalScroll).display = False
-        except Exception:
-            pass
-        self._unsubscribe_computer_permissions = self.history.subscribe(
-            self._handle_computer_permission_event
-        )
+        if self.input:
+            self.input.menu = self.query_one("#command-menu", Static)
+            self._refresh_command_menu()
+            self.input.focus()
+        self._unsubscribe_computer_permissions = self.history.subscribe(self._handle_computer_permission_event)
         if self._gateway_session_id:
-            self._subscribe_session_events(self._gateway_session_id)
+            self._attach_session_events(self._gateway_session_id, restore_transcript=not bool(self.history))
+        self._permission_text = self._permission_label()
+        self._update_startup()
+        from mana_agent.config.user_config import get_setting
 
-        # Safe immediate footer (avoids any early watcher issues)
-        from mana_agent.approval.policy import ApprovalMode, get_approval_policy
-
-        app_policy = get_approval_policy()
-        if app_policy.mode == ApprovalMode.FULL_ACCESS:
-            self.sub_title = "Mode: Autonomous · Approval: FULL ACCESS"
-        elif app_policy.mode == ApprovalMode.AUTO_APPROVE_SAFE:
-            self.sub_title = "Approval: AUTO APPROVE SAFE"
-        else:
-            self.sub_title = "Ready"
-
-        # Welcome (only if this is a fresh history)
-        if len(self.history.get_events()) == 0:
-            root_str = str(self.repo_root)
-            model_str = self.model or "default"
-            try:
-                from mana_agent.config.user_config import load_effective_settings
-
-                from mana_agent.config.inference_provider import credentials_from_mapping
-
-                configured = load_effective_settings(include_env=False)
-                provider = str(configured.get("MANA_AI_PROVIDER") or "openai")
-                search = str(configured.get("MANA_WEB_SEARCH_PROVIDER") or "disabled") if configured.get("MANA_SEARCH_ENABLE_WEB") else "disabled"
-                github = str(configured.get("MANA_GITHUB_CREDENTIAL_SOURCE") or "disabled")
-                warnings = []
-                api_key, _base = credentials_from_mapping(configured, provider=provider)
-                if not api_key:
-                    warnings.append("provider authentication missing")
-                warning_line = f"\nWarnings: {', '.join(warnings)}" if warnings else ""
-            except Exception:
-                provider, search, github, warning_line = "unknown", "unknown", "unknown", "\nWarnings: configuration unavailable"
-            welcome = AssistantMessageEvent(
-                content=(
-                    f"**Mana-Agent** · `{root_str}`\n"
-                    f"Provider: `{provider}` · Model: `{model_str}` · Search: `{search}` · GitHub: `{github}`"
-                    f"{warning_line}\n\nType a message, or use `/models` to manage configured models."
-                )
-            )
-            self.history.add(welcome)
-
-        # Schedule the first status update safely after the widget tree is ready.
-        # Calling update_status() synchronously in on_mount can trigger watchers
-        # before Footer is queryable, leading to crashes on footer.update().
-        self.call_after_refresh(
-            lambda: self.update_status(f"Ready — {self.repo_root.name or self.repo_root}")
-        )
+        self.activity_visibility = str(get_setting("MANA_ACTIVITY_VISIBILITY", "normal"))
+        if self.is_running:
+            self.run_worker(self._load_startup_branch(), group="startup")
+        self._refresh_runtime_labels()
         self.call_after_refresh(self._queue_outstanding_transactional_approvals)
-
-        # If the CLI passed an initial prompt (e.g. `mana-agent chat "explain the architecture"`),
-        # send it automatically as the first user message.
         if self.initial_prompt:
-            self.run_worker(self._send_initial_prompt(), exclusive=True)
+            self.run_worker(self._send_initial_prompt(), group="chat-turn", exclusive=True)
 
     def _handle_computer_permission_event(self, event: Any) -> None:
         if not isinstance(event, CodingActivityEvent):
@@ -331,7 +311,7 @@ class ManaChatApp(App):
             request_ids = {str(metadata.get(key) or "") for key in ("permission_request_id", "approval_request_id", "inbox_item_id", "action_id")} - {""}
             if request_ids:
                 from mana_agent.tui.computer_permission import ApprovalDecided
-                self.post_message(ApprovalDecided(request_ids, approved=False))
+                self.post_message(ApprovalDecided(request_ids, approved=False, expired=True))
                 self.update_status("Approval request expired or invalidated")
             return
         if event_type not in {
@@ -408,9 +388,20 @@ class ManaChatApp(App):
 
             from mana_agent.workspaces.paths import repository_id_for_path
             hub = get_execution_event_hub()
+            generation = self._approval_drawer_generation
+
+            def receive(event: dict[str, Any]) -> None:
+                with self._hub_receipt_lock:
+                    if generation != self._approval_drawer_generation:
+                        return
+                    if self._replay_deliveries is not None:
+                        self._replay_deliveries.append(event)
+                        return
+                self._handle_hub_session_event(event)
+
             unsub = hub.subscribe(
                 sid,
-                self._handle_hub_session_event,
+                receive,
                 repository_id=repository_id_for_path(self.repo_root),
                 buffered=True,
             )
@@ -418,21 +409,6 @@ class ManaChatApp(App):
             self._unsubscribe_api_approval_events = unsub
         except Exception:
             logger.debug("Failed to subscribe to ExecutionEventHub for session %s", session_id, exc_info=True)
-
-    @property
-    def _active_permission_screen(self) -> Any:
-        """Safely return the active ComputerPermissionScreen if mounted and running, else None."""
-        try:
-            if not getattr(self, "is_running", False):
-                return None
-            from mana_agent.tui.computer_permission import ComputerPermissionScreen
-
-            scr = getattr(self, "screen", None)
-            if isinstance(scr, ComputerPermissionScreen):
-                return scr
-        except Exception:
-            return None
-        return None
 
     def _handle_hub_session_event(self, event: dict[str, Any]) -> None:
         """Handle execution events from ExecutionEventHub as durable fallback and source of truth."""
@@ -551,27 +527,6 @@ class ManaChatApp(App):
             "inbox.item.expired",
         }:
             metadata = dict(event.get("metadata") or {})
-            req_id = str(
-                metadata.get("permission_request_id")
-                or metadata.get("approval_request_id")
-                or metadata.get("inbox_item_id")
-                or metadata.get("action_id")
-                or ""
-            )
-            perm_screen = self._active_permission_screen
-            if (
-                req_id
-                and perm_screen is not None
-                and (
-                    getattr(perm_screen, "request_id", None) == req_id
-                    or getattr(perm_screen, "request_id", None)
-                    in {metadata.get("inbox_item_id"), metadata.get("action_id")}
-                )
-            ):
-                try:
-                    perm_screen.dismiss(None)
-                except Exception:
-                    pass
             decision = str(metadata.get("decision") or "")
             is_expired = (
                 event_type in {"action.approval.expired", "action.approval.invalidated", "inbox.item.expired"}
@@ -587,6 +542,7 @@ class ManaChatApp(App):
                             event_type == "action.approval.granted"
                             or decision in {"approve", "allow_once", "allow_session", "always"}
                         ),
+                        expired=is_expired,
                     )
                 )
             if is_expired:
@@ -616,14 +572,21 @@ class ManaChatApp(App):
             return
 
         key = delivery_key(event)
-        if (event_id and event_id in self._delivered_coding_event_ids) or key in self._delivered_coding_event_ids:
-            return
+        meta = event.get("metadata") or event.get("payload") or {}
+        revision = (event_id, event_type, str(event.get("status") or ""), str(meta.get("stream_offset") or ""))
         safe = project_activity(event)
         if safe is None:
             return
-        self._delivered_coding_event_ids.add(key)
-        if len(self._delivered_coding_event_ids) > 4000:
-            self._delivered_coding_event_ids = {key}
+        with self._hub_receipt_lock:
+            if key in self._delivered_coding_event_ids or (event_id and revision in self._activity_revisions):
+                return
+            self._delivered_coding_event_ids.add(key)
+            if event_id:
+                self._activity_revisions.add(revision)
+            if len(self._delivered_coding_event_ids) > 4000:
+                self._delivered_coding_event_ids.pop()
+            if len(self._activity_revisions) > 4000:
+                self._activity_revisions.pop()
         execution_id = str(event.get("execution_id") or event.get("turn_id") or "")
         target_turn_id = self._execution_to_frontend_turn.get(execution_id) or execution_id
         if not target_turn_id:
@@ -664,32 +627,27 @@ class ManaChatApp(App):
         self._unsubscribe_api_approval_events = None
 
         self._execution_to_frontend_turn.clear()
-        self._delivered_coding_event_ids.clear()
+        with self._hub_receipt_lock:
+            self._delivered_coding_event_ids.clear()
+            self._activity_revisions.clear()
+            self._approval_drawer_generation += 1
         self._current_frontend_turn_id = None
+        self._turn_in_progress = False
         self._computer_permission_requests_shown.clear()
         self._transactional_modal_queue.clear()
         self._transactional_modal_active = False
         self._active_transactional_id = ""
         self._modal_request_queue.clear()
-        self._modal_screen_active = False
         self._active_modal_request_id = ""
-        perm_screen = self._active_permission_screen
-        if perm_screen is not None:
-            try:
-                perm_screen.dismiss(None)
-            except Exception:
-                pass
         self._resolved_inline_approvals.clear()
-        self._approval_drawer_generation += 1
         self._drawer_request_ids.clear()
-        if self.chat_log is not None and self.chat_log.is_mounted:
-            from mana_agent.tui.computer_permission import InlineApproval
-            for controls in list(self.query(InlineApproval)):
-                controls.remove()
-            try:
-                self.query_one("#approval-drawer", VerticalScroll).display = False
-            except Exception:
-                pass
+        self._saved_modal_previews.clear()
+        self.interrupt_requested = False
+        if self._active_approval is not None:
+            if self._active_approval.is_mounted:
+                self._active_approval.remove()
+            self._active_approval = None
+        self._approval_drawer.display = False
         self.active_flow_id = None
         self._tool_cid_map.clear()
 
@@ -697,35 +655,77 @@ class ManaChatApp(App):
             self._clear_conversation_view()
 
         self._gateway_session_id = new_session_id
-        self._subscribe_session_events(new_session_id)
-        self._replay_durable_session_events(new_session_id)
+        self._attach_session_events(new_session_id)
+        self._refresh_runtime_labels()
         return new_session_id
 
-    def _replay_durable_session_events(self, session_id: str) -> None:
-        """Replay durable execution events from ExecutionEventHub when switching/reopening session."""
-        if not session_id:
-            return
+    def _attach_session_events(self, session_id: str, *, restore_transcript: bool = False) -> None:
+        replay = bool(self.is_running and session_id)
+        with self._hub_receipt_lock:
+            self._replay_deliveries = [] if replay else None
+        self._subscribe_session_events(session_id)
+        if replay:
+            generation = self._approval_drawer_generation
+            saved_history = getattr(getattr(self.gateway, "session_service", None), "history", None)
+            load_messages = getattr(saved_history, "list", None) if restore_transcript else None
+            if callable(load_messages):
+                self._transcript_ready.clear()
+
+            async def replay_and_release() -> None:
+                try:
+                    if callable(load_messages):
+                        try:
+                            messages = await asyncio.to_thread(load_messages, session_id, limit=5000)
+                            if generation == self._approval_drawer_generation and messages:
+                                self._replace_timeline([message.to_dict() for message in messages])
+                        except (OSError, ValueError) as exc:
+                            self.notify(f"Conversation history unavailable: {safe_text(exc, 140)}", severity="warning")
+                        finally:
+                            self._transcript_ready.set()
+                    await self._replay_durable_session_events(session_id)
+                finally:
+                    if generation == self._approval_drawer_generation:
+                        while True:
+                            with self._hub_receipt_lock:
+                                deliveries = self._replay_deliveries
+                                self._replay_deliveries = [] if deliveries else None
+                            if not deliveries:
+                                break
+                            for event in deliveries:
+                                self._handle_hub_session_event(event)
+                            await asyncio.sleep(0)
+
+            self.run_worker(replay_and_release, group="session-replay", exclusive=True)
+
+    async def _replay_durable_session_events(self, session_id: str) -> None:
+        """Replay into the live projection through a fixed high-water mark."""
+        from mana_agent.services.execution_event_hub import get_execution_event_hub
+        from mana_agent.workspaces.paths import repository_id_for_path
+
+        generation = self._approval_drawer_generation
+        hub = get_execution_event_hub()
+        repository = repository_id_for_path(self.repo_root)
+        scope = dict(conversation_id=session_id, repository_id=repository)
         try:
-            from mana_agent.services.execution_event_hub import get_execution_event_hub
-            from mana_agent.workspaces.paths import repository_id_for_path
-            hub = get_execution_event_hub()
-            repository = repository_id_for_path(self.repo_root)
-            high = hub.history(conversation_id=session_id, repository_id=repository, limit=1)
+            high = await asyncio.to_thread(hub.history, **scope, limit=1)
             high_water = int(high[-1].get("sequence") or 0) if high else 0
             cursor = 0
-            while cursor < high_water:
-                page = hub.history(conversation_id=session_id, repository_id=repository,
-                                   after_sequence=cursor, forward=True, limit=500)
-                if not page:
+            while cursor < high_water and generation == self._approval_drawer_generation:
+                page = await asyncio.to_thread(hub.history, **scope, after_sequence=cursor, forward=True, limit=500)
+                if not page or generation != self._approval_drawer_generation:
                     break
-                for ev in page:
-                    sequence = int(ev.get("sequence") or 0)
+                for event in page:
+                    sequence = int(event.get("sequence") or 0)
                     if sequence > high_water:
                         break
                     cursor = sequence
-                    self._handle_hub_session_event(ev)
-        except Exception:
+                    self._handle_hub_session_event(event)
+                if int(page[-1].get("sequence") or 0) >= high_water:
+                    break
+                await asyncio.sleep(0)
+        except (OSError, ValueError) as exc:
             logger.debug("Failed to replay durable events for session %s", session_id, exc_info=True)
+            self.notify(f"Activity history unavailable: {safe_text(exc, 140)}", severity="warning")
 
     def _queue_outstanding_transactional_approvals(self) -> None:
         if self.gateway is None or not getattr(self.gateway, "human_inbox_service", None):
@@ -864,6 +864,7 @@ class ManaChatApp(App):
         if target_id not in self._transactional_modal_queue:
             self._transactional_modal_queue.append(target_id)
         self._show_next_transactional_modal()
+        self._sync_approval_drawer()
 
     def _show_next_transactional_modal(self) -> None:
         if self._transactional_modal_active or not self._transactional_modal_queue:
@@ -972,20 +973,17 @@ class ManaChatApp(App):
         ))
 
     def on_computer_permission_requested(self, event: Any) -> None:
-        self._show_permission_modal(event)
+        self._show_inline_approval(event)
 
-    def _show_permission_modal(self, event: Any) -> None:
-        """Show approval request in a modal popup screen over the entire chat UI."""
-        from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionChoice
+    def _show_inline_approval(self, event: Any) -> None:
+        """Validate a request and show it in the shared inline approval area."""
 
-        if event.request_id in self._resolved_inline_approvals:
-            self._show_next_modal_in_queue()
+        if event.request_id in self._resolved_inline_approvals or event.request_id == self._active_modal_request_id:
             return
 
         now = datetime.now(timezone.utc)
         if getattr(event, "expires_at", None) and event.expires_at <= now:
-            self._resolved_inline_approvals.add(event.request_id)
-            self._show_next_modal_in_queue()
+            self._discard_approval(event.request_id, expired=True)
             return
 
         item = None
@@ -1003,12 +1001,10 @@ class ManaChatApp(App):
 
         if item is not None:
             if item.status.value not in {"pending", "delivered"}:
-                self._resolved_inline_approvals.add(event.request_id)
-                self._show_next_modal_in_queue()
+                self._discard_approval(event.request_id, expired=item.status.value == "expired")
                 return
             if item.expires_at and item.expires_at <= now:
-                self._resolved_inline_approvals.add(event.request_id)
-                self._show_next_modal_in_queue()
+                self._discard_approval(event.request_id, expired=True)
                 return
             if item.action_intent_id:
                 try:
@@ -1022,141 +1018,99 @@ class ManaChatApp(App):
                         or (act.expires_at and act.expires_at <= u_now)
                         or (act.policy_decision and act.policy_decision.expires_at and act.policy_decision.expires_at <= u_now)
                     ):
-                        self._resolved_inline_approvals.add(event.request_id)
-                        self._show_next_modal_in_queue()
+                        self._discard_approval(event.request_id, expired=bool(act.expires_at and act.expires_at <= u_now))
                         return
                 except Exception:
                     pass
 
-        # If a modal is already displayed on screen, queue this request
-        if self._modal_screen_active or self._active_permission_screen is not None:
-            if not any(getattr(req, "request_id", None) == event.request_id for req in self._modal_request_queue):
+        if self._active_approval is not None:
+            if event.request_id not in self._drawer_request_ids:
                 self._modal_request_queue.append(event)
+                self._drawer_request_ids.add(event.request_id)
+                self._sync_approval_drawer()
             return
 
-        self._modal_screen_active = True
+        from mana_agent.tui.computer_permission import InlineApproval
+
         self._active_modal_request_id = event.request_id
+        self._drawer_request_ids.add(event.request_id)
+        self._active_approval = InlineApproval(event, self._apply_computer_permission)
+        if self._approval_drawer.is_mounted:
+            self._approval_drawer.mount(self._active_approval)
+        self._sync_approval_drawer()
 
-        screen = ComputerPermissionScreen(
-            request_id=event.request_id,
-            scope=event.scope,
-            preview=event.preview,
-            remote=getattr(event, "remote", False),
-            server=getattr(event, "server", False),
-            api=getattr(event, "api", False),
-            transactional=getattr(event, "transactional", False),
-            pending_count=getattr(event, "pending_count", 1) + len(self._modal_request_queue),
-            expires_at=getattr(event, "expires_at", None),
-        )
+    def _discard_approval(self, request_id: str, *, expired: bool) -> None:
+        from mana_agent.tui.computer_permission import InlineApprovalDecided
 
-        def _on_modal_dismiss(choice: Any) -> None:
-            self._modal_screen_active = False
-            self._active_modal_request_id = ""
-            if choice is not None:
-                self._apply_computer_permission(choice)
-            else:
-                if event.request_id not in self._resolved_inline_approvals:
-                    choice_deny = ComputerPermissionChoice(
-                        event.request_id,
-                        None,
-                        remote=getattr(event, "remote", False),
-                        server=getattr(event, "server", False),
-                        api=getattr(event, "api", False),
-                        transactional=getattr(event, "transactional", False),
-                    )
-                    self._apply_computer_permission(choice_deny)
-            self.call_after_refresh(self._show_next_modal_in_queue)
+        self.on_inline_approval_decided(InlineApprovalDecided({request_id}, False, expired=expired))
 
-        self.push_screen(screen, _on_modal_dismiss)
-
-    def _show_next_modal_in_queue(self) -> None:
-        if self._modal_screen_active or self._active_permission_screen is not None or not self._modal_request_queue:
+    def _show_next_approval(self) -> None:
+        if self._active_approval is not None:
             return
-        while self._modal_request_queue:
-            next_event = self._modal_request_queue.pop(0)
-            if next_event.request_id in self._resolved_inline_approvals:
-                continue
-            now = datetime.now(timezone.utc)
-            if getattr(next_event, "expires_at", None) and next_event.expires_at <= now:
-                self._resolved_inline_approvals.add(next_event.request_id)
-                continue
-            self._show_permission_modal(next_event)
-            break
-
-    def _show_inline_approval(self, event: Any) -> None:
-        self._show_permission_modal(event)
-
-    _show_approval_toast = _show_inline_approval
+        while self._modal_request_queue and self._active_approval is None:
+            event = self._modal_request_queue.pop(0)
+            self._drawer_request_ids.discard(event.request_id)
+            self._show_inline_approval(event)
 
     def _sync_approval_drawer(self) -> None:
-        pass
+        controls = self._active_approval
+        self._approval_drawer.display = controls is not None
+        if controls is not None:
+            ids = self._drawer_request_ids | set(self._transactional_modal_queue)
+            controls.set_pending_count(len(ids))
+        if self.chat_log is not None:
+            self.chat_log.refresh_activity_status()
 
-    _sync_approval_toast_layer = _sync_approval_drawer
+    def action_focus_approval(self) -> None:
+        if self._active_approval is not None:
+            self._active_approval.focus_choices()
 
     def on_inline_approval_decided(self, event: Any) -> None:
         self._resolved_inline_approvals.update(event.request_ids)
+        self._drawer_request_ids.difference_update(event.request_ids)
         self._modal_request_queue = [req for req in self._modal_request_queue if req.request_id not in event.request_ids]
         self._transactional_modal_queue[:] = [item for item in self._transactional_modal_queue if item not in event.request_ids]
-
-        advance = self._active_transactional_id in event.request_ids or self._active_modal_request_id in event.request_ids
-        if advance:
+        if self._active_transactional_id in event.request_ids:
             self._transactional_modal_active = False
             self._active_transactional_id = ""
-
-        perm_screen = self._active_permission_screen
-        if perm_screen is not None and getattr(perm_screen, "request_id", None) in event.request_ids:
-            self._modal_screen_active = False
+        if self._active_modal_request_id in event.request_ids and self._active_approval is not None:
+            restore_focus = self._active_approval.has_focus_within
+            if self._active_approval.is_mounted:
+                self._active_approval.remove()
+            self._active_approval = None
             self._active_modal_request_id = ""
-            try:
-                perm_screen.dismiss(None)
-            except Exception:
-                pass
-
+            if restore_focus and self.input:
+                self.input.focus()
         if self.chat_log is not None:
             for panel in self.chat_log._execution_panels.values():
-                for box in (panel.main_box, panel.coding_box):
-                    for request_id in event.request_ids:
-                        if any(request_id in {str((activity.get("metadata") or {}).get(key) or "") for key in ("inbox_item_id", "permission_request_id", "approval_request_id", "action_id")} for activity in box.events):
-                            box.update_event({
-                                "event_type": "action.approval.granted" if event.approved else "action.approval.denied",
-                                "title": "Approval granted" if event.approved else "Approval denied",
-                                "status": "completed" if event.approved else "failed",
-                                "metadata": {"permission_request_id": request_id, "decision": "approve" if event.approved else "deny"},
-                            })
-        if advance:
-            self.call_after_refresh(self._show_next_transactional_modal)
-            self.call_after_refresh(self._show_next_modal_in_queue)
+                panel.resolve_approvals(event.request_ids, approved=event.approved, expired=event.expired)
+        self._sync_approval_drawer()
+        self.call_after_refresh(self._show_next_approval)
+        self.call_after_refresh(self._show_next_transactional_modal)
 
     on_approval_decided = on_inline_approval_decided
 
     def _apply_computer_permission(self, choice: Any, *, controls: Any = None) -> None:
         if choice is None:
             return
-
+        controls = controls or self._active_approval
         batch_ids = list(self._transactional_modal_queue) if getattr(choice, "approve_all", False) else []
         generation = self._approval_drawer_generation
 
         async def complete_and_advance() -> None:
-            success = False
-            try:
-                success = await self._complete_computer_permission(choice, batch_ids=batch_ids)
-            finally:
-                if success:
-                    from mana_agent.tui.computer_permission import InlineApprovalDecided
-                    resolved = {choice.request_id}
-                    if batch_ids:
-                        resolved.update(batch_ids)
-                    self.on_inline_approval_decided(InlineApprovalDecided(resolved, choice.decision is not None))
-                if choice.transactional and self._active_transactional_id == choice.request_id:
-                    self._transactional_modal_active = False
-                    self._active_transactional_id = ""
-                    self.call_after_refresh(self._show_next_transactional_modal)
-                self.call_after_refresh(self._show_next_modal_in_queue)
+            success = await self._complete_computer_permission(choice, batch_ids=batch_ids)
+            if generation != self._approval_drawer_generation:
+                return
+            if success and choice.request_id not in self._resolved_inline_approvals:
+                from mana_agent.tui.computer_permission import InlineApprovalDecided
 
-        self.run_worker(
-            complete_and_advance(),
-            name=f"computer-permission-{choice.request_id}",
-        )
+                # The resolver removes additional requests only after the matching decision commits.
+                resolved = {choice.request_id} | (set(batch_ids) - set(self._transactional_modal_queue))
+                self.on_inline_approval_decided(InlineApprovalDecided(resolved, choice.decision is not None))
+            elif not success and controls is not None and controls is self._active_approval:
+                controls.enable_choices()
+
+        self.run_worker(complete_and_advance(), group="execution-approval", name=f"approval-{choice.request_id}")
 
     async def _complete_computer_permission(self, choice: Any, *, batch_ids: list[str] | None = None, is_batch: bool = False) -> bool:
         from mana_agent.integrations.computer_control.cancellation import (
@@ -1164,6 +1118,7 @@ class ManaChatApp(App):
             deny_computer_permission,
         )
 
+        generation = self._approval_drawer_generation
         try:
             if choice.transactional:
                 is_approve = choice.decision is not None
@@ -1200,7 +1155,7 @@ class ManaChatApp(App):
                     logger.info("Inbox item %s is already terminal/expired (%s)", reference.inbox_item_id, reference.status.value)
                     self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
                     from mana_agent.tui.computer_permission import ApprovalDecided
-                    self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                    self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False, expired=is_expired))
                     return True
                 if self.gateway is not None:
                     command = (
@@ -1252,7 +1207,7 @@ class ManaChatApp(App):
                             logger.info("Gateway transactional approval command error (terminal/expired): %s", exc)
                             self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
                             from mana_agent.tui.computer_permission import ApprovalDecided
-                            self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                            self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False, expired=is_expired))
                             return True
                         else:
                             logger.warning("Gateway transactional approval command error: %s", exc)
@@ -1407,7 +1362,7 @@ class ManaChatApp(App):
                             logger.info("Transactional action approval was terminal/expired: %s", exc)
                             self.notify("Approval request expired." if is_expired else "Approval request already decided.", severity="information")
                             from mana_agent.tui.computer_permission import ApprovalDecided
-                            self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                            self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False, expired=is_expired))
                             return True
                         else:
                             logger.exception("Failed to resolve transactional action approval directly")
@@ -1451,6 +1406,8 @@ class ManaChatApp(App):
                 if not handled:
                     self.notify(msg or "Failed to record approval decision.", severity="warning")
                     return False
+                if generation != self._approval_drawer_generation:
+                    return True
                 decided_event = "action.approval.granted" if is_approve else "action.approval.denied"
                 self.history.add(
                     CodingActivityEvent(
@@ -1469,8 +1426,6 @@ class ManaChatApp(App):
                 )
                 if is_approve:
                     self.notify("Approved", severity="information")
-                    if self.chat_log is not None:
-                        self.chat_log._scroll_to_latest()
                 else:
                     self.notify("Denied", severity="warning")
                 return True
@@ -1486,9 +1441,8 @@ class ManaChatApp(App):
                     session_id=self._gateway_session_id or "",
                     client_type="tui",
                 )
-                self._record_server_approval_completion(choice.request_id, result)
-                if choice.decision is not None and self.chat_log is not None:
-                    self.chat_log._scroll_to_latest()
+                if generation == self._approval_drawer_generation:
+                    self._record_server_approval_completion(choice.request_id, result)
                 return True
             if choice.api:
                 command = (
@@ -1501,17 +1455,17 @@ class ManaChatApp(App):
                     choice.request_id,
                     session_id=self._gateway_session_id or "",
                 )
-                self._record_api_approval_completion(choice.request_id, result)
-                if choice.decision is not None and self.chat_log is not None:
-                    self.chat_log._scroll_to_latest()
+                if generation == self._approval_drawer_generation:
+                    self._record_api_approval_completion(choice.request_id, result)
                 return True
             if choice.remote:
                 if choice.decision is None:
                     self.notify("Remote SSH request denied.", severity="warning")
                     return True
                 result = await asyncio.to_thread(self.gateway.remote_permission_command, choice.request_id)
-                self.notify(result["message"])
-                self.history.add(AssistantMessageEvent(content=result["message"]))
+                if generation == self._approval_drawer_generation:
+                    self.notify(result["message"])
+                    self.history.add(AssistantMessageEvent(content=result["message"]))
                 return True
             if choice.decision is None:
                 await asyncio.to_thread(
@@ -1527,12 +1481,15 @@ class ManaChatApp(App):
                 decision=choice.decision,
                 client_type="tui",
             )
-            self.notify(result.message)
-            self.history.add(AssistantMessageEvent(
-                content=f"Computer action completed after permission approval: {result.message}"
-            ))
+            if generation == self._approval_drawer_generation:
+                self.notify(result.message)
+                self.history.add(AssistantMessageEvent(
+                    content=f"Computer action completed after permission approval: {result.message}"
+                ))
             return True
         except Exception as exc:
+            if generation != self._approval_drawer_generation:
+                return False
             exc_str = str(exc).lower()
             if "expired" in exc_str or "already terminal" in exc_str or "is terminal" in exc_str:
                 if is_batch:
@@ -1546,7 +1503,7 @@ class ManaChatApp(App):
                 )
                 self.notify(f"{action_name} request expired.", severity="information")
                 from mana_agent.tui.computer_permission import ApprovalDecided
-                self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False))
+                self.on_approval_decided(ApprovalDecided({choice.request_id}, approved=False, expired="expired" in exc_str))
                 return True
             action_name = (
                 "Server approval"
@@ -1662,31 +1619,59 @@ class ManaChatApp(App):
         # (watch_status_text) will invoke it. This prevents duplicate work
         # and ordering problems during early app lifecycle.
 
-    def refresh_footer(self) -> None:
-        """Update dynamic footer text.
+    def _refresh_runtime_labels(self) -> None:
+        self._permission_text = self._permission_label()
+        mode_reader = getattr(self.gateway, "get_session_execution_mode", None)
+        mode = mode_reader(self._gateway_session_id) if mode_reader and self._gateway_session_id else ""
+        self._mode_text = str(mode).upper() if mode else ""
+        self.refresh_footer()
 
-        We use self.sub_title instead of directly mutating the Footer widget.
-        This avoids query_one timing issues during early mount / reactive updates
-        (watchers can fire before the compose tree is fully attached).
-        The default Textual Footer will display sub_title on the right side.
-        """
-        model = self.model or "default"
-        root = self.repo_root.name if self.repo_root else ""
-        tokens = f"tokens: {self.token_count}"
-        mode_str = ""
-        if (
-            self.gateway is not None
-            and hasattr(self.gateway, "get_session_execution_mode")
-            and self._gateway_session_id
-        ):
-            mode = self.gateway.get_session_execution_mode(self._gateway_session_id)
-            mode_str = f"  |  [{mode.upper()}]"
-        process_status = ""
-        manager = getattr(self.gateway, "background_processes", None)
-        if manager is not None:
-            active = sum(1 for row in manager.list() if row.state in {"starting", "running"})
-            process_status = f"  |  processes: {active}"
-        self.sub_title = f"{self.status_text}  |  {model}  |  {root}  |  {tokens}{mode_str}{process_status}"
+    def refresh_footer(self) -> None:
+        if not self._footer.is_mounted:
+            return
+        sep = glyph(" · ", " | ")
+        panel = self.chat_log.get_execution_panel(self._current_frontend_turn_id) if self.chat_log and self._current_frontend_turn_id else None
+        mode = (panel.workflow_mode if panel else "") or self._mode_text
+        parts = [part for part in (self.model, mode, self._permission_text) if part]
+        meters = [panel.context_meter for panel in self.chat_log._execution_panels.values() if panel.context_meter] if self.chat_log else []
+        metric = meters[-1] if meters else {}
+        used, window = metric.get("used_tokens"), metric.get("context_window")
+        ratio = metric.get("utilization_ratio")
+        if isinstance(used, (float, int)) and window:
+            ratio = used / window
+        if isinstance(ratio, (float, int)) and 0 <= ratio <= 1:
+            marker = "~" if metric.get("estimated") else ""
+            parts.append(f"Context {marker}{100 * (1 - ratio):.0f}% left")
+        value = sep.join(parts)
+        if str(self._footer.renderable) != value:
+            self._footer.update(Text(value, no_wrap=True, overflow="ellipsis"))
+
+    def on_resize(self, _: events.Resize) -> None:
+        self.call_after_refresh(self.refresh_footer)
+
+    async def action_interrupt_execution(self) -> None:
+        if not self.can_interrupt or self.interrupt_requested or len(self.screen_stack) > 1:
+            return
+        session_id = self._gateway_session_id
+        self.interrupt_requested = True
+        if self.chat_log:
+            self.chat_log.refresh_activity_status()
+
+        async def interrupt() -> None:
+            try:
+                accepted = await asyncio.to_thread(self.gateway.cancel, session_id, source="tui_escape")
+            except Exception as exc:
+                if self._gateway_session_id == session_id:
+                    self.interrupt_requested = False
+                    self.notify(f"Unable to interrupt: {safe_text(exc, 160)}", severity="error")
+                return
+            if self._gateway_session_id == session_id and not accepted:
+                self.interrupt_requested = False
+                self.notify("No cancellable turn is active.", severity="information")
+            if self._gateway_session_id == session_id and self.chat_log:
+                self.chat_log.refresh_activity_status()
+
+        self.run_worker(interrupt(), group="chat-interrupt")
 
     def action_latest_activity(self) -> None:
         if self.chat_log is not None:
@@ -1778,17 +1763,6 @@ class ManaChatApp(App):
         self.token_count += 42
         self.update_status("Agent response complete")
 
-    def on_message_input_height_changed(self, event: MessageInput.HeightChanged) -> None:
-        """Keep the input bar and chat timeline in sync with the composer."""
-        if event.message_input is not self.input:
-            return
-        try:
-            extra = 1 if (self.attachment_bar and self.attachment_bar.styles.display != "none" and self.attachment_bar.count > 0) else 0
-            self.query_one("#input-bar").styles.height = event.height + 2 + extra
-        except NoMatches:
-            # A queued resize can arrive after a modal replaces the chat screen.
-            return
-
     def action_attach_file(self) -> None:
         """Open the file attachment picker modal."""
         from mana_agent.tui.attachment_picker import FileAttachmentModal
@@ -1809,7 +1783,8 @@ class ManaChatApp(App):
     async def _submit_live_steering(self, instruction: str) -> None:
         import uuid
         target_turn_id = self._current_frontend_turn_id or getattr(self.chat_log, "_current_turn_id", "")
-        if not target_turn_id or not self.gateway or not self._gateway_session_id:
+        session_id = self._gateway_session_id
+        if not target_turn_id or not self.gateway or not session_id:
             self.notify("Steering unavailable: no active execution in this session.", severity="warning")
             return
         request_id = f"steer_{uuid.uuid4().hex}"
@@ -1820,8 +1795,10 @@ class ManaChatApp(App):
         self.history.add(message)
         try:
             result = await asyncio.to_thread(self.gateway.submit_steering,
-                                             session_id=self._gateway_session_id, text=instruction,
+                                             session_id=session_id, text=instruction,
                                              scope="execution", request_id=request_id, execution_id=target_turn_id)
+            if self._gateway_session_id != session_id:
+                return
             status = str(result.get("status") or "queued")
             self._safe_post_activity({"event_type": "steering.queued", "title": "Live steering queued",
                                       "status": "queued", "operation_id": request_id, "detail": instruction,
@@ -1829,10 +1806,13 @@ class ManaChatApp(App):
                                                    "steering_sequence": result.get("sequence", 0),
                                                    "status": status}}, target_turn_id)
         except Exception as exc:
-            self._safe_post_activity({"event_type": "steering.rejected", "title": "Live steering rejected",
-                                      "status": "rejected", "summary": safe_text(exc), "operation_id": request_id,
+            if self._gateway_session_id != session_id:
+                return
+            status = "rejected" if isinstance(exc, (ValueError, PermissionError)) else "failed"
+            self._safe_post_activity({"event_type": f"steering.{status}", "title": f"Live steering {status}",
+                                      "status": status, "summary": safe_text(exc), "operation_id": request_id,
                                       "metadata": {"request_id": request_id}}, target_turn_id)
-            self.notify(f"Steering rejected: {safe_text(exc, 120)}", severity="error")
+            self.notify(f"Steering {status}: {safe_text(exc, 120)}", severity="error")
 
     def _apply_file_attachment_path(self, target_path: Path | str) -> None:
         p = Path(target_path).expanduser()
@@ -1875,6 +1855,7 @@ class ManaChatApp(App):
         # Preserve message whitespace and explicit line breaks. A final newline is
         # an editing artifact from the composer, not part of the submitted turn.
         text = event.value.rstrip("\r\n")
+        await self._transcript_ready.wait()
 
         # Check attachment commands before regular turn execution
         if text == "/attach" or text.startswith("/attach "):
@@ -1883,7 +1864,7 @@ class ManaChatApp(App):
                 self._apply_file_attachment_path(parts[1].strip())
             else:
                 self.action_attach_file()
-            if self.input:
+            if self.input and self.input.value == event.value:
                 self.input.reset()
             return
 
@@ -1891,7 +1872,7 @@ class ManaChatApp(App):
             if self.attachment_bar:
                 removed = self.attachment_bar.clear_attachments()
                 self.notify(f"Removed {len(removed)} attachments.", severity="information")
-            if self.input:
+            if self.input and self.input.value == event.value:
                 self.input.reset()
             return
 
@@ -1912,7 +1893,7 @@ class ManaChatApp(App):
                     self.notify(f"Removed attachment: {removed.filename}", severity="information")
                 else:
                     self.notify("No matching attachment to remove.", severity="warning")
-            if self.input:
+            if self.input and self.input.value == event.value:
                 self.input.reset()
             return
 
@@ -1920,14 +1901,32 @@ class ManaChatApp(App):
         if not text.strip() and not pending_atts:
             return
 
+        if self._turn_in_progress and text.startswith("/"):
+            name, *arguments = text.split()
+            name = name.lower()
+            if name == "/cancel" and not arguments:
+                self.input.reset()
+                await self.action_interrupt_execution()
+                return
+            if name in {"/status", "/help"} and not arguments and self.gateway and hasattr(self.gateway, "dispatch_command"):
+                self.input.reset()
+                result = self.gateway.dispatch_command(text, session_id=self._gateway_session_id, frontend="tui")
+                if result and result.message:
+                    self.notify(result.message)
+                return
+            if name != "/steer":
+                self.notify("This command is unavailable during execution. Press Esc to interrupt.", severity="warning")
+                return
+
         if self._turn_in_progress:
-            # During an active turn, typing text and pressing Enter submits live steering
+            # Plain Enter steers the existing turn.
             instruction = text.strip()
-            if instruction.startswith("/steer "):
+            if instruction and instruction.split(maxsplit=1)[0].lower() == "/steer":
                 instruction = instruction[len("/steer"):].strip()
-            elif instruction == "/steer":
-                instruction = ""
-            if self.input:
+            elif not instruction:
+                self.notify("Pending attachments will be sent with the next turn.")
+                return
+            if self.input and self.input.value == event.value:
                 self.input.reset()
             if instruction:
                 asyncio.create_task(self._submit_live_steering(instruction))
@@ -1941,7 +1940,7 @@ class ManaChatApp(App):
                 self.action_steer_execution()
             else:
                 asyncio.create_task(self._submit_live_steering(instruction))
-            if self.input:
+            if self.input and self.input.value == event.value:
                 self.input.reset()
             return
 
@@ -1963,7 +1962,7 @@ class ManaChatApp(App):
                     message, selection = f"Model command failed: {exc}", None
                 self.history.add(AssistantMessageEvent(content=message))
                 self._apply_model_selection(selection)
-            if self.input:
+            if self.input and self.input.value == event.value:
                 self.input.reset()
             return
 
@@ -1980,6 +1979,9 @@ class ManaChatApp(App):
             if plan_command:
                 self._turn_in_progress = True
                 self._current_frontend_turn_id = activity_turn.turn_id
+                self._refresh_command_menu()
+                if self.chat_log:
+                    self.chat_log.set_active_turn(activity_turn.turn_id)
                 self.update_status("Preparing plan…")
                 await asyncio.sleep(0)
 
@@ -2012,11 +2014,13 @@ class ManaChatApp(App):
                         activity_turn.turn_id,
                     )
                 finally:
-                    self._current_frontend_turn_id = None
-                    self._turn_in_progress = False
+                    self._finish_active_turn()
             elif approval_command:
                 self._turn_in_progress = True
                 self._current_frontend_turn_id = activity_turn.turn_id
+                self._refresh_command_menu()
+                if self.chat_log:
+                    self.chat_log.set_active_turn(activity_turn.turn_id)
                 self.update_status("Approving plan…")
                 await asyncio.sleep(0)
                 try:
@@ -2035,8 +2039,7 @@ class ManaChatApp(App):
                         )
                     )
                 finally:
-                    self._current_frontend_turn_id = None
-                    self._turn_in_progress = False
+                    self._finish_active_turn()
             else:
                 result = self.gateway.dispatch_command(
                     text, session_id=self._gateway_session_id, frontend="tui"
@@ -2047,7 +2050,7 @@ class ManaChatApp(App):
                         content="Plan preparation failed. See Activity for details.",
                         turn_id=activity_turn.turn_id,
                     ))
-                if self.input:
+                if self.input and self.input.value == event.value:
                     self.input.reset()
                 self.update_status("Ready")
                 self._turn_in_progress = False
@@ -2064,16 +2067,21 @@ class ManaChatApp(App):
                     activity_turn.turn_id,
                 )
             if result is not None:
+                if result.data.get("activity_visibility") in {"minimal", "normal", "verbose"}:
+                    self.activity_visibility = result.data["activity_visibility"]
+                    if self.chat_log:
+                        for panel in self.chat_log._execution_panels.values():
+                            panel._schedule_render()
                 new_session_id = str(result.data.get("session_id") or "")
-                if new_session_id:
-                    self._handle_session_replacement(new_session_id, clear_view=False)
-                for event in result.events:
-                    if event.get("type") == "timeline.replace":
-                        self._replace_timeline(event.get("messages") or [])
-                    elif event.get("type") == "session.picker":
+                for response_event in result.events:
+                    if response_event.get("type") == "timeline.replace":
+                        self._replace_timeline(response_event.get("messages") or [])
+                    elif response_event.get("type") == "session.picker":
                         from mana_agent.tui.session_management import SessionPickerScreen
 
-                        self.push_screen(SessionPickerScreen(event.get("sessions") or []), self._apply_session_action)
+                        self.push_screen(SessionPickerScreen(response_event.get("sessions") or []), self._apply_session_action)
+                if new_session_id:
+                    self._handle_session_replacement(new_session_id, clear_view=False)
                 if result.status == "input_required" and (result.next_prompt or {}).get("kind") == "connector.telegram.setup":
                     from mana_agent.tui.session_management import TelegramSetupScreen
 
@@ -2084,12 +2092,11 @@ class ManaChatApp(App):
                         turn_id=activity_turn.turn_id if activity_turn is not None else "",
                     ))
                 self._show_mode_prompt(result.next_prompt)
-                if self.input:
+                if self.input and self.input.value == event.value:
                     self.input.reset()
                 waiting_for_answers = (result.next_prompt or {}).get("kind") == "mode.clarification"
                 self.update_status("Waiting for your answers" if waiting_for_answers else "Ready")
-                if approval_command:
-                    self._turn_in_progress = False
+                self._refresh_runtime_labels()
                 return
             if approval_command:
                 self._turn_in_progress = False
@@ -2098,13 +2105,13 @@ class ManaChatApp(App):
             if not self._gateway_session_id:
                 self._gateway_session_id = self.gateway.create_session(frontend="tui")
             self._start_new_conversation()
-            if self.input:
+            if self.input and self.input.value == event.value:
                 self.input.reset()
             self.update_status("Ready")
             return
 
         # Clear input immediately (premium feel)
-        if self.input:
+        if self.input and self.input.value == event.value:
             self.input.reset()
 
         self.update_status("Thinking...")
@@ -2118,13 +2125,14 @@ class ManaChatApp(App):
         user_event = UserMessageEvent(content=text, attachments=att_dicts)
         self.history.add(user_event)
 
-        # Yield so the Textual message pump can mount/paint the user bubble
-        # before long agent/tool work starts (immediate feedback in the message box).
+        self._turn_in_progress = True
+        self._current_frontend_turn_id = user_event.turn_id
+        if self.chat_log:
+            self.chat_log.set_active_turn(user_event.turn_id)
+        self._refresh_command_menu()
         await asyncio.sleep(0)
 
-        # Run the turn as a worker so the UI stays responsive and tool events can paint live
-        self._turn_in_progress = True
-        self.run_worker(self._handle_real_turn_guarded(user_event), exclusive=True)
+        self.run_worker(self._handle_real_turn_guarded(user_event), group="chat-turn", exclusive=True)
 
     def _start_new_conversation(self) -> str:
         """Apply the same gateway-owned conversation boundary as the plain CLI."""
@@ -2144,11 +2152,12 @@ class ManaChatApp(App):
             role = str(message.get("role") or "")
             content = str(message.get("content") or "")
             turn_id = str(message.get("turn_id") or "")
+            identity = {"event_id": str(message["message_id"])} if message.get("message_id") else {}
             if role == "user":
                 attachments = tuple(message.get("attachments") or ())
-                self.history.add(UserMessageEvent(content=content, turn_id=turn_id, attachments=attachments))
+                self.history.add(UserMessageEvent(content=content, turn_id=turn_id, attachments=attachments, **identity))
             elif role == "assistant":
-                self.history.add(AssistantMessageEvent(content=content, turn_id=turn_id))
+                self.history.add(AssistantMessageEvent(content=content, turn_id=turn_id, **identity))
 
     def _clear_conversation_view(self) -> None:
         """Clear both canonical TUI events and already-mounted timeline widgets."""
@@ -2176,13 +2185,11 @@ class ManaChatApp(App):
             self.notify(result.message, severity="error")
             return
         replacement_id = str(result.data.get("session_id") or "")
-        if replacement_id:
-            self._handle_session_replacement(replacement_id, clear_view=False)
-        elif action.action == "switch":
-            self._handle_session_replacement(action.session_id, clear_view=False)
         for event in result.events:
             if event.get("type") == "timeline.replace":
                 self._replace_timeline(event.get("messages") or [])
+        if replacement_id or action.action == "switch":
+            self._handle_session_replacement(replacement_id or action.session_id, clear_view=False)
         if result.message:
             self.notify(result.message)
 
@@ -2212,13 +2219,25 @@ class ManaChatApp(App):
         finally:
             self.update_status("Ready")
 
+    def _finish_active_turn(self) -> None:
+        self._current_frontend_turn_id = None
+        self._turn_in_progress = False
+        self.interrupt_requested = False
+        self._refresh_command_menu()
+        self._refresh_runtime_labels()
+        if self.chat_log is not None:
+            self.chat_log.set_active_turn(None)
+
     async def _handle_real_turn_guarded(self, user_event: UserMessageEvent) -> None:
+        self._current_frontend_turn_id = user_event.turn_id
+        self._turn_in_progress = True
+        if self.chat_log is not None:
+            self.chat_log.set_active_turn(user_event.turn_id)
+        self._refresh_command_menu()
         try:
-            self._current_frontend_turn_id = user_event.turn_id
             await self._handle_real_turn(user_event)
         finally:
-            self._current_frontend_turn_id = None
-            self._turn_in_progress = False
+            self._finish_active_turn()
             self.call_after_refresh(self._queue_outstanding_transactional_approvals)
 
     def _apply_model_selection(self, selection: Any) -> None:
@@ -2252,6 +2271,8 @@ class ManaChatApp(App):
                 self.tools_orchestrator = rich.tools_orchestrator
             except Exception as exc:
                 self.history.add(AssistantMessageEvent(content=f"Model selected, but the runtime could not be rebuilt: {exc}"))
+        self._refresh_command_menu()
+        self._refresh_runtime_labels()
         self.update_status(f"Model changed to {selection.qualified_id}")
         if selection.persist:
             self.history.add(AssistantMessageEvent(content=f"Default model saved: `{selection.qualified_id}`"))
@@ -2260,6 +2281,7 @@ class ManaChatApp(App):
         """Send the prompt that was passed on the command line (e.g. mana-agent chat "foo")."""
         if not self.initial_prompt:
             return
+        await self._transcript_ready.wait()
         prompt = self.initial_prompt
         self.initial_prompt = None  # only once
         # Seed the user message (it may have already been conceptually sent)
@@ -2270,7 +2292,7 @@ class ManaChatApp(App):
             isinstance(e, UserMessageEvent) and e.content == prompt for e in self.history.get_events()
         ):
             self.history.add(user_event)
-        await self._handle_real_turn(user_event)
+        await self._handle_real_turn_guarded(user_event)
 
     @staticmethod
     def _extract_answer(result: Any) -> str:
@@ -2302,7 +2324,7 @@ class ManaChatApp(App):
         return n
 
     def _make_tool_emit_bridge(self, *, original_emit: Any, turn_id: str):
-        """Wrap emit_tool_event so tool start/end become ToolCards in ChatLog."""
+        """Wrap emit_tool_event so the transcript can correlate legacy tool start and end events."""
 
         def bridged_emit(kind, tool, *, args="", duration=None, error="", event_id=None, **kwargs):
             try:
@@ -2434,7 +2456,7 @@ class ManaChatApp(App):
         callbacks, and tool emission are constructed to be identical to the
         logic in chat_cli.py so that:
           - behavior (edits, memory, plans, auto-execute, verification) is unchanged
-          - every tool appears as ToolCard inside the chat log ("chat box / tool box")
+          - observable tools appear in the turn’s inline execution stream
 
         Planning collection state is also supported for interactive pre-questions.
         """

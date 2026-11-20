@@ -888,10 +888,11 @@ async def _tui_steered_message_shows_activity_box_on_last_message() -> None:
 
         # Before steering: chat_log children has user message followed by ExecutionPanel (activity box)
         children_before = list(app.chat_log.children)
-        assert len(children_before) == 2
+        assert len(children_before) == 4
         from mana_agent.tui.widgets.execution_panel import ExecutionPanel
-        assert isinstance(children_before[1], ExecutionPanel)
-        panel = children_before[1]
+        panel = app.chat_log.query_one(ExecutionPanel)
+        user = app.chat_log.query_one(".user-message-row")
+        assert children_before.index(panel) == children_before.index(user) + 1
 
         # User submits live steering
         msg_input = app.query_one("#chat-input")
@@ -904,19 +905,14 @@ async def _tui_steered_message_shows_activity_box_on_last_message() -> None:
         # 1. The steered message was mounted
         # 2. The ExecutionPanel (activity box) moved after the steered message (on the last message)
         children_after = list(app.chat_log.children)
-        assert len(children_after) == 3
-        # children_after[0] is user message
-        # children_after[1] is steered message
-        steered_widget = children_after[1]
-        assert "Steering [" in getattr(steered_widget, "text", "")
-        assert "Use curses library" in getattr(steered_widget, "text", "")
-        # children_after[2] is the ExecutionPanel (activity box)
-        assert children_after[2] is panel
-        assert children_after.index(panel) > children_after.index(steered_widget)
+        steered_widget = list(app.chat_log.query(".user-message-row"))[-1]
+        assert "Steering " in steered_widget.source.text
+        assert "Use curses library" in steered_widget.source.text
+        assert children_after.index(panel) == children_after.index(steered_widget) + 1
 
-        # 3. Inside the activity box (main_box), the queued steering event is recorded
+        # 3. Inside the activity stream, the queued steering event is recorded
         steering_activity = [
-            ev for ev in panel.main_box.events
+            ev for ev in panel.events
             if ev.get("event_type") == "steering.queued"
         ]
         assert len(steering_activity) == 1
@@ -935,7 +931,7 @@ async def _tui_steered_message_shows_activity_box_on_last_message() -> None:
         await pilot.pause()
 
         children_subsequent = list(app.chat_log.children)
-        assert children_subsequent[-1] is panel
+        assert children_subsequent[-1] is app.chat_log.live
         assert children_subsequent.index(panel) > children_subsequent.index(steered_widget)
 
 

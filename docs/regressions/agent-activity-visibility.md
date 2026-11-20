@@ -85,10 +85,10 @@ recovered before allocating the next sequence.
 user configuration, with `normal` as the default. `/activity` shows recent
 activity in terminal chat; `/activity minimal`, `/activity normal`, and
 `/activity verbose` change presentation. TUI **Ctrl+End** returns to latest
-activity. Main Activity and Coding Activity are the only activity containers;
-internal coding operations appear in Coding Activity. Separate archive controls
-and the CLI backward-page shortcut have been removed. Durable cursor pagination
-remains available to recovery and API clients.
+activity. Textual chat shows general and coding operations in one inline stream
+per turn with earlier rows paged inside that stream. Dashboard activity uses its
+existing views. Durable cursor pagination remains available to recovery and API
+clients.
 
 Planning events carry `execution_mode=plan`. Saving a plan artifact is separate
 from implementation, and inspection does not enter the changed-file list. A
@@ -108,8 +108,8 @@ The user row is keyed by request ID and anchored to its original turn. Queued,
 delivered, applied, rejected, and superseded states come from recorded admission
 and acknowledgement. Delivered means guidance reached a safe execution boundary;
 applied follows successful fenced acknowledgement. A failed acknowledgement
-cannot publish applied or consume guidance. Existing approval modals, expiry,
-matching-request controls, and guarded approval endpoints remain authoritative.
+cannot publish applied or consume guidance. Textual execution approvals use an inline prompt with the existing expiry,
+matching-request validation, and guarded approval endpoints.
 
 ## Limits and compatibility
 
@@ -157,8 +157,8 @@ node --test tests/dashboard/live_chat_approval_ui.test.mjs
 
 ## Do not reintroduce
 
-- Keep activity inside Main Activity and Coding Activity; do not restore separate
-  archive panels or load-earlier controls.
+- Keep activity in its turn-scoped stream. Keep the Textual earlier-operation
+  control inside that stream and preserve the dashboard’s existing containers.
 - Do not expose bridge `reasoning_content`, raw reasoning deltas, encrypted state,
   prompts, or arbitrary invocation arguments under any summary or verbosity label.
 - Do not drop ownership when normalizing `type`/`event_type`, deduplicate lifecycle
@@ -206,3 +206,42 @@ replay page. Exercise cancellation/recovery, a failed steering acknowledgement,
 and unavailable journal storage. Inspect native vs bridged provider fixtures for
 private content before accepting the feature. Plan Mode must show planning and
 artifact saving without implementation or fabricated test outcomes.
+
+## 2026-11-21 Textual activity and inline approvals
+
+The Textual renderer previously dispatched tool events to separate activity boxes
+and could also mount a tool card for the same call. During a fast stream the UI
+read only the latest history revision, which discarded earlier output chunks.
+Session switching could also clear activity replayed before transcript replacement.
+The approval callback removed every request in the queued matching snapshot after
+a successful decision, even though the authoritative resolver grants only matching
+requests.
+
+The transcript now consumes a single redacted operation projection keyed by
+task, attempt, actor, operation, and explicit legacy call correlation. It merges
+channel offsets before coalescing display updates. Recent operation rows are
+bounded and older rows use the durable event cursor. Expanded rows fetch retained
+stdout, stderr, combined output, diffs, and results through the existing scoped
+content reader. Preview length and completeness depend on the producing runtime
+and its retention policy. Live events are held during session replay so older
+durable revisions can supply command metadata and initial output before new
+revisions are applied. Inline approval controls advance only after the
+correlated decision resolves. Matching approval reuse remains subject to the
+authority’s equivalence check.
+
+**Do not reintroduce.** Keep one rendering path per operation. Preserve output by
+channel and offset before collapsing updates. Restore messages before attaching
+activity. Never dismiss a queued approval solely because it was in the snapshot
+of candidates for matching approval.
+
+Run these from the checkout root:
+
+```sh
+venv/bin/python -m pytest tests/test_tui_*.py tests/test_codex_tui_lifecycle.py \
+  tests/chat/test_tui_attachments.py tests/test_operation_rows.py tests/test_activity_stream.py \
+  tests/test_activity_stream_integration.py tests/test_execution_trace.py tests/test_chat_command_dispatcher.py \
+  tests/execution/test_live_steering_integration.py tests/execution/test_unified_autonomous_loop.py \
+  tests/test_computer_control.py tests/human_inbox/test_approval_equivalence.py tests/test_api_conversations.py -q
+node --test tests/dashboard/live_chat_reducer.test.mjs tests/dashboard/live_chat_approval_ui.test.mjs
+venv/bin/mana-agent chat --tui
+```

@@ -1,237 +1,126 @@
-/* 
- * app.tcss — Premium dark theme for ManaChatApp
- * Inspired by modern AI coding tools (Aider, Claude, Cursor, etc.)
- */
-
 Screen {
-    background: #0f1117;
-    color: #e6e6e6;
-    layers: default overlay;
+    background: $background;
+    color: $text;
 }
 
-Header {
-    background: #1a1d27;
-    color: #a5b4fc;
-    text-style: bold;
-}
-
-Footer {
-    background: #1a1d27;
-    color: #94a3b8;
-    dock: bottom;
-}
-
-#input-bar {
-    height: 5;
-    background: #161923;
-    border-top: thick #334155;
-    /* Fixed at bottom of #body (above #footer-gap). ChatLog is 1fr and shrinks. */
-}
-
-#chat-input {
-    width: 100%;
-    height: 3;
-    min-height: 3;
-    max-height: 8;
-    border: round #475569;
-    background: #161923;  /* consistent with bar so bottom of message box isn't black */
-    color: #e2e8f0;
-}
-
-#input-help {
-    height: 1;
-    color: #94a3b8;
-    padding: 0 1;
-}
-
-#chat-input:focus {
-    border: round #6366f1;
+#body, #chat-log {
+    height: 1fr;
 }
 
 #chat-log {
-    height: 1fr;
-    border: round #334155;
-    background: #0f1117;
-    padding: 1;
-    /* Extra bottom padding so last messages aren't flush against the input bar */
-    padding-bottom: 1;
-}
-
-#body {
-    height: 1fr;
-}
-
-/* Approval request popup modal screen */
-ComputerPermissionScreen {
-    align: center middle;
-}
-
-#computer-permission-dialog {
-    width: 76;
-    height: 18;
-    padding: 1 2;
-    border: round #f59e0b;
-    background: #111827;
-}
-
-#computer-permission-title {
-    color: #fcd34d;
-    text-style: bold;
-    height: 1;
-}
-
-#computer-permission-scroll {
-    height: 1fr;
-    margin: 1 0;
-}
-
-#computer-permission-preview {
-    color: #e5e7eb;
-}
-
-#computer-permission-scope {
-    color: #93c5fd;
-    height: 1;
-    margin-bottom: 1;
-}
-
-.computer-permission-actions {
-    height: 3;
-    align-horizontal: right;
-}
-
-.computer-permission-actions Button {
-    margin-left: 1;
-}
-
-#main {
-    height: 1fr;
-}
-
-/* User message cards */
-.user-message {
-    margin: 1 2 1 0;
-    padding: 1;
-    background: #1e2937;
-    border-left: thick #3b82f6;
-}
-
-/* Assistant message cards */
-.assistant-message {
-    margin: 1 0 1 2;
-    padding: 1;
-    background: #0f172a;
-    border-left: thick #22c55e;
-    color: #e2e8f0;
-}
-
-.live-steering-message {
-    margin: 1 0 1 2;
-    padding: 1;
-    background: #181f2a;
-    border-left: thick #f59e0b;
-    color: #fef08a;
-}
-
-.execution-steps {
-    display: none;
-}
-
-.execution-summary {
-    margin: 0 0 1 0;
-    padding: 1;
-    background: #111e2e;
-    border-left: thick #22c55e;
-    color: #e2e8f0;
-}
-
-/* Tool cards styling is also in the Python DEFAULT_CSS of ToolCard */
-ToolCard {
-    margin: 0 2 1 2;
-    height: auto;
-}
-
-ToolCard Collapsible {
-    background: #161923;
-    border: round #64748b;
-}
-
-ToolCard .tool-call-header {
-    color: #facc15;
-}
-
-.tool-result-success {
-    color: #4ade80;
-}
-
-.tool-result-error {
-    color: #f87171;
-}
-
-.tool-result-body {
-    height: auto;
-}
-
-.tool-result-body.-empty {
-    display: none;
-}
-
-.tool-card-header {
-    text-style: bold;
     padding: 0 1;
+    scrollbar-size-vertical: 1;
 }
 
-/* Persistent Activity Boxes */
-MainActivityBox {
-    margin: 0 1 1 1;
-    border: round #3b82f6 50%;
-    background: #111827;
+.startup {
+    padding: 1;
+    color: $text-muted;
+}
+
+.user-message-row {
     height: auto;
+    margin-top: 1;
+    padding: 0 1;
+    background: $surface;
 }
 
-MainActivityBox Collapsible {
-    background: #111827;
-    border: none;
+.user-prompt {
+    width: 2;
+    height: 1;
+    color: $accent;
 }
 
-CodingActivityBox {
-    margin: 0 1 1 1;
-    border: round #10b981 50%;
-    background: #0f172a;
-    height: auto;
-}
-
-CodingActivityBox Collapsible {
-    background: #0f172a;
-    border: none;
-}
-
-CodingActivityBox .coding-operation-list {
-    height: auto;
-    max-height: 32;
-    overflow-y: auto;
-}
-
-/* Scrollbar */
-VerticalScroll > Scrollbar {
-    background: #1f2937;
-}
-
-VerticalScroll > Scrollbar:hover {
-    background: #334155;
-}
-
-/* General polish */
-Static, Markdown {
+.user-message {
+    width: 1fr;
     background: transparent;
 }
 
-Markdown {
-    margin: 0;
+AssistantReply {
+    height: auto;
+    margin: 1 0;
+    padding: 0 1;
 }
 
-/* Subtle dividers and notes */
-.system-note {
-    color: #64748b;
-    text-style: italic;
+AssistantReply Markdown {
+    height: auto;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+}
+
+AssistantReply .copy-mode {
+    height: 1;
+    min-width: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: $text-muted;
+}
+
+AssistantReply .copy-mode:focus {
+    background: $surface;
+    color: $text;
+}
+
+#live-status {
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#input-bar {
+    height: auto;
+    padding: 0 1;
+}
+
+#composer {
+    height: auto;
+    background: $surface;
+}
+
+#prompt-indicator {
+    width: 3;
+    height: 1;
+    padding: 0 0 0 1;
+    color: $accent;
+}
+
+#chat-input {
+    width: 1fr;
+    border: none;
+    padding: 0 1 0 0;
+    background: $surface;
+}
+
+#chat-input:focus {
+    border: none;
+}
+
+#command-menu {
+    height: auto;
+    max-height: 7;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#chat-status {
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#body Button {
+    border-top: none;
+    border-bottom: none;
+}
+
+#body Button:focus {
+    background: $panel;
+    color: $text;
+    text-style: reverse;
+}
+
+#approval-drawer {
+    height: auto;
+    margin: 0 1;
 }

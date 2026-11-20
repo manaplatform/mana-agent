@@ -205,7 +205,7 @@ def test_tui_new_command_deletes_active_session_and_clears_mounted_log(tmp_path:
         async with app.run_test() as pilot:
             assert app.chat_log is not None
             await pilot.pause()
-            assert len(app.chat_log.children) == 1
+            assert len(app.chat_log.query(".user-message")) == 1
             composer = app.query_one(MessageInput)
             composer.value = "/new"
             await pilot.press("enter")
@@ -214,7 +214,7 @@ def test_tui_new_command_deletes_active_session_and_clears_mounted_log(tmp_path:
             assert gateway.deleted_session == "session_old"
             assert app._gateway_session_id == "session_new"
             assert history.get_events() == []
-            assert list(app.chat_log.children) == []
+            assert not list(app.chat_log.query(".user-message, .assistant-message, ExecutionPanel"))
 
     asyncio.run(run())
 
@@ -309,3 +309,42 @@ def test_tui_records_api_approval_denial_as_terminal_assistant_message(
     assert "API request denied" in messages[-1].content
     assert app.status_text == "API request denied"
     assert any(severity == "warning" for _, severity in notifications)
+
+
+def test_tui_startup_restores_saved_messages_before_durable_activity(tmp_path: Path) -> None:
+    from mana_agent.services.chat_session_history import ChatSessionHistory
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+    from mana_agent.workspaces.paths import repository_id_for_path
+
+    session_id = "restore-startup"
+    records = ChatSessionHistory()
+    user = records.append(session_id, role="user", content="Previously submitted", turn_id="past")
+    records.append(session_id, role="assistant", content="Previously answered", turn_id="past")
+
+    class Gateway:
+        config = SimpleNamespace(session_id=session_id)
+        session_service = SimpleNamespace(history=records)
+
+        def create_session(self, *, frontend, session_id):
+            return session_id
+
+    get_execution_event_hub().publish(
+        {"type": "command.finished", "command": "git status", "operation_id": "past-check", "status": "success"},
+        conversation_id=session_id, execution_id="past", repository_id=repository_id_for_path(tmp_path),
+    )
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path, gateway=Gateway())
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            for _ in range(20):
+                await pilot.pause(.05)
+                panel = app.chat_log.get_execution_panel("past")
+                if panel is not None:
+                    break
+            assert panel is not None
+            nodes = list(app.chat_log.children)
+            assert nodes.index(panel) == nodes.index(app.query_one(".user-message-row")) + 1
+            assert nodes.index(panel) < nodes.index(app.query_one(".assistant-message"))
+            assert any(event.event_id == user.message_id for event in app.history.get_events())
+
+    asyncio.run(run())

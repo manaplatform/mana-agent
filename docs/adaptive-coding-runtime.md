@@ -60,6 +60,12 @@ outputs. A failed prerequisite stops that sequence and returns its output for
 the next repair. A required build must pass against the current source versions
 before the assignment can report success.
 
+ToolRunner fingerprints observed files before and after mutating commands.
+In a Git checkout this covers tracked files and non-ignored candidates. Tools
+with explicit file targets still observe those paths. The capture budget limits
+retained diff data. Hashing streams the file contents under the operation's
+deadline and cancellation checks.
+
 Each model turn must select an offered coding tool or submit a terminal result
 with one direct `submit_coding_result` call. If the model replies with prose
 alone, Coding requests one correction from the same model within the remaining

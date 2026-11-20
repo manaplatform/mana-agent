@@ -1,7 +1,7 @@
 # Mana-Agent
 
 Repository execution uses MainAgent → CodingAgent → deterministic ToolRunner. Repository knowledge is shared through the persistent [Repository Evidence Board](docs/regressions/repository-evidence-orchestration.md); investigation and understanding are TaskBoard tasks that use the selected coding engine.
-Coding Activity exposes commands, working directories, live output, observed
+Execution activity exposes commands, working directories, live output, observed
 diffs, and retained operation details. External Codex keeps its own tool loop
 with explicit backend provenance. See the [execution and verification contract](docs/regressions/hierarchical-tool-execution.md).
 
@@ -197,22 +197,27 @@ The optional dashboard provides another way to interact with Mana-Agent, inspect
 
 Textual chat, Rich terminal chat, and the dashboard show observable operations,
 agent explanations when provided, and supported public provider summaries while
-work is running. Activity and Coding Activity stay inside their existing turn
-containers. Concurrent agents retain their own task, attempt, and operation
-identity; backend completion and verified goal completion are separate states.
+work is running. The Textual chat shows one inline execution stream per turn.
+Expand an operation for its redacted command, available output, diff, and
+provenance. The Rich terminal and dashboard keep their existing activity views.
+Concurrent agents retain their task, attempt, and operation identities.
+Verification is recorded independently of backend completion.
 
 Use `/activity minimal`, `/activity normal` (default), or `/activity verbose` to
 persist `MANA_ACTIVITY_VISIBILITY` through the existing user configuration.
-Activity appears inside Main Activity and Coding Activity, including internal
-coding operations. `/activity` shows recent activity in terminal chat. In the
-TUI, **Ctrl+End** returns to latest activity. Visibility never
-reveals private reasoning, credentials, prompts, or raw invocation arguments.
+`/activity` shows recent recorded activity. In Textual chat, **Ctrl+End** returns
+to the latest output, **Ctrl+O** attaches a file, and **Esc** requests interruption
+of the session’s active execution. Begin with `/` to find available commands and
+press Tab to insert the selected command. Assistant replies offer **Copy mode**
+for selecting the Markdown source. Activity details use the public projection,
+which excludes private reasoning, credentials, prompts, and raw invocation arguments.
 
 During an active TUI or dashboard turn, submit text to steer that execution.
 The user row appears pending immediately and follows recorded delivery and
 acknowledgement. Dashboard steering is text-only and requires the same runtime
-to own the live session. Approval requirements remain unchanged. Plan Mode
-activity describes planning and artifact saving, not completed implementation.
+to own the live session. Execution approvals appear above the Textual composer.
+**Ctrl+G** focuses the choices. Plan Mode activity describes planning and artifact
+saving. Its revision review and clarification forms use the existing workflow.
 
 See [activity architecture, limitations, regression rules, and user verification](docs/regressions/agent-activity-visibility.md).
 
