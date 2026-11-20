@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 from pathlib import Path
 from typing import Protocol
@@ -9,6 +10,18 @@ from typing import Protocol
 from pydantic import Field
 
 from .models import ReviewerAssignment, ReviewerType, StrictModel
+
+
+def local_reviewer_actor(assigned_reviewer_id: str, *, settings=None) -> str:
+    """Use the local Mana identity for its requests; preserve legacy OS assignments."""
+    from mana_agent.config.user_config import resolve_local_user_id
+
+    os_user = getpass.getuser()
+    if assigned_reviewer_id != os_user:
+        local_user = resolve_local_user_id(settings)
+        if assigned_reviewer_id == local_user:
+            return local_user
+    return os_user
 
 
 class ReviewerIdentity(StrictModel):

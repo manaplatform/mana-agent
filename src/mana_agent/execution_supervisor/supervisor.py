@@ -28,6 +28,7 @@ from mana_agent.execution_supervisor.errors import (
     LeaseConflictError,
     RetrySafetyError,
     StaleLeaseError,
+    TaskDeadlineExceededError,
 )
 from mana_agent.execution_supervisor.models import (
     ActionEffectScope,
@@ -87,6 +88,11 @@ VALID_CHECKPOINT_STATES = frozenset(
     }
 )
 
+_CHILD_SLOT_STATES = frozenset({
+    ExecutionState.LEASED,
+    ExecutionState.RUNNING,
+    ExecutionState.CHECKPOINTING,
+})
 
 
 @runtime_checkable
@@ -378,6 +384,7 @@ class ExecutionSupervisor:
         task_id: str | None = None,
         parent_task_id: str | None = None,
         task_type: str = "task",
+        workflow_coordinator: bool = False,
         assigned_agent: str = "",
         assigned_model: str = "",
         runtime_provider: str = "",
@@ -469,6 +476,7 @@ class ExecutionSupervisor:
             if (
                 existing.parent_task_id != parent_task_id
                 or existing.task_type != task_type
+                or existing.workflow_coordinator != workflow_coordinator
                 or existing.assigned_model != assigned_model
                 or existing.runtime_provider != runtime_provider
                 or existing.routing_decision_id != routing_decision_id
@@ -542,7 +550,7 @@ class ExecutionSupervisor:
             cursor = self.store.get_task(cursor.parent_task_id) if cursor.parent_task_id else None
         if depth > self.config.max_child_depth:
             raise ValueError("maximum supervised child depth exceeded")
-        if parent and len(parent.child_task_ids) >= self.config.max_children_per_task:
+        if parent and not self._remaining_child_tasks(parent):
             raise ValueError("maximum supervised children per task exceeded")
         if parent:
             root_subtasks = sum(
@@ -578,6 +586,7 @@ class ExecutionSupervisor:
             parent_task_id=parent_task_id,
             root_task_id=parent.root_task_id if parent else identifier,
             task_type=task_type,
+            workflow_coordinator=workflow_coordinator,
             assigned_agent=assigned_agent,
             assigned_model=assigned_model,
             runtime_provider=runtime_provider,
@@ -673,6 +682,7 @@ class ExecutionSupervisor:
                     "a human-waiting branch may resume only through its durable inbox claim"
                 )
             validate_transition(task.state, target)
+            self._check_child_capacity(task, target)
             task.state = target
             task.updated_at = self.clock()
             if target == ExecutionState.RUNNING and task.started_at is None:
@@ -1045,6 +1055,13 @@ class ExecutionSupervisor:
     def get_task(self, task_id: str) -> TaskRecord:
         return self.store.get_task(task_id)
 
+    def _remaining_child_tasks(self, parent: TaskRecord) -> int:
+        return max(0, self.config.max_children_per_task - len(parent.child_task_ids))
+
+    def remaining_child_tasks(self, task_id: str) -> int:
+        """Return remaining lifetime child admissions, independent of concurrent leases."""
+        return self._remaining_child_tasks(self.store.get_task(task_id))
+
     def inspect_task(self, task_id: str) -> TaskRecord:
         return self.store.get_task(task_id)
 
@@ -1078,6 +1095,17 @@ class ExecutionSupervisor:
                 self.store.save_attempt(attempt)
         return task
 
+    def _check_child_capacity(self, task: TaskRecord, target: ExecutionState) -> None:
+        """Check slot admission inside the store write lock."""
+        if not task.parent_task_id or task.state in _CHILD_SLOT_STATES or target not in _CHILD_SLOT_STATES:
+            return
+        active_siblings = sum(
+            sibling.parent_task_id == task.parent_task_id and sibling.state in _CHILD_SLOT_STATES
+            for sibling in self.store.list_tasks(incomplete_only=True)
+        )
+        if active_siblings >= self.config.max_concurrent_children:
+            raise LeaseConflictError("maximum concurrent supervised children reached")
+
     def acquire_lease(self, task_id: str, *, owner: str, worker: str = "") -> tuple[TaskRecord, str]:
         if not owner.strip():
             raise ValueError("lease owner is required")
@@ -1093,32 +1121,14 @@ class ExecutionSupervisor:
             )
         if current.deadline_at is not None and current.deadline_at <= now:
             self.transition(task_id, ExecutionState.FAILED, reason="task wall-clock deadline exceeded")
-            raise BudgetExceededError("task wall-clock deadline exceeded")
+            raise TaskDeadlineExceededError("task wall-clock deadline exceeded")
 
         def claim(task: TaskRecord) -> AttemptRecord:
             if task.state not in {ExecutionState.QUEUED, ExecutionState.CREATED}:
                 raise LeaseConflictError(f"task is not leaseable from state {task.state.value}")
             if task.lease_token and task.lease_expires_at and task.lease_expires_at > now:
                 raise LeaseConflictError("task already holds an active lease")
-            if task.parent_task_id:
-                active_siblings = sum(
-                    item.parent_task_id == task.parent_task_id
-                    and item.task_id != task.task_id
-                    and (
-                        item.state in {
-                            ExecutionState.LEASED,
-                            ExecutionState.RUNNING,
-                            ExecutionState.CHECKPOINTING,
-                        }
-                        or (
-                            item.state is ExecutionState.WAITING
-                            and not item.waiting_inbox_item_id
-                        )
-                    )
-                    for item in self.store.list_tasks()
-                )
-                if active_siblings >= self.config.max_concurrent_children:
-                    raise LeaseConflictError("maximum concurrent supervised children reached")
+            self._check_child_capacity(task, ExecutionState.LEASED)
             attempt = AttemptRecord(
                 task_id=task.task_id,
                 number=len(task.attempt_ids) + 1,
@@ -1154,15 +1164,17 @@ class ExecutionSupervisor:
             or hmac.compare_digest(task.lease_token, lease_token)
         ):
             raise StaleLeaseError("lease token is stale or invalid")
-        if task.lease_expires_at is None or task.lease_expires_at <= self.clock():
+        now = self.clock()
+        if task.wall_clock_deadline_exceeded(now):
+            raise TaskDeadlineExceededError("task wall-clock deadline exceeded")
+        if task.lease_expires_at is None or task.lease_expires_at <= now:
             raise StaleLeaseError("lease has expired")
-        if task.deadline_at is not None and task.deadline_at <= self.clock():
-            raise BudgetExceededError("task wall-clock deadline exceeded")
 
     def start(self, task_id: str, *, attempt_id: str, lease_token: str) -> TaskRecord:
         def update(task: TaskRecord) -> None:
             self._validate_lease(task, attempt_id=attempt_id, lease_token=lease_token)
             validate_transition(task.state, ExecutionState.RUNNING)
+            self._check_child_capacity(task, ExecutionState.RUNNING)
             task.state = ExecutionState.RUNNING
             task.started_at = task.started_at or self.clock()
             task.updated_at = self.clock()
@@ -1305,6 +1317,7 @@ class ExecutionSupervisor:
             if task.waiting_inbox_item_id:
                 raise LeaseConflictError("task is waiting for human inbox response")
             if task.state in {ExecutionState.WAITING, ExecutionState.QUEUED}:
+                self._check_child_capacity(task, ExecutionState.RUNNING)
                 # Re-acquire lease for the resuming attempt since it was released while waiting
                 task.lease_owner = task.lease_owner or f"resumed:{attempt_id}"
                 task.lease_token = _token_hash(lease_token)
@@ -1429,6 +1442,7 @@ class ExecutionSupervisor:
             if generation is not None and task.attempt_generation != generation:
                 raise StaleLeaseError("attempt generation no longer owns the task")
             validate_transition(task.state, ExecutionState.CHECKPOINTING)
+            self._check_child_capacity(task, ExecutionState.CHECKPOINTING)
             task.state = ExecutionState.CHECKPOINTING
             task.updated_at = self.clock()
 

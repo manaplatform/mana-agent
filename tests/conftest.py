@@ -16,6 +16,36 @@ import pytest
 
 
 @pytest.fixture
+def complete_supervised_task(tmp_path):
+    """Create a real verified escrow receipt for task-state fixture setup."""
+    def complete(board, task_id, supervisor=None):
+        from mana_agent.execution_supervisor.config import ExecutionSupervisorConfig
+        from mana_agent.execution_supervisor.models import CompletionContract, CompletionContractType, ExecutionState
+        from mana_agent.execution_supervisor.supervisor import ExecutionSupervisor
+        supervisor = supervisor or ExecutionSupervisor(ExecutionSupervisorConfig(
+            root=tmp_path / "completion-supervisor", startup_recovery=False))
+        supervisor.create_task(task_id=task_id, routing_decision_id="fixture-completion",
+            workspace_path=board.store.root, completion_contract=[CompletionContract(
+                contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                metadata={"required_keys": ["fixture_result"], "expected_values": {"fixture_result": "observed"}})])
+        supervisor.queue(task_id)
+        leased, token = supervisor.acquire_lease(task_id, owner="fixture-worker")
+        supervisor.start(task_id, attempt_id=leased.attempt_id, lease_token=token)
+        submitted = supervisor.submit_result(task_id, attempt_id=leased.attempt_id, lease_token=token,
+                                             payload={"fixture_result": "observed"})
+        if submitted.state == ExecutionState.COMPLETED_PENDING_VERIFICATION:
+            supervisor.verify_completion(task_id)
+        receipt = supervisor.get_verified_execution_result(task_id)
+        assert receipt.is_verified
+        task = supervisor.get_task(task_id)
+        manifest = supervisor.store.artifact_manifest(task_id)
+        board.project_supervisor_completion(task_id, supervisor_task=task,
+            verification_evidence={"result_id": task.result_id, "verification": manifest["verification"]})
+        return task
+    return complete
+
+
+@pytest.fixture
 def coding_research_case(tmp_path):
     """An isolated, leased task with fake model/provider boundaries; no network."""
     from types import SimpleNamespace

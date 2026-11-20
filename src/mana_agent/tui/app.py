@@ -446,7 +446,7 @@ class ManaChatApp(App):
         event_type = str(event.get("type") or event.get("event_type") or "").strip()
         event_id = str(event.get("event_id") or event.get("id") or "").strip()
         if event_type == "mode.input_ready":
-            prompt = (event.get("metadata") or {}).get("next_prompt")
+            prompt = {"task_id": event.get("task_id"), "inbox_id": (event.get("metadata") or {}).get("inbox_id")}
             if self.is_running and threading.get_ident() != getattr(self, "_ui_thread_id", None):
                 self.call_from_thread(self._show_mode_prompt, prompt)
             elif self.is_running:
@@ -1619,15 +1619,15 @@ class ManaChatApp(App):
         self.update_status("API request completed")
 
     def _show_mode_prompt(self, prompt) -> None:
-        if not prompt or prompt.get("kind") not in {"mode.approval", "mode.clarification"}:
+        if not prompt or not prompt.get("task_id") or not prompt.get("inbox_id"):
             return
         from mana_agent.tui.mode_prompt import ModePrompt
 
         if isinstance(self.screen, ModePrompt):
             return
         workflow = self.gateway.mode_workflow
-        task = workflow.active(self._gateway_session_id) or workflow.active(self._gateway_session_id, mode="debug")
-        if task is None or task.mode_workflow.get("inbox_id") != prompt.get("inbox_id"):
+        prompt = workflow.pending_prompt(self._gateway_session_id, prompt["task_id"], prompt["inbox_id"])
+        if prompt is None:
             return
 
         def finish(result):
@@ -1652,6 +1652,8 @@ class ManaChatApp(App):
             self.history.add(AssistantMessageEvent(content=response.message))
         except (PermissionError, ValueError, RuntimeError) as exc:
             self.notify(str(exc), severity="error")
+            if action == "answer":
+                self._show_mode_prompt(prompt)
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""
@@ -2050,7 +2052,7 @@ class ManaChatApp(App):
                 self.update_status("Ready")
                 self._turn_in_progress = False
                 return
-            if plan_command and result is not None and result.status != "success":
+            if plan_command and result is not None and result.status == "error":
                 self._safe_post_activity(
                     {
                         "event_id": f"plan-preparation-{self._gateway_session_id}",
@@ -2084,7 +2086,8 @@ class ManaChatApp(App):
                 self._show_mode_prompt(result.next_prompt)
                 if self.input:
                     self.input.reset()
-                self.update_status("Ready")
+                waiting_for_answers = (result.next_prompt or {}).get("kind") == "mode.clarification"
+                self.update_status("Waiting for your answers" if waiting_for_answers else "Ready")
                 if approval_command:
                     self._turn_in_progress = False
                 return
@@ -2450,22 +2453,6 @@ class ManaChatApp(App):
             get_execution_event_hub().publish(payload, conversation_id=self._gateway_session_id,
                                               execution_id=turn_id, repository_id=repository_id_for_path(self.repo_root))
 
-        # --- Planning collection state machine (mirrors console pre-generate logic) ---
-        if self._in_planning_collection and self._planning_request:
-            # Treat this input as the next planning answer
-            self._planning_answers.append(question)
-            self._planning_questions.append(
-                f"(answer {len(self._planning_answers)})"
-            )  # placeholder; real questions were emitted earlier
-            # If we have enough, fall through to run generation; else ask another
-            # For simplicity in first full integration we proceed after one answer
-            # (full multi-question loop can be expanded; core parity is the generate call).
-            self._in_planning_collection = False
-            # Continue with the original planning_request as the task
-            question = self._planning_request
-            # Clear for next time
-            self._planning_request = None
-
         self.update_status("Thinking with multi-agent flow...")
 
         # Legacy observers are scoped to this turn; never replace a process-global
@@ -2619,8 +2606,11 @@ class ManaChatApp(App):
                                 turn_id=turn_id,
                             )
                         )
-                    self._show_mode_prompt(result_payload.get("next_prompt"))
-                    if not route_mode:
+                    next_prompt = result_payload.get("next_prompt")
+                    self._show_mode_prompt(next_prompt)
+                    if (next_prompt or {}).get("kind") == "mode.clarification":
+                        self.update_status("Waiting for your answers")
+                    elif not route_mode:
                         self.update_status("Ready")
                     else:
                         self.update_status(f"Ready ({route_mode})")
@@ -2634,326 +2624,22 @@ class ManaChatApp(App):
                     self.update_status("Gateway routing failed")
                     return
 
-            # ==========================================================
-            # Decide whether to use the full CodingAgent + strict planner checklist path.
-            # General queries (e.g. "check my gmail", "connect to mcp server X",
-            # "search the internet for ...", pure questions) should use the standard
-            # routing via chat_service.ask (which supports MCP tools, email connectors,
-            # web search, etc.) even when the rich coding stack is available.
-            # ==========================================================
-            use_coding_path = False
-            if self.coding_agent is not None:
+            if not answer and self.coding_agent is not None:
                 try:
-                    from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent, AutoChatMode
-                    intent = classify_auto_chat_intent(question or "")
-                    is_coding_intent = intent in (AutoChatMode.EDIT, AutoChatMode.PLAN_ONLY)
-                except Exception:
-                    is_coding_intent = False
-
-                # Use classifier as the primary model decision.
-                # General queries ("check my gmail", "search internet", "connect to mcp X")
-                # should use standard routing even if auto_execute_plan is on by default.
-                # Only enter the strict coding planner for edit/plan intents.
-                use_coding_path = is_coding_intent
-
-            if self.coding_agent is not None and use_coding_path:
-                # ==========================================================
-                # EXACT CODING AGENT PATH (mirrors chat_cli.py ~3127-3330)
-                # Only entered for edit/plan intents (or when auto-execute forces it).
-                # ==========================================================
-                active_mode = getattr(self.coding_agent, "active_engine_mode", "external")
-                engine_name = "Internal" if active_mode == "internal" else "Codex"
-                self.update_status(f"Running {engine_name} coding turn (tools live in chat box)…")
-
-                try:
-                    from mana_agent.commands.ui_helpers import RichToolActivityObserver
-                    cb = RichToolActivityObserver(show_inputs=True)
-                except Exception:
-                    cb = None
-                callbacks = [cb] if cb is not None else None
-
-                # Replicate decision variables from console (using our stored parity context)
-                # These expressions are intentionally close to the source of truth.
-                plan_trigger_request = False  # basic; can be extended with heuristics if needed
-                force_plan_only_response = False
-                force_auto_execute_edit = bool(
-                    self.coding_agent is not None
-                    and self.auto_execute_plan
-                )
-                execute_plan_now = bool(
-                    self.auto_execute_plan
-                    and not force_plan_only_response
-                    and (plan_trigger_request or force_auto_execute_edit)
-                )
-                auto_execute_available = bool(
-                    execute_plan_now and hasattr(self.coding_agent, "generate_auto_execute")
-                )
-
-                request_for_generation = question
-
-                # State for full-auto resume cycles (mirrors console)
-                turn_full_auto_resume_cycles = 0
-                turn_resume_run_id: str | None = None
-                active_flow_id = self.active_flow_id
-
-                # Try to give the planner good Flow context early (very important for valid checklist output).
-                # This mirrors the memory service usage in the console path and in preview/generate.
-                flow_context = None
-                try:
-                    mem_svc = getattr(self.coding_agent, "coding_memory_service", None)
-                    if mem_svc is not None and getattr(self.coding_agent, "coding_memory_enabled", False):
-                        git_paths: list[str] = []
-                        try:
-                            import subprocess
-                            proc = subprocess.run(
-                                ["git", "status", "--porcelain"],
-                                cwd=str(self.repo_root),
-                                capture_output=True,
-                                text=True,
-                                check=False,
-                            )
-                            for line in (proc.stdout or "").splitlines():
-                                if len(line) >= 4:
-                                    p = line[3:].strip()
-                                    if p:
-                                        git_paths.append(p)
-                        except Exception:
-                            pass
-                        try:
-                            flow_context = mem_svc.build_flow_context(active_flow_id, sorted(set(git_paths)))
-                        except Exception:
-                            pass
+                    idx = self.index_dir or str(self.repo_root)
+                    payload = await asyncio.to_thread(
+                        self.coding_agent.generate,
+                        question,
+                        index_dir=idx,
+                        k=self.resolved_k,
+                        max_steps=self.coding_agent_max_steps,
+                        timeout_seconds=min(max(self.agent_timeout_seconds, 60), 600),
+                    )
+                    answer = self._extract_answer(payload) or str(payload)
+                    used_full_flow = True
                 except Exception:
                     pass
 
-                # Mirror console pre-call logic for prechecklist (used by auto-execute to avoid
-                # double planner calls and to give the agent a head-start on execution_scope).
-                pending_prechecklist = None
-                pending_prechecklist_source = ""
-                pending_prechecklist_warning = ""
-                if self.auto_execute_plan and hasattr(self.coding_agent, "preview_execution_checklist"):
-                    try:
-                        preview_payload = self.coding_agent.preview_execution_checklist(
-                            request_for_generation,
-                            flow_id=active_flow_id,
-                            flow_context=flow_context,
-                        )
-                    except Exception:
-                        preview_payload = {}
-                    if isinstance(preview_payload, dict):
-                        f = preview_payload.get("flow_id")
-                        if isinstance(f, str) and f.strip():
-                            active_flow_id = f.strip()
-                        pre = preview_payload.get("prechecklist")
-                        if isinstance(pre, dict):
-                            pending_prechecklist = pre
-                        pending_prechecklist_source = str(preview_payload.get("prechecklist_source", "") or "")
-                        pending_prechecklist_warning = str(preview_payload.get("prechecklist_warning", "") or "")
-
-                prechecklist_payload = (
-                    {
-                        "flow_id": active_flow_id,
-                        "prechecklist": pending_prechecklist,
-                        "prechecklist_source": pending_prechecklist_source,
-                        "prechecklist_warning": pending_prechecklist_warning,
-                    }
-                    if isinstance(pending_prechecklist, dict) else None
-                )
-
-                cycle_result: dict[str, Any] = {}
-
-                def _run_coding_generation() -> Any:
-                    """Builds the exact call used by the console path and executes it."""
-                    nonlocal active_flow_id, turn_resume_run_id
-
-                    if self.dir_mode:
-                        idxs = self.index_dirs or [str(self.repo_root)]
-                        if auto_execute_available and hasattr(self.coding_agent, "generate_auto_execute"):
-                            return self.coding_agent.generate_auto_execute(
-                                request_for_generation,
-                                index_dirs=idxs,
-                                k=self.resolved_k,
-                                max_steps=self.coding_agent_max_steps,
-                                timeout_seconds=min(max(self.agent_timeout_seconds, 60), 600),
-                                pass_cap=self.auto_execute_max_passes,
-                                callbacks=callbacks,
-                                flow_id=active_flow_id,
-                                run_id=turn_resume_run_id,
-                                flow_context=flow_context,
-                                prechecklist_payload=prechecklist_payload,
-                                auto_chat_mode="edit" if execute_plan_now else None,
-                            )
-                        return self.coding_agent.generate_dir_mode(
-                            request_for_generation,
-                            index_dirs=idxs,
-                            k=self.resolved_k,
-                            max_steps=self.coding_agent_max_steps,
-                            timeout_seconds=min(max(self.agent_timeout_seconds, 60), 600),
-                            callbacks=callbacks,
-                            flow_id=active_flow_id,
-                            flow_context=flow_context,
-                            auto_chat_mode="edit" if execute_plan_now else None,
-                        )
-                    else:
-                        idx = self.index_dir or str(self.repo_root)
-                        if auto_execute_available and hasattr(self.coding_agent, "generate_auto_execute"):
-                            return self.coding_agent.generate_auto_execute(
-                                request_for_generation,
-                                index_dir=idx,
-                                k=self.resolved_k,
-                                max_steps=self.coding_agent_max_steps,
-                                timeout_seconds=min(max(self.agent_timeout_seconds, 60), 600),
-                                pass_cap=self.auto_execute_max_passes,
-                                callbacks=callbacks,
-                                flow_id=active_flow_id,
-                                run_id=turn_resume_run_id,
-                                flow_context=flow_context,
-                                prechecklist_payload=prechecklist_payload,
-                                auto_chat_mode="edit" if execute_plan_now else None,
-                            )
-                        return self.coding_agent.generate(
-                            request_for_generation,
-                            index_dir=idx,
-                            k=self.resolved_k,
-                            max_steps=self.coding_agent_max_steps,
-                            timeout_seconds=min(max(self.agent_timeout_seconds, 60), 600),
-                            callbacks=callbacks,
-                            flow_id=active_flow_id,
-                            flow_context=flow_context,
-                            auto_chat_mode="edit" if execute_plan_now else None,
-                        )
-
-                # Execute (with simple resume cycle support for auto-execute)
-                # Mirror console error handling so decision failures (e.g. execution_scope budget)
-                # and worker errors do not crash the TUI worker with traceback.
-                while True:
-                    try:
-                        from mana_agent.coding.live_events import coding_event_scope
-
-                        with coding_event_scope(_on_coding_event):
-                            payload = await asyncio.to_thread(_run_coding_generation)
-                    except Exception as gen_exc:  # includes ExecutionScopeDecisionError, ToolWorkerProcessError etc.
-                        # Surface gracefully (mirrors console except blocks).
-                        # The emit bridge may have emitted ToolCards for work done before the decision failure.
-                        err_msg = f"Coding agent failed: {type(gen_exc).__name__}: {gen_exc}"
-                        self.update_status("Coding agent error (see chat)")
-                        # Do not re-raise. Set payload so normal extraction + streaming shows it as final assistant message.
-                        payload = {
-                            "answer": err_msg,
-                            "decision_error": str(gen_exc),
-                            "warnings": [str(gen_exc)],
-                        }
-                    cycle_result["result"] = payload
-                    if not (
-                        getattr(self, "chat_auto_continue", False)
-                        and execute_plan_now
-                        and isinstance(payload, dict)
-                    ):
-                        break
-                    # minimal resume accounting (full ingest functions live in chat_cli)
-                    term = str((payload or {}).get("auto_execute_terminal_reason", "") or "").strip().lower()
-                    f = (payload or {}).get("flow_id")
-                    if isinstance(f, str) and f.strip():
-                        active_flow_id = f.strip()
-                    r = (payload or {}).get("run_id")
-                    if isinstance(r, str) and r.strip():
-                        turn_resume_run_id = r.strip()
-                    if term != "pass_cap_reached":
-                        break
-                    turn_full_auto_resume_cycles += 1
-                    # In real console a new resume request is built; here we simply loop once more
-                    # with the same request (the agent itself manages state via flow_id/run_id).
-                    continue
-
-                result = cycle_result.get("result")
-                extracted = self._extract_answer(result)
-                if extracted:
-                    answer = extracted
-                    used_full_flow = True
-
-                # Clean up planner failure messages so internal parse details like
-                # "no checklist payload found" are not leaked to the user.
-                if isinstance(result, dict):
-                    de = str(result.get("decision_error", "") or "").lower()
-                    ans_lower = (answer or "").lower()
-                    planner_failed = (
-                        "no checklist payload found" in de or
-                        "planner output is invalid" in de or
-                        "no checklist payload found" in ans_lower or
-                        "planner failed to produce valid checklist" in ans_lower
-                    )
-                    if planner_failed:
-                        # For non-editing / general queries, clear the answer so we fall
-                        # back to the standard chat_service / routing path. This makes
-                        # "check my gmail", "search the internet", "connect to mcp ..." work
-                        # via connectors / MCP tools / web search instead of the coding planner.
-                        try:
-                            from mana_agent.multi_agent.runtime.auto_chat import classify_auto_chat_intent, AutoChatMode
-                            intent = classify_auto_chat_intent(question or "")
-                            if intent not in (AutoChatMode.EDIT, AutoChatMode.PLAN_ONLY):
-                                answer = ""  # fall through to chat_service.ask etc.
-                                used_full_flow = False
-                            else:
-                                answer = "Planner was unable to produce a valid checklist for this request (after repair attempt). The planner LLM may need a more specific goal."
-                        except Exception:
-                            # If we can't classify, still prefer to show a helpful (non-internal) message
-                            answer = "Planner was unable to produce a valid checklist for this request (after repair attempt). Try rephrasing or use a more specific coding/editing request."
-                    elif "planner failed to produce valid checklist" in ans_lower:
-                        warns = result.get("warnings") or []
-                        detail = "; ".join(str(w) for w in warns if w and "planner" in str(w).lower())
-                        if detail:
-                            answer = (answer or "") + f" Details: {detail[:200]}"
-
-                # Update our mirror state
-                if isinstance(result, dict):
-                    rf = result.get("flow_id")
-                    if isinstance(rf, str) and rf.strip():
-                        self.active_flow_id = rf.strip()
-                        active_flow_id = self.active_flow_id
-
-                # Live bridge already emitted ToolCards. Also replay actions_taken for completeness
-                # (exactly as the old TUI + console transcript logic).
-                if isinstance(result, dict):
-                    for row in (result.get("actions_taken") or []):
-                        if not isinstance(row, dict):
-                            continue
-                        if row.get("backend") in {"codex", "internal"}:
-                            continue
-                        tname = str(row.get("tool_name") or row.get("tool") or row.get("name") or "tool")
-                        args_val = row.get("args") or row.get("input") or row.get("tool_args") or {}
-                        cid = str(
-                            row.get("event_id")
-                            or row.get("tool_call_id")
-                            or row.get("call_id")
-                            or f"tui-{tname}-{abs(hash(str(row)[:120])) % 1000000}"
-                        )
-                        tcall = ToolCallEvent(
-                            tool_name=tname,
-                            args=args_val,
-                            call_id=cid,
-                            summary=f"{tname} observed invocation",
-                            turn_id=turn_id,
-                        )
-                        self.history.add(tcall)
-                        ok = bool(row.get("ok", True))
-                        if "success" in row:
-                            ok = bool(row.get("success"))
-                        res_val = row.get("result") or row.get("output") or row.get("answer") or "(ok)"
-                        err = row.get("error")
-                        if err:
-                            ok = False
-                        tres = ToolResultEvent(
-                            call_id=cid,
-                            tool_name=tname,
-                            success=ok,
-                            result=None if not ok else res_val,
-                            error=str(err) if err else None,
-                            summary=f"{tname} {'ok' if ok else 'error'}",
-                            turn_id=turn_id,
-                        )
-                        self.history.add(tres)
-
-            # Fallbacks (unchanged behavior for non-coding paths)
             if not answer and self.tools_orchestrator is not None:
                 try:
                     if hasattr(self.tools_orchestrator, "run"):

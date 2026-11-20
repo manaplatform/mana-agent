@@ -80,6 +80,10 @@ class _RouteModel:
         self.payloads: list[dict[str, Any]] = []
 
     def decide_sync(self, messages, schema, **kwargs):
+        if isinstance(schema, dict) and schema["title"] == "ModeDecision":
+            return {"decision": {"action": "clarify", "reason": "The required behavior is unspecified",
+                                 "questions": [{"field_id": "behavior", "prompt": "What should the new behavior be?",
+                                                "reason": "Required for the implementation contract"}]}}
         raw = self.generate_sync(messages, **kwargs)
         if isinstance(raw, schema):
             return raw
@@ -138,6 +142,16 @@ class _RouteModel:
                     "error_code": "",
                     "reuse_active_route": len(self.payloads) > 1,
                     "runtime_capability_change": False,
+                    "coding_workflow": ({
+                        "mode": "auto", "requested_effect": "write",
+                        "objective": self.payloads[-1]["user_prompt"],
+                        "reason": "This extends an earlier coding task",
+                        "investigation_scope": "Follow the earlier repository task",
+                        "expected_result": "Related task is implemented",
+                        "risk_and_uncertainty": "Confirm the exact target first",
+                        "verification_requirements": ["Check the relevant behavior"],
+                    } if route == "coding" else None),
+                    "source_message_ids": [self.payloads[-1]["context"]["user_message_id"]] if route == "coding" else [],
                 }
             )
         )
@@ -673,13 +687,17 @@ def test_external_supermemory_write_and_followup_recall(
         if method == "add":
             sm_writes.append({"kwargs": kwargs, "args": args})
             return types.SimpleNamespace(id="sm-doc-1", status="queued")
-        elif method in {"search", "search.memories"}:
+        if method == "search":
             sm_searches.append({"kwargs": kwargs, "args": args})
             return types.SimpleNamespace(
                 results=[
                     types.SimpleNamespace(
-                        id="sm-doc-1",
-                        content="Redis cache cluster configured with TLS",
+                        id="sm-memory-1",
+                        memory="Redis cache cluster configured with TLS",
+                        chunk=None,
+                        is_latest=True,
+                        is_inference=False,
+                        included=None,
                         similarity=0.92,
                         metadata={
                             "task_id": "task_sm_test",
@@ -687,11 +705,13 @@ def test_external_supermemory_write_and_followup_recall(
                             "scope": "private",
                             "title": "Task result task_sm_test",
                         },
-                        created_at="2026-10-02T10:00:00Z",
+                        system=types.SimpleNamespace(
+                            created_at="2026-10-02T10:00:00Z", updated_at="2026-10-02T10:00:00Z",
+                        ),
                     )
                 ]
             )
-        return types.SimpleNamespace(results=[])
+        raise AssertionError(f"Unexpected Supermemory method: {method}")
 
     mem_config = MemoryConfig(
         mode="external",
@@ -736,7 +756,7 @@ def test_external_supermemory_write_and_followup_recall(
         session_id=session_id,
         authenticated_user_id="user_test",
         capsule_service=gateway._stack.memory_service.capsules,
-        repository_id=str(tmp_path),
+        repository_id=str(gateway._stack.repository_id or ""),
         current_turn_id="turn_sm_read",
         selected_memory_task_id=binding,
         memory_task_candidates=candidates,
@@ -746,6 +766,9 @@ def test_external_supermemory_write_and_followup_recall(
     assert read_payload["status"] in {"ok", "matched"}
     assert read_payload["capsules_returned"] == 1
     assert "Redis cache cluster configured with TLS" in read_payload["capsules"][0]["summary"]
+    assert len(sm_searches) == 1
+    assert sm_searches[0]["args"] == sm_writes[0]["args"]
+    assert sm_searches[0]["kwargs"]["query"] == "redis cluster TLS"
 
     read_events = [e for e in events if e[0] == "provider_memory_read"]
     assert len(read_events) == 1

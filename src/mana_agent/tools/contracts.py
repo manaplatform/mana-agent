@@ -427,13 +427,13 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="read_file",
-            description="Safely read a repository file by full file or line range, using run evidence memory before disk.",
+            description="Read a known repository file. Omit the range to read the whole file if it fits the output budget; use line bounds for focused or oversized files.",
             input_schema=_schema(
                 {
                     "path": {"type": "string"},
                     "mode": {"enum": ["line", "full"]},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
                 },
                 ["path"],
             ),
@@ -442,6 +442,14 @@ def coding_tool_contracts() -> list[ToolContract]:
                     "file_path": {"type": "string"},
                     "normalized_path": {"type": "string"},
                     "content": {"type": "string"},
+                    "total_lines": {"type": "integer"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "next_start_line": {"type": "integer"},
+                    "complete": {"type": "boolean"},
+                    "partial": {"type": "boolean"},
+                    "truncated": {"type": "boolean"},
+                    "sha256": {"type": "string"},
                     "cache_hit": {"type": "boolean"},
                     "source": {"enum": ["memory", "tool"]},
                     "covered_range": {"type": "array"},
@@ -499,7 +507,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="batch_read_files",
-            description="Read multiple repository files concurrently in a single batch with per-file SHA-256 hashes, line slicing, and size bounding.",
+            description="Read multiple repository files with per-file SHA-256 hashes and line ranges within a shared output budget.",
             input_schema=_schema(
                 {
                     "files": {"type": "array", "description": "Array of file paths or spec objects with optional start_line/end_line"},
@@ -697,7 +705,8 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="apply_patch_batch",
-            description="Validate and apply multiple related Codex patch payloads in one call.",
+            description=("Apply related Codex patches. Each patches entry contains a patch string beginning with "
+                         "*** Begin Patch and ending with *** End Patch. Use *** Update File, *** Add File, or *** Delete File headers."),
             input_schema=_schema({"patches": {"type": "array"}}, ["patches"]),
             output_schema=_schema({"ok": {"type": "boolean"}, "results": {"type": "array"}, "changed_files": {"type": "array"}}),
             error_format=common_error,
@@ -861,7 +870,10 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="list_files",
-            description="List repository files with optional glob filtering. " + DISCOVERY_DESCRIPTION,
+            description=(
+                "List repository files with optional glob filtering. The default scope is top-level files. "
+                + DISCOVERY_DESCRIPTION
+            ),
             input_schema=_schema({**_DISCOVERY_PROPERTIES, "limit": {"type": "integer"}}),
             output_schema=_schema({"files": {"type": "array"}, "truncated": {"type": "boolean"}}),
             error_format=common_error,
@@ -990,7 +1002,7 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="shell",
-            description="Run one non-interactive shell command in the local workspace. Multiple commands in one call are not supported.",
+            description="Run one non-interactive shell command. Use action.commands with one command and an optional repository-relative cwd.",
             input_schema=_schema(
                 {
                     "action": {
@@ -999,7 +1011,9 @@ def coding_tool_contracts() -> list[ToolContract]:
                             "commands": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "The shell commands to execute sequentially.",
+                                "minItems": 1,
+                                "maxItems": 1,
+                                "description": "The one shell command to execute.",
                             },
                             "timeout_ms": {
                                 "type": "integer",
@@ -1016,8 +1030,11 @@ def coding_tool_contracts() -> list[ToolContract]:
                     "commands": {
                         "type": "array",
                         "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 1,
                         "description": "Optional top-level shorthand for commands.",
                     },
+                    "cwd": {"type": "string", "description": "Optional working directory relative to the assigned checkout."},
                     "timeout_ms": {"type": "integer"},
                     "max_output_length": {"type": "integer"},
                     "environment": {
@@ -1079,7 +1096,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 {
                     "input": {
                         "action": {
-                            "commands": ["ls -la", "git status --short"],
+                            "commands": ["git status --short"],
                             "timeout_ms": 60000,
                             "max_output_length": 4096,
                         }

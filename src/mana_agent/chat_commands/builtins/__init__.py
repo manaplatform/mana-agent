@@ -340,6 +340,7 @@ def _human_inbox(context: CommandContext, args: list[str]) -> CommandResult:
         ResponseSubmission,
         UNRESOLVED_STATUSES,
     )
+    from mana_agent.human_inbox.identity import local_reviewer_actor
 
     service = context.gateway.human_inbox_service
     actor = getpass.getuser()
@@ -385,10 +386,17 @@ def _human_inbox(context: CommandContext, args: list[str]) -> CommandResult:
             current_action_digest=item.action_digest,
         ))
     elif action == "answer" and len(args) == 3:
+        if context.frontend_data.get("protocol_read_only"):
+            raise PermissionError("This protocol session is read-only.")
         answer = json.loads(args[2])
         if not isinstance(answer, dict):
             raise ValueError("Clarification answer must be a JSON object.")
         item = service.repository.get(args[1])
+        authenticated = context.frontend_data.get("authenticated_user_id")
+        if authenticated:
+            actor = str(authenticated)
+        elif context.frontend in {"cli", "tui"}:
+            actor = local_reviewer_actor(item.assigned_reviewer_id, settings=getattr(context.gateway, "settings", None))
         resolved = service.respond(ResponseSubmission(
             inbox_item_id=item.inbox_item_id,
             operation=ResponseOperation.ANSWER,
@@ -471,7 +479,14 @@ def _plan_command(context: CommandContext, args: list[str]) -> CommandResult:
     if not request:
         context.gateway.set_session_execution_mode(context.session_id, "plan")
         return CommandResult(status="input_required", message="What would you like to plan?")
-    return workflow.start(context.session_id, request)
+    options = context.frontend_data
+    if not (options.get("protocol_read_only") or options.get("authenticated_user_id")):
+        return workflow.start(context.session_id, request)
+    return workflow.start(
+        context.session_id, request,
+        read_only=bool(options.get("protocol_read_only")),
+        reviewer_id=str(options.get("authenticated_user_id") or ""),
+    )
 
 
 def _execution_mode_command(context: CommandContext, args: list[str]) -> CommandResult:

@@ -38,7 +38,8 @@ def _sha256(path: Path) -> str:
 
 class ArtifactVerifier:
     def __init__(self) -> None:
-        self._custom: dict[str, CustomVerifier] = {}
+        from mana_agent.repository_evidence.tasks import verify_requirements
+        self._custom: dict[str, CustomVerifier] = {"repository_evidence_requirements": verify_requirements}
 
     def register(self, name: str, verifier: CustomVerifier) -> None:
         if not name.strip():

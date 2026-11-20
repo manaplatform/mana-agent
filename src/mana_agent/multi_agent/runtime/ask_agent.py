@@ -2147,7 +2147,8 @@ class AskAgent:
             ToolBinding.from_callable(
                 func=list_files,
                 name="list_files",
-                description="List repository files relative to the project root. Read-only. " + DISCOVERY_DESCRIPTION,
+                description="List repository files. The default scope is top-level files. Read-only. "
+                            + DISCOVERY_DESCRIPTION,
                 input_model=_ListFilesInput,
             ),
             ToolBinding.from_callable(

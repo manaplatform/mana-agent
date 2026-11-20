@@ -1289,6 +1289,33 @@ def test_apply_patch_hunk_mismatch_rereads_before_retry(tmp_path: Path) -> None:
     assert any(row.get("created_by") == "apply_patch_hunk_mismatch_reread" for row in result.trace)
 
 
+@pytest.mark.parametrize("content_hashes", [{}, {"README.md": "stale-digest"}])
+def test_invalid_patch_syntax_skips_worker_context_recovery(
+    tmp_path: Path, content_hashes: dict[str, str],
+) -> None:
+    target = tmp_path / "README.md"
+    target.write_text("after\n", encoding="utf-8")
+    patch = (
+        "*** Begin Patch\n*** Update File: README.md\n@@\n-before\n+after\n"
+        "unsigned hunk line\n*** End Patch\n"
+    )
+    command = MutationCommand(
+        plan_id="mp_invalid_patch",
+        tool_name="apply_patch",
+        tool_args={"patch": patch, "content_hashes": content_hashes},
+        target_files=["README.md"],
+        reason="test malformed hunk",
+    )
+
+    result = execute_registered_mutation_command(repo_root=tmp_path, command=command)
+
+    assert not result.ok
+    assert "invalid patch hunk line at patch line 6" in result.error
+    assert [row["tool_name"] for row in result.trace] == ["apply_patch"]
+    assert not result.files_changed
+    assert target.read_text(encoding="utf-8") == "after\n"
+
+
 def test_mutation_command_executes_once_per_plan(tmp_path: Path) -> None:
     from mana_agent.multi_agent.runtime.agent_work_queue import QueueManager
 

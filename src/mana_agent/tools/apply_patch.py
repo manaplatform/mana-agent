@@ -36,6 +36,10 @@ _IMPORT_RE = re.compile(r"^\s*(?:from\s+\S+\s+import|import\s+\S)")
 _TABLE_ROW_RE = re.compile(r"^\s*\|.+\|\s*$")
 
 
+class PatchFormatError(ValueError):
+    """The patch could not be parsed without interpreting repository content."""
+
+
 @dataclass(frozen=True)
 class ApplyPatchResult:
     ok: bool
@@ -176,15 +180,20 @@ def _normalise_patch_payload(payload: Any) -> tuple[str, str]:
     return "", f"Error: invalid patch content type {type(payload).__name__}"
 
 
+def _is_hunk_header(line: str) -> bool:
+    return line == "@@" or line.startswith("@@ ")
+
+
+def _is_hunk_payload_line(line: str) -> bool:
+    return not line or line.startswith((" ", "+", "-"))
+
+
 def _parse_codex_patch(text: str) -> tuple[list[_CodexFilePatch], str]:
     patch = _strip_markdown_fences(text).strip("\n")
     lines = patch.splitlines()
     if not lines or lines[0].strip() != "*** Begin Patch":
         return [], "patch must start with *** Begin Patch"
-    if lines[-1].strip() != "*** End Patch":
-        return [], "patch must end with *** End Patch"
 
-    idx = 1
     files: list[_CodexFilePatch] = []
     current_op = ""
     current_path = ""
@@ -198,8 +207,13 @@ def _parse_codex_patch(text: str) -> tuple[list[_CodexFilePatch], str]:
         current_path = ""
         current_lines = []
 
-    while idx < len(lines) - 1:
-        line = lines[idx]
+    for line_number, line in enumerate(lines[1:], start=2):
+        if line.rstrip() == "*** End Patch":
+            if line_number != len(lines):
+                return [], f"premature *** End Patch at patch line {line_number}. Place it after the final hunk"
+            break
+        if line.rstrip() == "*** Begin Patch":
+            return [], f"unexpected *** Begin Patch at patch line {line_number}"
         if line.startswith("*** Update File: "):
             flush()
             current_op = "update"
@@ -213,10 +227,20 @@ def _parse_codex_patch(text: str) -> tuple[list[_CodexFilePatch], str]:
             current_op = "delete"
             current_path = _normalise_user_path(line.removeprefix("*** Delete File: "))
         elif not current_op:
-            return [], f"unexpected patch line outside file block: {line}"
+            return [], f"unexpected content outside a file operation at patch line {line_number}"
         else:
+            if current_op == "update" and not (_is_hunk_header(line) or _is_hunk_payload_line(line)):
+                return [], f"invalid patch hunk line at patch line {line_number}. Use a space, '+' or '-' prefix"
+            if current_op == "add" and line.strip() and not line.startswith("+"):
+                return [], f"Add File lines must start with '+' at patch line {line_number}"
+            if current_op == "delete" and line.strip():
+                return [], f"unexpected Delete File content at patch line {line_number}"
             current_lines.append(line)
-        idx += 1
+            continue
+        if not current_path:
+            return [], f"missing file path at patch line {line_number}"
+    else:
+        return [], "patch must end with *** End Patch"
     flush()
     if not files:
         return [], "patch contains no file operations"
@@ -329,7 +353,7 @@ def _split_update_hunks(lines: Sequence[str]) -> list[list[str]]:
     hunks: list[list[str]] = []
     current: list[str] = []
     for raw in lines:
-        if raw.startswith("@@"):
+        if _is_hunk_header(raw):
             if current:
                 hunks.append(current)
             current = [raw]
@@ -341,7 +365,7 @@ def _split_update_hunks(lines: Sequence[str]) -> list[list[str]]:
 
 
 def _hunk_payload(hunk_lines: Sequence[str]) -> list[str]:
-    return [line for line in hunk_lines if line != "@@" and not line.startswith("@@ ")]
+    return [line for line in hunk_lines if not _is_hunk_header(line)]
 
 
 def _normalize_hunk_payload_lines(payload: Sequence[str]) -> tuple[list[str], str]:
@@ -351,7 +375,7 @@ def _normalize_hunk_payload_lines(payload: Sequence[str]) -> tuple[list[str], st
         if line == "":
             normalized.append(" ")
             continue
-        if not line.startswith((" ", "+", "-")):
+        if not _is_hunk_payload_line(line):
             return [], f"invalid patch hunk line: {line}"
         normalized.append(line)
     return normalized, ""
@@ -1104,10 +1128,10 @@ def extract_patch_touched_files(patch: Any) -> dict[str, Any]:
 def extract_patch_operations(patch: str) -> list[tuple[str, str]]:
     text, error = _normalise_patch_payload(patch)
     if error:
-        raise ValueError(error)
+        raise PatchFormatError(error)
     parsed, error = _parse_codex_patch(text)
     if error or not parsed:
-        raise ValueError(error or "patch has no file operations")
+        raise PatchFormatError(error or "patch has no file operations")
     return [(item.path, item.op) for item in parsed]
 
 
@@ -1177,17 +1201,6 @@ def _safe_apply_patch_direct(
                     touched_files=touched_files,
                     error_code="target_exists",
                     error=f"Add File target already exists: {item.path}",
-                    attempts=all_attempts,
-                ).to_dict()
-                _write_patch_history(repo_root=repo_root, patch=patch_text, result=result, touched_files=touched_files, check_only=check_only)
-                return result
-            invalid = [line for line in item.lines if not line.startswith("+") and line.strip()]
-            if invalid:
-                result = ApplyPatchResult(
-                    ok=False,
-                    touched_files=touched_files,
-                    error_code="invalid_patch_format",
-                    error=f"Add File lines must start with '+': {invalid[0]}",
                     attempts=all_attempts,
                 ).to_dict()
                 _write_patch_history(repo_root=repo_root, patch=patch_text, result=result, touched_files=touched_files, check_only=check_only)
@@ -1273,9 +1286,7 @@ def _safe_apply_patch_direct(
                 result = ApplyPatchResult(
                     ok=False,
                     touched_files=touched_files,
-                    error_code="patch_context_not_found" if "patch_context_not_found" in (patch_err or "") or "ambiguous" in str(rec_meta.get("strategy") or "") or "post_apply_verify" in recovery_error else (
-                        "invalid_patch_format" if patch_err and patch_err != "patch_context_not_found" and "post_apply" not in recovery_error else "patch_context_not_found"
-                    ),
+                    error_code="patch_context_not_found",
                     error=error_detail,
                     stdout=snippet,
                     strategy=str(rec_meta.get("strategy") or ""),

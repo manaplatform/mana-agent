@@ -96,8 +96,10 @@ def queue_job_from_dict(payload: dict[str, Any]) -> QueueJob:
     payload = dict(payload)
     payload["job_type"] = _enum(QueueJobType, payload.get("job_type"))
     payload["status"] = _enum(QueueJobStatus, payload.get("status", QueueJobStatus.PENDING.value))
-    payload["created_at"] = parse_dt(payload.get("created_at"))
-    payload["updated_at"] = parse_dt(payload.get("updated_at"))
+    for name in ("created_at", "updated_at", "started_at", "ended_at", "task_created_at", "scheduled_at",
+                 "worker_claimed_at", "provider_started_at", "provider_completed_at", "task_completed_at"):
+        if payload.get(name):
+            payload[name] = parse_dt(payload[name])
     return _dataclass_from_dict(QueueJob, payload)
 
 

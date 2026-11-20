@@ -35,6 +35,15 @@ _SKIP_DIRS = {
 }
 
 
+def checkout_file_candidates(repo_root: Path) -> list[str]:
+    """List tracked and non-ignored candidate files in the checkout."""
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=repo_root, check=True, stdout=subprocess.PIPE, timeout=15,
+    )
+    return list(dict.fromkeys(os.fsdecode(name) for name in result.stdout.split(b"\0") if name))
+
+
 @dataclass(frozen=True)
 class VerificationCheck:
     name: str
@@ -90,6 +99,10 @@ def _scoped_files(root: Path, scope: tuple[str, ...] | None) -> Iterator[Path]:
         yield from _iter_files(root)
         return
     for relative in dict.fromkeys(scope):
+        if relative == ".":
+            yield from (path for path in root.iterdir()
+                        if path.name not in _SKIP_DIRS and _searchable(root, path) and path.is_file())
+            continue
         target, _ = _safe_rel(root, relative)
         if target is None or target != root / relative or any(
             _is_skipped_dir(part) for part in Path(relative).parts
@@ -153,8 +166,33 @@ DISCOVERY_DESCRIPTION = (
     "identifying the requested audit, systemic evidence, or what a narrower search failed to find."
 )
 
+DISCOVERY_LITERAL_PATH_PATTERN = r"^[^:*?\[\x00-\x1f]+$"
 
-def _selected_discovery_scope(args: dict[str, Any], *, repository_search_allowed: bool = True) -> tuple[str, ...] | None:
+
+class DiscoveryScopeRequired(ValueError):
+    """A discovery selection has no targeted scope or repository-wide reason."""
+
+
+def normalize_discovery_path(raw: str, *, allow_root_listing: bool = False) -> str:
+    """Normalize a literal discovery target while keeping traversal and globs out of paths."""
+    path = raw.strip().replace("\\", "/")
+    parsed = PurePosixPath(path)
+    normalized = parsed.as_posix()
+    if (not path or parsed.is_absolute() or ".." in parsed.parts
+            or normalized != normalized.strip()
+            or not re.fullmatch(DISCOVERY_LITERAL_PATH_PATTERN, raw)):
+        raise ValueError(
+            "Discovery paths must name literal files or directories relative to the repository root. "
+            "For a targeted pattern, use an empty paths list and put the pattern in glob."
+        )
+    if not parsed.parts and not allow_root_listing:
+        raise ValueError("Use list_files to list top-level files or select a narrower path.")
+    return normalized
+
+
+def _selected_discovery_scope(
+    args: dict[str, Any], *, repository_search_allowed: bool = True, allow_root_listing: bool = False,
+) -> tuple[str, ...] | None:
     paths = args.get("paths") or []
     if not isinstance(paths, (list, tuple)):
         raise ValueError("Discovery paths must be an array of relative files or directories")
@@ -162,12 +200,7 @@ def _selected_discovery_scope(args: dict[str, Any], *, repository_search_allowed
     for raw in paths:
         if not isinstance(raw, str):
             raise ValueError("Discovery paths must be relative strings")
-        path = raw.strip().replace("\\", "/").removeprefix("./").rstrip("/")
-        parsed = PurePosixPath(path)
-        if (not parsed.parts or parsed.is_absolute() or ".." in parsed.parts
-                or any(char in path for char in "\x00:*?[")):
-            raise ValueError("Discovery paths must name files or directories inside the repository")
-        normalized.append(parsed.as_posix())
+        normalized.append(normalize_discovery_path(raw, allow_root_listing=allow_root_listing))
 
     glob = str(args.get("glob") or "**/*").replace("\\", "/")
     if glob.startswith("/") or ".." in glob.split("/") or "\x00" in glob or ":" in glob:
@@ -185,13 +218,20 @@ def _selected_discovery_scope(args: dict[str, Any], *, repository_search_allowed
         if not repository_search_allowed:
             raise ValueError("Repository-wide search is outside the parent task's discovery scope")
         return None
-    raise ValueError(DISCOVERY_DESCRIPTION)
+    if allow_root_listing:
+        return (".",)
+    raise DiscoveryScopeRequired(DISCOVERY_DESCRIPTION)
+
+
+def validate_repository_discovery(args: dict[str, Any], *, tool: str = "") -> tuple[str, ...] | None:
+    """Validate discovery arguments and return the resolved literal scope, if any."""
+    return _selected_discovery_scope(args, allow_root_listing=tool == "list_files")
 
 
 def validate_delegated_discovery(tool: str, args: dict[str, Any]) -> None:
     """Fence scoped parent jobs before handing their arguments to a tool worker."""
     if tool in {"repo_search", "list_files", "find_symbols", "call_graph"}:
-        _selected_discovery_scope(args, repository_search_allowed=False)
+        _selected_discovery_scope(args, repository_search_allowed=False, allow_root_listing=tool == "list_files")
     elif tool in {"repo_batch_search", "batch_search_files"}:
         for entry in args.get("patterns") or []:
             _selected_discovery_scope(entry, repository_search_allowed=False)
@@ -225,8 +265,12 @@ def execute_repository_discovery(
         return batch_list_files(root, queries=args.get("queries") or [], limit=args.get("limit") or 200,
                                 model_selected=True, repository_search_allowed=repository_search_allowed)
     try:
-        options = {"glob": str(args.get("glob") or "**/*"),
-                   "scope": _selected_discovery_scope(args, repository_search_allowed=repository_search_allowed)}
+        options = {
+            "glob": str(args.get("glob") or "**/*"),
+            "scope": _selected_discovery_scope(
+                args, repository_search_allowed=repository_search_allowed, allow_root_listing=tool == "list_files",
+            ),
+        }
         if tool == "list_files":
             return list_files(root, limit=int(args.get("limit") or 200), **options)
         query = str(args.get("query") or "")

@@ -256,6 +256,20 @@ def model_id_for_provider(provider: str, value: str) -> str:
     return bare
 
 
+def inference_protocol_for_model(provider: str, model: str, *, mode: str = "auto") -> str:
+    """Select the request protocol for an already selected provider and model."""
+    definition = PROVIDERS.get(provider)
+    if definition.inference_protocol == "anthropic_messages":
+        return definition.inference_protocol
+    if mode != "auto":
+        return mode
+    if definition.id == "openrouter":
+        upstream = model_id_for_provider(definition.id, model)
+        if upstream.removeprefix("~").startswith("anthropic/"):
+            return "anthropic_messages"
+    return definition.inference_protocol
+
+
 def provider_credential_env_names(provider: str) -> tuple[str, str]:
     """Return ``(api_key_env, base_url_env)`` config keys for a provider."""
     try:

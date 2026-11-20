@@ -19,6 +19,12 @@ class AutoRenewConfig(BaseModel):
     require_approval_above_budget: bool = True
     stop_on_no_progress: bool = True
 
+    def adaptive_renewals_remaining(self, used: int) -> int | None:
+        """Realtime repair uses accounting capacity unless a count was explicitly set."""
+        if "max_auto_renewals" not in self.model_fields_set:
+            return None
+        return max(0, self.max_auto_renewals - used)
+
 
 class AutonomousExecutionConfig(BaseModel):
     """Configuration for the unified model-directed execution controller.

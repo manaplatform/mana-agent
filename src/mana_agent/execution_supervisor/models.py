@@ -614,6 +614,7 @@ class TaskRecord(StrictModel):
     child_task_ids: list[str] = Field(default_factory=list)
     dependency_task_ids: list[str] = Field(default_factory=list)
     task_type: str = "task"
+    workflow_coordinator: bool = False
     state: ExecutionState = ExecutionState.CREATED
     assigned_agent: str = ""
     assigned_model: str = ""

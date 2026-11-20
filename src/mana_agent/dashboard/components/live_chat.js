@@ -399,6 +399,7 @@
         commands: [],
         backend: "",
         model: "",
+        workflowMode: "",
         status: "running",
         startedAt: new Date().toISOString(),
         endedAt: null,
@@ -422,6 +423,7 @@
         status: trace.codingBox ? trace.codingBox.status : "running",
         backend: trace.codingBox ? trace.codingBox.backend : "",
         model: trace.codingBox ? trace.codingBox.model : "",
+        workflowMode: trace.codingBox ? trace.codingBox.workflowMode || "" : "",
         changedFiles: trace.codingBox ? [...trace.codingBox.changedFiles] : [],
         commands: trace.codingBox ? [...trace.codingBox.commands] : [],
         events: trace.codingBox ? [...trace.codingBox.events] : [],
@@ -653,6 +655,7 @@
     box.events = boundOperations(box.events);
     box.eventIdSet = new Set(box.events.map((event) => event.id));
     if (isCoding) {
+      if (["auto", "debug", "plan"].includes(meta.mode)) trace.codingBox.workflowMode = meta.mode.toUpperCase();
       if (meta && meta.backend) trace.codingBox.backend = text(meta.backend);
       if (meta && (meta.model || (event && event.model))) trace.codingBox.model = text(meta.model || event.model);
       const parsedArgs = (meta && typeof meta.args === "string" ? parseJsonSafe(meta.args) : (meta && meta.args)) ||
@@ -1746,9 +1749,10 @@
       icon.textContent = "💻";
       const titleText = document.createElement("span");
       const backendLabel = box.backend ? ` · ${box.backend}` : "";
+      const workflowLabel = box.workflowMode ? ` · ${box.workflowMode}` : "";
       const modelLabel = box.model ? ` (${box.model})` : "";
       const totalOps = Math.max(box.events.length, box.commands.length);
-      titleText.textContent = `Coding Activity${backendLabel}${modelLabel} (${totalOps} ${totalOps === 1 ? "operation" : "operations"})`;
+      titleText.textContent = `Coding Activity${workflowLabel}${backendLabel}${modelLabel} (${totalOps} ${totalOps === 1 ? "operation" : "operations"})`;
       titleWrap.appendChild(icon);
       titleWrap.appendChild(titleText);
       summary.appendChild(titleWrap);
@@ -1815,7 +1819,9 @@
         const groups = [];
         for (const ev of eventsToRender) {
           const lastGroup = groups[groups.length - 1];
-          const evTitle = ev.title || ev.tool_name || ev.type;
+          const action = ev.title || ev.tool_name || ev.type;
+          const activity = (ev.metadata || {}).coding_activity;
+          const evTitle = activity ? `${activity[0].toUpperCase()}${activity.slice(1)} · ${action}` : action;
           if (!isActionApproval(ev) && lastGroup && !isActionApproval(lastGroup.events[0]) && lastGroup.events[0].id === ev.id && lastGroup.status === ev.status) {
             lastGroup.events.push(ev);
           } else {

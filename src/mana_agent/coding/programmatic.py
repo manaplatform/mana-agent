@@ -22,8 +22,9 @@ from itertools import islice
 from pathlib import Path as FilePath
 from typing import Any, Sequence
 
+from mana_agent.coding.evidence_tools import CodingEvidenceTools, INVESTIGATE
 from mana_agent.coding.live_events import publish_coding_event
-from mana_agent.coding.models import AgentEvent, WorkspaceContext
+from mana_agent.coding.models import AgentEvent, ISOLATED_CHECK_TOOL, WorkspaceContext
 from mana_agent.tools.contracts import ToolContract, coding_tool_contracts
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,56 @@ logger = logging.getLogger(__name__)
 
 def operation_fingerprint(tool_name: str, arguments: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps({"tool": tool_name.replace(".", "_"), "arguments": arguments}, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def execute_coding_shell_action(action_runtime, safe_adapter, *, approval_id: str = "",
+                                wait_for_approval: bool = True) -> dict[str, Any]:
+    """Execute the exact shell action and surface the shared durable approval flow."""
+    from mana_agent.transactional_actions.gateway import ApprovalRequired
+
+    try:
+        safe_outcome = action_runtime.execute(safe_adapter, approval_id=approval_id)
+    except ApprovalRequired as pending:
+        is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
+        timeout = float(os.environ.get("MANA_APPROVAL_TIMEOUT", "120.0" if not is_test_env else "0.01"))
+        if wait_for_approval and timeout > 0:
+            from mana_agent.human_inbox import default_human_inbox_service
+            from mana_agent.human_inbox.models import InboxStatus
+            inbox_service = action_runtime.inbox_service or default_human_inbox_service()
+            inbox_item_id = pending.inbox_item_id or pending.action.inbox_item_id
+            start_time = time.monotonic()
+            poll_interval = 0.25
+            while time.monotonic() - start_time < timeout:
+                if inbox_item_id:
+                    item = inbox_service.repository.get(inbox_item_id)
+                    if item is not None and item.status == InboxStatus.APPROVED:
+                        grant = action_runtime.grant_for_approved_inbox(pending.action, item)
+                        safe_outcome = action_runtime.execute(safe_adapter, approval_id=grant.approval_id)
+                        return {
+                            "ok": safe_outcome.action.state.value == "committed",
+                            **safe_outcome.result,
+                            "action_id": safe_outcome.action.action_id,
+                        }
+                    elif item is not None and item.status in {
+                        InboxStatus.DENIED,
+                        InboxStatus.CANCELLED,
+                        InboxStatus.SUPERSEDED,
+                        InboxStatus.EXPIRED,
+                    }:
+                        return {
+                            "ok": False,
+                            "approved": False,
+                            "status": "denied",
+                            "error": f"Command approval {item.status.value}.",
+                            "action_id": pending.action.action_id,
+                        }
+                time.sleep(poll_interval)
+        return {"ok": False, "approved": False, "status": "awaiting_approval",
+                "permission_required": True, "error": "Command requires human approval.",
+                "inbox_item_id": pending.inbox_item_id, "action_id": pending.action.action_id,
+                "preview": pending.action.preview.redacted() if pending.action.preview else {}}
+    return {"ok": safe_outcome.action.state.value == "committed", **safe_outcome.result,
+            "action_id": safe_outcome.action.action_id}
 
 
 @dataclass(frozen=True)
@@ -57,6 +108,9 @@ class ProgrammaticExecutionState:
     native_continuation: dict[str, Any] | None = None
     native_messages: list[dict[str, Any]] = field(default_factory=list)
     native_pending_calls: list[str] = field(default_factory=list)
+    native_model_requests: int = 0
+    native_model_wait_ms: int = 0
+    native_evidence_elapsed_ms: int = 0
     active: bool = True
 
 
@@ -113,11 +167,15 @@ class ToolExecutionDispatcher:
         self.model = model
         self.provider = provider
         self.llm = llm
+        from mana_agent.repository_evidence.observations import SOURCE_OUTPUT_BYTES
+        self.source_output_bytes = SOURCE_OUTPUT_BYTES
         from mana_agent.coding.scheduler import OperationReadCache
 
         self.read_cache = OperationReadCache(ttl_seconds=cache_ttl_seconds) if cache_enabled else None
         self._read_locks: dict[str, threading.Lock] = {}
         self.runner = None
+        self.allowed_tools: frozenset[str] | None = None
+        self.evidence_tools: CodingEvidenceTools | None = None
         if execution_authority is not None:
             from mana_agent.multi_agent.agents.tool_runner_agent import ToolRunnerAgent
             self.runner = ToolRunnerAgent(execution_authority)
@@ -131,6 +189,8 @@ class ToolExecutionDispatcher:
         from mana_agent.multi_agent.agents.tool_runner_agent import bind_tool_authority, ToolRunnerAgent
         from mana_agent.multi_agent.tools.operation_policy import OperationPolicy
         contracts = {c.name.replace(".", "_"): c for c in coding_tool_contracts()}
+        if self.evidence_tools is not None:
+            contracts.update({name: self.evidence_tools.contract(name) for name in self.evidence_tools.definitions})
         for name, implementation in self.extra_tools.items():
             contract = getattr(implementation, "tool_contract", None)
             if contract is not None:
@@ -186,6 +246,8 @@ class ToolExecutionDispatcher:
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         name = tool_name.replace(".", "_")
+        if self.allowed_tools is not None and name not in self.allowed_tools:
+            return False
         if self.runner is None or name not in self.runner.authority.policies:
             return False
         policy = self.runner.authority.policies[name]
@@ -198,15 +260,23 @@ class ToolExecutionDispatcher:
         if self.runner is None:
             return {"ok": False, "error_code": "EXECUTION_AUTHORITY_REQUIRED", "error": "Tool execution requires a host-bound specialist task."}
         policy = self.runner.authority.policies.get(name)
+        if self.allowed_tools is not None and name not in self.allowed_tools:
+            return {"ok": False, "error_code": "TOOL_NOT_AUTHORIZED", "error": "Tool is unavailable in this assignment"}
         if policy is None:
             return {"ok": False, "error_code": "UNKNOWN_TOOL", "error": f"Tool has no registered execution capability: {tool_name}"}
-        if policy.effect != "read_only" and operation_fingerprint(tool_name, arguments) in self._previous_operation_fingerprints:
+        if (policy.effect != "read_only" and name != ISOLATED_CHECK_TOOL
+                and operation_fingerprint(tool_name, arguments) in self._previous_operation_fingerprints):
             return {"ok": False, "error_code": "RECOVERY_RECONCILIATION_REQUIRED",
                     "error": "Reconcile the completed operation instead of replaying its side effect."}
         cid = call_id or uuid.uuid4().hex
         def execute_once(selected_arguments):
             if _cached_result is not None and policy.effect == "read_only":
                 return {**_cached_result, "cache_hit": True}
+            if self.evidence_tools is not None and name in self.evidence_tools.definitions:
+                try:
+                    return self.evidence_tools.invoke(name, selected_arguments, call_id=cid)
+                except (ValueError, PermissionError) as exc:
+                    return {"ok": False, "error_code": "EVIDENCE_SELECTION_REJECTED", "error": str(exc)}
             for candidate in (tool_name, name):
                 if candidate in self.extra_tools:
                     value = self.extra_tools[candidate](**selected_arguments)
@@ -237,7 +307,8 @@ class ToolExecutionDispatcher:
                 version = selected_file_versions(self.repo_root, paths)
                 if version is None:
                     return execute_once(selected_arguments)
-                cache_args = {"arguments": selected_arguments, "versions": version}
+                cache_args = {"arguments": selected_arguments, "versions": version,
+                              "source_output_bytes": self.source_output_bytes}
                 cached = self.read_cache.get(name, cache_args)
                 if cached is not None:
                     return {**cached, "cache_hit": True}
@@ -249,6 +320,8 @@ class ToolExecutionDispatcher:
             request = self.runner.request(name, arguments, call_id=cid, decision_id=cid,
                 timeout_seconds=float(arguments.get("timeout") or 120))
             from mana_agent.multi_agent.agents.tool_runner_agent import model_result
+            if name != INVESTIGATE and callable(getattr(self, "charge_tool", None)):
+                self.charge_tool()
             return model_result(self.runner.execute(request, execute), self.runner.authority)
         except (ExecutionAuthorityError, ValueError) as exc:
             return {"ok": False, "error_code": "SANDBOX_VIOLATION" if self.workspace.sandbox == "readOnly" else "EXECUTION_AUTHORITY_REJECTED", "error": str(exc)}
@@ -268,7 +341,6 @@ class ToolExecutionDispatcher:
             git_diff,
             git_status,
             list_repository_directories,
-            repo_batch_read,
             run_script_once,
             verify_project,
         )
@@ -281,19 +353,9 @@ class ToolExecutionDispatcher:
             target = (self.repo_root / rel_path).resolve()
             if not target.is_relative_to(self.repo_root) or not target.is_file():
                 return {"ok": False, "error": f"File not found or outside workspace: {rel_path}"}
-            start_line = args.get("start_line")
-            end_line = args.get("end_line")
-            if start_line is not None or end_line is not None:
-                start = max(1, int(start_line or 1))
-                end = int(end_line) if end_line is not None else None
-                if end is not None and end < start:
-                    return {"ok": False, "error": "end_line precedes start_line"}
-                with target.open(encoding="utf-8", errors="replace") as stream:
-                    lines = list(islice(stream, start - 1, end))
-                return {"ok": True, "path": rel_path, "content": "".join(lines), "start_line": start,
-                        "end_line": start + len(lines) - 1}
-            text = target.read_text(encoding="utf-8", errors="replace")
-            return {"ok": True, "path": rel_path, "content": text, "total_lines": len(text.splitlines())}
+            from mana_agent.repository_evidence.observations import read_source
+            return read_source(self.repo_root, rel_path, start_line=args.get("start_line"),
+                               end_line=args.get("end_line"), max_chars=self.source_output_bytes)
 
         elif name == "read_skill":
             from mana_agent.skills.manager import read_skill
@@ -305,14 +367,55 @@ class ToolExecutionDispatcher:
                 return {"ok": False, "error": str(exc), "error_code": "SKILL_READ_FAILED"}
 
         elif name == "ls":
-            return list_repository_directories(self.repo_root)
+            from mana_agent.repository_evidence.observations import read_directory
+            return read_directory(self.repo_root)
+
+        elif name == "list_files" and args.get("paths") == ["."] and not args.get("repository_reason"):
+            from mana_agent.repository_evidence.observations import read_directory
+            from mana_agent.tools.repository import _matches_file_glob
+            manifest = read_directory(self.repo_root)
+            limit = max(1, min(int(args.get("limit") or 200), 5000))
+            pattern = str(args.get("glob") or "**/*")
+            selected = [path for path in manifest.get("files", []) if _matches_file_glob(path, pattern)]
+            return {**manifest, "files": selected[:limit], "limit": limit,
+                    "truncated": bool(manifest.get("truncated") or len(selected) >= limit)}
 
         elif name in {"list_files", "repo_search", "repo_batch_search", "find_symbols", "call_graph",
                       "batch_search_files", "batch_list_files"}:
             return execute_repository_discovery(self.repo_root, name, args)
 
-        elif name == "repo_batch_read":
-            return repo_batch_read(self.repo_root, files=list(args.get("files") or []))
+        elif name in {"repo_batch_read", "batch_read_files"}:
+            from mana_agent.repository_evidence.observations import read_source
+            room = min(self.source_output_bytes, int(args.get("max_bytes") or self.source_output_bytes))
+            cap = min(room, int(args.get("max_bytes_per_file") or room))
+            rows = []
+            seen = set()
+            for selected in args.get("files", [])[:100]:
+                if not isinstance(selected, (str, dict)):
+                    rows.append({"ok": False, "path": "", "error": "Select a path or a file range object"})
+                    continue
+                spec = {"path": selected} if isinstance(selected, str) else selected
+                path = spec.get("path") or spec.get("file_path") or ""
+                start, end = spec.get("start_line"), spec.get("end_line")
+                if not isinstance(path, str) or any(value is not None and type(value) is not int for value in (start, end)):
+                    rows.append({"ok": False, "path": "", "error": "Select a file path and integer range bounds"})
+                    continue
+                identity = (path, start or 1, end)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                try:
+                    row = read_source(self.repo_root, path, start_line=start,
+                                      end_line=end, max_chars=min(room, cap))
+                except (OSError, ValueError) as exc:
+                    row = {"ok": False, "path": path, "error": str(exc)}
+                rows.append(row)
+                room -= row.get("bytes_read", 0)
+            errors = [row for row in rows if not row["ok"]]
+            return {"ok": not errors, "files": rows, "errors": [
+                {"path": row["path"], "error": row["error"]} for row in errors],
+                "total_files": len(rows), "successful_count": len(rows) - len(errors),
+                "truncated": any(row.get("truncated") for row in rows)}
 
         elif name == "write_file":
             path = str(args.get("path") or "")
@@ -354,20 +457,6 @@ class ToolExecutionDispatcher:
             patches = list(args.get("patches") or [])
             res = apply_patch_batch(self.repo_root, patches=patches)
             return json.loads(res) if isinstance(res, str) else res
-
-        elif name == "batch_read_files":
-            from mana_agent.tools.batch_file_ops import batch_read_files
-            files = list(args.get("files") or [])
-            max_bytes = int(args.get("max_bytes") or 2_000_000)
-            max_bytes_per_file = int(args.get("max_bytes_per_file") or 150_000)
-            concurrency = int(args.get("concurrency") or 8)
-            return batch_read_files(
-                self.repo_root,
-                files=files,
-                max_bytes=max_bytes,
-                max_bytes_per_file=max_bytes_per_file,
-                concurrency=concurrency,
-            )
 
         elif name == "batch_write_files":
             from mana_agent.tools.batch_file_ops import batch_write_files
@@ -439,10 +528,8 @@ class ToolExecutionDispatcher:
             if timeout_s <= 0:
                 raise ValueError("command timeout must be at least one second")
             from mana_agent.transactional_actions.adapters import ShellActionAdapter
-            from mana_agent.transactional_actions.gateway import ApprovalRequired
             from mana_agent.transactional_actions.runtime import default_action_gateway
             from mana_agent.utils.shell_argv import local_shell_argv
-            from mana_agent.utils.process_stream import run_streaming_process
             working = (self.repo_root / str(cwd or ".")).resolve()
             if not working.is_relative_to(self.repo_root) or not working.is_dir():
                 raise ValueError("Command cwd escapes the assigned workspace")
@@ -470,51 +557,8 @@ class ToolExecutionDispatcher:
             )
             if approved_action is not None and approved_action.intent_digest() != safe_adapter.build_intent().intent_digest():
                 return {"ok": False, "error_code": "INVALID_APPROVAL", "error": "Approval does not match the exact command and execution context."}
-            try:
-                safe_outcome = action_runtime.execute(safe_adapter, approval_id=approval_id)
-            except ApprovalRequired as pending:
-                is_test_env = "PYTEST_CURRENT_TEST" in os.environ or "MANA_TESTING" in os.environ
-                timeout = float(os.environ.get("MANA_APPROVAL_TIMEOUT", "120.0" if not is_test_env else "0.01"))
-                wait_for_approval = getattr(self, "wait_for_approval", True)
-                if wait_for_approval and timeout > 0:
-                    from mana_agent.human_inbox import default_human_inbox_service
-                    from mana_agent.human_inbox.models import InboxStatus
-                    gateway = default_action_gateway(self.repo_root)
-                    inbox_service = gateway.inbox_service or default_human_inbox_service()
-                    inbox_item_id = pending.inbox_item_id or pending.action.inbox_item_id
-                    start_time = time.monotonic()
-                    poll_interval = 0.25
-                    while time.monotonic() - start_time < timeout:
-                        if inbox_item_id:
-                            item = inbox_service.repository.get(inbox_item_id)
-                            if item is not None and item.status == InboxStatus.APPROVED:
-                                grant = gateway.grant_for_approved_inbox(pending.action, item)
-                                safe_outcome = action_runtime.execute(safe_adapter, approval_id=grant.approval_id)
-                                return {
-                                    "ok": safe_outcome.action.state.value == "committed",
-                                    **safe_outcome.result,
-                                    "action_id": safe_outcome.action.action_id,
-                                }
-                            elif item is not None and item.status in {
-                                InboxStatus.DENIED,
-                                InboxStatus.CANCELLED,
-                                InboxStatus.SUPERSEDED,
-                                InboxStatus.EXPIRED,
-                            }:
-                                return {
-                                    "ok": False,
-                                    "approved": False,
-                                    "status": "denied",
-                                    "error": f"Command approval {item.status.value}.",
-                                    "action_id": pending.action.action_id,
-                                }
-                        time.sleep(poll_interval)
-                return {"ok": False, "approved": False, "status": "awaiting_approval",
-                        "permission_required": True, "error": "Command requires human approval.",
-                        "inbox_item_id": pending.inbox_item_id, "action_id": pending.action.action_id,
-                        "preview": pending.action.preview.redacted() if pending.action.preview else {}}
-            return {"ok": safe_outcome.action.state.value == "committed", **safe_outcome.result,
-                    "action_id": safe_outcome.action.action_id}
+            return execute_coding_shell_action(action_runtime, safe_adapter, approval_id=approval_id,
+                                               wait_for_approval=getattr(self, "wait_for_approval", True))
 
         elif name == "conversation_context_read":
             from mana_agent.chat.history import get_history
@@ -823,7 +867,8 @@ class ProgrammaticExecutionSession:
         caller = item.get("caller")
         caller_prog_id = str(caller.get("caller_id") or caller.get("call_id") or "") if isinstance(caller, dict) else None
 
-        if self.state.tool_calls_executed >= self.state.max_tool_calls:
+        compound = tool_name == INVESTIGATE and getattr(self.dispatcher, "evidence_tools", None) is not None
+        if not compound and self.state.tool_calls_executed >= self.state.max_tool_calls:
             err_msg = f"Maximum tool calls budget ({self.state.max_tool_calls}) exceeded for program"
             self.state.errors.append(err_msg)
             return {
@@ -832,7 +877,8 @@ class ProgrammaticExecutionSession:
                 "output": json.dumps({"ok": False, "error": err_msg, "error_code": "BUDGET_EXCEEDED"}),
             }
 
-        self.state.tool_calls_executed += 1
+        if not compound:
+            self.state.tool_calls_executed += 1
 
         logger.info("Tool call [%s]: %s", call_id, tool_name)
         publish_coding_event(AgentEvent(
@@ -854,7 +900,7 @@ class ProgrammaticExecutionSession:
         if result.get("ok") and tool_name in {"write_file", "create_file", "edit_file", "multi_edit_file", "delete_file",
                 "apply_patch", "apply_patch_batch", "batch_apply_patches", "batch_write_files", "batch_move_files", "batch_delete_files"}:
             self.state.verification_results.clear()
-        if tool_name in {"verify_project", "run_command", "run_script_once", "shell"}:
+        if tool_name in {"verify_project", ISOLATED_CHECK_TOOL, "run_command", "run_script_once", "shell"}:
             self.state.verification_results.append({"tool": tool_name, "arguments": arguments, "result": result})
 
         # Track mutations and commands

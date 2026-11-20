@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from repository_investigation_fixture import FileInvestigator, inspection
+
 from mana_agent.gateway import (
     AgentChatGateway,
     EntryRouteRegistry,
@@ -122,7 +124,7 @@ def test_children_preserve_lineage_context_dependencies_and_serialization(tmp_pa
     assert legacy.decomposition_id_map == {}
 
 
-def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path: Path) -> None:
+def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path: Path, complete_supervised_task) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)
     plan = _plan(_item("a"), _item("b"), _item("c"))
@@ -139,6 +141,7 @@ def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path
         time.sleep(0.05)
         with lock:
             active -= 1
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(item.local_id, task_id, item.title, "repository", "completed")
 
     results = orchestrator.execute(root_task_id=root.task_id, plan=plan, execute_child=execute)
@@ -148,7 +151,7 @@ def test_independent_children_execute_concurrently_with_bounded_workers(tmp_path
     assert board.get_task(root.task_id).aggregate_progress == "3/3 completed"
 
 
-def test_dependencies_run_in_order_and_failed_prerequisite_blocks_child(tmp_path: Path) -> None:
+def test_dependencies_run_in_order_and_failed_prerequisite_blocks_child(tmp_path: Path, complete_supervised_task) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)
     plan = _plan(_item("first"), _item("second", depends_on=["first"]), _item("independent"))
@@ -159,6 +162,7 @@ def test_dependencies_run_in_order_and_failed_prerequisite_blocks_child(tmp_path
         calls.append(item.local_id)
         if item.local_id == "first":
             return MultiTaskChildResult(item.local_id, task_id, item.title, "github", "failed", blocker="boom")
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(item.local_id, task_id, item.title, "repository", "completed")
 
     results = orchestrator.execute(root_task_id=root.task_id, plan=plan, execute_child=execute)
@@ -193,7 +197,7 @@ def test_approval_wait_keeps_dependents_queued_for_safe_resume(tmp_path: Path) -
 
 
 def test_worker_threads_inherit_parent_contextvars_for_computer_client(
-    tmp_path: Path,
+    tmp_path: Path, complete_supervised_task,
 ) -> None:
     """Computer route children must see the authenticated parent-turn client.
 
@@ -230,6 +234,7 @@ def test_worker_threads_inherit_parent_contextvars_for_computer_client(
             assert scoped is not None
             assert scoped.client_type == "tui"
             assert f"{item.local_id}:computer-entry-decision" in scoped.allowed_decision_ids
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(
             item.local_id, task_id, item.title, "computer", "completed", result="ok"
         )
@@ -265,7 +270,7 @@ def test_resume_materialization_does_not_duplicate_persisted_children(tmp_path: 
     assert len(board.get_task(root.task_id).child_task_ids) == 2
 
 
-def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path) -> None:
+def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path, complete_supervised_task) -> None:
     board = TaskBoard(tmp_path)
     root = _root(board)
     plan = _plan(_item("done"), _item("unfinished", depends_on=["done"]))
@@ -288,6 +293,7 @@ def test_resume_execution_does_not_rerun_completed_children(tmp_path: Path) -> N
 
     def execute(item: MultiTaskItem, task_id: str) -> MultiTaskChildResult:
         calls.append(item.local_id)
+        complete_supervised_task(board, task_id)
         return MultiTaskChildResult(item.local_id, task_id, item.title, "coding", "completed")
 
     results = orchestrator.execute(root_task_id=root.task_id, plan=plan, execute_child=execute)
@@ -790,6 +796,64 @@ def _build_memory_gateway(
     memory_service = _CapsuleMemoryService(user_id=user_id, return_capsules=return_capsules)
     gateway._stack.memory_service = memory_service
     return gateway, memory_service
+
+
+def test_compound_debug_child_uses_the_parent_user_message_and_workflow(tmp_path):
+    plan = MultiTaskPlan(
+        goal="Diagnose the handler and report it",
+        tasks=[
+            MultiTaskItem(local_id="diagnosis", title="Diagnose handler", request="Diagnose app.py",
+                          acceptance_criteria=["Cause explained"], reason="Repository diagnosis"),
+            MultiTaskItem(local_id="report", title="Report status", request="Report the diagnosis",
+                          depends_on=["diagnosis"], acceptance_criteria=["Report delivered"],
+                          reason="Report the result"),
+        ],
+        final_acceptance_criteria=["Both results delivered"], reason="Two distinct results",
+    )
+
+    class Model(FileInvestigator, _MultiTaskMemoryModel):
+        def generate_sync(self, messages, **kwargs):
+            if messages[0].content == MULTI_TASK_DECOMPOSITION_PROMPT:
+                return super().generate_sync(messages, **kwargs)
+            payload = json.loads(messages[-1].content)
+            if not payload["routing_constraints"]["atomic_child"]:
+                return {"route": "multi_task", "reason": "Two requested results",
+                        "confidence": 0.99, "required_sources": ["none"]}
+            if payload["user_prompt"] != "Diagnose app.py":
+                return {"route": "conversation", "reason": "Report the diagnosis",
+                        "confidence": 0.99, "required_sources": ["none"]}
+            assert payload["context"]["user_message_id"] == "user-1"
+            return {
+                "route": "coding", "reason": "Investigate the reported behavior",
+                "confidence": 0.99, "required_sources": ["repository"],
+                "source_message_ids": ["user-1"], "runtime_capability_change": False,
+                "coding_workflow": {"mode": "debug", "objective": "Diagnose app.py",
+                                    "reason": "Inspect the failure", "investigation_scope": "app.py",
+                                    "requested_effect": "read", "expected_result": "Explain the cause",
+                                    "risk_and_uncertainty": "Cause not yet confirmed",
+                                    "verification_requirements": ["Read the handler"]},
+            }
+
+        def decide_sync(self, messages, schema, **kwargs):
+            if isinstance(schema, dict) and schema["title"] == "ModeDecision":
+                context = json.loads(messages[-1].content)
+                if not context["evidence"]:
+                    return {"decision": inspection("app.py")}
+                return {"decision": {"action": "diagnose", "reason": "Observed source",
+                                     "root_cause": "The handler returns the old value",
+                                     "cause_evidence": ["evidence-1"]}}
+            return super().decide_sync(messages, schema, **kwargs)
+
+    (tmp_path / "app.py").write_text("return 'old value'\n")
+    gateway, _ = _build_memory_gateway(tmp_path, Model(plan))
+    session_id = gateway.create_session(frontend="test")
+    result = gateway.process_turn(session_id, "Diagnose app.py and report the result", user_message_id="user-1")
+    assert result.payload["overall_status"] == "done", result.answer
+    children = gateway._lane_coordinator.taskboard.store.repository.list_tasks(session_id=session_id)
+    diagnosis = next(task for task in children if task.mode_workflow.get("mode") == "debug")
+    assert diagnosis.mode_workflow["source_message_ids"] == ["user-1"]
+    assert diagnosis.mode_workflow["phase"] == "completed"
+    assert diagnosis.owning_lane == "coding"
 
 
 def test_multi_task_child_inherits_authorized_memory_routing_context(

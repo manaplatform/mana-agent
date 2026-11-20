@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from functools import wraps
 import logging
+import json
 from typing import Any, Callable
 
 from mana_agent.multi_agent.core.ids import new_task_id
@@ -38,6 +40,19 @@ def _append_unique(target: list[str], values: list[str]) -> None:
             seen.add(text)
 
 
+def taskboard_write(method):
+    """Serialize local writes using the same supervisor→board→SQLite lock order."""
+    @wraps(method)
+    def write(board, *args, **kwargs):
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        supervisor = getattr(context, "supervisor", None)
+        with supervisor.store.locked() if supervisor else nullcontext():
+            with board._save_lock:
+                return method(board, *args, **kwargs)
+    return write
+
+
 class TaskBoardProgress(dict):
     """Authoritative task progress metrics supporting both dictionary and attribute access."""
 
@@ -68,7 +83,41 @@ class TaskBoard:
         self._task_id_is_reserved = task_id_is_reserved
         self.tasks: dict[str, TaskBoardItem] = {}
         self._activity_snapshots: dict[str, tuple] = {}
+        self._persisted_snapshots: dict[str, str] = {}
         self.load()
+
+    def evidence_board(self, *, root=None, repository_id=None):
+        from mana_agent.repository_evidence.service import RepositoryEvidenceBoard
+        from mana_agent.services.activity_context import current_activity_context
+        activity = current_activity_context()
+        return RepositoryEvidenceBoard(db=self.store.db,
+            repository_id=repository_id or self.store.repository_id,
+            root=Path(root or self.store.root),
+            publication=activity.publication if activity else None)
+
+    @contextmanager
+    def transaction(self):
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        supervisor = getattr(context, "supervisor", None)
+        with supervisor.store.locked() if supervisor else nullcontext():
+            with self._save_lock:
+                try:
+                    with self.store.db.transaction():
+                        yield
+                except Exception:
+                    # SQLite rollback must also discard this transaction's cache.
+                    self.load()
+                    raise
+
+    @taskboard_write
+    def refresh(self) -> None:
+        """Refresh unchanged cached rows without overwriting local edits."""
+        for saved in self.store.repository.list_tasks():
+            cached = self.tasks.get(saved.task_id)
+            if cached is None or self._persisted_snapshots.get(saved.task_id) == json.dumps(serialize(cached), sort_keys=True, default=str):
+                self.tasks[saved.task_id] = saved
+                self._persisted_snapshots[saved.task_id] = json.dumps(serialize(saved), sort_keys=True, default=str)
 
     def _new_task_id(self) -> str:
         """Allocate an ID unused by this projection or an authoritative store."""
@@ -86,9 +135,11 @@ class TaskBoard:
         """Bind authoritative task-ID reservations before creating new tasks."""
         self._task_id_is_reserved = checker
 
+    @taskboard_write
     def create_task(
         self,
         *,
+        task_id: str | None = None,
         title: str,
         user_request: str = "",
         description: str = "",
@@ -113,7 +164,7 @@ class TaskBoard:
         wiring_required: bool = False,
         wiring_reason: str | None = None,
     ) -> TaskBoardItem:
-        task_id = self._new_task_id()
+        task_id = task_id or self._new_task_id()
         req_text = str(user_request or description or title).strip()
         goal = normalized_goal or req_text
         duplicate_of = None
@@ -204,10 +255,12 @@ class TaskBoard:
         self.save()
         return task
 
+    @taskboard_write
     def create_child_task(
         self,
         parent_task_id: str,
         *,
+        task_id: str | None = None,
         title: str,
         user_request: str = "",
         owner_agent_id: str | None = None,
@@ -224,7 +277,7 @@ class TaskBoard:
         integration_role: str = "",
     ) -> TaskBoardItem:
         parent = self.get_task(parent_task_id)
-        task_id = self._new_task_id()
+        task_id = task_id or self._new_task_id()
         req_text = str(user_request or parent.user_request or title).strip()
         task = TaskBoardItem(
             task_id=task_id,
@@ -317,6 +370,7 @@ class TaskBoard:
         self.save()
         return task
 
+    @taskboard_write
     def update_orchestration(
         self,
         task_id: str,
@@ -375,6 +429,7 @@ class TaskBoard:
             items = [t for t in items if t.root_task_id == root_task_id]
         return items
 
+    @taskboard_write
     def update_task(
         self,
         task_id: str,
@@ -391,9 +446,54 @@ class TaskBoard:
         status: TaskStatus | None = None,
         status_reason: str | None = None,
         mode_workflow: dict[str, Any] | None = None,
+        task_kind: str | None = None,
+        evidence_requirements: list[dict] | None = None,
+        evidence_refs: list[dict] | None = None,
+        investigation_scope: list[str] | None = None,
+        coding_assignment: dict | None = None,
+        missing_evidence: list[dict] | None = None,
+        depends_on: list[str] | None = None,
+        expected_version: int | None = None,
     ) -> TaskBoardItem:
         """Update task details, progress, or assignment atomically."""
         task = self.get_task(task_id)
+        from mana_agent.repository_evidence.models import CodingAssignment, EvidenceRequirement, EvidenceRef, MissingEvidenceRequest, relative_source
+        from mana_agent.repository_evidence.service import EvidenceConflict
+        if expected_version is not None and task.row_version != expected_version:
+            raise EvidenceConflict("Task changed before the selected update")
+        changes = {}
+        if task_kind is not None:
+            if task_kind not in {"general", "investigation", "understanding", "implementation", "integration", "verification"}:
+                raise ValueError("Unknown task kind")
+            changes["task_kind"] = task_kind
+        for field_name, value, model in (
+            ("evidence_requirements", evidence_requirements, EvidenceRequirement),
+            ("evidence_refs", evidence_refs, EvidenceRef),
+            ("missing_evidence", missing_evidence, MissingEvidenceRequest),
+        ):
+            if value is not None:
+                changes[field_name] = [model.model_validate(item).model_dump(mode="json") for item in value]
+        if investigation_scope is not None:
+            changes["investigation_scope"] = [relative_source(path) for path in investigation_scope]
+        if coding_assignment is not None:
+            assignment = CodingAssignment.model_validate(coding_assignment)
+            if assignment.task_id != task_id:
+                raise ValueError("Coding assignment belongs to another task")
+            changes["coding_assignment"] = assignment.model_dump(mode="json")
+        if depends_on is not None:
+            graph = {item.task_id: list(item.depends_on) for item in self.list_tasks()}
+            graph[task_id] = list(depends_on)
+            def visit(key, ancestors):
+                if key in ancestors:
+                    raise ValueError("Task dependency graph contains a cycle")
+                if key not in graph:
+                    raise ValueError("Unknown task dependency")
+                for dependency in graph[key]:
+                    visit(dependency, ancestors | {key})
+            visit(task_id, set())
+            changes["depends_on"] = list(dict.fromkeys(depends_on))
+        for name, value in changes.items():
+            setattr(task, name, value)
         if mode_workflow is not None:
             task.mode_workflow = dict(mode_workflow)
         if title is not None:
@@ -493,6 +593,7 @@ class TaskBoard:
             self._record("task.dependency_removed", {"task_id": task_id, "depends_on": depends_on_task_id})
             self.save()
 
+    @taskboard_write
     def update_status(self, task_id: str, status: TaskStatus, *, reason: str | None = None) -> None:
         task = self.get_task(task_id)
         if status == TaskStatus.DONE:
@@ -673,6 +774,7 @@ class TaskBoard:
         self._validate_feature_completion(task)
         validate_transition(task, TaskStatus.DONE, reason="supervisor completion projected")
         task.status = TaskStatus.DONE
+        task.crossed_off = True
         if not task.wiring_required and task.integration_role != "wiring":
             task.wiring_outcome = "not_required"
         elif task.wiring_outcome not in {"mutation_applied", "already_integrated"}:
@@ -719,13 +821,7 @@ class TaskBoard:
         if ev:
             self.add_evidence(task_id, str(ev))
         if task.status != TaskStatus.DONE:
-            try:
-                self.update_status(task_id, TaskStatus.DONE, reason=ev or "task marked completed")
-            except Exception:
-                task.status = TaskStatus.DONE
-                task.updated_at = utc_now()
-                self._record("task.completed", {"task_id": task_id, "evidence": ev})
-                self.save()
+            self.update_status(task_id, TaskStatus.DONE, reason=ev or "task marked completed")
 
     def mark_crossed_off(self, task_id: str, crossed_off: bool = True) -> None:
         """Toggle checklist crossing off without falsely asserting independent verification."""
@@ -749,6 +845,10 @@ class TaskBoard:
         """Verify task completion against acceptance criteria and record independent evidence."""
         task = self.get_task(task_id)
         ev_dict = evidence if isinstance(evidence, dict) else {}
+        if passed and not (task.supervisor_execution_id and task.supervisor_state == "completed"
+                           and task.supervisor_verification_evidence.get("verification")
+                           and task.supervisor_verification_evidence.get("result_id")):
+            raise InvalidTaskTransition("Passing verification requires a durable supervisor verification result")
         summary_text = summary or (str(evidence) if isinstance(evidence, str) and evidence else str(ev_dict.get("summary") or "verification completed"))
         failures = list(ev_dict.get("failures", [])) if not passed and ev_dict.get("failures") else ([] if passed else [summary_text])
         actual_commands = commands_run or commands or ev_dict.get("commands_run") or []
@@ -772,13 +872,8 @@ class TaskBoard:
         if passed:
             task.evidence.append(f"Verification passed: {summary_text}")
             if task.status not in {TaskStatus.DONE, TaskStatus.CANCELLED}:
-                try:
-                    self.update_status(task_id, TaskStatus.VERIFYING, reason=f"Verification passed: {summary_text}")
-                    self.update_status(task_id, TaskStatus.DONE, reason=f"Verification passed: {summary_text}")
-                except Exception:
-                    task.status = TaskStatus.DONE
-                    task.updated_at = utc_now()
-                    self.save()
+                self.update_status(task_id, TaskStatus.VERIFYING, reason=f"Verification passed: {summary_text}")
+                self.update_status(task_id, TaskStatus.DONE, reason=f"Verification passed: {summary_text}")
         else:
             fail_msg = f"Verification failed: {summary_text}"
             _append_unique(task.blockers, [fail_msg])
@@ -839,6 +934,7 @@ class TaskBoard:
             ],
         })
 
+    @taskboard_write
     def assign(self, task_id: str, agent_id: str) -> None:
         task = self.get_task(task_id)
         _append_unique(task.assigned_agent_ids, [agent_id])
@@ -897,6 +993,7 @@ class TaskBoard:
     def add_verification_queue_job(self, task_id: str, job_id: str) -> None:
         self._add_many(task_id, "verification_queue_job_ids", [job_id])
 
+    @taskboard_write
     def record_budget(self, task_id: str, record: dict[str, Any]) -> None:
         task = self.get_task(task_id)
         payload = dict(record)
@@ -993,13 +1090,18 @@ class TaskBoard:
         self.save()
         return render_envelope(envelope)
 
+    @taskboard_write
     def save(self) -> None:
         notifications = []
         snapshots = {}
         with self._save_lock:
             for task in self.tasks.values():
+                before = json.dumps(serialize(task), sort_keys=True, default=str)
+                if self._persisted_snapshots.get(task.task_id) == before:
+                    continue
                 self.store.repository.save_task(task)
-                snapshot = (str(task.status), task.aggregate_progress, tuple(task.plan), tuple(task.blockers), task.owner_agent_id)
+                self._persisted_snapshots[task.task_id] = json.dumps(serialize(task), sort_keys=True, default=str)
+                snapshot = (str(task.status), task.aggregate_progress, tuple(task.plan), tuple(task.blockers), task.owner_agent_id, task.row_version)
                 if self._activity_snapshots.get(task.task_id) != snapshot:
                     snapshots[task.task_id] = snapshot
                     notifications.append({
@@ -1033,7 +1135,10 @@ class TaskBoard:
 
     def load(self) -> None:
         self.tasks = {task.task_id: task for task in self.store.repository.list_tasks()}
+        self._persisted_snapshots = {key: json.dumps(serialize(task), sort_keys=True, default=str)
+                                     for key, task in self.tasks.items()}
 
+    @taskboard_write
     def _add_text(self, task_id: str, field_name: str, value: str, *, save: bool = True) -> None:
         if not str(value or "").strip():
             return
@@ -1044,6 +1149,7 @@ class TaskBoard:
         if save:
             self.save()
 
+    @taskboard_write
     def _add_many(self, task_id: str, field_name: str, values: list[str]) -> None:
         task = self.get_task(task_id)
         _append_unique(getattr(task, field_name), values)

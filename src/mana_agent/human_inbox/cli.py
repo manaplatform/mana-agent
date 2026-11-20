@@ -8,6 +8,7 @@ import json
 import typer
 
 from . import default_human_inbox_service
+from .identity import local_reviewer_actor
 from .models import InboxQuery, InboxRequestType, InboxStatus, ResponseOperation, ResponseSubmission
 from .repository import InboxConcurrentUpdateError
 
@@ -72,10 +73,13 @@ def _respond(inbox_item_id: str, *, operation: ResponseOperation, actor: str, co
     service = _service()
     item = service.repository.get(inbox_item_id)
     try:
+        actor_id = _actor(actor)
+        if not actor.strip() and operation is ResponseOperation.ANSWER and actor_id != item.assigned_reviewer_id:
+            actor_id = local_reviewer_actor(item.assigned_reviewer_id)
         result = service.respond(ResponseSubmission(
             inbox_item_id=inbox_item_id,
             operation=operation,
-            actor_id=_actor(actor),
+            actor_id=actor_id,
             channel="cli",
             idempotency_key=f"cli:{operation.value}:{inbox_item_id}:{item.version}",
             answer=answer or {},

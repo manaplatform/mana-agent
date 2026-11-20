@@ -666,6 +666,31 @@ def test_p03_verification_persistence_idempotent(tmp_path):
     assert len(child.verification_results) == 1
 
 
+@pytest.mark.parametrize("persisted", [True, False])
+def test_runtime_gate_requires_an_isolated_receipt_from_the_coding_task(tmp_path, persisted):
+    board, parent, supervisor = _setup_runtime(tmp_path)
+    receipt = {"operation_id": "verify-entrypoint", "attempt_id": "coding-attempt", "passed": True,
+               "exit_code": 0, "argv": ["python", "entrypoint.py"], "cwd": "."}
+    if persisted:
+        board.update_task(parent.task_id, mode_workflow={"verification": [receipt]})
+    decision = WiringDecision(outcome="already_integrated", edges=_edges(), verification_commands=["python entrypoint.py"])
+    result = FeatureIntegrationCoordinator().run(
+        core_result={"status": "completed", "changed_files": ["src/provider.py"]},
+        request="add provider", gateway_task_id=parent.task_id, flow_id=None,
+        runtime_capability_change=True, taskboard=board, taskboard_parent_task_id=parent.task_id,
+        execution_supervisor=supervisor, workspace_root=tmp_path, integration_decision=decision,
+        isolated_verification=[receipt],
+    )
+    child = board.get_task(board.get_task(parent.task_id).required_wiring_task_ids[0])
+    assert result.passed is persisted
+    assert not child.verification_queue_job_ids
+    assert not child.integration_stage
+    if persisted:
+        assert child.reviewed_by_agent_id
+        assert child.verification_provenance["isolated_operation_ids"] == ["verify-entrypoint"]
+        assert child.verification_status == "passed"
+
+
 def test_p05_supervisor_completion_verification_is_exactly_once(tmp_path):
     """Supervisor submit_result verifies fresh completion; projection does not verify it again."""
     board, parent, supervisor = _setup_runtime(tmp_path)

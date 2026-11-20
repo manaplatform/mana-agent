@@ -21,12 +21,6 @@ TaskScope = Literal["single_file", "single_file_section", "multi_file", "project
 
 _FILE_RE = re.compile(r"(?i)(?<![\w/.-])([A-Za-z0-9_.\-/]+\.[A-Za-z0-9_]+)(?![\w/.-])")
 _HEADING_RE = re.compile(r"(?m)(#{1,6})\s+([^\n#][^\n]*)")
-_MUTATION_WORD_RE = re.compile(
-    r"(?i)\b(task\s*:\s*)?(update|edit|write|fix|change|modify|replace|refactor|add|remove|delete|create)\b"
-)
-_VERIFY_WORD_RE = re.compile(r"(?i)\b(test|verify|check|pytest|lint|typecheck)\b")
-
-
 @dataclass(frozen=True, slots=True)
 class TaskDecision:
     task_type: TaskType
@@ -101,48 +95,32 @@ def classify_task(
 ) -> TaskDecision:
     root = Path(repo_root).resolve()
     text = str(request or "").strip()
-    lowered = text.lower()
+    if requires_edit is None and not text.startswith("/"):
+        raise ValueError("Task classification requires an explicit repository effect")
     explicit_files = _extract_target_files(text, repo_root=root, explicit_targets=target_files)
     sections = _extract_target_sections(text)
-    mutation = bool(requires_edit) if requires_edit is not None else bool(_MUTATION_WORD_RE.search(text))
-    verification_only = (not mutation) and bool(_VERIFY_WORD_RE.search(text))
-    slash = lowered.startswith("/")
-    scope: TaskScope
-    architecture_source_update = bool(explicit_files) and "architecture" in lowered and "src" in lowered
-    if architecture_source_update:
-        scope = "multi_file"
-    elif len(explicit_files) == 1 and sections:
-        scope = "single_file_section"
-    elif len(explicit_files) == 1:
-        scope = "single_file"
+    mutation = requires_edit is True
+    scope: TaskScope = "unknown"
+    if len(explicit_files) == 1:
+        scope = "single_file_section" if sections else "single_file"
     elif len(explicit_files) > 1:
         scope = "multi_file"
-    elif any(token in lowered for token in ("repo", "project", "everywhere", "all files")):
-        scope = "project_wide"
-    else:
-        scope = "unknown"
 
-    if slash:
+    if text.startswith("/"):
         task_type: TaskType = "slash_command"
     elif mutation:
         task_type = "mutation_required"
-    elif verification_only:
-        task_type = "verification_only"
-    elif explicit_files or any(token in lowered for token in ("inspect", "read", "find", "where")):
-        task_type = "repo_inspection"
-    elif not text:
-        task_type = "unknown_needs_clarification"
     else:
-        task_type = "answer_only"
+        task_type = "repo_inspection"
 
     needs_file_read = bool(explicit_files) and task_type in {"mutation_required", "repo_inspection", "verification_only"}
-    needs_repo_search = (not explicit_files or architecture_source_update) and task_type in {"mutation_required", "repo_inspection"}
+    needs_repo_search = (not explicit_files) and task_type in {"mutation_required", "repo_inspection"}
     confidence = 0.45
     if explicit_files:
         confidence += 0.25
     if sections:
         confidence += 0.15
-    if mutation or verification_only:
+    if mutation:
         confidence += 0.1
     confidence = min(confidence, 0.95)
 
@@ -162,7 +140,7 @@ def classify_task(
         needs_repo_search=needs_repo_search,
         needs_file_read=needs_file_read,
         needs_mutation=mutation,
-        needs_verification=mutation or verification_only,
+        needs_verification=mutation,
         scope=scope,
         confidence=confidence,
     )

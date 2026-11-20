@@ -231,7 +231,7 @@ def test_shell_execution_engine_blocks_destructive_commands_in_plan_mode(tmp_pat
 def test_plan_service_requires_a_model_and_reads_only_selected_lines(tmp_path: Path) -> None:
     from mana_agent.agent.plan_service import EvidenceRequest
 
-    (tmp_path / "app.py").write_text("before\nfunction\nafter\n")
+    (tmp_path / "app.py").write_bytes(b"before\nfunction\nafter\n")
     service = PlanService(tmp_path, llm=None)
     read = EvidenceRequest(tool="read_file", level=1, paths=("app.py",),
                            start_line=2, end_line=2, reason="Reported location")
@@ -266,14 +266,12 @@ def test_coding_task_plan_mode_read_only_default() -> None:
 def test_plan_service_validates_structured_model_decision(tmp_path: Path) -> None:
     mock_llm = MagicMock()
     mock_llm.decide_sync.return_value = {"decision": {
-        "action": "inspect", "reason": "Find the target", "evidence": {
-            "tool": "repo_search", "level": 1, "paths": ["app.py"],
-            "query": "handler", "reason": "Named in the request",
-        },
+        "action": "investigate", "reason": "Investigate the target", "scope": "app.py",
+        "objective": "Find the source of the handler behavior",
     }}
     service = PlanService(tmp_path, llm=mock_llm)
     decision = service.next_decision("plan", {"request": "Inspect app.py"})
-    assert decision.evidence.paths == ("app.py",)
+    assert decision.scope == "app.py"
     mock_llm.decide_sync.return_value = {"decision": {"action": "draft", "reason": "missing material"}}
     with pytest.raises(RuntimeError, match="ModeDecision"):
         service.next_decision("plan", {"request": "Inspect app.py"})

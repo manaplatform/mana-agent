@@ -131,10 +131,10 @@ def test_stale_attempt_cannot_publish_or_deliver(coding_research_case):
     assert not c.router.calls
 
 
-def test_research_preserves_completed_children_and_task_identity(coding_research_case):
+def test_research_preserves_completed_children_and_task_identity(coding_research_case, complete_supervised_task):
     c = coding_research_case
     child = c.board.create_child_task(c.item.task_id, title="Completed local inspection", user_request="Inspect initializer")
-    c.board.mark_completed(child.task_id, evidence="Local source inspected")
+    complete_supervised_task(c.board, child.task_id, c.supervisor)
     before = deepcopy(c.board.get_task(child.task_id))
     c.model.responses = [c.decision(research_plan=c.plan), c.decision("BLOCKED")]
     c.runtime().decide(goal=c.goal, result=c.result)

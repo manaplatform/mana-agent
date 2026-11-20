@@ -99,3 +99,57 @@ Additional targeted suites:
 ```bash
 python -m pytest tests/test_model_routing.py tests/llm/test_contracts.py tests/test_model_capabilities.py -q
 ```
+
+## Entry routing reason regression
+
+On 2026-11-16, OpenRouter completed an entry routing call for `deepseek/deepseek-v4.1-flash`. Mana then stopped the turn with `routing reason is required`. The saved activity establishes the validation failure. It does not contain the returned field value.
+
+`EntryRoutingOutput` declared `reason` as a required string and accepted empty or whitespace-only values. The gateway trimmed the field and rejected the result after decoding, and its correction guidance omitted this validation error. A complete routing decision requires a brief top-level reason on every route.
+
+The [gateway router](../../src/mana_agent/gateway/entry_routing.py) now advertises a nonempty string and strips whitespace before native decision validation. The native engine can ask for one correction using the selected model and response format. An unstructured router adapter can use the gateway's existing correction to supply a missing or blank reason. A decision with a persistently invalid reason stops the turn before dispatch. The change affects model output validation and requires no migration of saved decisions.
+
+**Do not reintroduce** an unconstrained routing reason or a synthesized explanation that lets an incomplete model decision dispatch.
+
+Run `venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/llm/test_engine.py -k entry_route_reason` to check missing and blank reasons, correction through each native response strategy, and terminal failure after one correction. Then restart Mana and resend the original request with the same routing model. The agent did not run the tests or replay the live request.
+
+## Expired capability evidence before entry routing
+
+On 2026-11-17, a chat turn stopped at `entry_route` with `openrouter/deepseek/deepseek-v4.1-flash: output_text=STALE`. The local capability records for the model had expired. A recent model picker cache still listed the model with text output and token limits, but that list was not bound to the inference connection and could not renew its capability evidence.
+
+`NativeLLMEngine.decide()` chose the response format and checked capability evidence before calling `generate()`. With expired evidence, that check could reject the turn before generation reached its built-in catalog refresh. The refresh also used budget accessors that allow stale values, so it could skip renewal when only the token limits had expired.
+
+The [native inference engine](../../src/mana_agent/llm/engine.py) now runs its existing metadata refresh before a decision chooses a response format. The refresh checks for current text and token limit evidence and keeps the existing catalog cache and connection scope. Inference still requires current evidence. Refresh only reads model metadata; it does not run capability probes or substitute another model. There is no configuration or cache migration.
+
+**Do not reintroduce** decision capability checks ahead of metadata refresh, or treat a cached token limit as current solely because it has a numerical value.
+
+Run `venv/bin/python -m pytest -q tests/llm/test_engine.py -k entry_route_refreshes_capability_evidence` to check same-model recovery, expired token limits, and failure before inference when text output is still unverified. Restart Mana and resend the original request to verify the live provider path. To recover on an older build, open `mana-agent --configure`, select OpenRouter, then use **Model capabilities → Refresh metadata** for `deepseek/deepseek-v4.1-flash`. The agent did not run the tests or replay the live request.
+
+## Stale tool calling with a fresh catalog
+
+At 22:18 Tehran time on 2026-11-19, entry routing stopped before inference
+with `openrouter/anthropic/claude-haiku-5.5: tool_calling=STALE`. The model
+catalog already advertised tools and matched the configured connection. The
+registry merged those fresh facts first, then imported equivalent expired
+facts from its saved connection profile. Deduplication kept the last copy
+merged. The refresh skipped fetching another catalog because the cache was
+recent. In addition, the preflight considered only text and token limits,
+so a separately expired tool capability could skip refresh as well.
+
+The registry now keeps the newest observation for equivalent facts. The
+native decision preflight includes the required response capability, such
+as tool calling for a composite decision on OpenRouter Messages. A fresh
+cache can recover the same model without another catalog request. If
+current metadata still does not confirm a required capability, routing
+stops before inference. No cache migration is needed.
+
+Do not let import order replace a newer capability fact. Include the
+capability required by the decision format in preflight freshness checks.
+
+```sh
+venv/bin/python -m pytest -q tests/llm/test_registry.py tests/llm/test_engine.py -k 'older_equivalent_observations or refreshes_required_tool_calling or entry_route_refreshes_capability_evidence'
+```
+
+The saved catalog reproduced the failure before the fix. After the fix,
+the same cache reported current support and entry routing succeeded with a
+mock inference response on the configured model. Live inference remains
+unverified.

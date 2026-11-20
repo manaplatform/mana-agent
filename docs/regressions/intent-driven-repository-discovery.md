@@ -71,13 +71,61 @@ citation rules only after inference. The prompt also showed detailed results
 for only the most recent 12 observations, so an older observation at the
 highest level could be absent.
 
-Each decision now gets the highest observed level, next permitted ordinary
-level, and IDs and levels of all stored observations. Detailed results still
-use the bounded history window. Native inference uses that same task-state
-snapshot to validate inspection decisions during its existing correction
-attempt. The correction distinguishes skipped levels, missing IDs, unknown
-IDs, and missing citations at the highest observed level. The gateway checks
-the scope again before executing the selected read-only operation.
+The native investigator starts with the highest observed level, the next
+permitted level, and the IDs and levels of saved observations. New tool
+results include an evidence ID and level. The tool session validates every
+batch against the evidence available before that response. Invalid selections
+stop before dispatch and identify skipped levels, missing or unknown IDs, or
+missing citations at the highest observed level.
+
+## Starting an investigation without a file path
+
+An AUTO, DEBUG, or PLAN investigation could stop with
+`decision: Select relevant relative files/directories in paths` when the
+model selected a search without paths or used a broad glob at level 1. The
+native tool schema advertised `**/*` as the default. It did not explain that
+the validator treats it as repository-wide when paths are absent. The exact
+arguments from the reported failure were unavailable.
+
+The main model is asked to preserve relevant diagnostic text, symbols, and
+locations in its investigation handoff. When no location is available, the
+investigator can choose `ls` at level 1 to see immediate directories, then
+choose a scoped search. The tool schema describes valid paths and targeted
+globs without advertising a broad default. Repository-wide discovery uses
+level 4 and a reason under the existing audit and evidence rules. Invalid
+selections name the rejected tool and stop before any call in that batch runs.
+
+## Relative paths in investigation listings
+
+`list_files` could stop an investigation with a canonical-path error before
+the discovery tool ran. The evidence model validated the spelling first, so
+it rejected forms such as `./src/` that the discovery tool already
+normalized. A root path such as `.` also failed. The reported error did not
+identify the rejected path or its position.
+
+The evidence model and discovery tools now use the same normalization for
+literal discovery paths. Validation errors identify the offending path index
+without printing its value. Normalized paths are used for execution and
+duplicate detection. An explicit `list_files` path of `.` lists immediate
+files and filters protected names and symlinks. Recursion requires a narrower
+directory, a targeted glob, or an authorized repository-wide selection.
+Absolute paths, parent traversal, and protected evidence targets fail
+validation before dispatch.
+
+## Default scope for file listings
+
+An investigator could still hit `Supply literal paths or a targeted glob`
+when calling `list_files` without paths or with an extension-only glob.
+The shared scope validator treated a shallow file listing like a recursive
+content search. The reported error did not include the tool arguments.
+
+`list_files` now defaults to the same shallow scope as an explicit `.`
+path when the selection has no paths, targeted glob, or repository-wide
+reason. A broad glob such as `**/*.py` filters top-level files within that
+scope. Both forms of the same shallow selection use the same evidence
+fingerprint. A level-4 listing with a reason can recurse when authorized by
+the existing scope checks. Text and symbol search still require a scoped
+selection or authorized expansion.
 
 ## Do not reintroduce
 
@@ -91,6 +139,12 @@ the scope again before executing the selected read-only operation.
   because it uses the command transport.
 - Never hide the scope ceiling and evidence IDs from the decision model or
   invent observations to satisfy an expansion gate.
+- Never present a recursive checkout glob as the default for a scoped search.
+  Keep initial layout discovery shallow and explicitly selected by the model.
+- Never turn a dot path into a recursive checkout walk. Normalize discovery
+  arguments before checking their scope or comparing them for duplicates.
+- Never require repository-wide scope to list only top-level files. A broad
+  filter alone does not authorize recursive traversal.
 
 ## Verification
 
@@ -105,10 +159,27 @@ did not walk the repository root. The replay does not implement sudo support
 or call a live model. For interactive acceptance, submit the example in a disposable checkout,
 inspect the execution trace, and stop before applying any proposed sudo change.
 
-For Plan and Debug scope correction, run
+For repository investigation scope, run
 
-    venv/bin/python -m pytest -q tests/llm/test_engine.py tests/gateway/test_debug_plan_mode_contract.py -k 'investigation_scope or unjustified_expansion or repository_audit'
+    venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'investigation_batch or unjustified_expansion or repository_audit'
 
-The fixtures cover the four correction reasons, references to older
-observations, rejection before a broader tool runs, and the explicit audit
-path. The agent did not run these tests or make a live provider call.
+The fixtures cover rejection before a broader tool runs, resume with saved
+observations, and the explicit audit path. The agent did not run these tests
+or make a live provider call.
+
+For an error report without a location, run
+
+    venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'no_reported_location or investigation_batch_rejects or investigation_tool_schema or repository_audit'
+
+The fixtures cover searching a directory selected from the listing, rejecting
+unscoped selections before any batch dispatch, and preserving authorized
+audits. These checks and live-provider behavior are unverified.
+
+For relative investigation paths, run
+
+    venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/llm/test_providers.py -k 'investigation_list_files or investigation_batch_rejects or repository_audit or investigation_tool_schema'
+
+The fixtures cover explicit and default shallow listings, broad filters,
+normalized paths, duplicate aliases, invalid selections, and authorized
+recursive listings. Test execution and live provider verification remain
+pending.

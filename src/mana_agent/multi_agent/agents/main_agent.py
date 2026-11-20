@@ -91,9 +91,13 @@ class MainAgent:
         workspace_id: str | None = None,
         execution_supervisor: ExecutionSupervisor | None = None,
         initialize_if_missing: bool = True,
+        coding_agent: Any | None = None,
+        lane_coordinator: Any | None = None,
     ) -> None:
         requested_root = Path(root).resolve()
         self.routing_llm = routing_llm
+        self.coding_engine = coding_agent
+        self.repository_lanes = lane_coordinator
         self.workspace_service = WorkspaceService()
         try:
             self.workspace_context = self.workspace_service.context_for_session(str(session_id)) if session_id else None
@@ -211,6 +215,7 @@ class MainAgent:
         git_intent: GitIntent | None = None,
         autonomous: bool = False,
         step_runner: Any | None = None,
+        max_turns: int | None = None,
     ) -> MainAgentResult:
         if autonomous:
             return self.run_autonomous(
@@ -218,6 +223,7 @@ class MainAgent:
                 entrypoint=entrypoint,
                 git_intent=git_intent,
                 step_runner=step_runner,
+                max_turns=max_turns,
             )
         request = str(user_request or "").strip()
         from mana_agent.prompting.repo_rules import render_repo_rules
@@ -554,7 +560,10 @@ class MainAgent:
             user_goal=request,
             step_runner=runner,
             strategy_hint=route.route_name,
+            max_turns=max_turns,
         )
+        if self.repository_lanes is not None:
+            self.repository_lanes.sync_controller_projection(task.task_id)
         answer = exec_res.final_response or f"Execution completed with status {exec_res.status}."
         return MainAgentResult(
             task.task_id,
@@ -576,6 +585,11 @@ class MainAgent:
         step_runner: Any | None = None,
         max_turns: int | None = None,
     ) -> MainAgentResult:
+        if step_runner is None:
+            # All domains already use this controller through their actual routed
+            # specialist. Repository coordination must not replace other domains.
+            return self.run_user_request(user_request, entrypoint=entrypoint,
+                git_intent=git_intent, max_turns=max_turns)
         request = str(user_request or "").strip()
         from mana_agent.prompting.repo_rules import render_repo_rules
 
@@ -637,65 +651,181 @@ class MainAgent:
             scope.repository_ids,
         )
 
-    def _build_autonomous_step_runner(
-        self,
-        task_id: str,
-        request: str,
-        entrypoint: str,
-        scope: Any,
-        git_intent: GitIntent | None = None,
-    ) -> Any:
-        def step_runner(ctx: Any) -> Any:
-            current_task = self.taskboard.get_task(task_id)
-            if not current_task.plan:
-                planner = self._agent(AgentRole.PLANNER, PlannerAgent)
-                plan = planner.plan(task_id, request, "autonomous")
-                self.taskboard.update_plan(task_id, plan.steps)
-                self.taskboard.add_evidence(task_id, f"Plan generated with {len(plan.steps)} steps.")
-                for idx, step_desc in enumerate(plan.steps, start=1):
-                    self.taskboard.create_task(
-                        title=f"Step {idx}: {step_desc[:50]}",
-                        user_request=step_desc,
-                        parent_task_id=task_id,
-                        plan=[step_desc],
-                        owner_agent_id=self.registry.find_by_role(AgentRole.MAIN).agent_id,
-                    )
-                ctx.evidence.append(f"Autonomous plan created: {len(plan.steps)} steps.")
-                return f"Plan established with {len(plan.steps)} steps."
+    def _build_autonomous_step_runner(self, task_id, request, entrypoint, scope, git_intent=None, *, route=None):
+        """Model-directed work on existing tasks, never simulated child completion."""
+        route = route or self.router.route(task_id=task_id, user_request=request, command_hint=entrypoint, repo_root=self.root)
+        def runner(step_index, ctx):
+            from mana_agent.repository_evidence.coordination import coordinate_step
+            return coordinate_step(self, task_id, request, route, ctx)
+        return runner
 
-            subtasks = self.taskboard.list_tasks(parent_task_id=task_id)
-            pending_subtasks = [
-                t for t in subtasks
-                if t.status not in {TaskStatus.DONE, TaskStatus.SKIPPED, TaskStatus.CANCELLED}
-            ]
+    def _execute_evidence_assignment(self, parent_id, child_id, decision_id, route, *, recovery=None, runtime_budget=None):
+        from mana_agent.gateway.lane_coordinator import LaneCoordinator
+        from mana_agent.gateway.lanes import LaneId
+        if self.repository_lanes is None:
+            self.repository_lanes = LaneCoordinator(self.root, taskboard=self.taskboard, execution_supervisor=self.execution_supervisor)
+        self.repository_lanes.project_active_controller(parent_id,
+            lane_id=LaneId.CODING if route.route_name == "coding" else LaneId.RESEARCH)
+        with self.repository_lanes.workflow_step_capacity(parent_id, child_id):
+            return self._run_evidence_assignment(parent_id, child_id, decision_id, route, recovery=recovery, runtime_budget=runtime_budget)
 
-            if pending_subtasks:
-                next_subtask = pending_subtasks[0]
-                self.taskboard.update_status(
-                    next_subtask.task_id,
-                    TaskStatus.IN_PROGRESS,
-                    reason="Autonomous loop executing next subtask.",
-                )
-                self.taskboard.mark_completed(
-                    next_subtask.task_id,
-                    result_summary=f"Executed {next_subtask.title}",
-                )
-                ctx.evidence.append(f"Completed subtask {next_subtask.task_id}: {next_subtask.title}")
-                return f"Subtask {next_subtask.title} executed."
-
-            verifier = self._agent(AgentRole.VERIFIER, VerifierAgent)
-            commands = list(current_task.verification_commands)
-            if not commands:
-                commands = ["python -m compileall ."]
-            verification = verifier.execute_verification(task_id, commands)
-            if verification.passed:
-                ctx.evidence.append(f"Autonomous verification passed: {verification.summary}")
-                return "Autonomous execution verified."
+    def _run_evidence_assignment(self, parent_id, child_id, decision_id, route, *, recovery=None, runtime_budget=None):
+        from mana_agent.gateway.lane_coordinator import LaneCoordinator
+        from mana_agent.gateway.lanes import LaneId, LaneTaskState
+        from mana_agent.coding.facade import UnifiedCodingAgentFacade
+        from mana_agent.coding.selection import resolve_coding_backend
+        from mana_agent.integrations.codex.config import CodexSettings
+        from mana_agent.services.activity_context import ActivityContext, activity_scope, current_activity_context
+        from mana_agent.repository_evidence.tasks import assignment_for, investigation_completion_contract
+        from mana_agent.repository_evidence.investigation import execute_investigation
+        from mana_agent.coding.programmatic import ToolExecutionDispatcher
+        from mana_agent.execution_supervisor.models import RecoveryAction
+        if self.repository_lanes is None:
+            self.repository_lanes = LaneCoordinator(self.root, taskboard=self.taskboard, execution_supervisor=self.execution_supervisor)
+        if self.coding_engine is None:
+            settings = Settings()
+            selected = resolve_coding_backend(settings)
+            self.coding_engine = UnifiedCodingAgentFacade(repo_root=self.root,
+                default_mode="internal" if selected.backend == "internal" else "external",
+                codex_settings=CodexSettings.from_mana_settings(settings),
+                repository_id=self.taskboard.store.repository_id, workspace_id=self.taskboard.store.workspace_id,
+                session_id=self.workspace_context.session.session_id)
+        child = self.taskboard.get_task(child_id)
+        if child.status not in {TaskStatus.NEW, TaskStatus.QUEUED, TaskStatus.ROUTED} and recovery is None:
+            raise PermissionError("Only a ready task may be dispatched; recover existing attempts explicitly")
+        if any(self.taskboard.get_task(dep).status != TaskStatus.DONE for dep in child.depends_on):
+            raise PermissionError("The selected task has unresolved dependencies")
+        investigating = child.task_kind in {"investigation", "understanding"}
+        if child.task_kind in {"implementation", "integration"} and route.requested_effect != "write":
+            raise PermissionError("The original route does not authorize repository mutation")
+        if not investigating and self.managed_worktrees_enabled:
+            parent = self.taskboard.get_task(parent_id)
+            if not parent.execution_repo_root:
+                managed = self._allocate_managed_workspace(parent_id, title=parent.title, assigned_agent_id=child.owner_agent_id or "coding_agent")
+                parent = self.taskboard.get_task(parent_id)
+                def bind_workspace(record):
+                    record.workspace_path = parent.execution_repo_root
+                self.execution_supervisor.store.update_task(parent_id, bind_workspace)
+            child.execution_repo_root = parent.execution_repo_root
+            child.managed_worktree_path = parent.managed_worktree_path
+            self.taskboard.save()
+        elif investigating:
+            parent = self.taskboard.get_task(parent_id)
+            if parent.execution_repo_root:
+                child.execution_repo_root = parent.execution_repo_root
+                child.managed_worktree_path = parent.managed_worktree_path
+                self.taskboard.save()
+        root = Path(child.execution_repo_root or child.managed_worktree_path or self.root)
+        lane_id = LaneId.RESEARCH if investigating else LaneId.VERIFY if child.task_kind == "verification" else LaneId.CODING
+        if recovery is not None:
+            if recovery.task_id != child_id:
+                raise PermissionError("Recovery belongs to a different task")
+            if recovery.action == RecoveryAction.RESUME_CHECKPOINT:
+                reservation = self.repository_lanes.resume_checkpoint(child_id, decision=recovery, session_id=child.session_id)
             else:
-                ctx.evidence.append(f"Autonomous verification failed: {verification.summary}")
-                return f"Autonomous verification failed: {verification.summary}"
-
-        return step_runner
+                reservation = self.repository_lanes.retry_task(child_id, decision=recovery, session_id=child.session_id)
+        else:
+            reservation = self.repository_lanes.reserve(normalized_intent=child.user_request, lane_id=lane_id,
+                taskboard_task_id=child_id, parent_task_id=parent_id, session_id=child.session_id,
+                workspace_id=child.workspace_id, repository_id=child.primary_repository_id,
+                execution_workspace=root, target_files=[str(root / path) for path in child.investigation_scope if path != "."],
+                routing_decision_id=decision_id, completion_contract=investigation_completion_contract(child) if investigating else ())
+        self.repository_lanes.start(reservation)
+        execution = reservation.execution
+        parent_activity = current_activity_context()
+        activity = ActivityContext(conversation_id=child.session_id,
+            execution_id=getattr(parent_activity, "execution_id", "") or child_id,
+            task_id=child_id, parent_task_id=parent_id, root_task_id=child.root_task_id,
+            repository_id=child.primary_repository_id, agent_id=child.owner_agent_id or "coding_agent",
+            attempt_id=execution.supervisor_attempt_id, attempt_generation=self.execution_supervisor.get_task(child_id).attempt_generation,
+            lease_token=execution.supervisor_lease_token, supervisor=self.execution_supervisor,
+            protected_text=getattr(parent_activity, "protected_text", ()),
+            authorize_tool=lambda name: self.repository_lanes.authorize_tool(child_id, name),
+            execution_lane=lane_id.value, execution_mode="read_only" if investigating else "act",
+            coordinator=self.repository_lanes, execution_registry=self.registry, taskboard=self.taskboard)
+        try:
+            with activity_scope(activity):
+                runtime = {"execution_supervisor": self.execution_supervisor, "taskboard": self.taskboard,
+                           "execution_registry": self.registry,
+                           "tool_authorize": lambda name: self.repository_lanes.authorize_tool(child_id, name),
+                           **(runtime_budget or {})}
+                if child.task_kind == "verification":
+                    if not child.verification_commands:
+                        raise PermissionError("Verification requires model-selected commands; no default check was executed")
+                    verification = self._agent(AgentRole.VERIFIER, VerifierAgent).execute_verification(child_id, child.verification_commands)
+                    result = {"status": "completed" if verification.passed else "failed", "goal_satisfied": verification.passed,
+                              "tests_run": verification.commands_run, "tests_passed": verification.passed,
+                              "summary": verification.summary, "verification": {"execution_job_ids": verification.execution_job_ids}}
+                elif investigating:
+                    dispatcher = ToolExecutionDispatcher.for_coding_task(repo_root=root, task_id=child_id)
+                    dispatcher.charge_tool = runtime.get("charge_tool")
+                    from mana_agent.repository_evidence.observations import validate_selected_source
+                    def validate_source(source):
+                        if callable(runtime.get("charge_tool")):
+                            runtime["charge_tool"]()
+                        return validate_selected_source(dispatcher.runner, source, decision_id=decision_id)
+                    result = execute_investigation(taskboard=self.taskboard, task_id=child_id,
+                        coding_agent=self.coding_engine, decision_id=decision_id, runtime=runtime,
+                        validate_source=validate_source)
+                else:
+                    assignment = assignment_for(self.taskboard, child_id, backend=self.coding_engine.active_engine_mode, decision_id=decision_id)
+                    from mana_agent.repository_evidence.models import EvidenceQuery
+                    import json
+                    knowledge = self.taskboard.evidence_board(root=root, repository_id=child.primary_repository_id)
+                    context = knowledge.query(EvidenceQuery(evidence_ids=tuple(ref.evidence_id for ref in assignment.evidence))) if assignment.evidence else {"records": []}
+                    checkpoint_id = recovery.resume_checkpoint_id if recovery and recovery.action == RecoveryAction.RESUME_CHECKPOINT else ""
+                    checkpoint = self.execution_supervisor.store.get_checkpoint(checkpoint_id) if checkpoint_id else None
+                    resume = checkpoint.resume_payload.get("continuation", {}) if checkpoint else {}
+                    prompt = child.user_request + "\n\nAuthoritative coding assignment and current repository evidence:\n" + json.dumps({
+                        "assignment": assignment.model_dump(mode="json"), "evidence": context,
+                        "resume_checkpoint": checkpoint_id}, ensure_ascii=False)
+                    worker = self.coding_engine.for_assignment(root=root)
+                    try:
+                        result = worker.generate_auto_execute(prompt, gateway_task_id=child_id,
+                            execution_mode="read_only" if child.task_kind == "verification" else "auto",
+                            relevant_context=assignment.model_dump_json(), execution_runtime=runtime,
+                            coding_resume_context=resume,
+                            coding_continuation_id=checkpoint_id if resume else "")
+                        if child.task_kind == "verification" and not (result.get("tests_run") and result.get("tests_passed")):
+                            raise PermissionError("Verification task returned no executed passing check")
+                    finally:
+                        worker.close()
+                    if child.task_kind in {"implementation", "integration"} and not result.get("missing_evidence") and not result.get("changed_files"):
+                        raise PermissionError("Implementation returned no observed repository changes")
+                    result["goal_satisfied"] = result.get("status") in {"success", "completed"}
+                if result.get("missing_evidence"):
+                    from mana_agent.repository_evidence.models import MissingEvidenceRequest
+                    gaps = [MissingEvidenceRequest.model_validate(item) for item in result["missing_evidence"]]
+                    if any(gap.task_id != child_id for gap in gaps):
+                        raise ValueError("Missing evidence belongs to a different task")
+                    self.taskboard.update_task(child_id, missing_evidence=[g.model_dump(mode="json") for g in gaps])
+                    checkpoint_id = self.repository_lanes.checkpoint(child_id, boundary="missing_repository_evidence",
+                        resume_payload={"assignment": child.coding_assignment, "missing_evidence": result["missing_evidence"],
+                                        "continuation": result.get("continuation_context", {})})
+                    self.repository_lanes.transition(child_id, LaneTaskState.WAITING, reason="Waiting for repository evidence")
+                    self.repository_lanes.lock_manager.release_task(child_id)
+                    return {**result, "goal_satisfied": False, "verification_passed": False,
+                            "checkpoint_id": checkpoint_id}
+                if result.get("goal_satisfied") and child.task_kind in {"implementation", "integration"} and route.runtime_capability_change:
+                    plan = self._agent(AgentRole.PLANNER, PlannerAgent).plan(child_id, child.user_request,
+                        route.route_name, runtime_capability_change=True)
+                    self._run_feature_integration_taskboard_lifecycle(child_id, route, plan)
+                    updated = self.taskboard.get_task(child_id)
+                    if not (updated.integration_verified and updated.runtime_reachability_verified):
+                        result["goal_satisfied"] = False
+                        result["summary"] = "Production integration verification remains incomplete"
+                if not result.get("goal_satisfied"):
+                    self.repository_lanes.mark_blocked(child_id, reason="Task completion requirements remain unsatisfied")
+                    return {**result, "verification_passed": False}
+            finished = self.repository_lanes.finish(child_id, changed_files=result.get("changed_files", []), verification_state=result)
+            if finished.state != LaneTaskState.COMPLETED:
+                raise PermissionError("Task completion was not verified by the supervisor")
+            return {"answer": result.get("summary") or result.get("answer", ""), "goal_satisfied": False,
+                    "verification_passed": False, "changed_files": result.get("changed_files", [])}
+        except Exception as exc:
+            if self.repository_lanes.inspect_task(child_id).state == LaneTaskState.RUNNING:
+                self.repository_lanes.mark_blocked(child_id, reason=str(exc))
+            raise
 
     def _run_experience_workshop(self, task_id: str, summary: str, *, approved: bool):
         """Evaluate recorded completion facts without affecting task success."""

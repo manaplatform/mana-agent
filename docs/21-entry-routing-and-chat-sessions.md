@@ -1,6 +1,6 @@
 # Entry routing and chat sessions
 
-Every gateway turn begins with one structured model decision before a conversational model, coding agent, search service, or connector can run. The entry decision selects one registered route, including `conversation`, `coding`, connectors, search, repository, automation, `multi_task`, and the fail-closed error routes.
+Ordinary gateway turns begin with a structured model decision before a conversational model, coding agent, search service, or connector can run. The entry decision selects one registered route, including `conversation`, `coding`, connectors, search, repository, automation, `multi_task`, and the fail-closed error routes. Coding routes require a typed AUTO or DEBUG choice and observed user message IDs for the requested effect. Direct turns and compound children enter the same dispatcher. Explicit PLAN commands enter their approval workflow through the command dispatcher.
 
 The route registry is runtime data, not a keyword table. Each route publishes its description, tools, configuration state, authorization state, and any setup action. The model chooses the route from the request, prior route, conversation context, and this live registry snapshot. Invalid model output stops with an entry-decision error; it does not execute a default route or generate an integration refusal.
 

@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from stat import S_ISREG
 import threading
 import time
 from typing import Any
@@ -25,22 +26,31 @@ from types import MappingProxyType
 import uuid
 
 from mana_agent.chat.activity import safe_text
-from mana_agent.coding.models import AgentEvent, WorkspaceContext
+from mana_agent.coding.models import AgentEvent, ISOLATED_CHECK_TOOL, WorkspaceContext
 from mana_agent.multi_agent.core.types import AgentRole, AgentState
 from mana_agent.multi_agent.queue.locks import LockTable
 from mana_agent.multi_agent.tools.operation_policy import OperationPolicy, validate_arguments
 from mana_agent.multi_agent.tools.tool_request import ToolOperationRequest
 from mana_agent.multi_agent.tools.tool_result import FileMutationEvidence, ToolOperationResult
+from mana_agent.repository_evidence.tasks import is_shallow_investigation
 from mana_agent.services.activity_context import activity_scope, current_activity_context
 
 logger = logging.getLogger(__name__)
 _LOCKS = LockTable()
 _ACTIVE: ContextVar["RunningOperation | None"] = ContextVar("mana_running_operation", default=None)
 _SEAL = object()
+_MAX_MUTATION_HASH_BYTES = 100 * 1024 * 1024
 
 
 class ExecutionAuthorityError(PermissionError):
     pass
+
+
+_INVESTIGATION_READ_TOOLS = frozenset({
+    "read_file", "repo_read", "repo_batch_read", "batch_read_files", "ls",
+    "list_files", "repo_search", "find_symbols", "call_graph",
+})
+_EVIDENCE_CONTEXT_TOOLS = frozenset({"repository_evidence_query", "repository_evidence_get"})
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,8 @@ class ToolExecutionAuthority:
     cancel: Callable[[], bool] = field(default=lambda: False, repr=False)
     authorize: Callable[[str], Any] | None = field(default=None, repr=False)
     taskboard: Any = field(default=None, repr=False, compare=False)
+    record_taskboard_evidence: bool = True
+    coding_assignment: dict = field(default_factory=dict, repr=False, compare=False)
     registry: Any = field(default=None, repr=False, compare=False)
     externally_locked: bool = field(default=False, repr=False)
     scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -67,7 +79,8 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
                         policies: Mapping[str, OperationPolicy], schemas: Mapping[str, dict[str, Any]],
                         cancel: Callable[[], bool] = lambda: False,
                         authorize: Callable[[str], Any] | None = None, taskboard=None,
-                        worker_id: str = "", externally_locked: bool = False) -> ToolExecutionAuthority:
+                        worker_id: str = "", externally_locked: bool = False,
+                        record_taskboard_evidence: bool = True) -> ToolExecutionAuthority:
     """Host-only binding after lane admission, with exact registered identities."""
     node = registry.agents.get(actor_id)
     if node is None or node.state == AgentState.DONE or node.role in {AgentRole.MAIN, AgentRole.HEAD_DECISION, AgentRole.TOOL_WORKER}:
@@ -93,11 +106,16 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
         raise ExecutionAuthorityError("Specialist has no MainAgent supervision lineage")
     if taskboard is not None:
         assigned = taskboard.get_task(task_id)
-        if actor_id not in {assigned.owner_agent_id, *assigned.assigned_agent_ids, *assigned.assigned_subagent_ids}:
+        if actor_id not in {getattr(assigned, "owner_agent_id", None), *getattr(assigned, "assigned_agent_ids", []), *getattr(assigned, "assigned_subagent_ids", [])}:
             raise ExecutionAuthorityError("Specialist is not assigned to this TaskBoard task")
-        execution_root = assigned.execution_repo_root or assigned.managed_worktree_path
+        execution_root = getattr(assigned, "execution_repo_root", None) or getattr(assigned, "managed_worktree_path", None)
         if execution_root and Path(execution_root).resolve() != workspace.worktree_path.resolve():
             raise ExecutionAuthorityError("Workspace differs from the TaskBoard execution assignment")
+        if getattr(assigned, "task_kind", None) in {"investigation", "understanding"}:
+            reads = {"ls", "list_files"} if is_shallow_investigation(assigned) else _INVESTIGATION_READ_TOOLS
+            policies = {name: policy for name, policy in policies.items()
+                        if policy.effect == "read_only" and name in reads | _EVIDENCE_CONTEXT_TOOLS}
+            schemas = {name: schemas[name] for name in policies}
     worker = registry.agents.get(worker_id) if worker_id else next((candidate for candidate in registry.agents.values()
         if candidate.role == AgentRole.TOOL_WORKER and candidate.parent_agent_id == actor_id and candidate.state != AgentState.DONE), None)
     if worker_id and (worker is None or worker.role != AgentRole.TOOL_WORKER or worker.parent_agent_id != actor_id or worker.state == AgentState.DONE):
@@ -110,7 +128,8 @@ def bind_tool_authority(*, registry, actor_id: str, task_id: str, workspace: Wor
     return ToolExecutionAuthority(task_id=task_id, actor_id=actor_id, actor_role=node.role, worker_id=worker.agent_id,
         workspace=workspace, policies=MappingProxyType(dict(policies)), schemas=MappingProxyType(dict(schemas)),
         activity=context, cancel=cancel, authorize=authorize, taskboard=taskboard, registry=registry,
-        externally_locked=externally_locked, seal=_SEAL)
+        coding_assignment=dict(getattr(assigned, "coding_assignment", None) or {}) if taskboard is not None else {},
+        externally_locked=externally_locked, record_taskboard_evidence=record_taskboard_evidence, seal=_SEAL)
 
 
 def current_operation() -> "RunningOperation | None":
@@ -143,27 +162,40 @@ def _protected_text(authority: ToolExecutionAuthority) -> tuple[str, ...]:
 
 def model_result(result: ToolOperationResult, authority: ToolExecutionAuthority) -> dict[str, Any]:
     """Bound/redact model context; full execution evidence stays in scoped artifacts."""
+    from mana_agent.repository_evidence.observations import SOURCE_OUTPUT_BYTES
+
     remaining = 64_000
     truncated = False
-    def bounded(value, depth=0):
+    source_read = result.tool_name in {"read_file", "batch_read_files", "repo_batch_read", "investigate_repository"}
+    def bounded(value, depth=0, key=""):
         nonlocal remaining, truncated
         if depth > 12 or remaining <= 0:
             truncated = True
             return "[retained detail omitted from model context]"
         if isinstance(value, str):
-            length = min(len(value), remaining, 16_000)
+            limit = SOURCE_OUTPUT_BYTES if source_read and key == "content" else 16_000
+            length = min(len(value), remaining, limit)
             remaining -= length
             if length < len(value):
                 truncated = True
             return value[:length] + ("\n[open retained details for remaining content]" if length < len(value) else "")
         if isinstance(value, dict):
             truncated = truncated or len(value) > 100
-            return {key: bounded(item, depth + 1) for key, item in list(value.items())[:100]}
+            return {key: bounded(item, depth + 1, key) for key, item in list(value.items())[:100]}
         if isinstance(value, list):
             truncated = truncated or len(value) > 100
             return [bounded(item, depth + 1) for item in value[:100]]
         return value
-    public = bounded(_public_value(result.result, _protected_text(authority)))
+    payload = _public_value(result.result, _protected_text(authority))
+    if source_read:
+        # Keep the stamp, but don't duplicate the returned source in model context.
+        rows = payload.get("files", [payload])
+        if result.tool_name == "investigate_repository":
+            rows = [item.get("result", {}) for item in payload.get("observations", [])]
+        for row in rows:
+            if isinstance(row.get("source_evidence"), dict):
+                row["source_evidence"].pop("excerpt", None)
+    public = bounded(payload)
     if truncated:
         public["model_context_truncated"] = True
         public["retained_detail_identity"] = {"execution_id": result.execution_id,
@@ -201,6 +233,8 @@ class RunningOperation:
 
     def _details(self) -> dict[str, Any]:
         from mana_agent.utils.shell_argv import local_shell_argv
+        from mana_agent.coding.models import CodingActivity, ISOLATED_CHECK_TOOL
+        from mana_agent.coding.scheduler import classify_tool_operation, OperationKind
         import shlex
         args = self.request.arguments
         action = args.get("action") if isinstance(args.get("action"), dict) else {}
@@ -213,8 +247,21 @@ class RunningOperation:
             argv = local_shell_argv(str(command))
         cwd = (Path(self.request.workspace_root) / str(args.get("cwd") or ".")).resolve()
         path = args.get("path") or args.get("file_path") or ""
+        tool = self.request.tool_name
+        kind = classify_tool_operation(tool)
+        activity = (
+            CodingActivity.VERIFYING if tool in {ISOLATED_CHECK_TOOL, "verify_project"}
+            else CodingActivity.INVESTIGATING if tool in {"investigate_repository", "integrate_repository_evidence"}
+            else CodingActivity.REVIEWING if tool == "git_diff"
+            else CodingActivity.SEARCHING if "search" in tool or tool in {"find_symbols", "call_graph"}
+            else {
+                OperationKind.READ: CodingActivity.READING, OperationKind.WRITE: CodingActivity.EDITING,
+                OperationKind.EXECUTE: CodingActivity.EXECUTING,
+            }.get(kind)
+        )
         return _public_value({"command": str(command), "display_argv": argv or [], "cwd": str(cwd),
-            "path": str(path), "display_arguments": {key: value for key, value in args.items() if key in {
+            "path": str(path), "coding_activity": activity.value if activity else "",
+            "display_arguments": {key: value for key, value in args.items() if key in {
                 "path", "paths", "file_path", "query", "glob", "regex", "start_line", "end_line", "limit",
                 "command", "script", "cwd", "argv", "timeout", "timeout_ms", "revision", "staged"}}, "timeout_seconds": self.request.timeout_seconds,
             "provenance": "native_tool_runner", "streaming": True,
@@ -227,7 +274,10 @@ class RunningOperation:
             raise ExecutionAuthorityError("Execution owner or ToolRunner registration was revoked")
         if self.authority.cancel():
             raise InterruptedError("Execution cancelled by its owner")
-        if self.authority.taskboard is not None:
+        if self.authority.taskboard is not None and hasattr(self.authority.taskboard, "store"):
+            from mana_agent.repository_evidence.tasks import validate_assignment
+            validate_assignment(self.authority.taskboard, self.request.task_id,
+                                expected=self.authority.coding_assignment)
             assigned = self.authority.taskboard.get_task(self.request.task_id)
             if self.authority.actor_id not in {assigned.owner_agent_id, *assigned.assigned_agent_ids, *assigned.assigned_subagent_ids}:
                 raise ExecutionAuthorityError("Execution task assignment was revoked")
@@ -253,8 +303,10 @@ class RunningOperation:
             _ACTIVE.reset(token)
 
     def emit(self, event_type: str, *, status: str = "running", **details: Any) -> None:
-        from mana_agent.coding.live_events import publish_coding_event
+        from mana_agent.coding.live_events import current_coding_execution, publish_coding_event
         details = _public_value(details, self.protected)
+        coding = current_coding_execution() or {}
+        backend = str(coding.get("backend") or "internal") if coding.get("task_id") == self.request.task_id else "internal"
         with self.lock:
             self.sequence += 1
             metadata = {**self.public, **details, "parent_execution_id": self.request.parent_execution_id,
@@ -264,7 +316,7 @@ class RunningOperation:
                 "trace_complete": self.trace_complete, "retained_bytes": self.retained_bytes,
                 "omitted_bytes": self.omitted_bytes}
             event = AgentEvent(event_type=event_type, task_id=self.request.task_id,
-                backend="internal" if self.authority.actor_role == AgentRole.CODING else "tools",
+                backend=backend if self.authority.actor_role == AgentRole.CODING else "tools",
                 operation_id=self.request.operation_id, operation_attempt_id=self.request.operation_attempt_id,
                 agent_id=self.request.agent_id, parent_agent_id=self.request.requested_by_agent_id,
                 root_task_id=self.request.root_task_id, parent_task_id=self.request.parent_task_id,
@@ -277,7 +329,8 @@ class RunningOperation:
                 visibility="progress", semantic_kind="tool_execution", payload={**metadata, "status": status})
             if publish_coding_event(event) is False:
                 self.trace_complete = False
-            if self.authority.taskboard is not None and event_type in {"tool.completed", "tool.failed", "tool.interrupted", "tool.cancelled", "tool.waiting"}:
+            if (self.authority.taskboard is not None and self.authority.record_taskboard_evidence
+                    and event_type in {"tool.completed", "tool.failed", "tool.interrupted", "tool.cancelled", "tool.waiting"}):
                 try:
                     context = self.authority.activity
                     with context.publication() if context else nullcontext():
@@ -405,15 +458,38 @@ class ToolRunnerAgent:
         cwd = (a.workspace.worktree_path / str(request.arguments.get("cwd") or ".")).resolve()
         if not cwd.is_relative_to(a.workspace.worktree_path.resolve()):
             raise ExecutionAuthorityError("Tool cwd escapes its assigned workspace")
+        assigned_task = a.taskboard.get_task(request.task_id) if a.taskboard else None
+        investigation = assigned_task is not None and getattr(assigned_task, "task_kind", None) in {"investigation", "understanding"}
+        if investigation and not policy.repository and request.tool_name not in _EVIDENCE_CONTEXT_TOOLS:
+            raise ExecutionAuthorityError("Investigation cannot run unrelated tools or access external services")
         if policy.repository:
+            allowed_scope = (list(getattr(assigned_task, "investigation_scope", [])) if investigation else
+                list((getattr(assigned_task, "coding_assignment", {}) or {}).get("allowed_scope", []))
+                if assigned_task is not None and policy.effect != "read_only" else [])
+            if investigation and request.tool_name not in _INVESTIGATION_READ_TOOLS:
+                raise ExecutionAuthorityError("Investigation only permits registered repository read tools")
+            if investigation and is_shallow_investigation(assigned_task):
+                paths = request.arguments.get("paths") or []
+                if (request.tool_name not in {"ls", "list_files"} or request.arguments.get("repository_reason")
+                        or any(path != "." for path in paths)):
+                    raise ExecutionAuthorityError("The initial dot scope permits only shallow layout discovery")
+            if investigation and request.tool_name not in {"ls"} and not (request.arguments.get("paths") or request.arguments.get("path") or request.arguments.get("files")):
+                raise ExecutionAuthorityError("Investigation calls require explicit bounded paths")
             def validate_paths(value):
                 if isinstance(value, dict):
                     for key, item in value.items():
                         if key in {"path", "file_path", "repo_path", "repo_root", "execution_repo_root", "source", "destination", "src", "dst"} and isinstance(item, str) and item:
-                            target = (a.workspace.worktree_path / item).resolve()
+                            requested = a.workspace.worktree_path / item
+                            target = requested.resolve()
                             if not target.is_relative_to(a.workspace.worktree_path.resolve()):
                                 raise ExecutionAuthorityError("Tool target escapes its assigned workspace")
-                            if any(part.startswith(".env") or part in {".ssh", "secrets.toml", "id_rsa", "id_ed25519"} for part in target.relative_to(a.workspace.worktree_path.resolve()).parts):
+                            if allowed_scope and "." not in allowed_scope and not any(
+                                target == (a.workspace.worktree_path / scope).resolve() or target.is_relative_to((a.workspace.worktree_path / scope).resolve())
+                                for scope in allowed_scope):
+                                raise ExecutionAuthorityError("Repository target exceeds its assigned scope")
+                            if policy.effect == "mutation" and requested != target:
+                                raise ExecutionAuthorityError("Mutation targets cannot use symlinks or noncanonical paths")
+                            if any(part.startswith(".env") or part in {".git", ".mana", ".ssh", "secrets.toml", "credentials.json", "id_rsa", "id_ed25519"} for part in target.relative_to(a.workspace.worktree_path.resolve()).parts):
                                 raise ExecutionAuthorityError("Tool target is protected credential material")
                         elif key in {"paths", "files"} and isinstance(item, list):
                             for entry in item:
@@ -497,7 +573,17 @@ class ToolRunnerAgent:
         observe_mutations = policy.effect == "mutation" or (
             policy.effect == "command" and not _is_read_only_observation(request.tool_name, request.arguments)
         )
-        before = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
+        root = Path(request.workspace_root)
+        source_candidates = request.tool_name == ISOLATED_CHECK_TOOL and (root / ".git").exists()
+        before = _snapshot(root, request.arguments, self.capture_limit,
+                           source_candidates=source_candidates) if observe_mutations else FileSnapshot()
+        queue_store = None
+        operation_key = ""
+        if self.authority.taskboard is not None and hasattr(self.authority.taskboard, "store"):
+            from mana_agent.repository_evidence.tool_queue import ToolQueueStore
+            queue_store = ToolQueueStore(self.authority.taskboard.store.db)
+            with context.publication() if context else nullcontext():
+                operation_key = queue_store.begin_operation(request)
         operation.emit("tool.started")
         raw: dict[str, Any]
         try:
@@ -524,11 +610,16 @@ class ToolRunnerAgent:
             status = "interrupted" if getattr(exc, "outcome_unknown", False) else "timed_out" if isinstance(exc, subprocess.TimeoutExpired) else "failed"
             raw = {"ok": False, "error": safe_text(str(exc), protected=operation.protected), "error_code": type(exc).__name__,
                    "stdout": str(getattr(exc, "stdout", "") or ""), "stderr": str(getattr(exc, "stderr", "") or "")}
-        after = _snapshot(Path(request.workspace_root), request.arguments, request.tool_name, self.capture_limit) if observe_mutations else {}
+        after = _snapshot(root, request.arguments, self.capture_limit,
+                          source_candidates=source_candidates) if observe_mutations else FileSnapshot()
         mutations = _mutations(before, after, partial=status != "success")
-        if not getattr(before, "complete", True) or not getattr(after, "complete", True) or any(value is None for value in (*before.values(), *after.values())):
+        if not before.complete or not after.complete or any(
+            version is None or version.content is None for version in (*before.values(), *after.values())
+        ):
             operation.trace_complete = False
         for mutation in mutations:
+            if mutation.status == "unknown":
+                continue
             operation.retain("diff", mutation.diff)
             operation.emit("file.edit.applied", status="running",
                 mutation=mutation.model_dump(exclude={"diff"}), path=mutation.path,
@@ -554,18 +645,55 @@ class ToolRunnerAgent:
             mutations=mutations, retained_bytes=operation.retained_bytes, omitted_bytes=operation.omitted_bytes,
             trace_complete=operation.trace_complete)
         if action is not None and status != "waiting_approval":
+            action_state = ActionRequestState.FAILED
+            verification_state: dict[str, Any] = {"operation_attempt_id": request.operation_attempt_id, "status": status}
+            if status == "success":
+                action_state = ActionRequestState.SUCCEEDED
+            elif status in {"cancelled", "timed_out", "interrupted"} or mutations:
+                action_state = ActionRequestState.OUTCOME_UNKNOWN
+            elif (request.tool_name == ISOLATED_CHECK_TOOL and policy.effect == "command"
+                    and before.complete and after.complete and raw.get("passed") is False
+                    and raw.get("operation_id") == request.operation_id and raw.get("verification_progress_digest")):
+                exit_code = raw.get("exit_code")
+                if exit_code is None and raw.get("setup_receipts"):
+                    setup_exit_code = raw["setup_receipts"][-1].get("exit_code")
+                    if type(setup_exit_code) is int and setup_exit_code > 0:
+                        exit_code = setup_exit_code
+                if type(exit_code) is int and exit_code >= 0:
+                    # The check failed, but its recorded exit and unchanged source settle the action.
+                    action_state = ActionRequestState.RECONCILED
+                    verification_state.update(operation_id=request.operation_id, exit_code=exit_code)
             supervisor.update_action(action.action_id,
                 attempt_id=attempt_id, lease_token=lease_token,
-                request_state=ActionRequestState.SUCCEEDED if status == "success" else ActionRequestState.OUTCOME_UNKNOWN if status in {"cancelled", "timed_out", "interrupted"} or mutations else ActionRequestState.FAILED,
+                request_state=action_state,
                 result_reference=next((item["reference"] for item in operation.references.get("result", []) if item["reference"]), ""),
-                verification_state={"operation_attempt_id": request.operation_attempt_id, "status": status})
+                verification_state=verification_state)
+        activity_update = {"coding_activity": "debugging"} if status == "failed" and operation.public.get("coding_activity") == "verifying" else {}
         operation.emit("tool.completed" if status == "success" else "tool.waiting" if status == "waiting_approval" else "tool.cancelled" if status == "cancelled" else "tool.failed",
             status=status, exit_code=result.exit_code, termination_reason=result.termination_reason,
             result_summary=str(public_result.get("summary") or public_result.get("error") or status),
-            changed_files=[m.path for m in mutations], output_references=operation.references)
+            output_preview=public_result.get("output", "") if operation.public.get("coding_activity") == "verifying" else "",
+            changed_files=[m.path for m in mutations if m.status != "unknown"], output_references=operation.references, **activity_update)
         result.trace_complete = operation.trace_complete
         result.result["execution"] = result.model_dump(mode="json", exclude={"result", "mutations"})
         result.result["mutations"] = _public_value([m.model_dump() for m in mutations], operation.protected)
+        if queue_store is not None:
+            with context.publication() if context else nullcontext():
+                queue_store.finish_operation(operation_key, result)
+        if (self.authority.taskboard is not None and self.authority.record_taskboard_evidence
+                and context is not None and context.attempt_id
+                and (policy.repository or mutations or policy.effect == "command")):
+            import sqlite3
+            from mana_agent.repository_evidence.observations import ingest_operation
+            from mana_agent.repository_evidence.service import EvidenceConflict, StaleEvidenceSource
+            with context.publication():
+                try:
+                    ingest_operation(self.authority, result)
+                except (EvidenceConflict, StaleEvidenceSource, ValueError, sqlite3.Error):
+                    result.result["repository_evidence_warning"] = (
+                        "Evidence could not be saved. The executed tool result is available on this turn."
+                    )
+                    logger.warning("Could not record repository evidence for %s", request.operation_id)
         return result
 
 
@@ -593,11 +721,37 @@ def _is_read_only_observation(tool_name: str, arguments: dict[str, Any]) -> bool
     return isinstance(cmd, str) and "\n" not in cmd and "\r" not in cmd and is_plan_mode_read_only_command(cmd)
 
 
-class FileSnapshot(dict):
+@dataclass(frozen=True)
+class _FileVersion:
+    sha256: str
+    content: bytes | None
+
+
+class FileSnapshot(dict[str, _FileVersion | None]):
+    # Whether discovery covered the candidate paths. A None value means an
+    # individual path was seen but could not be fingerprinted.
     complete: bool = True
 
 
-def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int) -> dict[str, bytes | None]:
+def _file_version(path: Path, size: int, *, capture_content: bool) -> _FileVersion | None:
+    with path.open("rb") as stream:
+        if capture_content:
+            content = stream.read(size + 1)
+            return _FileVersion(hashlib.sha256(content).hexdigest(), content) if len(content) == size else None
+        digest = hashlib.sha256()
+        remaining = size
+        while remaining:
+            block = stream.read(min(remaining, 65_536))
+            if not block:
+                return None
+            digest.update(block)
+            remaining -= len(block)
+        if stream.read(1):
+            return None
+    return _FileVersion(digest.hexdigest(), None)
+
+
+def _snapshot(root: Path, arguments: dict[str, Any], limit: int, *, source_candidates: bool = False) -> FileSnapshot:
     """Bounded observation within the worker lock; never execute another tool."""
     import os
     paths: set[str] = set()
@@ -621,12 +775,19 @@ def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int)
                 for prefix in ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "):
                     if line.startswith(prefix):
                         paths.add(line[len(prefix):])
-    collect(arguments)
-    if not paths:
+    if source_candidates:
+        from mana_agent.tools.repository import checkout_file_candidates
+
+        candidates = checkout_file_candidates(root)
+        paths.update(candidates[:5000])
+        complete = len(candidates) <= 5000
+    else:
+        collect(arguments)
+    if not paths and not source_candidates:
         for directory, dirs, files in os.walk(root, followlinks=False):
             dirs[:] = [d for d in dirs if d not in {".git", ".mana", "node_modules", "venv", ".venv", "__pycache__"} and not (Path(directory) / d).is_symlink()]
             for name in files:
-                paths.add(str((Path(directory) / name).relative_to(root)))
+                paths.add((Path(directory) / name).relative_to(root).as_posix())
                 if len(paths) >= 5000:
                     complete = False
                     break
@@ -634,50 +795,66 @@ def _snapshot(root: Path, arguments: dict[str, Any], tool_name: str, limit: int)
                 break
     snapshot = FileSnapshot()
     snapshot.complete = complete
-    remaining = limit
+    content_remaining = limit
+    hash_remaining = _MAX_MUTATION_HASH_BYTES
     for path in sorted(paths):
         target = (root / path).resolve()
         if not target.is_relative_to(root) or any(p in {".git", ".mana"} or p.startswith(".env") for p in Path(path).parts):
             snapshot.complete = False
             continue
+        relative = target.relative_to(root).as_posix()
         try:
-            if target.is_file() and target.stat().st_size <= remaining:
-                body = target.read_bytes()
-                snapshot[str(target.relative_to(root))] = body
-                remaining -= len(body)
-            elif target.exists():
-                snapshot[str(target.relative_to(root))] = None
-                snapshot.complete = False
+            info = target.stat()
+        except FileNotFoundError:
+            continue
         except OSError:
-            snapshot[str(target.relative_to(root))] = None
+            snapshot[relative] = None
+            continue
+        size = info.st_size
+        if not S_ISREG(info.st_mode) or size > hash_remaining:
+            snapshot[relative] = None
+            continue
+        hash_remaining -= size
+        try:
+            version = _file_version(target, size, capture_content=size <= content_remaining)
+        except OSError:
+            version = None
+        snapshot[relative] = version
+        if version is not None and version.content is not None:
+            content_remaining -= size
     return snapshot
 
 
-def _mutations(before: dict[str, bytes | None], after: dict[str, bytes | None], *, partial: bool) -> list[FileMutationEvidence]:
+def _mutations(before: FileSnapshot, after: FileSnapshot, *, partial: bool) -> list[FileMutationEvidence]:
     result = []
     for path in sorted(before.keys() | after.keys()):
-        old, new = before.get(path, b""), after.get(path, b"")
-        if old == new and (path in before) == (path in after):
+        existed, exists = path in before, path in after
+        old, new = before.get(path), after.get(path)
+        old_digest, new_digest = old.sha256 if old else "", new.sha256 if new else ""
+        unknown = (old is None and (existed or not before.complete)
+                   or new is None and (exists or not after.complete))
+        if not unknown and old_digest == new_digest:
             continue
-        unknown = old is None or new is None or (path not in before and not getattr(before, "complete", True)) or (path not in after and not getattr(after, "complete", True))
-        binary = unknown or b"\0" in (old or b"") or b"\0" in (new or b"")
-        try:
-            (old or b"").decode("utf-8")
-            (new or b"").decode("utf-8")
-        except UnicodeDecodeError:
-            binary = True
-        old_lines = (old or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
-        new_lines = (new or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
-        diff = "" if binary else "".join(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}" if path in before else "/dev/null", tofile=f"b/{path}" if path in after else "/dev/null"))
-        result.append(FileMutationEvidence(path=path, operation="delete" if path not in after else "create" if path not in before else "edit",
-            before_sha256=hashlib.sha256(old).hexdigest() if old is not None and path in before else "",
-            after_sha256=hashlib.sha256(new).hexdigest() if new is not None and path in after else "",
+        old_body, new_body = old.content if old else b"", new.content if new else b""
+        binary, diff = True, ""
+        if not unknown and old_body is not None and new_body is not None and b"\0" not in old_body and b"\0" not in new_body:
+            try:
+                old_lines = old_body.decode("utf-8").splitlines(keepends=True)
+                new_lines = new_body.decode("utf-8").splitlines(keepends=True)
+            except UnicodeDecodeError:
+                pass
+            else:
+                binary = False
+                diff = "".join(difflib.unified_diff(old_lines, new_lines,
+                    fromfile=f"a/{path}" if existed else "/dev/null", tofile=f"b/{path}" if exists else "/dev/null"))
+        result.append(FileMutationEvidence(path=path, operation="delete" if not exists else "create" if not existed else "edit",
+            before_sha256=old_digest, after_sha256=new_digest,
             diff=diff, added_lines=sum(line.startswith("+") and not line.startswith("+++") for line in diff.splitlines()),
             removed_lines=sum(line.startswith("-") and not line.startswith("---") for line in diff.splitlines()),
             binary=binary, status="unknown" if unknown else "partial" if partial else "applied"))
-    deleted = [item for item in result if item.operation == "delete" and item.before_sha256]
+    deleted = [item for item in result if item.operation == "delete" and item.status != "unknown"]
     for created in list(result):
-        if created.operation != "create":
+        if created.operation != "create" or created.status == "unknown":
             continue
         match = next((item for item in deleted if item.before_sha256 == created.after_sha256), None)
         if match is not None:

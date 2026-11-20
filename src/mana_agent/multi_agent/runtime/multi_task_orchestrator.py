@@ -5,7 +5,9 @@ from __future__ import annotations
 import contextvars
 import json
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import Event
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -20,6 +22,30 @@ from mana_agent.utils.text import extract_model_text
 
 
 MAX_MULTI_TASK_CHILDREN = 12
+
+
+def _verified_completion(task) -> bool:
+    evidence = task.supervisor_verification_evidence
+    return (task.status == TaskStatus.DONE and task.supervisor_state == "completed"
+            and task.verification_status == "passed" and bool(evidence.get("result_id"))
+            and bool(evidence.get("verification")))
+
+
+@contextmanager
+def taskboard_wakeup(root_task_id):
+    """Wake the existing executor on relevant task/evidence events, coalescing updates."""
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+    wakeup = Event()
+    def changed(event):
+        if event.get("root_task_id") == root_task_id or event.get("task_id") == root_task_id:
+            kind = event.get("type") or event.get("event_type")
+            if kind in {"task.updated", "task.created", "task.cancelled"} or (event.get("metadata") or {}).get("evidence_id"):
+                wakeup.set()
+    unsubscribe = get_execution_event_hub().subscribe_all(changed)
+    try:
+        yield wakeup
+    finally:
+        unsubscribe()
 
 
 class MultiTaskError(RuntimeError):
@@ -38,6 +64,9 @@ class MultiTaskItem(_StrictModel):
     acceptance_criteria: list[str] = Field(min_length=1)
     preferred_parallelism: Literal["parallel", "sequential", "automatic"] = "automatic"
     reason: str = Field(min_length=1)
+    task_kind: Literal["general", "investigation", "understanding", "implementation", "integration", "verification"] = "general"
+    investigation_scope: list[str] = Field(default_factory=list)
+    evidence_requirements: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_item(self) -> "MultiTaskItem":
@@ -49,6 +78,13 @@ class MultiTaskItem(_StrictModel):
         self.acceptance_criteria = [item.strip() for item in self.acceptance_criteria if item.strip()]
         if not all((self.local_id, self.title, self.request, self.reason)) or not self.acceptance_criteria:
             raise ValueError("child fields and acceptance criteria must be meaningful")
+        from mana_agent.repository_evidence.models import EvidenceRequirement, relative_source
+        for path in self.investigation_scope:
+            relative_source(path)
+        for requirement in self.evidence_requirements:
+            EvidenceRequirement.model_validate(requirement)
+        if self.task_kind in {"investigation", "understanding"} and (not self.investigation_scope or not self.evidence_requirements):
+            raise ValueError("Investigation and understanding tasks need bounded scope and evidence requirements")
         if len(set(self.depends_on)) != len(self.depends_on):
             raise ValueError(f"task {self.local_id!r} contains duplicate dependencies")
         if self.local_id in self.depends_on:
@@ -111,7 +147,9 @@ be independently entry-routed and capability-checked after this decision; do not
 tools here. Documentation inspection, integration persistence, and execution against that same API
 form one atomic child rather than independently completable children. A child is complete only when
 its acceptance criteria are met; a prose explanation that an intended action was not executed is a
-blocker, not completion. This is decomposition only, never execution or a prose answer.
+blocker, not completion. Use investigation and understanding task kinds only for distinct read-only
+deliverables the user requested. Coding owns its own scoped reads and searches, including reads needed for wiring.
+This is decomposition only, never execution or a prose answer.
 """
 
 
@@ -195,14 +233,16 @@ class MultiTaskOrchestrator:
                 decomposition_local_id=item.local_id,
                 preferred_parallelism=item.preferred_parallelism,
             )
+            self.taskboard.update_task(child.task_id, task_kind=item.task_kind,
+                investigation_scope=item.investigation_scope, evidence_requirements=item.evidence_requirements)
             mapping[item.local_id] = child.task_id
         for item in plan.tasks:
             child = self.taskboard.get_task(mapping[item.local_id])
             child.depends_on = [mapping[dependency] for dependency in item.depends_on]
         root.acceptance_criteria = list(plan.final_acceptance_criteria)
         root.plan = [plan.reason]
-        root.decomposition_id_map = mapping
-        root.child_task_ids = [mapping[item.local_id] for item in plan.tasks]
+        root.decomposition_id_map.update(mapping)
+        root.child_task_ids = list(dict.fromkeys([*root.child_task_ids, *mapping.values()]))
         self.taskboard.save()
         record_current(
             "multi_task.children_persisted",
@@ -236,6 +276,8 @@ class MultiTaskOrchestrator:
             status = persisted_statuses.get(task.status)
             if status is None:
                 continue
+            if status == "completed" and not _verified_completion(task):
+                status = "blocked"
             results[local_id] = MultiTaskChildResult(
                 local_id=local_id,
                 task_id=task.task_id,
@@ -251,8 +293,34 @@ class MultiTaskOrchestrator:
             )
             pending.remove(local_id)
 
-        with ThreadPoolExecutor(max_workers=self.maximum_concurrency, thread_name_prefix="mana-multi-task") as pool:
+        with taskboard_wakeup(root_task_id) as wakeup, ThreadPoolExecutor(max_workers=self.maximum_concurrency, thread_name_prefix="mana-multi-task") as pool:
             while pending or running:
+                wakeup.clear()
+                self.taskboard.refresh()
+                current_tasks = self.taskboard.list_tasks(root_task_id=root_task_id)
+                reverse = {task_id: local_id for local_id, task_id in mapping.items()}
+                for task in current_tasks:
+                    if task.task_id == root_task_id or task.parent_task_id != root_task_id:
+                        continue
+                    local_id = reverse.get(task.task_id) or task.decomposition_local_id or task.task_id
+                    if local_id not in by_id:
+                        mapping[local_id] = task.task_id
+                        reverse[task.task_id] = local_id
+                        by_id[local_id] = MultiTaskItem(local_id=local_id, title=task.title, request=task.user_request,
+                            acceptance_criteria=task.acceptance_criteria, reason="Model-directed TaskBoard update")
+                        pending.add(local_id)
+                for local_id in list(pending):
+                    task = self.taskboard.get_task(mapping[local_id])
+                    unknown = [dep for dep in task.depends_on if dep not in reverse]
+                    if unknown:
+                        raise MultiTaskError("A dynamic task dependency is outside this admitted task graph")
+                    by_id[local_id].depends_on = [reverse[dep] for dep in task.depends_on]
+                    if task.status == TaskStatus.DONE:
+                        verified = _verified_completion(task)
+                        results[local_id] = MultiTaskChildResult(local_id, task.task_id, task.title, task.entry_route,
+                            "completed" if verified else "blocked", result=task.result_summary,
+                            blocker="" if verified else "Saved task lacks durable supervisor verification")
+                        pending.remove(local_id)
                 if is_cancelled and is_cancelled():
                     for local_id in sorted(pending):
                         task_id = mapping[local_id]
@@ -314,15 +382,23 @@ class MultiTaskOrchestrator:
                         item,
                         mapping[local_id],
                     )
+                    future.add_done_callback(lambda _: wakeup.set())
                     running[future] = local_id
                     pending.remove(local_id)
                     made_progress = True
                 if running:
-                    done, _ = wait(tuple(running), return_when=FIRST_COMPLETED)
+                    if not any(future.done() for future in running):
+                        wakeup.wait(timeout=30)
+                    done = {future for future in running if future.done()}
                     for future in done:
                         local_id = running.pop(future)
                         try:
-                            results[local_id] = future.result()
+                            result = future.result()
+                            task = self.taskboard.get_task(mapping[local_id])
+                            if result.status == "completed" and not _verified_completion(task):
+                                result.status = "blocked"
+                                result.blocker = "Worker completion lacks TaskBoard and supervisor verification"
+                            results[local_id] = result
                         except Exception as exc:
                             task_id = mapping[local_id]
                             task = self.taskboard.get_task(task_id)
@@ -355,9 +431,9 @@ class MultiTaskOrchestrator:
                 complete = sum(result.status in {"completed", "skipped"} for result in results.values())
                 self.taskboard.update_orchestration(
                     root_task_id,
-                    aggregate_progress=f"{complete}/{len(plan.tasks)} completed",
+                    aggregate_progress=f"{complete}/{len(by_id)} completed",
                 )
-        return [results[item.local_id] for item in plan.tasks]
+        return [results[local_id] for local_id in by_id if local_id in results]
 
 
 __all__ = [

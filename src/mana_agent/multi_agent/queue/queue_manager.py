@@ -36,7 +36,9 @@ class QueueManager:
         self.tools_manager.execution_registry = self.hierarchy_policy.registry
         self.tools_manager.execution_taskboard = self.taskboard
         self.default_worker_agent_id = default_worker_agent_id
-        self.jobs: dict[str, QueueJob] = {}
+        from mana_agent.repository_evidence.tool_queue import ToolQueueStore
+        self.job_store = ToolQueueStore(self.taskboard.store.db)
+        self.jobs: dict[str, QueueJob] = self.job_store.jobs()
         self.locks = LockTable()
 
     def _worker_for(self, actor_id: str) -> str:
@@ -132,7 +134,6 @@ class QueueManager:
         # Prebuilt requests pass the same checks even when they already contain a fingerprint.
         self.hierarchy_policy.assert_can_create_queue_job(job.requested_by_agent_id, task_id=job.task_id)
         self.hierarchy_policy.assert_can_assign_worker(job.requested_by_agent_id, job.assigned_worker_agent_id, task_id=job.task_id)
-        self._reserve_budget(job)
         if self.memory_service is not None:
             accepted, existing_id = self.memory_service.register_queue_item(
                 queue_item_id=job.job_id,
@@ -143,40 +144,46 @@ class QueueManager:
                 job.duplicate_of = existing_id
                 job.result_summary = f"skipped duplicate_of:{existing_id}"
                 self.jobs[job.job_id] = job
+                self.job_store.save(job)
                 self.taskboard.add_queue_job(job.task_id, job.job_id)
                 self.taskboard.add_evidence(job.task_id, f"Queue job {job.job_id} skipped as duplicate_of:{existing_id}")
                 self._bump_memory_status(job.task_id, duplicate_of=existing_id)
                 return job
-        self.jobs[job.job_id] = job
-        self.taskboard.add_queue_job(job.task_id, job.job_id)
-        if job.job_type in {QueueJobType.SHELL, QueueJobType.RUN_TESTS, QueueJobType.RUN_LINT}:
-            self.taskboard.add_verification_queue_job(job.task_id, job.job_id)
-        self.taskboard.add_evidence(job.task_id, f"Queue job {job.job_id} queued for {job.job_type.value}: {job.purpose}")
+        with self.taskboard.transaction():
+            self.job_store.save(job)
+            self._reserve_budget(job)
+            self.jobs[job.job_id] = job
+            self.taskboard.add_queue_job(job.task_id, job.job_id)
+            if job.job_type in {QueueJobType.SHELL, QueueJobType.RUN_TESTS, QueueJobType.RUN_LINT}:
+                self.taskboard.add_verification_queue_job(job.task_id, job.job_id)
+            self.taskboard.add_evidence(job.task_id, f"Queue job {job.job_id} queued for {job.job_type.value}: {job.purpose}")
         return job
 
     def claim_next(self, agent_id: str) -> QueueJob | None:
-        job = next_job(list(self.jobs.values()))
+        self.jobs = self.job_store.jobs()
+        job = next_job(list(self.jobs.values()), worker_id=agent_id)
         if job is None:
             return None
-        job.status = QueueJobStatus.CLAIMED
-        job.updated_at = utc_now()
-        job.assigned_worker_agent_id = job.assigned_worker_agent_id or agent_id
-        job.agent_id = agent_id
-        if agent_id.startswith("subagent_"):
-            job.subagent_id = agent_id
-        elif not job.subagent_id and str(job.assigned_worker_agent_id or "").startswith("subagent_"):
-            job.subagent_id = job.assigned_worker_agent_id
-        job.payload = {**job.payload, "claimed_by_agent_id": agent_id}
-        return job
+        # Dependency lookup must include jobs belonging to other workers.
+        if any(dep not in self.jobs or self.jobs[dep].status != QueueJobStatus.DONE for dep in job.depends_on):
+            return None
+        claimed = self.job_store.claim(job.job_id, agent_id)
+        if claimed is not None:
+            claimed.agent_id = agent_id
+            claimed.updated_at = utc_now()
+            self.jobs[claimed.job_id] = claimed
+        return claimed
 
-    def run_next(self, worker_agent_id: str | None = None) -> QueueJob | None:
-        pending = next_job(list(self.jobs.values()))
+    def run_next(self, worker_agent_id: str | None = None, *, job_id: str | None = None) -> QueueJob | None:
+        self.jobs = self.job_store.jobs()
+        pending = self.jobs.get(job_id) if job_id is not None else next_job(list(self.jobs.values()), worker_id=worker_agent_id)
         if pending is None:
             return None
         worker_id = worker_agent_id or pending.assigned_worker_agent_id
-        job = self.claim_next(worker_id)
+        job = self.job_store.claim(job_id, worker_id) if job_id is not None else self.claim_next(worker_id)
         if job is None:
             return None
+        self.jobs[job.job_id] = job
         task = self.taskboard.get_task(job.task_id)
         expected_root = Path(task.execution_repo_root or task.managed_worktree_path or self.root).resolve()
         if self.tools_manager.execution_root_for_job(job) != expected_root:
@@ -202,6 +209,7 @@ class QueueManager:
             job.status = QueueJobStatus.RUNNING
             job.started_at = utc_now()
             job.updated_at = utc_now()
+            self.job_store.save(job)
             self._record_tool_event(job, event_type="tool.started", worker_agent_id=worker_id)
             result = self.tools_manager.execute_job(job)
             job.result = result.result
@@ -238,6 +246,7 @@ class QueueManager:
                 self.taskboard.add_files_touched(job.task_id, [str(item) for item in changed])
         if self.memory_service is not None:
             self.memory_service.update_task(job.task_id, status=job.status.value, result_summary=job.result_summary or "")
+        self.job_store.save(job)
         return job
 
     def run_until_idle(self, max_jobs: int | None = None, *, worker_agent_id: str | None = None) -> list[QueueJob]:
@@ -259,6 +268,7 @@ class QueueManager:
             job.result_summary = reason
             job.ended_at = job.ended_at or utc_now()
             job.updated_at = utc_now()
+            self.job_store.save(job)
 
     def cancel_task_jobs(self, task_id: str, *, reason: str = "cancelled") -> list[str]:
         cancelled_ids: list[str] = []
@@ -272,6 +282,7 @@ class QueueManager:
                 job.result_summary = reason
                 job.ended_at = job.ended_at or utc_now()
                 job.updated_at = utc_now()
+                self.job_store.save(job)
                 cancelled_ids.append(job.job_id)
         return cancelled_ids
 

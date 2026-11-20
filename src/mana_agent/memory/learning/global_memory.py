@@ -73,11 +73,12 @@ class GlobalMemory:
             clean_action = redact_secrets(attempted_action).strip()
             clean_error = redact_secrets(error).strip()
             clean_context = redact_secrets(context).strip()
+            cat = category if isinstance(category, LearningCategory) else LearningCategory(str(category).upper())
 
             analysis = self.engine.analyze_mistake(
                 attempted_action=clean_action,
                 error=clean_error,
-                category=category,
+                category=cat,
                 context=clean_context,
                 metadata=metadata,
             )
@@ -86,7 +87,6 @@ class GlobalMemory:
                 logger.debug("Skipping non-meaningful or transient error: %s", analysis.get("reason"))
                 return None
 
-            cat = category if isinstance(category, LearningCategory) else LearningCategory(str(category).upper())
             scp = scope if isinstance(scope, LearningScope) else LearningScope(str(scope).upper())
             proj_id = project_id or self.default_project_id
             env_fp = environment_fingerprint or self.default_environment_fingerprint

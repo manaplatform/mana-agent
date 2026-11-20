@@ -26,6 +26,9 @@ class CreateTaskParams(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list)
     plan: list[str] = Field(default_factory=list)
     owner_agent_id: str | None = None
+    task_kind: str = "general"
+    evidence_requirements: list[dict[str, Any]] = Field(default_factory=list)
+    investigation_scope: list[str] = Field(default_factory=list)
 
 
 class UpdateTaskParams(BaseModel):
@@ -39,6 +42,12 @@ class UpdateTaskParams(BaseModel):
     acceptance_criteria: list[str] | None = None
     blockers: list[str] | None = None
     crossed_off: bool | None = None
+    task_kind: str | None = None
+    evidence_requirements: list[dict[str, Any]] | None = None
+    evidence_refs: list[dict[str, Any]] | None = None
+    investigation_scope: list[str] | None = None
+    depends_on: list[str] | None = None
+    expected_version: int | None = None
 
 
 class DeleteTaskParams(BaseModel):
@@ -85,6 +94,9 @@ class TaskBoardOperationsHandler:
             plan=p.plan,
             owner_agent_id=p.owner_agent_id,
         )
+        self.taskboard.update_task(task.task_id, task_kind=p.task_kind,
+                                   evidence_requirements=p.evidence_requirements,
+                                   investigation_scope=p.investigation_scope)
         return {
             "status": "created",
             "task_id": task.task_id,
@@ -129,6 +141,9 @@ class TaskBoardOperationsHandler:
             acceptance_criteria=p.acceptance_criteria,
             blockers=p.blockers,
             crossed_off=p.crossed_off,
+            task_kind=p.task_kind, evidence_requirements=p.evidence_requirements,
+            evidence_refs=p.evidence_refs, investigation_scope=p.investigation_scope,
+            depends_on=p.depends_on, expected_version=p.expected_version,
         )
         return {
             "status": "updated",

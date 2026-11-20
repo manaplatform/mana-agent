@@ -54,13 +54,16 @@ class ActivityContext:
         from mana_agent.execution_supervisor.models import ExecutionState
         with self.supervisor.store.locked():
             task = self.supervisor.get_task(self.task_id)
+            if self.attempt_id and (task.attempt_id != self.attempt_id
+                    or self.attempt_generation and task.attempt_generation != self.attempt_generation):
+                raise StaleLeaseError("activity belongs to a retired execution attempt")
             attempt_id = self.attempt_id
             lease_token = self.lease_token
             coordinator = getattr(self, "coordinator", None)
             if coordinator is not None and hasattr(coordinator, "inspect_task"):
                 try:
                     lane_exec = coordinator.inspect_task(self.task_id)
-                    if lane_exec and lane_exec.supervisor_attempt_id and lane_exec.supervisor_lease_token:
+                    if lane_exec and lane_exec.supervisor_attempt_id == task.attempt_id and lane_exec.supervisor_lease_token:
                         attempt_id = lane_exec.supervisor_attempt_id
                         lease_token = lane_exec.supervisor_lease_token
                 except Exception:
@@ -123,6 +126,14 @@ def observed_activity(title: str):
     return decorate
 
 
+def activity_protected_text(settings: Any) -> tuple[str, ...]:
+    values = (str(getattr(settings, name, "") or "") for name in (
+        "openai_api_key", "openrouter_api_key", "nvidia_api_key", "anthropic_api_key",
+        "xai_api_key", "mana_github_token", "mana_api_token",
+    ))
+    return tuple(value for value in values if len(value) >= 8)
+
+
 def activity_turn(method):
     """Bind the admitted gateway turn, including pre-task routing observations."""
     @wraps(method)
@@ -133,10 +144,8 @@ def activity_turn(method):
         state = gateway._session(session_id)
         state["activity_execution_id"] = turn_id
         settings = getattr(gateway, "settings", None)
-        protected = tuple(str(getattr(settings, name, "") or "") for name in (
-            "openai_api_key", "openrouter_api_key", "nvidia_api_key", "anthropic_api_key", "xai_api_key", "mana_github_token", "mana_api_token"
-        ) if len(str(getattr(settings, name, "") or "")) >= 8)
-        context = ActivityContext(conversation_id=session_id, execution_id=turn_id, protected_text=protected,
+        context = ActivityContext(conversation_id=session_id, execution_id=turn_id,
+                                  protected_text=activity_protected_text(settings),
                                   repository_id=repository_id_for_path(gateway.root),
                                   execution_mode=str(state.get("execution_mode") or ""))
         with activity_scope(context):

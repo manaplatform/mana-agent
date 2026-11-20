@@ -1,6 +1,6 @@
 # Mana-Agent
 
-Repository execution uses MainAgent → CodingAgent → deterministic ToolRunner.
+Repository execution uses MainAgent → CodingAgent → deterministic ToolRunner. Repository knowledge is shared through the persistent [Repository Evidence Board](docs/regressions/repository-evidence-orchestration.md); investigation and understanding are TaskBoard tasks that use the selected coding engine.
 Coding Activity exposes commands, working directories, live output, observed
 diffs, and retained operation details. External Codex keeps its own tool loop
 with explicit backend provenance. See the [execution and verification contract](docs/regressions/hierarchical-tool-execution.md).
@@ -218,7 +218,7 @@ See [activity architecture, limitations, regression rules, and user verification
 
 Use `/plan` to review a repository change before approving its exact revision. In
 ordinary chat, describe the failure to start an evidence-based investigation.
-See [Plan, Act, and Debug](docs/plan-and-act-modes.md) for the terminal workflow.
+See [AUTO, DEBUG, and PLAN](docs/plan-and-act-modes.md) for ordinary coding and exact revision approval.
 
 ## License
 

@@ -243,6 +243,13 @@ class TaskBoardItem:
     evidence: list[str] = field(default_factory=list)
     coding_research_state: dict[str, Any] = field(default_factory=dict)
     mode_workflow: dict[str, Any] = field(default_factory=dict)
+    row_version: int = 0
+    task_kind: str = "general"
+    evidence_requirements: list[dict[str, Any]] = field(default_factory=list)
+    evidence_refs: list[dict[str, Any]] = field(default_factory=list)
+    investigation_scope: list[str] = field(default_factory=list)
+    coding_assignment: dict[str, Any] = field(default_factory=dict)
+    missing_evidence: list[dict[str, Any]] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     # Explicit implementation-to-runtime contract. Empty values preserve
@@ -345,6 +352,7 @@ class QueueJob:
     depends_on: list[str] = field(default_factory=list)
     result_summary: str | None = None
     status: QueueJobStatus = QueueJobStatus.QUEUED
+    row_version: int = 0
     priority: int = 100
     lock_key: str | None = None
     requires_write_lock: bool = False
@@ -632,6 +640,7 @@ class RouteDecision:
     risk_level: RiskLevel
     reason_summary: str
     runtime_capability_change: bool = True
+    requested_effect: str = "none"
 
 
 @dataclass

@@ -7,6 +7,7 @@ from mana_agent.batch.policy import PendingBatchOperation, TaskExecutionPolicy
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+from enum import Enum
 from typing import Any, Literal
 import uuid
 
@@ -21,6 +22,20 @@ def _utc_now() -> datetime:
 _SECRET_KEY = re.compile(r"(?:api[_-]?key|authorization|password|secret|token|credential)", re.I)
 _BEARER = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 _OUTPUT_LIMIT = 8_000
+
+ISOLATED_CHECK_TOOL = "verify_coding_change"
+CODING_RESULT_TOOL = "submit_coding_result"
+
+
+class CodingActivity(str, Enum):
+    INVESTIGATING = "investigating"
+    READING = "reading"
+    SEARCHING = "searching"
+    EDITING = "editing"
+    EXECUTING = "executing"
+    DEBUGGING = "debugging"
+    VERIFYING = "verifying"
+    REVIEWING = "reviewing"
 
 
 def redact_event_value(value: Any, *, key: str = "") -> Any:
@@ -187,6 +202,10 @@ class CodingTaskResult(BaseModel):
     debugging_report: CodingDebuggingReport | None = None
     continuation_context: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
+    adaptive_result: dict[str, Any] | None = None
+    investigation_result: dict[str, Any] | None = None
+    missing_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    patch_proposal: str = Field(default="", exclude=True, repr=False)
     changed_files: list[str] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
     tests_run: list[str] = Field(default_factory=list)

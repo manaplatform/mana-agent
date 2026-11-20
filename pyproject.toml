@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mana-agent"
-version = "0.13.2"
+version = "0.14.0"
 description = "Autonomous multi-agent AI software engineering platform for repository understanding, planning, coding, debugging, testing, and verified task execution."
 readme = "README.md"
 requires-python = ">=3.10,<=3.15.2"  # Existing bound retained; compatibility acceptance is user-owned.
@@ -69,7 +69,7 @@ teach-desktop = [
   "pyobjc-framework-ApplicationServices>=10,<13; sys_platform == 'darwin'",
 ]
 mem0 = ["mem0ai>=2.0,<3.0", "keyring>=24.0,<26.0"]
-supermemory = ["supermemory>=3.56,<4.0", "keyring>=24.0,<26.0"]
+supermemory = ["supermemory>=5.0.1,<6", "keyring>=24.0,<26.0"]
 acp = ["agent-client-protocol>=1.0.0,<2.0.0"]
 a2a = ["a2a-sdk[http-server]>=1.1,<2.0"]
 protocols = [
@@ -122,7 +122,7 @@ full = [
   "google-auth-oauthlib>=1.2,<2.0",
   "keyring>=24.0,<26.0",
   "mem0ai>=2.0,<3.0",
-  "supermemory>=3.56,<4.0",
+  "supermemory>=5.0.1,<6",
   "agent-client-protocol>=1.0.0,<2.0.0",
   "a2a-sdk[http-server]>=1.1,<2.0",
   "sounddevice>=0.5,<1.0",

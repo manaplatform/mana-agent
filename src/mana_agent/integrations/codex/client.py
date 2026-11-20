@@ -155,7 +155,7 @@ class AsyncCodexAppServer:
                         "title": "Mana-Agent",
                         "version": get_version(),
                     },
-                    "capabilities": {},
+                    "capabilities": {"experimentalApi": True},
                 },
             )
         except CodexUnavailableError as exc:
@@ -318,6 +318,11 @@ class AsyncCodexAppServer:
                 "error": {"code": -32001, "message": "Mana-Agent denied the permission request"},
             }
         )
+
+    async def respond_to_dynamic_tool(self, request_id: Any, *, success: bool, text: str) -> None:
+        await self._write({"jsonrpc": "2.0", "id": request_id, "result": {
+            "success": success, "contentItems": [{"type": "inputText", "text": text}],
+        }})
 
     async def close(self, *, wait_timeout: float = 1.0) -> None:
         process = self._process

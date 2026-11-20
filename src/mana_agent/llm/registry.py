@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from mana_agent.llm.capabilities import CapabilityFact, CapabilityState, ModelProfile, metadata_facts, observation
@@ -11,12 +12,17 @@ from mana_agent.llm.capabilities import CapabilityFact, CapabilityState, ModelPr
 _PRIORITY = {"unknown": 0, "models.dev": 1, "provider": 2, "probe": 3, "override": 4}
 
 
+def _observed_at(fact: CapabilityFact) -> datetime:
+    stamp = fact.observed_at or datetime.min
+    return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+
+
 def _winner(observations: list[CapabilityFact], scope: str) -> CapabilityFact:
     candidates = {}
     for fact in observations:
         if fact.scope not in {"", scope}:
             continue
-        stamp = fact.observed_at.isoformat() if fact.observed_at else ""
+        stamp = _observed_at(fact)
         prior = candidates.get(fact.source)
         if prior is None or stamp >= prior[0]:
             candidates[fact.source] = (stamp, fact)
@@ -104,9 +110,14 @@ class ModelCapabilityRegistry:
                 if name in {"context_window", "max_output_tokens", "max_input_tokens"} and fact.state is CapabilityState.SUPPORTED and (type(fact.value) is not int or fact.value <= 0):
                     raise ValueError(f"{name} evidence must contain a positive integer")
                 observations = current.observations.setdefault(name, [])
-                observations[:] = [old for old in observations if not (old.source == fact.source and old.scope == fact.scope
-                    and old.state == fact.state and old.value == fact.value)]
-                observations.append(fact)
+                newest = fact
+                distinct = []
+                for old in observations:
+                    if (old.source, old.scope, old.state, old.value) != (fact.source, fact.scope, fact.state, fact.value):
+                        distinct.append(old)
+                    elif _observed_at(old) > _observed_at(newest):
+                        newest = old
+                observations[:] = [*distinct, newest]
                 if len(observations) > 48:
                     del observations[:-48]
                 current.facts[name] = _winner(observations, current.configuration_fingerprint)
@@ -157,7 +168,7 @@ GLOBAL_CAPABILITY_REGISTRY = ModelCapabilityRegistry()
 def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_version: str = "", transport: str = "",
                     configuration: dict[str, Any] | None = None, credential_revision: str = "",
                     catalog_records: Any = None) -> ModelProfile:
-    from mana_agent.config.provider_registry import PROVIDERS, model_id_for_provider
+    from mana_agent.config.provider_registry import PROVIDERS, inference_protocol_for_model, model_id_for_provider
     from mana_agent.config.user_config import get_setting, load_model_cache
     try:
         definition = PROVIDERS.get(provider)
@@ -172,7 +183,7 @@ def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_versio
     credential_revision = credential_revision or hashlib.sha256(connection.api_key.encode()).hexdigest()
     api_version = api_version or connection.headers.get("anthropic-version", "") or connection.query_params.get("api-version", "")
     mode = str(get_setting("MANA_LLM_API_MODE", "auto") or "auto")
-    transport = transport or (definition.inference_protocol if mode == "auto" or definition.inference_protocol == "anthropic_messages" else mode)
+    transport = transport or inference_protocol_for_model(provider, model, mode=mode)
     if configuration is None:
         effort = get_setting("MANA_LLM_REASONING_EFFORT", "")
         configuration = {"reasoning_effort": effort} if effort else {}

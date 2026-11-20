@@ -61,8 +61,10 @@ JSONL events are stored under:
 
 Temporary files are flushed and atomically replaced. A cross-process lock
 guards compare-and-set updates and lease acquisition on Windows, macOS, and
-Linux. Execution logs rotate to one bounded previous segment. Secret-shaped
-fields and payload values are redacted before persistence.
+Linux. Task record reads retry brief permission denials during replacement
+with bounded backoff. Recovery scans still stop on persistent read errors or
+invalid task records. Execution logs rotate to one bounded previous segment.
+Secret-shaped fields and payload values are redacted before persistence.
 
 A worker must present the current task ID, attempt ID, and unguessable lease
 token to start, heartbeat, checkpoint, or publish a result. Heartbeats extend a
@@ -233,6 +235,44 @@ Logs, checkpoints, partial artifacts, and escrow are retained. A task that has
 entered an explicitly marked irreversible side-effect phase remains active with
 `blocked_by_side_effect`; the supervisor does not pretend that cancellation
 reversed the external action.
+
+### Realtime coding deadline during checkpointing
+
+In the November 20 run (`task_20261120_000016` and coding child
+`task_20261120_000017`), the child reached the configured 30-minute deadline
+while saving native continuation state. It had already saved 36 checkpoints.
+The supervisor correctly fenced the write, but the gateway rendered the
+backend's error list and marked both tasks as waiting. The resulting status
+could suggest resuming an already expired task.
+
+Each checkpoint collects unacknowledged child results, and its lifecycle events
+can check for existing terminal escrow before advertising resume eligibility.
+For a live task with no indexed result, both lookups decoded historical escrow
+files on every scan. The local store now reuses the identity of each validated,
+unchanged result file. Matching payloads and acknowledgments are read from disk.
+New, replaced, or changed files are checked again. Legacy results without an
+execution index still participate in lookup, and corrupt or incompatible
+escrow still raises its existing error. No stored records need migration.
+
+If an attempt reaches its deadline, the lane reports `timed_out` and the
+supervisor records the failure. The workflow reports `DEADLINE_EXPIRED`,
+retains saved checkpoints and tool outcomes, and directs the operator to review
+partial work before submitting a fresh task. Completion at the deadline uses
+the same timeout classification. Explicit approval and clarification waits
+continue through the durable inbox path.
+
+**Do not reintroduce** repeated decoding of unchanged, unrelated escrow on
+checkpoint lookups or an ordinary waiting state for a deadline-expired attempt.
+Keep deadline and lease checks on tools, checkpoints, and result publication.
+
+User verification covers the active coding path, result publication at the
+deadline, historical lookup, and existing recovery contracts. The agent did
+not run these tests or replay the live task.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py tests/gateway/test_lane_coordinator.py tests/execution_supervisor/test_result_escrow_recovery.py -k 'adaptive_coding_deadline or adaptive_coding_resumes_after_a_model_wait_failure or finish_records_expired_deadline or checkpoint_escrow_scans'
+venv/bin/python -m pytest -q tests/gateway/test_entry_routing.py tests/execution_supervisor/test_supervisor_core.py -k 'deadline or wall_clock'
+```
 
 ## Operator workflows
 

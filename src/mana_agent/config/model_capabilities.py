@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Iterable
 from mana_agent.llm.capabilities import ModelProfile, CapabilityState
 from mana_agent.llm.registry import GLOBAL_CAPABILITY_REGISTRY, ModelCapabilityRegistry, resolve_profile
-from mana_agent.config.provider_registry import PROVIDERS, CodexTransport, split_qualified_model_id
+from mana_agent.config.provider_registry import CodexTransport, inference_protocol_for_model, split_qualified_model_id
 from mana_agent.evals.recorder import record_current
 
 class ReasoningEffortPolicy(str, Enum):
@@ -18,21 +18,19 @@ class ReasoningEffortPolicy(str, Enum):
 def normalize_model_lookup_id(provider: str, model_id: str) -> str:
     return split_qualified_model_id(model_id, default_provider=provider)[1]
 
-def resolve_transport_name(provider: str, transport: str | CodexTransport | None = None) -> str:
+def resolve_transport_name(provider: str, transport: str | CodexTransport | None = None, *, model: str = "") -> str:
     value = transport.value if isinstance(transport, CodexTransport) else transport
+    if value:
+        return {"direct_responses": "responses", "responses_bridge": "chat_completions"}.get(value, value)
+    from mana_agent.config.user_config import get_setting
+    configured = str(get_setting("MANA_LLM_API_MODE", "auto") or "auto")
     try:
-        proto = PROVIDERS.get(provider).inference_protocol
+        return inference_protocol_for_model(provider, model, mode=configured)
     except KeyError:
-        proto = ""
-    if value is None:
-        from mana_agent.config.user_config import get_setting
-        configured = str(get_setting("MANA_LLM_API_MODE", "auto") or "auto")
-        if proto != "anthropic_messages" and configured != "auto":
-            value = configured
-    return {"direct_responses": "responses", "responses_bridge": "chat_completions"}.get(value, value) or proto
+        return "" if configured == "auto" else configured
 
 def resolve_model_capability(provider: str, model: str, transport: str | CodexTransport | None = None, *, catalog_records=None) -> ModelProfile:
-    return resolve_profile(provider, model, transport=resolve_transport_name(provider, transport), catalog_records=catalog_records)
+    return resolve_profile(provider, model, transport=resolve_transport_name(provider, transport, model=model), catalog_records=catalog_records)
 
 def clear_capability_cache() -> None:
     GLOBAL_CAPABILITY_REGISTRY.clear_cache()

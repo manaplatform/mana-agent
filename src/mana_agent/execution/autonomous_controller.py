@@ -19,7 +19,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 from pydantic import Field
 
 from mana_agent.config.autonomous_config import AutonomousExecutionConfig
@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
 
 logger = logging.getLogger(__name__)
+
+StageResult = TypeVar("StageResult")
 
 
 class ExecutionStrategy(str, Enum):
@@ -339,6 +341,24 @@ class AutonomousExecutionController:
             lease_token=lease_token,
         )
 
+    def drive_repository_workflow(
+        self,
+        *,
+        advance: Callable[[], StageResult | None],
+        check_attempt: Callable[[], Any],
+    ) -> StageResult:
+        """Drive repository decisions and their fenced execution in one loop.
+
+        Call sites charge the relevant budget before requesting a model or
+        executing a tool. Reaching a model limit cannot suppress an already
+        selected verification or receipt reconciliation.
+        """
+        while True:
+            check_attempt()
+            result = advance()
+            if result is not None:
+                return result
+
     def advance_batch_task(self, **kwargs: Any) -> dict[str, Any]:
         """Advance the shared durable Batch loop under this controller's authority."""
         from mana_agent.execution.batch_loop import BatchTaskLoop
@@ -467,6 +487,7 @@ class AutonomousExecutionController:
                 tb_task = self.taskboard.get_task(task_id)
             except Exception:
                 tb_task = self.taskboard.create_task(
+                    task_id=task_id,
                     title=user_goal[:80] or "Autonomous Task",
                     user_request=user_goal,
                     normalized_goal=user_goal,
@@ -503,6 +524,24 @@ class AutonomousExecutionController:
 
         effective_max_turns = max_turns if max_turns is not None else self.config.max_model_turns
         effective_max_tools = self.config.max_tool_calls
+
+        def charge_repository_boundary(*, model=False):
+            """Charge delegated calls to this existing supervised pursuit."""
+            from mana_agent.execution_supervisor.errors import BudgetExceededError
+            def update(current):
+                self.supervisor._validate_lease(current, attempt_id=active_attempt_id or "", lease_token=active_lease_token)
+                if current.state != ExecutionState.RUNNING or current.cancellation_status is not None:
+                    raise PermissionError("The supervising pursuit is no longer runnable")
+                field = "autonomous_model_turns" if model else "autonomous_tool_calls"
+                maximum = effective_max_turns if model else effective_max_tools
+                used = max(getattr(current, field), metrics.model_turns if model else metrics.tool_calls)
+                if used >= maximum:
+                    raise BudgetExceededError("The supervising pursuit's delegated call budget is exhausted")
+                setattr(current, field, used + 1)
+            self.supervisor.store.update_task(task_id, update)
+
+        ctx["charge_model"] = lambda: charge_repository_boundary(model=True)
+        ctx["charge_tool"] = charge_repository_boundary
 
         step_index = 0
         completed_steps: list[dict[str, Any]] = []
@@ -707,6 +746,9 @@ class AutonomousExecutionController:
                     logger.warning("Checkpoint before step %d failed: %s", step_index, cp_exc)
 
             # 4. Execute Step via Capability Runner
+            accounted = self.supervisor.get_task(task_id)
+            ctx["remaining_model_turns"] = max(0, effective_max_turns - max(metrics.model_turns, accounted.autonomous_model_turns))
+            ctx["remaining_tool_calls"] = max(0, effective_max_tools - max(metrics.tool_calls, accounted.autonomous_tool_calls))
             step_t0 = time.perf_counter()
             try:
                 try:
@@ -829,6 +871,9 @@ class AutonomousExecutionController:
                 progress_summary=evidence_summary,
                 evidence_fingerprint=evidence_fingerprint,
             )
+            accounted = self.supervisor.get_task(task_id)
+            metrics.model_turns = max(metrics.model_turns, accounted.autonomous_model_turns)
+            metrics.tool_calls = max(metrics.tool_calls, accounted.autonomous_tool_calls)
 
             # Synchronize TaskBoard with step results
             if self.taskboard is not None:
@@ -1320,27 +1365,24 @@ class AutonomousExecutionController:
                         reason="independent completion verification failed",
                     )
                 else:
-                    current_task = self.supervisor.get_task(task_id)
-                    if current_task.state == ExecutionState.COMPLETED_PENDING_VERIFICATION and current_task.attempt_id == active_attempt_id:
-                        try:
-                            self.supervisor.transition(
-                                task_id,
-                                ExecutionState.COMPLETED,
-                                attempt_id=active_attempt_id,
-                                generation=active_generation,
-                            )
-                        except Exception:
-                            pass
+                    receipt = self.supervisor.get_verified_execution_result(task_id)
+                    if not receipt.is_verified:
+                        return _finish(AutonomousExecutionResult(
+                            task_id=task_id, status="blocked", goal_satisfied=False,
+                            answer="Completion is pending a verified supervisor result.",
+                            metrics=metrics, decision=decision, verification_passed=False,
+                            error="supervisor_result_unverified", trace=overall_trace,
+                            warnings=warnings, completed_steps=completed_steps))
                     if self.taskboard is not None:
-                        try:
-                            tb_task = self.taskboard.get_task(task_id)
-                            if tb_task.status != TaskStatus.VERIFYING:
-                                self.taskboard.mark_completed(task_id, evidence=final_answer, cross_off=True)
-                            tb_task.verification_status = "passed"
-                            tb_task.implementation_verified = True
+                        tb_task = self.taskboard.get_task(task_id)
+                        if tb_task.status != TaskStatus.VERIFYING:
+                            manifest = self.supervisor.store.artifact_manifest(task_id) or {}
+                            self.taskboard.project_supervisor_completion(task_id, supervisor_task=receipt.task,
+                                verification_evidence={"result_id": receipt.task.result_id,
+                                                       "verification": manifest.get("verification")})
+                        else:
+                            tb_task.crossed_off = True
                             self.taskboard.save()
-                        except Exception:
-                            pass
 
                     # Reinforce verified learning memories
                     if self.global_memory is not None:
@@ -1678,10 +1720,10 @@ class AutonomousExecutionController:
                 ]
             done_statuses = {TaskStatus.DONE, TaskStatus.SKIPPED, "completed", "skipped"}
             evaluated_statuses = done_statuses | {TaskStatus.FAILED, TaskStatus.BLOCKED, "failed", "blocked"}
-            evaluated_ids = {t.task_id for t in tasks if t.status in evaluated_statuses}
+            evaluated_ids = {t.task_id for t in tasks if t.status in evaluated_statuses or getattr(t, "crossed_off", False)}
             ready = []
             for t in tasks:
-                if t.status in done_statuses or t.status in {TaskStatus.CANCELLED, "cancelled"}:
+                if t.status in done_statuses or t.status in {TaskStatus.CANCELLED, "cancelled"} or getattr(t, "crossed_off", False):
                     continue
                 deps = getattr(t, "depends_on", []) or []
                 if all(dep in evaluated_ids for dep in deps):
@@ -1753,9 +1795,8 @@ class AutonomousExecutionController:
         tool_name = (
             getattr(task_item, "routing_evidence", {}).get("tool")
             or (task_item.metadata.get("tool") if hasattr(task_item, "metadata") and isinstance(task_item.metadata, dict) else None)
-            or (getattr(task_item, "allowed_tools", [None])[0] if getattr(task_item, "allowed_tools", None) else None)
             or getattr(task_item, "preferred_tool", None)
-            or "subtask_executor"
+            or ""
         )
         tool_args = (
             getattr(task_item, "routing_evidence", {}).get("tool_args")
@@ -1807,7 +1848,7 @@ class AutonomousExecutionController:
                 coding_res = self.coding_engine.execute(task_item, ctx)
                 result_output = str(coding_res)
             else:
-                result_output = f"Completed subtask: {title}"
+                raise PermissionError(f"No authorized executor is bound to subtask {child_id}")
         except Exception as exc:
             error_msg = str(exc)
             logger.exception("Error executing subtask %s: %s", child_id, exc)
@@ -1818,9 +1859,9 @@ class AutonomousExecutionController:
         if self.taskboard is not None:
             try:
                 if success:
-                    self.taskboard.mark_completed(child_id, result_summary=result_output)
                     if changed_files:
                         self.taskboard.add_files_touched(child_id, changed_files)
+                    self.taskboard.mark_crossed_off(child_id)
                 else:
                     self.taskboard.mark_blocked(child_id, reason=error_msg)
                 self.taskboard.save()
@@ -1926,6 +1967,7 @@ class AutonomousExecutionController:
                 pending = [
                     t for t in tasks
                     if t.status not in {TaskStatus.DONE, TaskStatus.SKIPPED, "completed", "skipped"}
+                    and not getattr(t, "crossed_off", False)
                 ]
                 failed = [
                     t for t in tasks

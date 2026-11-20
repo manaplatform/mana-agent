@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ from mana_agent.gateway.lane_coordinator import (
     LaneReservation,
 )
 from mana_agent.gateway.chat_gateway import AgentChatGateway
+from mana_agent.gateway.checkpoint_resume import CheckpointResumeError
 from mana_agent.gateway.lanes import (
     ACTIVE_LANE_STATES,
     LockMode,
@@ -146,6 +148,47 @@ def test_recovery_candidates_include_failed_task_from_another_session(
         repository_id=coordinator.taskboard.store.repository_id,
     )
     assert fenced_candidates == []
+
+
+def test_archived_task_is_not_offered_for_recovery_and_explains_resume_failure(
+    coordinator: LaneCoordinator,
+) -> None:
+    from mana_agent.workspaces.retention import ReferenceAwareGC, RetentionMetrics, RetentionPolicy
+
+    reservation = _reserve(coordinator, LaneId.CODING, session="session-archived")
+    task_id = reservation.execution.task_id
+    coordinator.start(reservation)
+    coordinator.finish(task_id, state=LaneTaskState.FAILED, error="Task deadline exceeded")
+    gc = ReferenceAwareGC(
+        execution_store=coordinator.execution_supervisor.store,
+        policy=RetentionPolicy(max_completed_tasks_per_workspace=0),
+    )
+    assert gc.compact_completed_tasks(gc.collect_active_references(), RetentionMetrics()) == [task_id]
+    assert coordinator.inspect_task(task_id).state is LaneTaskState.FAILED
+    assert coordinator.taskboard.get_task(task_id)
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway._lane_coordinator = coordinator
+    gateway._workspaces = SimpleNamespace(gc=gc)
+    gateway._history_store = SimpleNamespace(
+        list=lambda **kw: pytest.fail("Archived work must stop before loading the original request"),
+    )
+    assert gateway._recovery_candidates(
+        lane_id=None,
+        session_id="session-archived",
+        workspace_id=coordinator.taskboard.store.workspace_id,
+        repository_id=coordinator.taskboard.store.repository_id,
+    ) == []
+
+    with pytest.raises(CheckpointResumeError, match="archived with status failed") as error:
+        gateway._canonical_task_request(task_id, "session-archived")
+    assert error.value.code == "recovery_task_unavailable"
+    for control in (gateway.resume_task, gateway.retry_task_control, gateway.replan_task_control):
+        with pytest.raises(LaneCoordinatorError, match="archived with status failed.*original request as a new task"):
+            control(task_id)
+    with pytest.raises(LaneCoordinatorError, match="no saved execution record"):
+        coordinator.ensure_recoverable_execution(task_id)
+    assert coordinator.execution_supervisor.store.get_task_or_none(task_id) is None
 
 
 def test_recovery_candidates_include_blocked_multi_task_root_without_inbox_wait(
@@ -635,6 +678,45 @@ def test_lane_capacity_waits_in_queue_until_capacity_is_released(tmp_path: Path,
     assert result and result[0].execution.state == LaneTaskState.QUEUED
 
 
+def test_coding_coordinators_at_capacity_can_start_their_scoped_steps(coordinator):
+    coordinator.global_worker_limit = 2
+    coordinator.contracts[LaneId.CODING] = replace(coordinator.contracts[LaneId.CODING], timeout_seconds=1)
+    scope = {"session_id": "session-1", "workspace_id": coordinator.taskboard.store.workspace_id,
+             "repository_id": coordinator.taskboard.store.repository_id}
+    parents = []
+    for name in ("first", "second"):
+        parent = coordinator.start(coordinator.reserve(normalized_intent=name, lane_id=LaneId.CODING,
+                                                       workflow_coordinator=True, **scope))
+        parents.append(parent.task_id)
+        assert coordinator.store.get_task(parent.task_id).workflow_coordinator
+        assert not any(lock.task_id == parent.task_id for lock in coordinator._locks.values())
+        with pytest.raises(PermissionError):
+            coordinator.authorize_tool(parent.task_id, "apply_patch")
+
+    first_step, second_step = [
+        coordinator.taskboard.create_child_task(parent_id, title=name, user_request=name,
+                                                owner_agent_id="coding_agent")
+        for parent_id, name in zip(parents, ("first step", "second step"), strict=True)
+    ]
+    with coordinator.workflow_step_capacity(parents[0], first_step.task_id):
+        first = coordinator.start(coordinator.reserve(
+            normalized_intent="first step", lane_id=LaneId.CODING, parent_task_id=parents[0],
+            taskboard_task_id=first_step.task_id, target_files=("first.py",), **scope,
+        ))
+        with coordinator.workflow_step_capacity(parents[1], second_step.task_id):
+            second = coordinator.start(coordinator.reserve(
+                normalized_intent="second step", lane_id=LaneId.CODING, parent_task_id=parents[1],
+                taskboard_task_id=second_step.task_id, target_files=("second.py",), **scope,
+            ))
+            active = coordinator._active_capacity_executions()
+            assert {execution.task_id for execution in active} == {first.task_id, second.task_id}
+            assert {lock.task_id for lock in coordinator._locks.values()} == {first.task_id, second.task_id}
+            coordinator.finish(second.task_id)
+        coordinator.finish(first.task_id)
+    for task_id in parents:
+        coordinator.finish(task_id)
+
+
 def test_scheduler_diagnostics_explain_capacity_wait_before_lane_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -922,6 +1004,25 @@ def test_completion_accepts_attempt_created_empty_files_and_directories(
         check["contract_type"]
         for check in manifest["verification"]["checks"]
     ] == ["file_exists", "directory_exists"]
+
+
+@pytest.mark.parametrize("heartbeat_failure", ["", "heartbeat renewal failed"])
+def test_finish_records_expired_deadline_as_timeout(coordinator: LaneCoordinator, monkeypatch, heartbeat_failure) -> None:
+    supervisor = coordinator.execution_supervisor
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(supervisor, "clock", lambda: now)
+    reservation = _reserve(coordinator, LaneId.CODING, intent="deadline during completion")
+    coordinator.start(reservation)
+    task_id = reservation.execution.task_id
+    reservation.execution.heartbeat_failure = heartbeat_failure
+    now = supervisor.get_task(task_id).deadline_at
+
+    finished = coordinator.finish(task_id, verification_state={"status": "passed"})
+
+    assert finished.state == LaneTaskState.TIMED_OUT
+    assert supervisor.get_task(task_id).state == SupervisorState.FAILED
+    assert not supervisor.get_verified_execution_result(task_id).is_verified
+    assert coordinator.taskboard.get_task(task_id).status == TaskStatus.FAILED
 
 
 def test_completion_failure_surfaces_the_persisted_contract_reason(

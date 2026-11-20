@@ -196,23 +196,33 @@ def test_invalid_backend_decision_stops_safely() -> None:
         )
 
 
-def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    app = workspace.worktree_path / "src" / "app.py"
+    app.parent.mkdir()
+    app.write_text("enabled = False\n", encoding="utf-8")
+    (workspace.worktree_path / "preexisting.txt").write_text("unchanged\n", encoding="utf-8")
     fake: _FakeClient | None = None
+
+    class WritingClient(_FakeClient):
+        async def notifications(self, thread_id: str):
+            app.write_text("enabled = True\n", encoding="utf-8")
+            async for notification in super().notifications(thread_id):
+                yield notification
 
     def factory(command: tuple[str, ...]) -> _FakeClient:
         nonlocal fake
-        fake = _FakeClient(command)
+        fake = WritingClient(command)
         return fake
 
-    # Write-required turns require a non-empty diff to complete successfully.
-    monkeypatch.setattr(
-        "mana_agent.integrations.codex.backend._git_changed_files",
-        lambda *args, **kwargs: ["src/app.py"],
-    )
     backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=factory)
-    result = asyncio.run(backend.execute(_task(), _workspace(tmp_path)))
+    task = _task()
+
+    async def collect_events() -> list[AgentEvent]:
+        return [event async for event in backend.stream(task, workspace)]
+
+    events = asyncio.run(collect_events())
+    result = backend.result_for(task.task_id)
 
     assert result.status == "completed"
     assert result.backend == "codex"
@@ -220,6 +230,10 @@ def test_codex_backend_uses_thread_turn_protocol_and_normalizes_result(
     assert result.tests_passed is True
     assert result.changed_files == ["src/app.py"]
     assert result.thread_id == "thread-1"
+    workspace_diff, = [event for event in events if event.payload.get("diff_scope") == "turn"]
+    assert workspace_diff.payload["changed_files"] == ["src/app.py"]
+    assert "-enabled = False" in workspace_diff.payload["diff"]
+    assert "+enabled = True" in workspace_diff.payload["diff"]
     assert fake is not None
     assert [method for method, _params in fake.requests] == ["thread/start", "turn/start"]
     turn_payload = fake.requests[1][1]
@@ -266,6 +280,33 @@ def test_plan_proposal_turn_is_read_only_even_with_an_existing_thread(tmp_path: 
     assert turn["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
     assert turn["approvalPolicy"] == "never"
     assert turn["outputSchema"]["required"] == ["patch"]
+
+
+def test_codex_investigation_schema_uses_assigned_requirement_ids(tmp_path: Path) -> None:
+    from mana_agent.repository_evidence.models import CodingAssignment, EvidenceRequirement
+
+    workspace = _workspace(tmp_path).model_copy(update={"sandbox": "readOnly"})
+    fake = _FakeClient(("codex", "app-server"))
+    backend = CodexCodingBackend(CodexSettings(enabled=True), client_factory=lambda _: fake)
+    assignment = CodingAssignment(
+        task_id="task-1", task_version=1, objective="Locate the caller", task_kind="investigation",
+        backend="external", source_view=str(workspace.worktree_path), decision_id="decision",
+        requirements=(EvidenceRequirement(requirement_id="caller", objective="Find the caller",
+                                          acceptance_criteria=("Cite a call site",)),),
+    )
+    task = _task().model_copy(update={
+        "requires_repository_write": False,
+        "context": {"repository_investigation": assignment.model_dump(mode="json")},
+    })
+
+    asyncio.run(backend.execute(task, workspace))
+
+    turn = next(payload for method, payload in fake.requests if method == "turn/start")
+    schema = turn["outputSchema"]
+    finding_ids = schema["$defs"]["InvestigationFinding"]["properties"]["requirement_ids"]
+    assert finding_ids["items"]["enum"] == ["caller"]
+    assert set(schema["properties"]["evidence_bindings"]["properties"]) == {"caller"}
+    assert schema["properties"]["evidence_bindings"]["additionalProperties"] is False
 
 
 def test_codex_backend_reports_turn_started_only_after_turn_start_accepts(
@@ -1019,3 +1060,50 @@ def test_interrupted_turn_is_cancelled(tmp_path: Path) -> None:
         ],
     )
     assert result.status == "cancelled"
+
+
+def test_codex_reports_safe_investigation_classification_error(tmp_path: Path) -> None:
+    import json
+
+    task = _task().model_copy(update={
+        "context": {"repository_investigation": True}, "requires_repository_write": False,
+    })
+    text = json.dumps({"findings": [{
+        "category": "layout", "statement": "The application calls its handler.",
+        "classification": "PRIVATE_FIXTURE", "confidence": 0.8,
+    }]})
+    result = parse_codex_result(
+        task=task, workspace=_workspace(tmp_path), worker_id="worker-1",
+        thread_id="thread-1", turn_id="turn-1", changed_files=[],
+        notifications=[
+            {"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": text}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ],
+    )
+    assert result.status == "failed"
+    assert result.investigation_result is None
+    assert "CODING_INVESTIGATION_RESULT_INVALID" in result.errors
+    assert any("findings.0.classification" in error and "Use 'inferred' or 'hypothetical'" in error
+               for error in result.errors)
+    assert all("PRIVATE_FIXTURE" not in error for error in result.errors)
+
+
+def test_codex_preserves_continuation_for_missing_evidence(tmp_path: Path) -> None:
+    import json
+
+    task = _task().model_copy(update={"context": {"mode_patch_proposal": True,
+        "coding_continuation_id": "continuation-1"}, "requires_repository_write": False})
+    gap = {"task_id": task.task_id, "requirement": {"requirement_id": "caller",
+        "objective": "Identify the caller", "acceptance_criteria": ["Cite a call site"]},
+        "reason": "The caller is unresolved"}
+    result = parse_codex_result(task=task, workspace=_workspace(tmp_path), worker_id="worker-1",
+        thread_id="thread-1", turn_id="turn-1", changed_files=[],
+        notifications=[
+            {"method": "item/completed", "params": {"item": {"type": "agentMessage",
+                "text": json.dumps({"patch": "", "missing_evidence": [gap]})}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ])
+    assert result.status == "waiting"
+    assert result.missing_evidence[0]["task_id"] == task.task_id
+    assert result.continuation_context == {"coding_continuation_id": "continuation-1",
+        "thread_id": "thread-1", "turn_id": "turn-1", "changed_files": []}

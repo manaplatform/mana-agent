@@ -61,6 +61,8 @@ def normalize_execution_mode(value: Any, default: ExecutionMode = ExecutionMode.
 
 
 class ModePhase(str, Enum):
+    ACTIVE = "active"
+    # Decode-only compatibility for saved v1 workflows. No new work emits these.
     UNDERSTANDING = "understanding"
     INVESTIGATING = "investigating"
     CLARIFICATION_REQUIRED = "clarification_required"
@@ -68,7 +70,9 @@ class ModePhase(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     APPROVED = "approved"
     EXECUTING = "executing"
+    INTEGRATING = "integrating"
     VERIFYING = "verifying"
+    REVIEWING = "reviewing"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
@@ -78,14 +82,42 @@ def repository_relative_path(value: str) -> str:
     path = PurePosixPath(value)
     if (not value or path.is_absolute() or path.as_posix() != value or value == "."
             or "\\" in value or ":" in value or any(ord(c) < 32 for c in value)
-            or any(p == ".." or p in {".git", ".mana", ".ssh", "secrets.toml", "credentials.json"}
-                   or p.startswith(".env") for p in path.parts)):
-        raise PydanticCustomError("mode_repository_path", "use an unprotected, canonical repository-relative path")
+            or ".." in path.parts):
+        raise PydanticCustomError(
+            "mode_repository_path", "Use a canonical repository-relative path such as src/app.py.",
+        )
+    if any(p in {".git", ".mana", ".ssh", "secrets.toml", "credentials.json"}
+           or p.startswith(".env") for p in path.parts):
+        raise PydanticCustomError(
+            "mode_repository_protected_path",
+            "Protected repository paths are unavailable. Choose an accessible path or report the gap.",
+        )
     return value
 
 
 class ModeContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class CodingWorkflowDecision(ModeContract):
+    """The model's coding choice. Access is still checked at dispatch and at each write."""
+
+    mode: Literal["auto", "debug"]
+    objective: str = Field(pattern=r"\S", max_length=12000)
+    reason: str = Field(pattern=r"\S", max_length=240)
+    investigation_scope: str = Field(pattern=r"\S", max_length=2000)
+    expected_result: str = Field(pattern=r"\S", max_length=2000)
+    risk_and_uncertainty: str = Field(pattern=r"\S", max_length=2000)
+    verification_requirements: tuple[str, ...] = Field(min_length=1, max_length=12)
+    requested_effect: Literal["read", "write"]
+
+    @model_validator(mode="after")
+    def validate_requirements(self):
+        if any(not item.strip() or len(item) > 1000 for item in self.verification_requirements):
+            raise ValueError("verification requirements must be bounded nonempty statements")
+        if self.mode == "auto" and self.requested_effect != "write":
+            raise ValueError("AUTO requires an explicit implementation request")
+        return self
 
 
 @dataclass(frozen=True)
@@ -121,6 +153,43 @@ class VerificationCommand(ModeContract):
     expected: Literal["pass", "fail"] = "pass"
     output_marker: str = ""
     image: str = ""
+
+    @property
+    def uses_git_checkout(self) -> bool:
+        executable, *args = self.argv
+        if PurePosixPath(executable.replace("\\", "/")).name not in {"git", "git.exe"}:
+            return False
+        return args not in (["--version"], ["version"]) and not (
+            args[:1] == ["diff"] and "--no-index" in args
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        command = handler.resolve_ref_schema(handler(schema))
+        if handler.mode != "validation":
+            return command
+
+        # Advertise the conditional diagnostic requirement without changing saved commands.
+        fields = command["properties"]
+        passing = {
+            **command,
+            "properties": {**fields, "expected": {"type": "string", "const": "pass", "default": "pass"}},
+        }
+        failing = {
+            **command,
+            "properties": {
+                **fields,
+                "expected": {"type": "string", "const": "fail"},
+                "output_marker": {
+                    "type": "string", "minLength": 1,
+                    "description": "Literal text the failing command must emit for the intended reason.",
+                },
+            },
+            "required": [*command["required"], "expected", "output_marker"],
+        }
+        return {"anyOf": [passing, failing]}
 
     @model_validator(mode="after")
     def validate_command(self):
@@ -192,6 +261,13 @@ class PlanRevision(ModeContract):
     coding_backend: Literal["", "internal", "external"] = ""
     execution_policy: dict[str, Any] = Field(default_factory=dict)
     draft: PlanDraft
+    evidence_refs: tuple[dict[str, Any], ...] = ()
+
+    def model_dump(self, **kwargs):
+        result = super().model_dump(**kwargs)
+        if not self.evidence_refs:
+            result.pop("evidence_refs", None)
+        return result
 
     @property
     def digest(self) -> str:
@@ -202,6 +278,8 @@ class PlanRevision(ModeContract):
                  "", "## Findings", self.draft.findings]
         if self.coding_backend:
             lines.extend(["", f"Coding backend: {self.coding_backend}"])
+        if self.evidence_refs:
+            lines.extend(["", "Repository evidence:", *(f"- `{ref['evidence_id']}:{ref['revision']}`" for ref in self.evidence_refs)])
         for title, entries in (
             ("Objectives", self.draft.objectives), ("Scope", self.draft.scope),
             ("Out of scope", self.draft.exclusions), ("Dependencies", self.draft.dependencies),

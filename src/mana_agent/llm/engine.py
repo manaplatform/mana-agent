@@ -7,12 +7,13 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 from pydantic import BaseModel, ValidationError
+from mana_agent.llm.capabilities import ModelProfile
 from mana_agent.llm.errors import (
     CapabilityError, InvalidResponseError, InferenceTimeoutError, ProviderRequestError,
-    StructuredOutputError, describe_decision_validation, format_provider_error,
+    StructuredOutputError, describe_decision_validation,
 )
 from mana_agent.llm.messages import messages_from_records, validate_conversation
 from mana_agent.llm.registry import metadata_binding, resolve_profile
@@ -50,13 +51,24 @@ class NativeLLMEngine:
         self.adapter = adapter
         self.tools: list[dict[str, Any]] = []
         self.tool_choice: str | dict[str, Any] | None = None
+        self._tool_argument_validators: dict[str, Callable[[dict[str, Any]], None]] = {}
         self.context_cost_governor = None
         self._volatile_continuations: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
-    def with_tools(self, tools: list[Any], *, tool_choice: Any = None) -> NativeLLMEngine:
+    def with_tools(
+        self, tools: list[Any], *, tool_choice: Any = None,
+        argument_validators: dict[str, Callable[[dict[str, Any]], None]] | None = None,
+    ) -> NativeLLMEngine:
+        """Bind provider schemas and optional host-side argument contracts."""
         selected = copy.copy(self)
         selected.tools = [tool_specification(tool) for tool in tools]
         selected.tool_choice = tool_choice
+        selected._tool_argument_validators = dict(argument_validators or {})
+        names = {tool["name"] for tool in selected.tools if "name" in tool and "parameters" in tool}
+        if selected._tool_argument_validators.keys() - names:
+            raise ValueError("Argument validators must belong to offered function tools")
+        if not all(callable(validator) for validator in selected._tool_argument_validators.values()):
+            raise TypeError("Tool argument validators must be callable")
         return selected
 
     def update_model_assignment(self, provider: str, model: str, *, settings: Any,
@@ -261,30 +273,47 @@ class NativeLLMEngine:
             error = InvalidResponseError(detail, public_detail=detail)
             error.provider_usage, error.response_accepted = response.usage.model_dump(), True
             raise error
-        if not response.content and not response.tool_calls and not response.protocol_pending:
-            error = InvalidResponseError("Empty inference output is not completion evidence",
-                                         public_detail="The provider returned an empty response.")
-            error.provider_usage, error.response_accepted = response.usage.model_dump(), True
-            raise error
         try:
             from mana_agent.multi_agent.tools.operation_policy import validate_arguments
             offered = {tool["name"]: tool["parameters"] for tool in request.tools if tool.get("name") and "parameters" in tool}
+            if offered.keys() == {"record_decision"} and "record_decision" in self._tool_argument_validators:
+                calls = response.tool_calls
+                if len(calls) != 1 or calls[0].name != "record_decision":
+                    detail = "Return exactly one record_decision call."
+                    raise StructuredOutputError(detail, public_detail=detail)
+            if not response.content and not response.tool_calls and not response.protocol_pending:
+                raise InvalidResponseError("Empty inference output is not completion evidence",
+                                           public_detail="The provider returned an empty response.")
             seen = {call.id for message in request.messages for call in message.tool_calls}
             for call in response.tool_calls:
-                if call.id in seen or call.name not in offered:
-                    raise InvalidResponseError("Provider returned a reused call ID or a tool outside the offered set")
-                validate_arguments(call.args, offered[call.name])
+                if call.id in seen:
+                    detail = "The provider reused a tool call ID."
+                    raise InvalidResponseError(detail, public_detail=detail, reason_code="tool_call_id_reused")
+                if call.name not in offered:
+                    detail = "The provider called a tool outside the offered set."
+                    raise InvalidResponseError(detail, public_detail=detail, reason_code="tool_not_offered")
+                validator = self._tool_argument_validators.get(call.name)
+                try:
+                    if validator is not None:
+                        validator(call.args)
+                    else:
+                        validate_arguments(call.args, offered[call.name], redact_keys=True)
+                except StructuredOutputError:
+                    raise
+                except ValueError as exc:
+                    detail = f"Provider tool arguments violate the registered schema for {call.name}"
+                    if validator is None:
+                        detail += f" ({exc})"
+                    raise StructuredOutputError(detail, public_detail=detail,
+                                                reason_code="tool_arguments_invalid") from None
                 seen.add(call.id)
-        except ValueError as exc:
-            error = StructuredOutputError("Provider tool arguments violate the registered schema")
-            error.provider_usage, error.response_accepted = response.usage.model_dump(), True
-            raise error from exc
         except InvalidResponseError as exc:
             exc.provider_usage, exc.response_accepted = response.usage.model_dump(), True
             raise
         if reservation:
             self.context_cost_governor.record_model_call(reservation, usage=response.usage.model_dump(),
-                provider=request.provider, model=request.model, estimated_input=[m.content for m in request.messages])
+                provider=request.provider, model=request.model, task_id=request.task_id,
+                estimated_input=[m.content for m in request.messages])
         if response.continuation is not None:
             # Output-budget defaults are not caller configuration changes.
             response.continuation.configuration_fingerprint = request.configuration_fingerprint
@@ -294,7 +323,9 @@ class NativeLLMEngine:
             "model": request.model, "task_id": request.task_id, "request_id": request.request_id,
             "usage": response.usage.model_dump(), "latency_seconds": time.perf_counter() - started})
         _emit_inference_activity("model.completed", title="Model responded", status="success", operation_id=request.request_id,
-                      metadata={"provider": request.provider, "model": request.model})
+                      duration_ms=int((time.perf_counter() - started) * 1000),
+                      metadata={"provider": request.provider, "model": request.model,
+                                "duration_ms": int((time.perf_counter() - started) * 1000)})
         if response.public_summaries and self.profile().supports("public_reasoning_summaries"):
             for index, summary in enumerate(response.public_summaries):
                 _emit_inference_activity("agent.summary", title="Reasoning summary", summary=summary, status="success",
@@ -302,23 +333,62 @@ class NativeLLMEngine:
                     metadata={"summary_source": "provider", "summary_trusted": True, "summary_complete": True,
                         "provider": self.provider, "transport": "direct_responses" if self.endpoint == "responses" else self.endpoint})
 
-    def _failed(self, request: InferenceRequest, reservation: str, exc: BaseException) -> None:
+    def _failed(
+        self, request: InferenceRequest, reservation: str, exc: BaseException, started: float,
+        *, decision_correction_available: bool = False,
+    ) -> ProviderRequestError | None:
         if reservation:
             if getattr(exc, "response_accepted", False):
                 self.context_cost_governor.record_model_call(reservation, usage=getattr(exc, "provider_usage", None),
-                    provider=request.provider, model=request.model, estimated_input=[message.content for message in request.messages])
+                    provider=request.provider, model=request.model, task_id=request.task_id,
+                    estimated_input=[message.content for message in request.messages])
             else:
                 self.context_cost_governor.release_reservation(reservation, reason=f"Inference failed: {type(exc).__name__}")
-        _emit_inference_activity("model.failed", title="Model request failed", status="failed", operation_id=request.request_id,
-                      summary=exc.public_detail if isinstance(exc, InvalidResponseError) else "",
-            metadata={"provider": request.provider, "model": request.model, "error_type": type(exc).__name__})
+        request_error = None
+        status_code = getattr(exc, "status_code", None)
+        if not isinstance(exc, ProviderRequestError) and type(status_code) is int and 400 <= status_code < 600:
+            from mana_agent.integrations.provider_failure import classify_http_status
 
-    async def _refresh_metadata(self) -> None:
-        selected = self.profile()
-        if self.adapter is not None:
-            return
-        if selected.supports("input_text") and selected.supports("output_text") and selected.context_window and selected.max_output_tokens:
-            return
+            failure = classify_http_status(status_code, provider=request.provider, model=request.model,
+                operation="native_inference", endpoint=self.endpoint)
+            request_error = ProviderRequestError(failure.safe_message, provider=request.provider,
+                status_code=status_code, failure=failure)
+        error = request_error or exc
+        metadata = {"provider": request.provider, "model": request.model, "transport": self.endpoint,
+                    "error_type": type(error).__name__,
+                    "duration_ms": int((time.perf_counter() - started) * 1000)}
+        title, status = "Model request failed", "failed"
+        summary = error.public_detail if isinstance(error, (InvalidResponseError, ProviderRequestError)) else ""
+        if isinstance(error, StructuredOutputError) and getattr(error, "response_accepted", False):
+            title = "Model response failed validation"
+            metadata["reason_code"] = error.reason_code or "response_schema_invalid"
+            if decision_correction_available:
+                title, status = "Decision needs correction", "rejected"
+        elif isinstance(error, InvalidResponseError):
+            if getattr(error, "response_accepted", False):
+                title = "Model response rejected"
+                metadata["reason_code"] = error.reason_code or "provider_response_invalid"
+            elif error.reason_code:
+                metadata["reason_code"] = error.reason_code
+        elif isinstance(error, asyncio.TimeoutError):
+            title = "Model request timed out"
+            summary = f"The provider response did not complete within the {self.timeout:g}-second request deadline."
+            metadata["reason_code"] = "inference_timeout"
+        elif isinstance(error, asyncio.CancelledError):
+            title, status = "Model request cancelled", "cancelled"
+        if isinstance(error, ProviderRequestError) and error.failure is not None:
+            metadata["reason_code"] = error.failure.error_code
+        _emit_inference_activity("model.failed", title=title, status=status,
+            operation_id=request.request_id, duration_ms=metadata["duration_ms"], metadata=metadata, summary=summary)
+        return request_error
+
+    async def _refresh_metadata(
+        self, parameters: dict[str, Any] | None = None, *, required_capabilities: tuple[str, ...] = (),
+    ) -> ModelProfile:
+        selected = self.profile(parameters)
+        required = ("input_text", "output_text", "context_window", "max_output_tokens", *required_capabilities)
+        if self.adapter is not None or all(selected.supports(name) for name in required):
+            return selected
         from mana_agent.llm.discovery import ModelDiscoveryService
         from mana_agent.config.user_config import load_model_cache
         from datetime import datetime, timedelta, timezone
@@ -331,16 +401,23 @@ class NativeLLMEngine:
                     hashlib.sha256(json.dumps(self.query, sort_keys=True).encode()).hexdigest())
                 if (created.tzinfo and datetime.now(timezone.utc) - created < timedelta(hours=24)
                     and any(isinstance(record, dict) and record.get("_mana_catalog_binding") == binding for record in cached.models)):
-                    return
+                    return selected
             except ValueError:
                 pass
         await ModelDiscoveryService().discover(provider=self.provider, base_url=self.base_url, api_key=self.api_key,
             default_headers=self.headers, query_params=self.query)
+        return self.profile(parameters)
 
-    async def generate(self, messages: Any, *, schema: Any = None, continuation: Any = None, **options: Any) -> ModelResponse:
+    async def generate(
+        self, messages: Any, *, schema: Any = None, continuation: Any = None,
+        _decision_correction_available: bool = False, **options: Any,
+    ) -> ModelResponse:
         if options.get("stream", self.parameters.get("stream", False)):
             result = None
-            async for event in self.stream(messages, schema=schema, continuation=continuation, **options):
+            async for event in self.stream(
+                messages, schema=schema, continuation=continuation,
+                _decision_correction_available=_decision_correction_available, **options,
+            ):
                 if event.type == "completed":
                     result = event.response
             if result is None:
@@ -350,7 +427,7 @@ class NativeLLMEngine:
         request = self._request(messages, schema=schema, continuation=continuation, **options)
         reservation, started = self._reserve(request), time.perf_counter()
         _emit_inference_activity("model.started", title="Waiting for model", status="running", operation_id=request.request_id,
-                      metadata={"provider": request.provider, "model": request.model})
+                      metadata={"provider": request.provider, "model": request.model, "timeout_seconds": self.timeout})
         try:
             for attempt in range(self.max_attempts):
                 adapter = self._adapter()
@@ -370,17 +447,12 @@ class NativeLLMEngine:
                     if self.adapter is None:
                         await adapter.close()
         except BaseException as exc:
-            self._failed(request, reservation, exc)
+            request_error = self._failed(request, reservation, exc, started,
+                                         decision_correction_available=_decision_correction_available)
+            if request_error is not None:
+                raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
                 raise InferenceTimeoutError("Selected inference request timed out; no alternate action was attempted") from exc
-            if isinstance(getattr(exc, "status_code", None), int):
-                from mana_agent.integrations.provider_failure import classify_http_status
-                failure = classify_http_status(exc.status_code, provider=self.provider, model=self.model,
-                    operation="native_inference", endpoint=self.endpoint)
-                error = ProviderRequestError(failure.safe_message or failure.user_status(), provider=self.provider,
-                    status_code=exc.status_code, retryable=False)
-                error.failure = failure
-                raise error from exc
             raise
         raise InvalidResponseError("Inference attempt budget is empty")
 
@@ -400,28 +472,55 @@ class NativeLLMEngine:
 
     async def decide(
         self, messages: Any, schema: type[BaseModel] | dict[str, Any], *,
-        repair_decision: bool = False, validation_context: dict[str, Any] | None = None, **options: Any,
+        repair_decision: bool = False, validation_context: dict[str, Any] | None = None,
+        complex_schema: bool = False, correction_hint: str | Callable[[ValueError], str] = "",
+        on_decision_rejected: Callable[[int, Exception, bool], None] | None = None, **options: Any,
     ) -> BaseModel | dict[str, Any]:
         from mana_agent.llm.messages import UserMessage
         from mana_agent.multi_agent.tools.operation_policy import validate_arguments
 
-        prof = self.profile(options.get("parameters", {}))
-        if options.pop("require_native_structured_output", False):
-            prof.require("native_structured_output")
+        require_native = options.pop("require_native_structured_output", False)
+        # Use Claude's ordinary client tool for composite workflow decisions.
+        # Local validation retains the full contract without compiling a provider grammar.
+        use_tool = (complex_schema and not require_native and self.provider == "openrouter"
+                    and self.endpoint == "anthropic_messages")
+        required = ("native_structured_output",) if require_native else ("tool_calling",) if use_tool else ()
+        # Refresh capability evidence before choosing or validating the request format.
+        prof = await self._refresh_metadata(options.get("parameters"), required_capabilities=required)
+        prof.require(*required)
         schema_dict = schema if isinstance(schema, dict) else schema.model_json_schema()
         decision_messages = messages_from_records(messages)
-        native = prof.supports("native_structured_output")
+        native = not use_tool and prof.supports("native_structured_output")
         tool_based = not native and prof.supports("tool_calling")
         model = self
         if tool_based:
+            def validate_decision_arguments(arguments: dict[str, Any]) -> None:
+                try:
+                    validate_arguments(arguments, schema_dict, redact_keys=True)
+                except ValueError as exc:
+                    detail = f"Provider tool arguments violate the registered schema for record_decision ({exc})"
+                    if isinstance(schema, type) and issubclass(schema, BaseModel):
+                        try:
+                            schema.model_validate_json(json.dumps(arguments), strict=True, context=validation_context)
+                        except ValidationError as error:
+                            detail += ". " + describe_decision_validation(error, schema_dict)
+                    raise StructuredOutputError(detail, public_detail=detail) from None
+
             record_tool = {
                 "name": "record_decision",
-                "description": "Return the decision that matches this schema.",
+                "description": "Submit the complete decision in the tool arguments.",
                 "parameters": schema_dict,
             }
             choice = {"type": "function", "name": "record_decision"} if prof.supports_value("tool_choice", "function") else None
-            model = self.with_tools([record_tool], tool_choice=choice)
-            decision_messages.append(UserMessage("Return exactly one record_decision call with the decision."))
+            model = self.with_tools([record_tool], tool_choice=choice,
+                                    argument_validators={"record_decision": validate_decision_arguments})
+            instruction = "Return exactly one record_decision call with the complete decision in its arguments."
+            required_fields = schema_dict.get("required", [])
+            if required_fields:
+                instruction += f" Required top-level fields are {', '.join(required_fields)}."
+                if schema_dict.get("additionalProperties") is False and set(required_fields) == set(schema_dict.get("properties", {})):
+                    instruction += " Use only those top-level fields."
+            decision_messages.append(UserMessage(instruction))
         if not native and not tool_based:
             if not (prof.supports("output_text") or prof.supports("input_text") or prof.supports("text_generation")):
                 prof.require("output_text")
@@ -432,16 +531,20 @@ class NativeLLMEngine:
         attempts = 2 if repair_decision or (not native and not tool_based) else 1
         for attempt in range(attempts):
             try:
-                response = await model.generate(decision_messages, schema=schema if native else None, **options)
+                response = await model.generate(
+                    decision_messages, schema=schema if native else None,
+                    _decision_correction_available=attempt + 1 < attempts, **options,
+                )
             except StructuredOutputError as exc:
                 failure = exc
+            except Exception as exc:
+                if attempt and on_decision_rejected is not None:
+                    on_decision_rejected(attempt, exc, True)
+                raise
             else:
                 try:
                     if tool_based:
-                        calls = response.tool_calls
-                        if len(calls) != 1 or calls[0].name != "record_decision":
-                            raise StructuredOutputError("Return exactly one record_decision call.")
-                        content = json.dumps(calls[0].args)
+                        content = json.dumps(response.tool_calls[0].args)
                     else:
                         content = response.content.strip() if isinstance(response.content, str) else ""
                         if not native and content.startswith("```"):
@@ -460,6 +563,9 @@ class NativeLLMEngine:
                 except ValueError as exc:
                     failure = exc
 
+            final = attempt + 1 >= attempts
+            if on_decision_rejected is not None:
+                on_decision_rejected(attempt, failure, final)
             if attempts == 1:
                 raise failure
             if isinstance(failure, ValidationError):
@@ -468,12 +574,16 @@ class NativeLLMEngine:
                 detail = str(failure)
             else:
                 detail = "The response did not match the required JSON fields or types."
-            if attempt + 1 >= attempts:
+            if final:
                 raise StructuredOutputError(f"Decision still invalid after one correction (failed schema validation). {detail}") from None
-            decision_messages.append(UserMessage(
+            correction = (
                 f"The decision was invalid. {detail}\n"
                 "Correct the response for the original request using the same response format."
-            ))
+            )
+            hint = correction_hint(failure) if callable(correction_hint) else correction_hint
+            if hint:
+                correction += f"\n{hint}"
+            decision_messages.append(UserMessage(correction))
         raise AssertionError("Decision validation attempts were not configured")
 
     def decide_sync(self, messages: Any, schema: type[BaseModel] | dict[str, Any], **options: Any) -> BaseModel | dict[str, Any]:
@@ -487,7 +597,9 @@ class NativeLLMEngine:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mana-inference-decide-sync") as pool:
             return pool.submit(context.run, lambda: asyncio.run(self.decide(messages, schema, **options))).result()
 
-    async def stream(self, messages: Any, **options: Any) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, messages: Any, *, _decision_correction_available: bool = False, **options: Any,
+    ) -> AsyncIterator[StreamEvent]:
         await self._refresh_metadata()
         request = self._request(messages, **options)
         self.profile(request.parameters).require("streaming", *(["tool_call_streaming"] if request.tools else []))
@@ -497,7 +609,8 @@ class NativeLLMEngine:
         completed = False
         deadline = time.monotonic() + self.timeout
         _emit_inference_activity("model.started", title="Waiting for model stream", status="running",
-            operation_id=request.request_id, metadata={"provider": self.provider, "model": self.model})
+            operation_id=request.request_id, metadata={"provider": self.provider, "model": self.model,
+                                                        "timeout_seconds": self.timeout})
         try:
             adapter = self._adapter()
             events = adapter.stream(request).__aiter__()
@@ -524,7 +637,10 @@ class NativeLLMEngine:
             if not completed:
                 raise InvalidResponseError("Interrupted stream; reconcile checkpoint before continuing")
         except BaseException as exc:
-            self._failed(request, reservation, exc)
+            request_error = self._failed(request, reservation, exc, started,
+                                         decision_correction_available=_decision_correction_available)
+            if request_error is not None:
+                raise request_error from None
             if isinstance(exc, asyncio.TimeoutError):
                 raise InferenceTimeoutError("Inference stream timed out; reconcile before continuing") from exc
             raise
@@ -540,7 +656,7 @@ def create_model(*, api_key: str, model: str, base_url: str | None = None, provi
                  default_headers: dict[str, str] | None = None, default_query: dict[str, str] | None = None,
                  model_configuration: dict[str, Any] | None = None,
                  **options: Any) -> NativeLLMEngine:
-    from mana_agent.config.provider_registry import PROVIDERS, model_id_for_provider
+    from mana_agent.config.provider_registry import PROVIDERS, inference_protocol_for_model, model_id_for_provider
     from mana_agent.config.user_config import get_setting
     from mana_agent.config.inference_provider import resolve_inference_connection
     from mana_agent.config.settings import Settings
@@ -556,9 +672,7 @@ def create_model(*, api_key: str, model: str, base_url: str | None = None, provi
         raise ValueError("Configure an HTTP(S) provider base URL without credentials, query fields, or a fragment")
     bare_model = model_id_for_provider(definition.id, model)
     mode = str(get_setting("MANA_LLM_API_MODE", "auto") or "auto")
-    endpoint = definition.inference_protocol if mode == "auto" else mode
-    if definition.inference_protocol == "anthropic_messages":
-        endpoint = "anthropic_messages"
+    endpoint = inference_protocol_for_model(definition.id, bare_model, mode=mode)
     timeout = float(options.pop("timeout", options.pop("request_timeout", 600)))
     attempts = int(options.pop("max_retries", 1)) + 1
     from mana_agent.model_routing.models import provider_request_overrides_from_configuration

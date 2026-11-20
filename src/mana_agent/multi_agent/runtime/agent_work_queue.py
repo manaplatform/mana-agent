@@ -97,7 +97,7 @@ from mana_agent.memory import CodingMemoryService
 from mana_agent.documents.service import DocumentService
 from mana_agent.memory import MultiAgentMemoryService
 from mana_agent.services.coding_todo_service import TodoService
-from mana_agent.tools.apply_patch import safe_apply_patch
+from mana_agent.tools.apply_patch import PatchFormatError, extract_patch_operations, safe_apply_patch
 from mana_agent.tools.repository import apply_patch_batch
 from mana_agent.tools.write_file import safe_create_file, safe_delete_file, safe_write_file
 
@@ -173,11 +173,6 @@ def _mutation_command_hash(command: MutationCommand) -> str:
         default=str,
     )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
-
-
-def _patch_context_mismatch(result: dict[str, Any]) -> bool:
-    text = " ".join(str(result.get(key) or "") for key in ("error_code", "error", "stderr", "stdout")).lower()
-    return "patch_context_not_found" in text or "re-read the target file" in text or "hunk" in text
 
 
 def _text_content_hash(content: str) -> str:
@@ -346,18 +341,29 @@ def _execute_registered_mutation_command(
     elif tool == "delete_file":
         result = safe_delete_file(repo_root=repo_root, path=str(args["path"]))
     elif tool == "apply_patch":
+        patch = str(args["patch"])
         expected_hashes = dict(args.get("content_hashes") or {})
-        actual_hashes = _current_content_hashes(repo_root, expected_hashes)
-        stale = sorted(path for path, expected in expected_hashes.items() if actual_hashes.get(path) != expected)
-        if stale:
+        try:
+            if expected_hashes:
+                extract_patch_operations(patch)
+        except PatchFormatError as exc:
             result = {
                 "ok": False,
-                "touched_files": stale,
-                "error_code": "patch_precondition_failed",
-                "error": f"Target content changed after patch generation: {stale}",
+                "error_code": "invalid_patch_format",
+                "error": f"Invalid patch format. {exc}",
             }
         else:
-            result = safe_apply_patch(repo_root=repo_root, patch=str(args["patch"]))
+            actual_hashes = _current_content_hashes(repo_root, expected_hashes)
+            stale = sorted(path for path, expected in expected_hashes.items() if actual_hashes.get(path) != expected)
+            if stale:
+                result = {
+                    "ok": False,
+                    "touched_files": stale,
+                    "error_code": "patch_precondition_failed",
+                    "error": f"Target content changed after patch generation: {stale}",
+                }
+            else:
+                result = safe_apply_patch(repo_root=repo_root, patch=patch)
     elif tool == "apply_patch_batch":
         result = apply_patch_batch(repo_root, patches=list(args["patches"]))
     elif tool == "document_create":
@@ -414,7 +420,8 @@ def _execute_registered_mutation_command(
             "error": "" if ok else str(result.get("error") or result.get("stderr") or "mutation command failed"),
         }
     ]
-    if not ok and tool == "apply_patch" and (_patch_context_mismatch(result) or result.get("error_code") == "patch_precondition_failed"):
+    error_code = result.get("error_code")
+    if not ok and tool == "apply_patch" and error_code in {"patch_context_not_found", "patch_precondition_failed"}:
         touched = list(result.get("touched_files") or command.target_files or [])
         # Always re-read targets so the agent/runtime has fresh content before any further edit.
         trace.extend(_reread_patch_targets_trace(repo_root=repo_root, touched_files=touched))
@@ -438,7 +445,7 @@ def _execute_registered_mutation_command(
         # original stale patch unchanged. Only retry when we can rebuild a distinct patch
         # (precondition failure / single-line rebase) or when recovery metadata is absent.
         recovery_attempts = list(result.get("attempts") or [])
-        recovery_exhausted = bool(recovery_attempts) and result.get("error_code") == "patch_context_not_found"
+        recovery_exhausted = bool(recovery_attempts) and error_code == "patch_context_not_found"
         rebuilt = None if recovery_exhausted else _rebase_patch_once(repo_root=repo_root, patch=str(args["patch"]))
         if recovery_exhausted and not rebuilt:
             trace.append(
@@ -469,7 +476,7 @@ def _execute_registered_mutation_command(
 
         # Precondition failures still need one apply against freshly read content.
         retry_patch = rebuilt or str(args["patch"])
-        if rebuilt is None and result.get("error_code") != "patch_precondition_failed":
+        if rebuilt is None and error_code != "patch_precondition_failed":
             retry_result = {"ok": False, "error": "patch_rebuild_not_safe"}
         else:
             retry_result = safe_apply_patch(repo_root=repo_root, patch=retry_patch)
@@ -578,6 +585,10 @@ class WorkItem(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     kind: WorkKind
+    task_id: str = ""
+    queue_job_id: str = ""
+    attempt_id: str = ""
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
     title: str = ""
     gate: str = ""
     tool_name: str = ""
@@ -713,6 +724,14 @@ class AgentWorkQueue:
     def submit(self, item: WorkItem) -> bool:
         """Add a job. Returns ``False`` if a duplicate was suppressed."""
         with self._lock:
+            from mana_agent.services.activity_context import current_activity_context
+            activity = current_activity_context()
+            if activity is not None and activity.task_id:
+                if item.task_id and item.task_id != activity.task_id:
+                    raise PermissionError("Native work item belongs to another TaskBoard task")
+                item.task_id = activity.task_id
+                item.attempt_id = activity.attempt_id
+                item.queue_job_id = item.queue_job_id or item.id
             if self._memory_service is not None:
                 accepted, existing_id = self._memory_service.register_queue_item(
                     queue_item_id=item.id,

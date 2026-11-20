@@ -8,6 +8,7 @@ adapter uses the same evidence contract before publishing a turn result.
 from __future__ import annotations
 
 from mana_agent.batch.policy import BatchPending
+from mana_agent.coding.verification_evidence import isolated_verification_ids
 
 import json
 from dataclasses import dataclass
@@ -242,6 +243,7 @@ def validate_or_reconcile_integration_stage(child: Any) -> str:
     has_passed_verification = bool(verification_results) and bool(verification_results[-1].passed)
     execution_ids = list(getattr(child, "verification_queue_job_ids", []) or getattr(child, "queue_job_ids", []) or [])
     verification_provenance = dict(getattr(child, "verification_provenance", {}) or {})
+    execution_ids = execution_ids or isolated_verification_ids(child)
     has_provenance = bool(verification_provenance and verification_provenance.get("verification_id"))
 
     has_verification_evidence = has_passed_verification and bool(execution_ids) and has_provenance
@@ -607,6 +609,7 @@ class FeatureIntegrationCoordinator:
         verification_executor: IntegrationVerificationExecutor | None = None,
         integration_decision_provider: Callable[..., WiringDecision | dict[str, Any] | None] | None = None,
         integration_decision: WiringDecision | dict[str, Any] | None = None,
+        isolated_verification: list[dict] | None = None,
     ) -> FeatureIntegrationResult:
         result = dict(core_result or {})
         if str(result.get("status") or result.get("run_status") or "").strip().lower() not in {"completed", "success"}:
@@ -662,7 +665,6 @@ class FeatureIntegrationCoordinator:
                 changed_files=changed_files,
                 trigger_turn_id=trigger_turn_id,
             )
-            taskboard.get_task(taskboard_parent_task_id).integration_stage = "CORE_COMPLETE"
 
         checkpoint = {
             "boundary": "after_core_implementation",
@@ -852,6 +854,7 @@ class FeatureIntegrationCoordinator:
                 queue_manager=queue_manager,
                 verification_executor=verification_executor,
                 trigger_turn_id=trigger_turn_id,
+                isolated_verification=isolated_verification,
             )
 
         # A TaskBoard-backed run must obtain authority from the lifecycle it
@@ -917,6 +920,7 @@ class FeatureIntegrationCoordinator:
         queue_manager: Any | None = None,
         verification_executor: IntegrationVerificationExecutor | None = None,
         trigger_turn_id: str = "",
+        isolated_verification: list[dict] | None = None,
     ) -> tuple[IntegrationAuthority | None, str]:
         """Materialize model evidence into the runtime-owned integration gate.
 
@@ -979,11 +983,11 @@ class FeatureIntegrationCoordinator:
         if getattr(child, "runtime_reachability_verified", False) and getattr(child, "integration_evidence_records", None):
             child.integration_verified = True
 
+        legacy_cursor = bool(child.integration_stage)
         current_stage = validate_or_reconcile_integration_stage(child)
-        if not child.integration_stage or child.integration_stage in ("CORE_COMPLETE", "INTEGRATION_DISCOVERY", "INTEGRATION_MUTATION"):
-            child.integration_stage = "INTEGRATION_VERIFY"
+        if current_stage in {"CORE_COMPLETE", "INTEGRATION_DISCOVERY", "INTEGRATION_MUTATION"}:
             current_stage = "INTEGRATION_VERIFY"
-        else:
+        if legacy_cursor:
             child.integration_stage = current_stage
         taskboard.save()
 
@@ -1014,58 +1018,75 @@ class FeatureIntegrationCoordinator:
                 )
                 return None, FEATURE_INTEGRATION_VERIFICATION_PLAN_MISSING
 
-            active_executor = verification_executor
-            if active_executor is None:
-                if queue_manager is not None:
-                    active_executor = MultiAgentVerificationExecutor(
-                        taskboard=taskboard,
-                        queue_manager=queue_manager,
-                        workspace_root=root_path,
-                    )
-                else:
-                    try:
+            if isolated_verification is None:
+                active_executor = verification_executor
+                if active_executor is None:
+                    if queue_manager is not None:
                         active_executor = MultiAgentVerificationExecutor(
                             taskboard=taskboard,
+                            queue_manager=queue_manager,
                             workspace_root=root_path,
                         )
-                    except BatchPending:
-                        raise
-                    except Exception:
-                        active_executor = None
+                    else:
+                        try:
+                            active_executor = MultiAgentVerificationExecutor(
+                                taskboard=taskboard,
+                                workspace_root=root_path,
+                            )
+                        except BatchPending:
+                            raise
+                        except Exception:
+                            active_executor = None
 
-            if active_executor is None or getattr(active_executor, "queue_manager", True) is None:
-                taskboard.update_status(
-                    child_id,
-                    TaskStatus.BLOCKED,
-                    reason=f"{FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE}: verification infrastructure unavailable",
+                if active_executor is None or getattr(active_executor, "queue_manager", True) is None:
+                    taskboard.update_status(
+                        child_id,
+                        TaskStatus.BLOCKED,
+                        reason=f"{FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE}: verification infrastructure unavailable",
+                    )
+                    return None, FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE
+
+                verification = active_executor.execute(
+                    task_id=child_id,
+                    commands=commands,
+                    workspace_root=root_path,
                 )
-                return None, FEATURE_INTEGRATION_VERIFIER_UNAVAILABLE
 
-            verification = active_executor.execute(
-                task_id=child_id,
-                commands=commands,
-                workspace_root=root_path,
-            )
+                # Idempotently persist VerificationResult
+                existing_verif_ids = {
+                    r.verification_id for r in child.verification_results if hasattr(r, "verification_id")
+                }
+                if verification.verification_id not in existing_verif_ids:
+                    taskboard.add_verification_result(child_id, verification)
 
-            # Idempotently persist VerificationResult
-            existing_verif_ids = {
-                r.verification_id for r in child.verification_results if hasattr(r, "verification_id")
-            }
-            if verification.verification_id not in existing_verif_ids:
-                taskboard.add_verification_result(child_id, verification)
+                # Idempotently persist execution/queue job IDs
+                exec_job_ids = list(getattr(verification, "execution_job_ids", []) or [])
+                if not exec_job_ids:
+                    if queue_manager is not None:
+                        exec_job_ids = [job.job_id for job in queue_manager.jobs_for_task(child_id)]
+                    elif getattr(active_executor, "queue_manager", None) is not None:
+                        exec_job_ids = [job.job_id for job in active_executor.queue_manager.jobs_for_task(child_id)]
+                for job_id in exec_job_ids:
+                    if job_id not in child.verification_queue_job_ids:
+                        taskboard.add_verification_queue_job(child_id, job_id)
+                    if job_id not in child.queue_job_ids:
+                        taskboard.add_queue_job(child_id, job_id)
 
-            # Idempotently persist execution/queue job IDs
-            exec_job_ids = list(getattr(verification, "execution_job_ids", []) or [])
-            if not exec_job_ids:
-                if queue_manager is not None:
-                    exec_job_ids = [job.job_id for job in queue_manager.jobs_for_task(child_id)]
-                elif getattr(active_executor, "queue_manager", None) is not None:
-                    exec_job_ids = [job.job_id for job in active_executor.queue_manager.jobs_for_task(child_id)]
-            for job_id in exec_job_ids:
-                if job_id not in child.verification_queue_job_ids:
-                    taskboard.add_verification_queue_job(child_id, job_id)
-                if job_id not in child.queue_job_ids:
-                    taskboard.add_queue_job(child_id, job_id)
+            else:
+                from mana_agent.human_inbox.models import canonical_digest
+
+                parent_receipts = taskboard.get_task(parent_task_id).mode_workflow.get("verification", [])
+                operation_ids = list(dict.fromkeys(row["operation_id"] for row in isolated_verification
+                    if row in parent_receipts and row.get("passed") and row.get("exit_code") == 0
+                    and row.get("attempt_id") and row.get("operation_id")))
+                verification = VerificationResult(
+                    verification_id=canonical_digest(operation_ids), task_id=child_id,
+                    verified_by_agent_id="isolated_verifier", commands_run=commands,
+                    passed=bool(operation_ids), summary="Matched passing isolated verification receipts from Coding.",
+                )
+                exec_job_ids = []
+                if not any(row.verification_id == verification.verification_id for row in child.verification_results):
+                    taskboard.add_verification_result(child_id, verification)
 
             if not verification.passed:
                 reviewer.reject_weak_evidence(child_id, verification.summary)
@@ -1076,7 +1097,7 @@ class FeatureIntegrationCoordinator:
                 )
                 return None, FEATURE_INTEGRATION_VERIFICATION_FAILED
 
-            if commands and not (child.verification_queue_job_ids or exec_job_ids):
+            if isolated_verification is None and commands and not (child.verification_queue_job_ids or exec_job_ids):
                 taskboard.update_status(
                     child_id,
                     TaskStatus.BLOCKED,
@@ -1093,6 +1114,8 @@ class FeatureIntegrationCoordinator:
                 "source": verification_plan.source,
                 "decision_id": verification_plan.decision_id,
             }
+            if isolated_verification is not None:
+                child.verification_provenance["isolated_operation_ids"] = operation_ids
 
             taskboard.save()
             taskboard.update_status(
@@ -1101,7 +1124,8 @@ class FeatureIntegrationCoordinator:
                 reason="VerifierAgent recorded executed integration verification evidence.",
             )
 
-            child.integration_stage = "REACHABILITY_VERIFY"
+            if legacy_cursor:
+                child.integration_stage = "REACHABILITY_VERIFY"
             taskboard.save()
             current_stage = "REACHABILITY_VERIFY"
 
@@ -1113,6 +1137,7 @@ class FeatureIntegrationCoordinator:
                 [edge["source_reference"] for edge in edges]
                 + list(child.queue_job_ids)
                 + list(child.verification_queue_job_ids)
+                + isolated_verification_ids(child)
             ))
             verification_id = str((child.verification_provenance or {}).get("verification_id") or "")
             if not reviewer.verify_runtime_reachability(
@@ -1129,7 +1154,8 @@ class FeatureIntegrationCoordinator:
                     reason=f"{FEATURE_INTEGRATION_REACHABILITY_UNPROVEN}: reachability verification failed",
                 )
                 return None, FEATURE_INTEGRATION_REACHABILITY_UNPROVEN
-            child.integration_stage = "REVIEW"
+            if legacy_cursor:
+                child.integration_stage = "REVIEW"
             taskboard.save()
             current_stage = "REVIEW"
 
@@ -1142,7 +1168,8 @@ class FeatureIntegrationCoordinator:
                     reason=f"{FEATURE_INTEGRATION_REVIEW_REJECTED}: Reviewer rejected integration evidence",
                 )
                 return None, FEATURE_INTEGRATION_REVIEW_REJECTED
-            child.integration_stage = "SUPERVISOR_FINALIZE"
+            if legacy_cursor:
+                child.integration_stage = "SUPERVISOR_FINALIZE"
             taskboard.save()
             current_stage = "SUPERVISOR_FINALIZE"
 

@@ -68,6 +68,25 @@ The `MemoryLearningEngine` continuously observes execution outputs without requi
 - **Unverified Hypotheses**:
   - Failures where the root cause or correction cannot be definitively verified are stored as `CANDIDATE` with `is_hypothesis=True`. They are never presented as established facts until verified with empirical evidence.
 
+### Tool failure recording regression
+
+On 2026-11-18 the internal coding engine passed lowercase `tool` when reporting
+a failed tool operation. The runtime logged `'tool' is not a valid LearningCategory`
+and skipped recording the event. `GlobalMemory.record_failure` called the
+case-sensitive analyzer before normalizing the category. Tests that supplied
+enum members did not exercise that order.
+
+The recording boundary now resolves the category to its enum before analysis,
+so lowercase, mixed-case, and enum inputs produce the same tool signature and
+deduplicate repeated failures. Stored category values need no migration.
+Do not defer category normalization until after failure analysis.
+
+User verification uses the following command. The agent did not run it.
+
+```sh
+venv/bin/python -m pytest -q tests/test_global_learning_memory.py -k tool_failure_category
+```
+
 ---
 
 ## 3. Persistent Memory Schema

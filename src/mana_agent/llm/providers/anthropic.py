@@ -9,9 +9,16 @@ from collections.abc import AsyncIterator
 from typing import Any
 from mana_agent.llm.errors import InvalidResponseError
 from mana_agent.llm.messages import ToolCall
-from mana_agent.llm.providers.openai import plain
+from mana_agent.llm.providers.openai import decode_structured, plain, strict_schema
 from mana_agent.llm.types import ContinuationState, InferenceRequest, ModelResponse, StreamEvent, Usage
 from mana_agent.utils.text import _strip_thinking_tags
+
+
+_STOP_DETAILS = {
+    "max_tokens": "The provider reached the output-token limit before completing its response.",
+    "pause_turn": "The provider paused the Messages turn before completing its response.",
+    "refusal": "The selected provider refused the request.",
+}
 
 
 class AnthropicProvider:
@@ -19,8 +26,24 @@ class AnthropicProvider:
                  headers: dict[str, str] | None = None, query: dict[str, str] | None = None,
                  timeout: float = 600, client: Any = None,
                  volatile_continuations: dict | None = None):
-        self.options = dict(api_key=api_key, base_url=base_url, default_headers=headers,
+        self.provider = provider
+        # The SDK appends /v1/messages to its base URL.
+        sdk_base_url = base_url.rstrip("/").removesuffix("/v1")
+        self.options = dict(api_key=api_key, base_url=sdk_base_url, default_headers=headers,
                             default_query=query, timeout=timeout, max_retries=0)
+        if provider == "openrouter":
+            # The oldest supported SDK defines Omit here without re-exporting it.
+            from anthropic._types import Omit
+
+            if not api_key:
+                raise ValueError("Configure OPENROUTER_API_KEY to use OpenRouter Messages")
+            headers = {name: value for name, value in (headers or {}).items()
+                       if name.lower() not in {"authorization", "x-api-key"}}
+            # Older SDKs read ambient keys unless api_key is set and may prefer
+            # that field over auth_token. Explicitly replace the wire headers.
+            self.options.update(api_key="", auth_token=api_key, default_headers={
+                **headers, "Authorization": f"Bearer {api_key}", "X-Api-Key": Omit(),
+            })
         self.client = client
         self.owns_client = client is None
         self.volatile_continuations = volatile_continuations if volatile_continuations is not None else {}
@@ -41,6 +64,22 @@ class AnthropicProvider:
                 **body.get("extra_body", {}).get("output_config", {}), "effort": effort}}
         for key in ("callbacks", "config", "stream"):
             body.pop(key, None)
+        if self.provider == "openrouter":
+            if body.pop("n", 1) not in (None, 1):
+                raise ValueError("OpenRouter Messages requires one response choice")
+            output_field = body.pop("output_token_parameter", None)
+            if output_field is not None and output_field not in {"max_tokens", "max_completion_tokens", "max_output_tokens"}:
+                raise ValueError("Unknown output token field for the native adapter")
+            if request.response_schema or "provider" in body:
+                extra = dict(body.get("extra_body") or {})
+                provider = body.pop("provider", {})
+                provider_extra = extra.get("provider", {})
+                if not isinstance(provider, dict) or not isinstance(provider_extra, dict):
+                    raise ValueError("OpenRouter provider routing settings must be an object")
+                extra["provider"] = {**provider, **provider_extra}
+                if request.response_schema:
+                    extra["provider"]["require_parameters"] = True
+                body["extra_body"] = extra
         maximum = body.pop("max_output_tokens", body.pop("max_completion_tokens", None))
         if maximum is not None:
             body["max_tokens"] = maximum
@@ -104,13 +143,25 @@ class AnthropicProvider:
             else:
                 body["tool_choice"] = {"type": "tool", "name": choice.get("name") or choice.get("function", {}).get("name")}
         if request.response_schema:
-            body["extra_body"] = {**body.get("extra_body", {}), "output_config": {**body.get("extra_body", {}).get("output_config", {}), "format": {"type": "json_schema", "schema": request.response_schema}}}
+            extra = body.get("extra_body", {})
+            body["extra_body"] = {
+                **extra,
+                "output_config": {
+                    **extra.get("output_config", {}),
+                    "format": {
+                        "type": "json_schema",
+                        "schema": strict_schema(request.response_schema, claude_compatible=True),
+                    },
+                },
+            }
         return body
 
     def normalize(self, raw: Any, request: InferenceRequest) -> ModelResponse:
         data = plain(raw)
-        if data.get("stop_reason") in {"max_tokens", "pause_turn", "refusal"}:
-            raise InvalidResponseError(f"Anthropic response is incomplete/refused: {data['stop_reason']}")
+        stop_reason = data.get("stop_reason")
+        if stop_reason in _STOP_DETAILS:
+            detail = _STOP_DETAILS[stop_reason]
+            raise InvalidResponseError(detail, public_detail=detail, reason_code=f"messages_stop_{stop_reason}")
         text, calls, opaque = [], [], []
         has_private_thinking = False
         for block in data.get("content", []):
@@ -123,7 +174,9 @@ class AnthropicProvider:
             elif block["type"] == "thinking":
                 has_private_thinking = True
             else:
-                raise InvalidResponseError(f"Unsupported Anthropic output block: {block['type']}")
+                detail = "The provider returned an unsupported Messages content block."
+                raise InvalidResponseError(detail, public_detail=detail, reason_code="messages_unsupported_block")
+        content = decode_structured("".join(text), request.response_schema or None)
         continuation = None
         if (calls and has_private_thinking) or opaque or request.continuation:
             # Signed thinking is necessary for this provider's tool continuation. Keep
@@ -145,19 +198,22 @@ class AnthropicProvider:
         outgoing = counts.get("output_tokens", 0) or 0
         usage = Usage(input_tokens=incoming, output_tokens=outgoing, total_tokens=incoming + outgoing,
             cached_input_tokens=cached)
-        return ModelResponse(id=data.get("id", ""), provider=request.provider, model=request.model, content="".join(text),
-            tool_calls=calls, usage=usage, finish_reason=data.get("stop_reason") or "stop",
+        return ModelResponse(id=data.get("id", ""), provider=request.provider, model=request.model, content=content,
+            tool_calls=calls, usage=usage, finish_reason=stop_reason or "stop",
             continuation=continuation,
             configuration_observation={"reasoning_effort": (data.get("output_config") or {}).get("effort")})
 
-    async def generate(self, request: InferenceRequest) -> ModelResponse:
-        raw = await self._client().messages.create(**self.encode(request))
+    def _finish(self, raw: Any, request: InferenceRequest) -> ModelResponse:
         try:
             return self.normalize(raw, request)
         except Exception as exc:
             exc.provider_usage = plain(raw).get("usage")
             exc.response_accepted = True
             raise
+
+    async def generate(self, request: InferenceRequest) -> ModelResponse:
+        raw = await self._client().messages.create(**self.encode(request))
+        return self._finish(raw, request)
 
     async def stream(self, request: InferenceRequest) -> AsyncIterator[StreamEvent]:
         sequence = 0
@@ -179,8 +235,9 @@ class AnthropicProvider:
                         yield StreamEvent(type="tool.arguments.delta", request_id=request.request_id, sequence=sequence,
                             call_id=identity, name=name, delta=delta["partial_json"])
                 elif event["type"] == "error":
-                    raise InvalidResponseError("Anthropic stream failed")
-            response = self.normalize(await stream.get_final_message(), request)
+                    detail = "The provider interrupted its Messages stream before completing the response."
+                    raise InvalidResponseError(detail, public_detail=detail, reason_code="messages_stream_interrupted")
+            response = self._finish(await stream.get_final_message(), request)
             for call in response.tool_calls:
                 sequence += 1
                 yield StreamEvent(type="tool.completed", request_id=request.request_id, sequence=sequence, call_id=call.id, name=call.name)

@@ -15,6 +15,13 @@ _CHAT_STOP_DETAILS = {
     "content_filter": "The provider's content filter stopped the response.",
 }
 
+# Claude's constrained decoder rejects these keywords. The original schema
+# still enforces them when Mana validates the response.
+_CLAUDE_DESCRIPTION_CONSTRAINTS = (
+    "minLength", "maxLength", "maxItems", "uniqueItems",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+)
+
 
 def plain(value: Any) -> Any:
     return value.model_dump(mode="json", exclude_none=True) if hasattr(value, "model_dump") else value
@@ -29,10 +36,10 @@ def usage(value: Any) -> Usage:
         reasoning_tokens=(raw.get("output_tokens_details") or raw.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0)
 
 
-def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+def strict_schema(schema: dict[str, Any], *, claude_compatible: bool = False) -> dict[str, Any]:
     """Create the provider's strict schema without changing application validation."""
     if isinstance(schema, list):
-        return [strict_schema(item) for item in schema]
+        return [strict_schema(item, claude_compatible=claude_compatible) for item in schema]
     if not isinstance(schema, dict):
         return schema
     if not schema or (schema.get("type") == "object" and not schema.get("properties") and schema.get("additionalProperties") is not False):
@@ -42,12 +49,22 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
         return {"type": "string", "description": "A JSON-encoded value for this field. " + schema.get("description", "")}
     value = dict(schema)
     value.pop("default", None)
+    if claude_compatible:
+        constraints = [f"{key}: {value.pop(key)}" for key in _CLAUDE_DESCRIPTION_CONSTRAINTS if key in value]
+        if value.get("minItems") not in (None, 0, 1):
+            constraints.append(f"minItems: {value.pop('minItems')}")
+        if constraints:
+            guidance = "Constraints: " + ", ".join(constraints) + "."
+            value["description"] = f"{value.get('description', '')} {guidance}".strip()
     for key in ("properties", "$defs", "definitions"):
         if isinstance(value.get(key), dict):
-            value[key] = {name: strict_schema(item) for name, item in value[key].items()}
+            value[key] = {
+                name: strict_schema(item, claude_compatible=claude_compatible)
+                for name, item in value[key].items()
+            }
     for key in ("items", "anyOf", "oneOf", "allOf"):
         if key in value:
-            value[key] = strict_schema(value[key])
+            value[key] = strict_schema(value[key], claude_compatible=claude_compatible)
     if value.get("type") == "object" or "properties" in value:
         properties = value.get("properties", {})
         value["required"] = list(properties)
@@ -174,7 +191,10 @@ class OpenAIProvider:
                 body["tools"] = [{"type": "function", "function": tool} for tool in request.tools]
             if request.response_schema:
                 body["response_format"] = {"type": "json_schema", "json_schema": {"name": "mana_response", "strict": True,
-                    "schema": strict_schema(request.response_schema)}}
+                    "schema": strict_schema(
+                        request.response_schema,
+                        claude_compatible=self.provider == "openrouter" and request.model.startswith("anthropic/"),
+                    )}}
                 if self.provider == "openrouter":
                     # OpenRouter can otherwise drop parameters unsupported by the served endpoint.
                     extra = dict(body.get("extra_body") or {})

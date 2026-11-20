@@ -14,6 +14,388 @@ from mana_agent.coding.models import AgentEvent, CodingTask, WorkspaceContext
 from mana_agent.coding.live_events import coding_event_scope
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_native_reads_whole_files_and_returns_exact_bounded_ranges(tmp_path, newline):
+    from hashlib import sha256
+    from mana_agent.coding.programmatic import ToolExecutionDispatcher
+
+    small = "".join(f"setting_{line:04d} = 'default value for the module'\n" for line in range(400))
+    large = small * 20
+    source_bytes = small.replace("\n", newline).encode("utf-8")
+    (tmp_path / "settings.py").write_bytes(source_bytes)
+    (tmp_path / "big.py").write_bytes(source_bytes * 20)
+    (tmp_path / "alias.py").symlink_to(tmp_path / "settings.py")
+    dispatcher = ToolExecutionDispatcher.for_coding_task(repo_root=tmp_path, task_id="adaptive-read")
+
+    def read(path, **kwargs):
+        return dispatcher.dispatch("read_file", {"path": path, **kwargs})
+
+    complete = read("settings.py")
+    assert complete["complete"] and not complete["truncated"]
+    assert (complete["start_line"], complete["end_line"], complete["total_lines"]) == (1, 400, 400)
+    assert complete["content"] == small
+    assert complete["source_evidence"]["sha256"] == sha256(source_bytes).hexdigest()
+
+    scoped = read("big.py", start_line=7900, end_line=7910)
+    assert scoped["partial"] and not scoped["truncated"]
+    assert (scoped["start_line"], scoped["end_line"], scoped["total_lines"]) == (7900, 7910, 8000)
+    assert scoped["content"] == "".join(large.splitlines(keepends=True)[7899:7910])
+    chunk = read("big.py")
+    assert chunk["truncated"] and chunk["partial"] and not chunk["complete"]
+    assert len(chunk["content"].splitlines()) == chunk["end_line"]
+    assert chunk["next_start_line"] == chunk["end_line"] + 1
+    assert not read("alias.py")["ok"]
+
+
+def test_native_resume_adds_refreshed_evidence_to_saved_history(tmp_path):
+    class Model:
+        async def generate(self, messages, *, continuation):
+            text = [message.content for message in messages]
+            assert "Previous scoped read" in text
+            assert "Fresh config evidence" in text[-1]
+            assert "same assignment" in text[-1]
+            return SimpleNamespace(tool_calls=[], content="Use the confirmed option.")
+
+    task = CodingTask(task_id="resumed", goal="Change the consumer", relevant_context="Fresh config evidence",
+                      requires_repository_write=False, context={
+                          "coding_continuation_id": "checkpoint",
+                          "coding_resume_context": {"native_messages": [
+                              {"role": "system", "content": "Work within scope"},
+                              {"role": "user", "content": "Previous scoped read"},
+                          ]},
+                      })
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(InternalCodingEngine(llm_client=Model()).execute(task, workspace))
+    assert result.status == "completed", result.errors
+
+
+def test_native_oversized_read_group_can_be_narrowed(tmp_path):
+    (tmp_path / "handler.py").write_text("handler = True\n")
+
+    class Model:
+        turns = 0
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            if self.turns == 1:
+                return SimpleNamespace(tool_calls=[{"id": f"read-{n}", "name": "read_file", "args": {"path": path}}
+                    for n, path in enumerate(("handler.py", "caller.py"))])
+            if self.turns == 2:
+                assert [json.loads(message.content)["executed"] for message in messages[-2:]] == [0, 0]
+                return SimpleNamespace(tool_calls=[{"id": "narrow", "name": "read_file", "args": {"path": "handler.py"}}])
+            assert "handler = True" in messages[-1].content
+            return SimpleNamespace(tool_calls=[], content="The handler is enabled.")
+
+    engine = InternalCodingEngine(llm_client=Model(), max_tool_calls=1)
+    task = CodingTask(task_id="coding", goal="Confirm handler", requires_repository_write=False)
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+    assert result.status == "completed", result.errors
+    assert result.summary == "The handler is enabled."
+
+
+@pytest.mark.parametrize(("outcome", "use_continuation"), [
+    ("recovered", False), ("recovered", True), ("repeated", False), ("budget", True),
+])
+def test_adaptive_coding_corrects_a_missing_tool_call(tmp_path, monkeypatch, outcome, use_continuation):
+    from mana_agent.coding.models import CODING_RESULT_TOOL
+    from mana_agent.llm.engine import _conversation_fingerprint
+    from mana_agent.llm.messages import ToolCall, validate_conversation
+    from mana_agent.llm.types import ContinuationState, ModelResponse
+
+    (tmp_path / "handler.py").write_text("enabled = True\n")
+    prose = '{"disposition": "complete", "summary": "Unsubmitted result"}'
+    events = []
+    monkeypatch.setattr("mana_agent.services.activity_context.emit_activity",
+                        lambda kind, **fields: events.append((kind, fields)))
+
+    class Model:
+        turns = 0
+        receipt = None
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            validate_conversation(messages)
+            if self.turns == 1:
+                assert "Respond with a tool call" in messages[-1].content
+                return ModelResponse(tool_calls=[ToolCall(id="read", name="read_file", args={"path": "handler.py"})])
+            if self.turns == 2:
+                assert messages[-1].tool_call_id == "read"
+                assert "enabled = True" in messages[-1].content
+                response = ModelResponse(content=prose)
+                if use_continuation:
+                    self.receipt = ContinuationState(
+                        provider="openai", model="fixture", endpoint="responses", mode="server",
+                        response_id="receipt", message_count=len(messages) + 1,
+                        message_fingerprint=_conversation_fingerprint([*messages, response.message]),
+                    )
+                    response.continuation = self.receipt
+                return response
+            assert self.turns == 3
+            assert continuation == self.receipt
+            if continuation:
+                assert _conversation_fingerprint(messages[:continuation.message_count]) == continuation.message_fingerprint
+            else:
+                assert all(message.content != prose for message in messages)
+            assert sum(message.tool_call_id == "read" for message in messages) == 1
+            assert messages[-1].role == "user"
+            assert f"{CODING_RESULT_TOOL} by itself as a direct call" in messages[-1].content
+            if outcome == "repeated":
+                return ModelResponse(content=prose)
+            return ModelResponse(tool_calls=[ToolCall(id="done", name=CODING_RESULT_TOOL, args={
+                "disposition": "complete", "summary": "Observed the enabled handler.",
+            })])
+
+    model = Model()
+    charges = []
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=1, programmatic_tool_calling_enabled=False)
+    engine.max_model_turns = 2 if outcome == "budget" else 5
+    engine.charge_model = lambda: charges.append("model")
+    task = CodingTask(task_id="adaptive-missing-action", goal="Confirm the handler state",
+                      requires_repository_write=False, context={"adaptive_mode": "debug"})
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    read, = result.continuation_context["executed_operations"]
+    assert read["call_id"] == "read" and read["ok"]
+    assert model.turns == len(charges) == (2 if outcome == "budget" else 3)
+    corrections = [fields for kind, fields in events if kind == "coding.progress"]
+    if outcome == "budget":
+        assert not corrections
+    else:
+        correction, = corrections
+        assert correction["status"] == "rejected"
+        assert correction["metadata"]["reason_code"] == "missing_coding_tool_call"
+        assert prose not in correction["summary"]
+    if outcome == "recovered":
+        assert result.status == "completed", result.errors
+        assert result.summary == "Observed the enabled handler."
+    else:
+        assert result.status == "failed"
+        assert result.adaptive_result is None
+        error, = result.errors
+        assert ("budget cannot cover a correction" if outcome == "budget" else "after one correction") in error
+        assert prose not in error
+
+
+def test_adaptive_coding_rejects_repeated_oversized_groups_without_dispatch(tmp_path):
+    from mana_agent.llm.messages import validate_conversation
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "app.py"
+    target.write_text("before\n")
+
+    class Model:
+        turns = 0
+
+        async def generate(self, messages, *, continuation):
+            validate_conversation(messages)
+            if self.turns:
+                errors = [json.loads(message.content) for message in messages if message.role == "tool"]
+                assert len(errors) == 3
+                assert all(error["error_code"] == "BUDGET_EXCEEDED" for error in errors)
+                assert all(not error["ok"] and error["executed"] == 0 for error in errors)
+                assert all(error["remaining"] == 3 and error["optional_remaining"] == 1 for error in errors)
+            self.turns += 1
+            selections = [
+                ("read_file", {"path": "app.py", "evidence_need": "Confirm the value to edit."}),
+                ("repo_search", {"query": "before", "paths": ["app.py"],
+                                 "evidence_need": "Find other occurrences that may require the same edit."}),
+                ("write_file", {"path": "app.py", "content": "unexpected\n"}),
+            ]
+            return SimpleNamespace(tool_calls=[{"id": f"{self.turns}-{index}", "name": name, "args": args}
+                                               for index, (name, args) in enumerate(selections)])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=3, programmatic_tool_calling_enabled=False)
+    engine.max_model_turns = 5
+    task = CodingTask(task_id="oversized-group", goal="Fix app.py", context={"adaptive_mode": "auto"})
+    workspace = WorkspaceContext(repository_path=repository, worktree_path=worktree, sandbox="workspaceWrite")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "failed"
+    assert "rejected after correction" in result.errors[0]
+    assert model.turns == 2
+    assert result.continuation_context["executed_operations"] == []
+    assert target.read_text() == "before\n"
+
+
+def test_adaptive_coding_rejects_shell_during_saved_inspection_correction(tmp_path):
+    from mana_agent.coding.adaptive import SHELL_TOOL_NAMES, USE_REPOSITORY_TOOL
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "app.py"
+    target.write_text("before\n")
+
+    class Model:
+        turns = 0
+
+        def with_tools(self, tools):
+            offered = {tool["function"]["name"] for tool in tools}
+            assert SHELL_TOOL_NAMES.isdisjoint(offered)
+            assert {"read_file", "write_file"} <= offered
+            return self
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            return SimpleNamespace(tool_calls=[
+                {"id": f"shell-{self.turns}", "name": "shell", "args": {"action": {"commands": ["ls"]}}},
+                {"id": f"write-{self.turns}", "name": "write_file", "args": {"path": "app.py", "content": "unexpected\n"}},
+            ])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=4, programmatic_tool_calling_enabled=False)
+    engine.max_model_turns = 6
+    task = CodingTask(task_id="saved-inspection-correction", goal="Fix app.py", context={
+        "adaptive_mode": "debug", "coding_resume_context": {"native_selection_corrections": [USE_REPOSITORY_TOOL]},
+    })
+    workspace = WorkspaceContext(repository_path=repository, worktree_path=worktree, sandbox="workspaceWrite")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "failed"
+    assert "rejected after correction" in result.errors[0]
+    assert model.turns == 2
+    assert result.continuation_context["executed_operations"] == []
+    assert target.read_text() == "before\n"
+
+
+def test_adaptive_coding_protects_model_turns_for_edit_check_and_result():
+    from mana_agent.coding.adaptive import AdaptiveWriteBudget
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+
+    budget = AdaptiveWriteBudget(remaining_tools=10, remaining_turns=3, tool_reserve=2)
+    assert budget.optional_calls == 0
+    assert not budget.allows("read_file")
+    assert budget.reject_group([ISOLATED_CHECK_TOOL])[0] == "BUDGET_EXCEEDED"
+    assert budget.reject_group(["apply_patch"]) is None
+
+    mixed = AdaptiveWriteBudget(remaining_tools=3, remaining_turns=4, tool_reserve=2)
+    assert mixed.allows("read_file")
+    assert mixed.reject_group(["read_file", "apply_patch", ISOLATED_CHECK_TOOL]) is None
+
+    last_tool_turn = AdaptiveWriteBudget(remaining_tools=10, remaining_turns=2, tool_reserve=2)
+    assert last_tool_turn.reject_group([ISOLATED_CHECK_TOOL, "apply_patch"])[0] == "VERIFICATION_RESERVE_REQUIRED"
+    assert last_tool_turn.reject_group(["apply_patch", ISOLATED_CHECK_TOOL]) is None
+
+    assert AdaptiveWriteBudget(remaining_tools=2, remaining_turns=3, tool_reserve=1).optional_calls == 1
+    assert AdaptiveWriteBudget(remaining_tools=2, remaining_turns=3, tool_reserve=2).optional_calls == 0
+    assert AdaptiveWriteBudget(remaining_tools=1, remaining_turns=2, tool_reserve=0).optional_calls == 1
+
+    final_turn = AdaptiveWriteBudget(remaining_tools=10, remaining_turns=1, tool_reserve=0)
+    assert final_turn.allows(CODING_RESULT_TOOL)
+    assert not final_turn.allows(ISOLATED_CHECK_TOOL)
+
+
+def test_adaptive_coding_routes_shell_inspection_and_rejects_inline_verification():
+    from mana_agent.coding.adaptive import validate_adaptive_tool
+    from mana_agent.coding.models import ISOLATED_CHECK_TOOL
+
+    assert validate_adaptive_tool("run_command", {"command": "grep -n handler src/app.py"})[0] == "USE_REPOSITORY_TOOL"
+    inspection = {"action": {"commands": ["git diff -- src/app.py"]}}
+    assert validate_adaptive_tool("shell", inspection)[0] == "USE_REPOSITORY_TOOL"
+    assert validate_adaptive_tool("run_command", {"command": "cc --version"}) is None
+    assert validate_adaptive_tool(ISOLATED_CHECK_TOOL, {"argv": ["bash", "-lc", "make && ctest"]})[0] == "INVALID_VERIFICATION_COMMAND"
+    assert validate_adaptive_tool(ISOLATED_CHECK_TOOL, {"argv": ["ctest"], "setup_argv": [["make"]]}) is None
+    assert validate_adaptive_tool(ISOLATED_CHECK_TOOL, {"argv": ["bash", "scripts/check.sh"]}) is None
+
+
+def test_slow_native_provider_is_measured_separately_from_duplicate_reads(tmp_path, monkeypatch):
+    from mana_agent.coding import internal_engine
+
+    (tmp_path / "a.py").write_text("value = True\n")
+    clock = [0.0]
+    monkeypatch.setattr(internal_engine, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    lifecycle = []
+    monkeypatch.setattr("mana_agent.services.activity_context.emit_activity",
+                        lambda kind, **fields: lifecycle.append((kind, fields)))
+
+    class Model:
+        turns = 0
+
+        async def generate(self, messages, *, continuation):
+            self.turns += 1
+            clock[0] += 300 if self.turns == 1 else 0.001
+            return SimpleNamespace(tool_calls=[
+                {"id": f"read-{self.turns}", "name": "read_file", "args": {"path": "a.py"}},
+            ])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model)
+    engine.max_no_progress_cycles = 2
+    task = CodingTask(task_id="slow", goal="Decide from the current file", requires_repository_write=False)
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+    assert result.status == "failed"
+    assert "Repeated repository reads" in result.errors[0]
+    assert model.turns == 4
+    assert len(result.continuation_context["executed_operations"]) == 3
+    durations = [fields["duration_ms"] for kind, fields in lifecycle if kind == "model.completed"]
+    assert durations == [300_000, 1, 1, 1]
+    assert result.duration_breakdown["provider_execution_time_ms"] == 300_003
+
+
+@pytest.mark.parametrize(("max_tool_calls", "max_model_turns", "expected_reads"), [(1, 4, 1), (5, 2, 1), (5, 5, 2)])
+def test_native_patch_proposal_can_finish_after_reads_stop(tmp_path, max_tool_calls, max_model_turns, expected_reads):
+    (tmp_path / "a.py").write_text("value = True\n")
+    patch = "*** Begin Patch\n*** Update File: a.py\n@@\n-value = True\n+value = False\n*** End Patch"
+
+    class Model:
+        reads = 0
+
+        async def generate(self, messages, *, continuation):
+            if "No further tools are available in this proposal" in messages[-1].content:
+                return SimpleNamespace(tool_calls=[], content=json.dumps({"patch": patch}))
+            self.reads += 1
+            return SimpleNamespace(tool_calls=[{"id": f"read-{self.reads}", "name": "read_file", "args": {"path": "a.py"}}])
+
+    model = Model()
+    engine = InternalCodingEngine(llm_client=model, max_tool_calls=max_tool_calls)
+    engine.max_model_turns = max_model_turns
+    engine.max_no_progress_cycles = 1
+    task = CodingTask(task_id="proposal", goal="Propose a change for a.py", allowed_files=["a.py"],
+                      requires_repository_write=False, context={"mode_patch_proposal": True})
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+    result = asyncio.run(engine.execute(task, workspace))
+
+    assert result.status == "completed", result.errors
+    assert json.loads(result.summary) == {"patch": patch}
+    assert model.reads == expected_reads
+    assert (tmp_path / "a.py").read_text() == "value = True\n"
+
+
+def test_cancelling_provider_wait_retains_completed_tool_result(tmp_path):
+    (tmp_path / "a.py").write_text("value = True\n")
+    task = CodingTask(task_id="cancel-after-read", goal="Inspect a.py", requires_repository_write=False)
+    workspace = WorkspaceContext(repository_path=tmp_path, worktree_path=tmp_path, sandbox="readOnly")
+
+    async def exercise():
+        pending = asyncio.Event()
+
+        class Model:
+            async def generate(self, messages, *, continuation):
+                if len(messages) == 2:
+                    return SimpleNamespace(tool_calls=[{"id": "read", "name": "read_file", "args": {"path": "a.py"}}])
+                pending.set()
+                await asyncio.Event().wait()
+
+        engine = InternalCodingEngine(llm_client=Model())
+        execution = asyncio.create_task(engine.execute(task, workspace))
+        await asyncio.wait_for(pending.wait(), timeout=5)
+        await engine.cancel(task.task_id)
+        return await asyncio.wait_for(execution, timeout=5)
+
+    result = asyncio.run(exercise())
+    assert result.status == "cancelled"
+    read, = result.continuation_context["executed_operations"]
+    assert read["call_id"] == "read" and read["ok"]
+
+
 class _FakeMultiToolLLM:
     """Simulates an LLM returning multiple parallel tool calls on turn 1, then completing on turn 2."""
 
@@ -67,8 +449,8 @@ class _MockTaskBoard:
     def add_files_touched(self, task_id, paths):
         self.get_task(task_id).files_touched.extend(paths)
 
-    def update_task(self, task_id: str, progress_summary: str, changed_files: list[str]) -> None:
-        self.updates.append({"task_id": task_id, "summary": progress_summary, "files": changed_files})
+    def update_task(self, task_id: str, *, progress: str) -> None:
+        self.updates.append({"task_id": task_id, "progress": progress})
 
 
 class _MockGlobalMemory:
@@ -149,15 +531,14 @@ def test_internal_coding_engine_parallel_workflow(tmp_path: Path) -> None:
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 100\n"
     assert (tmp_path / "b.py").read_text(encoding="utf-8") == "y = 200\n"
 
-    # Verify event stream contained parallel groups and phase tracking
     event_types = [e.event_type for e in events_emitted]
     assert "parallel.group.started" in event_types
     assert "parallel.group.completed" in event_types
     assert "turn.completed" in event_types
 
-    # Verify supervisor & taskboard integrations
-    assert len(supervisor.recorded_actions) > 0
-    assert len(taskboard.updates) > 0
+    assert supervisor.recorded_actions
+    assert [update["task_id"] for update in taskboard.updates] == [task.task_id, task.task_id]
+    assert all(update["progress"] for update in taskboard.updates)
 
 
 def test_internal_coding_engine_global_memory_recording_on_error(tmp_path: Path) -> None:
@@ -221,8 +602,19 @@ def test_internal_coding_engine_batch_read_allowed_files(tmp_path: Path) -> None
     file_a.write_text("def fn_a(): return 1\n", encoding="utf-8")
     file_b.write_text("def fn_b(): return 2\n", encoding="utf-8")
 
+    def _batch_read_client(task, ws, tools, session):
+        if len(task.allowed_files) > 1 and engine.batch_operations_enabled:
+            session.handle_function_call({
+                "call_id": "call_batch_1",
+                "name": "batch_read_files",
+                "arguments": {"files": list(task.allowed_files)},
+                "caller": {"type": "program", "call_id": "prog_init"},
+            })
+        return f"Completed internal coding task: {task.goal}"
+
     engine = InternalCodingEngine(
         model="test-model",
+        llm_client=_batch_read_client,
         batch_operations_enabled=True,
     )
 

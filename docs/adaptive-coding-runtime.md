@@ -1,12 +1,96 @@
 # Adaptive Coding Runtime
 
-## Unresolved bugs and external evidence
+## Supervised AUTO and DEBUG
+
+After the gateway validates an AUTO or DEBUG decision, realtime Internal
+Coding receives one Coding-lane assignment. The native loop chooses its tools
+from the authority of that assignment. It can read, edit, run a diagnostic,
+or verify immediately. TaskBoard retains progress and tool receipts, and the
+Execution Supervisor fences the attempt and confirms completion. Explicit PLAN
+retains its exact-revision approval boundary. External Codex, explicit Batch,
+and existing staged tasks keep their staged execution contracts.
+
+`verify_coding_change` runs selected arguments through the existing isolated
+Docker verifier. A failed check returns its exit code and bounded output to
+Coding, which can repair the implementation in the same attempt. Passing
+checks must match the current changed-file hashes from durable tool receipts.
+The native terminal decision can report completion, identify a blocker, or
+ask for material clarification. Production capability changes additionally
+require source-backed runtime reachability and existing integration verification.
+
+For a realtime Internal write task, `read_file`, `repo_search`, and the
+top-level `ls` are ordinary tool choices alongside edits and checks. Each source request supplies
+`evidence_need` with the missing fact and the edit or check it could affect.
+Searches name specific paths or a targeted glob. Use `ls` when the top-level
+location is unknown. An edit or useful diagnostic can be the first action, and
+a failing check can lead to another scoped read.
+
+The loop shows the remaining tool calls and model turns before each decision.
+It leaves capacity for an edit and a focused check before the first change and
+after a failed check. An unverified edit needs only the check reserve, and a
+passing check releases it. One model turn stays available for the typed
+result. A rejected group dispatches nothing and identifies the invalid call
+when a specific call caused the rejection. Each distinct error can get one
+correction within the remaining model budget and the configured no-progress
+limit. See the [search correction regression](regressions/unified-adaptive-coding.md#distinct-tool-errors-shared-one-correction).
+
+After a source-inspection shell rejection, Coding pauses the generic shell
+tools while the model corrects its selection. The model can use offered
+repository tools, edits, or `verify_coding_change` with direct arguments.
+For a top-level `ls`, supply only `evidence_need`. Provider argument errors
+refer to the offered schema for the affected tool. The pending correction
+survives a saved continuation. See the [shell inspection incident](regressions/unified-adaptive-coding.md#shell-inspection-repeated-during-correction).
+
+When the assignment approaches its tool or model-turn limit, the model can
+request `renew_coding_budget` with the progress made and the edit or check it
+still needs. Renewal uses the active accounting reservation, the configured
+increments, and any explicitly configured renewal count. Further renewals
+remain available while work advances and the reservation has capacity.
+Granted allowances and consumed calls survive resume. Failed build results
+on new source versions can show progress toward the next renewal. Coding
+Activity alerts the user when actions repeat without advancing the task.
+
+Source inspection uses the repository tools. The adaptive loop validates
+Codex patch syntax and isolated check inputs before charging a tool call.
+Use a direct command argv and `cwd` of `.` or a repository-relative directory.
+Realtime Internal write assignments run verification through the shell action
+policy in the assigned checkout. Use `setup_argv` for configuration or build
+prerequisites. Setup and the final check share the checkout and its build
+outputs. A failed prerequisite stops that sequence and returns its output for
+the next repair. A required build must pass against the current source versions
+before the assignment can report success.
+
+Each model turn must select an offered coding tool or submit a terminal result
+with one direct `submit_coding_result` call. If the model replies with prose
+alone, Coding requests one correction from the same model within the remaining
+turn budget. The model retains completed operations and their tool results.
+A second reply without a tool call stops the attempt. See the
+[missing tool call regression](regressions/unified-adaptive-coding.md#missing-tool-call-in-a-native-coding-response).
+
+Native file reads default to the whole source within the smaller of the
+remaining model context allowance and the 48,000-byte tool-content ceiling.
+Batch reads share that allowance. The result distinguishes full and scoped
+reads from budget-truncated ranges, returns the actual line boundaries and
+file hash, and provides the next line when needed. Files beyond the
+2,000,000-byte source-provenance limit require a narrower artifact or search.
+
+The Repository Evidence Board saves source-backed observations as tools return
+and checks their hashes before reuse. Duplicate observations reference existing
+results, and invalid references return a correction diagnostic. On recovery,
+the supervisor resumes the saved Coding assignment when action receipts reconcile.
+Source reads whose hashes changed are marked stale in the recovered history.
+Coding Activity labels reads, searches, edits, diagnostics, checks, and review
+in one stream. See the [unified coding regression](regressions/unified-adaptive-coding.md).
+
+## Unresolved bugs and external evidence in staged workflows
 
 The Main Model can select research at coding turn/yield boundaries after evaluating a typed debugging report, local evidence, attempted fixes and installed versions. Both engines return a report as pending work. Research uses the existing autonomous controller and search providers, then returns an untrusted, sourced recommendation to the same task/backend. A fixed number of failures never triggers a search.
 
 Default task limits are 12 search requests in four rounds, with at most three queries and three source inspections per round. Queries are sanitized; task-scoped results, consumed counters and delivery receipts survive recovery. Missing permissions or provider availability are reported to the Main Model without fallback searches. The existing integration and independent completion gates still apply. Configuration, recovery boundaries, limitations and user-owned verification are documented in [the regression note](regressions/coding-bug-research.md).
 
-Coding turns begin with one validated `ExecutionScopeDecision`. The model owns
+## Queue-based coding turns
+
+Queue-based coding turns begin with one validated `ExecutionScopeDecision`. The model owns
 semantic choices: intent, scope level, mutation targets, read-only related
 files, evidence needs, tool families, budgets, mutation strategy, verification,
 delegation, and stop conditions. Runtime code canonicalizes paths and enforces
@@ -103,5 +187,5 @@ All operations stream structured events into a single persistent `CodingActivity
 - Active operation groups (parallel groups, batch counts).
 - Per-tool duration and status icons (`✓`, `◌`, `✗`, `■`).
 - Active concurrency meter.
-- Current phase (`Exploration`, `Implementation`, `Verification`, `Review`).
+- Current activity, such as reading, editing, debugging, or verifying.
 - Automatic error signature recording into `GlobalMemory`.

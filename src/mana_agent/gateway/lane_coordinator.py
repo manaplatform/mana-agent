@@ -47,6 +47,7 @@ from mana_agent.execution_supervisor.errors import (
     BudgetExceededError,
     CompletionVerificationError,
     ExecutionSupervisorError,
+    TaskDeadlineExceededError,
 )
 from mana_agent.execution_supervisor.models import (
     BudgetOverrunFinalizationDecision,
@@ -336,6 +337,7 @@ class LaneCoordinator:
         self._waiters: list[dict[str, Any]] = []
         self._wait_sequence = 0
         self._claiming_waiters: dict[str, tuple[LaneId, float]] = {}
+        self._synchronous_steps: dict[str, str] = {}
         supervisor_config = ExecutionSupervisorConfig.from_settings(Settings())
         self.execution_supervisor = execution_supervisor or ExecutionSupervisor(
             supervisor_config,
@@ -613,12 +615,21 @@ class LaneCoordinator:
         completion_contract: Sequence[CompletionContract] = (),
         compensation_strategy: str = "",
         important_constraints: Sequence[str] = (),
+        execution_workspace: Path | None = None,
+        workflow_coordinator: bool = False,
     ) -> LaneReservation:
+        assigned_root = execution_workspace.resolve() if execution_workspace is not None else self.root
+        if assigned_root != self.root:
+            parent = self.execution_supervisor.store.get_task_or_none(parent_task_id) if parent_task_id else None
+            if parent is None or Path(parent.workspace_path).resolve() != assigned_root:
+                raise PermissionError("A child execution must use its parent's assigned worktree")
         if not self.execution_supervisor.config.enabled:
             raise LaneCoordinatorError(
                 "execution supervisor is disabled; no gateway task was created"
             )
         contract = self.contracts[lane_id]
+        if workflow_coordinator and (lane_id not in {LaneId.CODING, LaneId.RESEARCH} or capabilities):
+            raise LaneCoordinatorError("A coding workflow coordinator cannot reserve tool capabilities directly")
         if contract.requires_repository and not repository_id:
             raise LaneCoordinatorError(f"Lane {lane_id.value} requires a repository identity")
         if contract.allowed_models and model not in contract.allowed_models:
@@ -629,6 +640,7 @@ class LaneCoordinator:
             "workspace_id": workspace_id, "target_files": files,
             "lane": lane_id.value, "parent_task_id": parent_task_id,
             "relation_type": relation_type,
+            "workflow_coordinator": workflow_coordinator,
         })
         # ``lane_id`` is itself a validated structured routing decision. Older
         # callers did not persist a separate decision ID, so derive a stable
@@ -636,6 +648,8 @@ class LaneCoordinator:
         effective_routing_decision_id = routing_decision_id or f"lane-selection:{fingerprint}"
         selected_priority = priority or contract.default_priority
         with self._condition:
+            reuses_parent = bool(parent_task_id and taskboard_task_id
+                                 and self._synchronous_steps.get(parent_task_id) == taskboard_task_id)
             self._wait_sequence += 1
             waiter = {
                 "waiter_id": f"wait_{uuid.uuid4().hex}",
@@ -662,6 +676,7 @@ class LaneCoordinator:
                             "target_files": active.target_files, "lane": active.owning_lane.value,
                             "parent_task_id": active.parent_task_id,
                             "relation_type": active.relation_type,
+                            "workflow_coordinator": active.workflow_coordinator,
                         })
                         explicit_identity_matches = (
                             not taskboard_task_id
@@ -676,11 +691,11 @@ class LaneCoordinator:
                             return LaneReservation(active, duplicate=True)
                     capacity_available = True
                     try:
-                        self._assert_capacity(contract, model)
+                        self._assert_capacity(contract, model, exclude_task_id=parent_task_id if reuses_parent else "")
                     except LaneCapacityError:
                         capacity_available = False
-                    if capacity_available and self._next_waiter_id() == waiter["waiter_id"]:
-                        if waiter_persisted:
+                    if capacity_available and (reuses_parent or self._next_waiter_id() == waiter["waiter_id"]):
+                        if waiter_persisted and not reuses_parent:
                             self._claiming_waiters[waiter["waiter_id"]] = (contract.lane_id, time.monotonic())
                         break
                     remaining = deadline - time.monotonic()
@@ -775,6 +790,8 @@ class LaneCoordinator:
                 and set(capabilities).issubset({"repository_read"})
                 else SideEffectClassification.UNKNOWN
             )
+            if workflow_coordinator and side_effect_classification is None:
+                side_effect = SideEffectClassification.READ_ONLY
             initial_contract = list(completion_contract) or [
                 CompletionContract(
                     contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
@@ -789,10 +806,11 @@ class LaneCoordinator:
                 task_id=task_id,
                 parent_task_id=parent_task_id,
                 task_type=task_type,
+                workflow_coordinator=workflow_coordinator,
                 assigned_agent=f"lane:{lane_id.value}",
                 assigned_model=model,
                 runtime_provider=provider,
-                workspace_path=self.root,
+                workspace_path=assigned_root,
                 routing_decision_id=effective_routing_decision_id,
                 side_effect_classification=side_effect,
                 completion_contract=initial_contract,
@@ -844,6 +862,7 @@ class LaneCoordinator:
                 target_files=files, priority=selected_priority, budget=budget,
                 taskboard_task_id=task.task_id, model=model, capabilities=list(capabilities),
                 routing_decision_id=effective_routing_decision_id, provider=provider, task_type=task_type,
+                workflow_coordinator=workflow_coordinator,
                 trigger_turn_id=trigger_turn_id, relation_type=relation_type, previous_task_id=previous_task_id,
                 user_message_id=user_message_id,
                 waiter_id=waiter["waiter_id"],
@@ -860,6 +879,8 @@ class LaneCoordinator:
                     tb_task.scheduled_at = datetime.fromisoformat(scheduled_at_iso.replace("Z", "+00:00"))
             self.taskboard.update_status(task_id, TaskStatus.ROUTED)
             self.taskboard.update_status(task_id, TaskStatus.QUEUED)
+            if workflow_coordinator:
+                self.taskboard.update_orchestration(task_id, owning_lane=lane_id.value)
             self._persist_locked()
             self.emit("lane.queued", task_id=task_id, lane_id=lane_id)
             self.emit("task.created", task_id=task_id, lane_id=lane_id, parent_task_id=parent_task_id)
@@ -872,8 +893,11 @@ class LaneCoordinator:
         if reservation.duplicate:
             return execution
         contract = self.contracts[execution.owning_lane]
-        mode = contract.lock_policy
+        mode = LockMode.NONE if execution.workflow_coordinator else contract.lock_policy
         paths = execution.target_files
+        assigned_task = self.taskboard.get_task(execution.task_id)
+        if assigned_task.task_kind in {"investigation", "understanding"} and paths:
+            mode = LockMode.FILE_READ
         if mode == LockMode.NONE and "repository_write" in execution.capabilities:
             mode = LockMode.FILE_WRITE
         elif mode == LockMode.NONE and "repository_read" in execution.capabilities:
@@ -1041,6 +1065,9 @@ class LaneCoordinator:
             return ""
         if not self.can_checkpoint(task_id):
             return execution.checkpoint_id or ""
+        task = self.taskboard.get_task(task_id)
+        resume_payload = {**dict(resume_payload or {}), "repository_evidence_refs": task.evidence_refs,
+                          "coding_assignment": task.coding_assignment, "evidence_requirements": task.evidence_requirements}
         checkpoint = self.execution_supervisor.checkpoint(
             task_id,
             attempt_id=execution.supervisor_attempt_id,
@@ -1113,6 +1140,7 @@ class LaneCoordinator:
         *,
         state: LaneTaskState = LaneTaskState.COMPLETED,
         changed_files: Sequence[str] = (),
+        reconciled_file_versions: Mapping[str, str] | None = None,
         consumed_input_tokens: int = 0,
         consumed_output_tokens: int = 0,
         actual_cost: float | None = None,
@@ -1132,8 +1160,13 @@ class LaneCoordinator:
             if getattr(execution, "waiter_id", ""):
                 self._claiming_waiters.pop(execution.waiter_id, None)
             if state == LaneTaskState.COMPLETED and execution.heartbeat_failure:
-                state = LaneTaskState.FAILED
-                error = execution.heartbeat_failure
+                supervised = self.execution_supervisor.get_task(task_id)
+                if supervised.wall_clock_deadline_exceeded(self.execution_supervisor.clock()):
+                    state = LaneTaskState.TIMED_OUT
+                    error = "task wall-clock deadline exceeded"
+                else:
+                    state = LaneTaskState.FAILED
+                    error = execution.heartbeat_failure
             execution.changed_files = self.canonical_paths(changed_files)
             execution_had_usage = execution.budget.consumed_tokens > 0
             incremental_usage = consumed_input_tokens > 0 or consumed_output_tokens > 0
@@ -1228,6 +1261,7 @@ class LaneCoordinator:
         self._stop_supervisor_heartbeats(task_id)
         verified = False
         if state == LaneTaskState.COMPLETED:
+            workspace_root = Path(self.execution_supervisor.get_task(task_id).workspace_path or self.root)
             lookup = self.execution_supervisor.get_verified_execution_result(task_id)
             if lookup.status == EscrowLookupStatus.FOUND and lookup.is_verified and lookup.task is not None:
                 supervised = lookup.task
@@ -1235,133 +1269,145 @@ class LaneCoordinator:
                 state = LaneTaskState.COMPLETED if verified else LaneTaskState.VERIFYING
             else:
                 contracts: list[CompletionContract] = []
-            for changed in execution.changed_files:
-                path = Path(changed)
-                try:
-                    relative = path.relative_to(self.root)
-                except ValueError:
-                    relative = path
-                if path.is_file():
-                    contracts.append(
-                        CompletionContract(
-                            contract_type=CompletionContractType.FILE_EXISTS,
-                            path=str(relative),
-                            minimum_size=0,
-                            require_attempt_change=True,
+                for changed in execution.changed_files:
+                    path = Path(changed)
+                    path = (workspace_root / path).resolve() if not path.is_absolute() else path.resolve()
+                    relative = path.relative_to(workspace_root.resolve())
+                    version = (reconciled_file_versions or {}).get(relative.as_posix())
+                    if path.is_file():
+                        contracts.append(
+                            CompletionContract(
+                                contract_type=CompletionContractType.FILE_EXISTS,
+                                path=str(relative),
+                                minimum_size=0,
+                                expected_sha256=version or "",
+                                require_attempt_change=version is None,
+                            )
                         )
-                    )
-                elif path.is_dir():
-                    contracts.append(
-                        CompletionContract(
-                            contract_type=CompletionContractType.DIRECTORY_EXISTS,
-                            path=str(relative),
-                            expected_kind="directory",
-                            require_attempt_change=True,
+                    elif path.is_dir():
+                        contracts.append(
+                            CompletionContract(
+                                contract_type=CompletionContractType.DIRECTORY_EXISTS,
+                                path=str(relative),
+                                expected_kind="directory",
+                                require_attempt_change=True,
+                            )
                         )
-                    )
-                else:
-                    contracts.append(
-                        CompletionContract(
-                            contract_type=CompletionContractType.GIT_DIFF_PRESENT,
-                            path=str(relative),
-                        )
-                    )
-            if not contracts:
-                contracts.append(
-                    CompletionContract(
-                        contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
-                        metadata={
-                            "required_keys": ["lane_state", "verification_evidence_present"],
-                            "expected_values": {
-                                "lane_state": "completed",
-                                "verification_evidence_present": True,
-                            },
-                        },
-                    )
-                )
-            try:
-                self.execution_supervisor.set_completion_contract(
-                    task_id,
-                    attempt_id=execution.supervisor_attempt_id,
-                    lease_token=execution.supervisor_lease_token,
-                    contracts=contracts,
-                )
-                supervised = self.execution_supervisor.submit_result(
-                    task_id,
-                    attempt_id=execution.supervisor_attempt_id,
-                    lease_token=execution.supervisor_lease_token,
-                    payload={
-                        "lane_state": "completed",
-                        "changed_files": list(execution.changed_files),
-                        "verification_evidence_present": bool(
-                            execution.verification_state or execution.evidence
-                        ),
-                        "verification_state": dict(execution.verification_state),
-                        "chat_result": dict(execution.verification_state.get("chat_result") or {}),
-                        "evidence": list(execution.evidence),
-                        "token_usage": accounted_input_tokens + accounted_output_tokens,
-                        "actual_cost": accounted_actual_cost,
-                    },
-                    token_usage=accounted_input_tokens + accounted_output_tokens,
-                    actual_cost=(accounted_actual_cost if execution.budget.actual_cost_known else None),
-                    provider_metadata=effective_provider_metadata,
-                )
-            except CompletionVerificationError as exc:
-                execution.error = str(exc)
-                state = LaneTaskState.VERIFYING
-            except BudgetExceededError as exc:
-                # submit_result has already projected the durable task to its
-                # authoritative terminal budget state. Do not replace it with
-                # a second terminal transition to FAILED.
-                execution.error = str(exc)
-                if execution.verification_state.get("chat_result", {}).get("status") == "completed":
-                    state = LaneTaskState.COMPLETED
-                else:
-                    state = LaneTaskState.BUDGET_EXHAUSTED
-            except ExecutionSupervisorError as exc:
-                execution.error = str(exc)
-                supervised = self.execution_supervisor.store.get_task(task_id)
-                state = (
-                    LaneTaskState.BUDGET_EXHAUSTED
-                    if supervised.state == SupervisorState.BUDGET_EXHAUSTED
-                    else LaneTaskState.FAILED
-                )
-                if supervised.state not in {
-                    SupervisorState.FAILED,
-                    SupervisorState.CANCELLED,
-                    SupervisorState.COMPLETED,
-                    SupervisorState.COMPLETED_PENDING_VERIFICATION,
-                    SupervisorState.BUDGET_EXHAUSTED,
-                }:
-                    self.execution_supervisor.transition(
-                        task_id,
-                        SupervisorState.FAILED,
-                        reason=f"lane completion supervision failed: {exc}",
-                    )
-            else:
-                if supervised.state == SupervisorState.COMPLETED_PENDING_VERIFICATION:
-                    try:
-                        self.execution_supervisor.verify_completion(task_id)
-                        supervised = self.execution_supervisor.store.get_task(task_id)
-                    except Exception as exc:
-                        self.execution_supervisor.transition(
-                            task_id, SupervisorState.FAILED, reason=f"Verification failed: {exc}"
-                        )
-                        supervised = self.execution_supervisor.store.get_task(task_id)
-
-                verified = supervised.state == SupervisorState.COMPLETED
-                state = (
-                    LaneTaskState.COMPLETED if verified
-                    else LaneTaskState.PENDING_BUDGET_DECISION
-                    if supervised.state is SupervisorState.PENDING_BUDGET_DECISION
-                    else LaneTaskState.VERIFYING
-                )
-                if not verified:
-                    if state is LaneTaskState.PENDING_BUDGET_DECISION:
-                        execution.error = "A validated model budget-overrun decision is required before finalization."
                     else:
-                        manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
-                        execution.error = _completion_verification_failure(manifest, execution, supervised)
+                        contracts.append(
+                            CompletionContract(
+                                contract_type=CompletionContractType.GIT_DIFF_PRESENT,
+                                path=str(relative),
+                            )
+                        )
+                evidence_task = self.taskboard.get_task(task_id)
+                if evidence_task.evidence_requirements:
+                    contracts.append(CompletionContract(contract_type=CompletionContractType.CUSTOM_VERIFIER,
+                        verifier_name="repository_evidence_requirements", metadata={"task_id": task_id, "workspace_id": self.taskboard.store.workspace_id}))
+                if not contracts:
+                    contracts.append(
+                        CompletionContract(
+                            contract_type=CompletionContractType.STRUCTURED_RESULT_VALID,
+                            metadata={
+                                "required_keys": ["lane_state", "verification_evidence_present"],
+                                "expected_values": {
+                                    "lane_state": "completed",
+                                    "verification_evidence_present": True,
+                                },
+                            },
+                        )
+                    )
+                try:
+                    self.execution_supervisor.set_completion_contract(
+                        task_id,
+                        attempt_id=execution.supervisor_attempt_id,
+                        lease_token=execution.supervisor_lease_token,
+                        contracts=contracts,
+                    )
+                    supervised = self.execution_supervisor.submit_result(
+                        task_id,
+                        attempt_id=execution.supervisor_attempt_id,
+                        lease_token=execution.supervisor_lease_token,
+                        payload={
+                            "lane_state": "completed",
+                            "changed_files": list(execution.changed_files),
+                            "verification_evidence_present": bool(
+                                execution.verification_state or execution.evidence
+                            ),
+                            "verification_state": dict(execution.verification_state),
+                            "chat_result": dict(execution.verification_state.get("chat_result") or {}),
+                            "evidence": list(execution.evidence),
+                            "token_usage": accounted_input_tokens + accounted_output_tokens,
+                            "actual_cost": accounted_actual_cost,
+                        },
+                        token_usage=accounted_input_tokens + accounted_output_tokens,
+                        actual_cost=(accounted_actual_cost if execution.budget.actual_cost_known else None),
+                        provider_metadata=effective_provider_metadata,
+                    )
+                except CompletionVerificationError as exc:
+                    execution.error = str(exc)
+                    state = LaneTaskState.VERIFYING
+                except TaskDeadlineExceededError as exc:
+                    execution.error = str(exc)
+                    supervised = self.execution_supervisor.transition(
+                        task_id, SupervisorState.FAILED, reason=execution.error,
+                        attempt_id=execution.supervisor_attempt_id,
+                    )
+                    state = (LaneTaskState.CANCELLED if supervised.state == SupervisorState.CANCELLED
+                             else LaneTaskState.TIMED_OUT)
+                except BudgetExceededError as exc:
+                    # submit_result has already projected the durable task to its
+                    # authoritative terminal budget state. Do not replace it with
+                    # a second terminal transition to FAILED.
+                    execution.error = str(exc)
+                    if execution.verification_state.get("chat_result", {}).get("status") == "completed":
+                        state = LaneTaskState.COMPLETED
+                    else:
+                        state = LaneTaskState.BUDGET_EXHAUSTED
+                except ExecutionSupervisorError as exc:
+                    execution.error = str(exc)
+                    supervised = self.execution_supervisor.store.get_task(task_id)
+                    state = (
+                        LaneTaskState.BUDGET_EXHAUSTED
+                        if supervised.state == SupervisorState.BUDGET_EXHAUSTED
+                        else LaneTaskState.FAILED
+                    )
+                    if supervised.state not in {
+                        SupervisorState.FAILED,
+                        SupervisorState.CANCELLED,
+                        SupervisorState.COMPLETED,
+                        SupervisorState.COMPLETED_PENDING_VERIFICATION,
+                        SupervisorState.BUDGET_EXHAUSTED,
+                    }:
+                        self.execution_supervisor.transition(
+                            task_id,
+                            SupervisorState.FAILED,
+                            reason=f"lane completion supervision failed: {exc}",
+                        )
+                else:
+                    if supervised.state == SupervisorState.COMPLETED_PENDING_VERIFICATION:
+                        try:
+                            self.execution_supervisor.verify_completion(task_id)
+                            supervised = self.execution_supervisor.store.get_task(task_id)
+                        except Exception as exc:
+                            self.execution_supervisor.transition(
+                                task_id, SupervisorState.FAILED, reason=f"Verification failed: {exc}"
+                            )
+                            supervised = self.execution_supervisor.store.get_task(task_id)
+
+                    verified = supervised.state == SupervisorState.COMPLETED
+                    state = (
+                        LaneTaskState.COMPLETED if verified
+                        else LaneTaskState.PENDING_BUDGET_DECISION
+                        if supervised.state is SupervisorState.PENDING_BUDGET_DECISION
+                        else LaneTaskState.VERIFYING
+                    )
+                    if not verified:
+                        if state is LaneTaskState.PENDING_BUDGET_DECISION:
+                            execution.error = "A validated model budget-overrun decision is required before finalization."
+                        else:
+                            manifest = self.execution_supervisor.store.artifact_manifest(task_id) or {}
+                            execution.error = _completion_verification_failure(manifest, execution, supervised)
         elif state == LaneTaskState.CANCELLED:
             self.execution_supervisor.cancel(task_id, reason=error or "lane execution cancelled")
         elif state == LaneTaskState.BUDGET_EXHAUSTED:
@@ -1385,7 +1431,9 @@ class LaneCoordinator:
                     provider_metadata=effective_provider_metadata,
                 )
             supervised = self.execution_supervisor.store.get_task(task_id)
-            if supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
+            if state is LaneTaskState.TIMED_OUT and supervised.state is SupervisorState.CANCELLED:
+                state = LaneTaskState.CANCELLED
+            elif supervised.state not in {SupervisorState.FAILED, SupervisorState.CANCELLED}:
                 self.execution_supervisor.transition(
                     task_id,
                     SupervisorState.FAILED,
@@ -2158,6 +2206,54 @@ class LaneCoordinator:
             SupervisorState.CREATED: LaneTaskState.FAILED,
         }.get(state, LaneTaskState.FAILED)
 
+    def project_active_controller(self, task_id: str, *, lane_id: LaneId) -> LaneExecution:
+        """Expose an already leased Autonomous Loop without creating another execution."""
+        from mana_agent.services.activity_context import current_activity_context
+        context = current_activity_context()
+        if context is None or context.task_id != task_id or context.supervisor is not self.execution_supervisor:
+            raise PermissionError("Controller projection requires its existing admitted attempt")
+        if lane_id not in {LaneId.CODING, LaneId.RESEARCH}:
+            raise PermissionError("A repository controller needs a repository coordination lane")
+        with context.publication(), self._condition:
+            durable = self.execution_supervisor.get_task(task_id)
+            if not durable.workflow_coordinator:
+                self.execution_supervisor.store.update_task(task_id,
+                    lambda record: setattr(record, "workflow_coordinator", True))
+            existing = self._executions.get(task_id)
+            if existing is not None:
+                if not existing.workflow_coordinator:
+                    raise PermissionError("An executing specialist cannot become a controller")
+                existing.state = LaneTaskState.RUNNING
+                existing.supervisor_attempt_id = context.attempt_id
+                existing.supervisor_lease_token = context.lease_token
+                self._persist_locked()
+                return existing
+            task = self.taskboard.get_task(task_id)
+            execution = LaneExecution(task_id=task_id, root_task_id=task.root_task_id,
+                parent_task_id=task.parent_task_id, owning_lane=lane_id, state=LaneTaskState.RUNNING,
+                normalized_intent=task.user_request, repository_id=task.primary_repository_id,
+                workspace_id=task.workspace_id, session_id=task.session_id, taskboard_task_id=task_id,
+                workflow_coordinator=True, routing_decision_id=durable.routing_decision_id,
+                budget=LaneBudget(reserved_input_tokens=max(0, int(durable.token_budget or 0))),
+                supervisor_attempt_id=context.attempt_id, supervisor_lease_token=context.lease_token)
+            self._executions[task_id] = execution
+            self._persist_locked()
+            return execution
+
+    def sync_controller_projection(self, task_id: str) -> None:
+        """Mirror the existing supervisor lifecycle after its loop returns."""
+        with self.execution_supervisor.store.locked(), self._condition:
+            execution = self._executions.get(task_id)
+            if execution is None or not execution.workflow_coordinator:
+                return
+            durable = self.execution_supervisor.get_task(task_id)
+            execution.state = self._lane_state_for_supervisor(durable.state)
+            execution.updated_at = _iso()
+            if durable.state != SupervisorState.RUNNING:
+                execution.supervisor_lease_token = ""
+            self._persist_locked()
+            self._condition.notify_all()
+
     def ensure_recoverable_execution(self, task_id: str) -> LaneExecution:
         """Return the lane projection, rehydrating it from the supervisor when needed.
 
@@ -2167,12 +2263,12 @@ class LaneCoordinator:
         not fail with an opaque unknown-task error when the supervisor record is
         present and recoverable.
         """
+        durable = self.execution_supervisor.store.get_task_or_none(task_id)
+        if durable is None:
+            raise LaneCoordinatorError(f"Task {task_id} has no saved execution record for recovery")
         existing = self._executions.get(task_id)
         if existing is not None:
             return existing
-        durable = self.execution_supervisor.store.get_task_or_none(task_id)
-        if durable is None:
-            raise LaneCoordinatorError(f"Unknown gateway task: {task_id}")
         if durable.state in {
             SupervisorState.RUNNING,
             SupervisorState.LEASED,
@@ -2216,6 +2312,7 @@ class LaneCoordinator:
             provider=str(durable.runtime_provider or ""),
             routing_decision_id=str(durable.routing_decision_id or ""),
             task_type=str(durable.task_type or "single"),
+            workflow_coordinator=durable.workflow_coordinator,
             checkpoint_id=str(durable.checkpoint_id or ""),
             error=str(durable.failure_reason or ""),
             trigger_turn_id=str(durable.trigger_turn_id or ""),
@@ -2572,6 +2669,8 @@ class LaneCoordinator:
     def handoff(self, handoff: LaneHandoff) -> LaneExecution:
         with self._condition:
             execution = self._executions[handoff.task_id]
+            if execution.workflow_coordinator:
+                raise LaneHandoffError("A coding workflow stays in its owning lane")
             if execution.owning_lane != handoff.source_lane:
                 raise LaneHandoffError("handoff source does not own the task")
             source_contract = self.contracts[handoff.source_lane]
@@ -2603,6 +2702,8 @@ class LaneCoordinator:
         execution = self._executions[task_id]
         if execution.state != LaneTaskState.RUNNING:
             raise LaneCoordinatorError(f"Task {task_id} is not running")
+        if execution.workflow_coordinator:
+            raise PermissionError("The workflow coordinator uses scoped repository tools and supervised steps.")
         try:
             capabilities = validate_tool_permission(
                 self.contracts[execution.owning_lane], tool_name,
@@ -2695,22 +2796,22 @@ class LaneCoordinator:
                 )
                 expired = heartbeat + timedelta(seconds=self.contracts[execution.owning_lane].timeout_seconds + 30) < _now()
                 if worker_missing or expired:
-                    contract = self.contracts[execution.owning_lane]
+                    requires_write = self.contracts[execution.owning_lane].requires_write_access and not execution.workflow_coordinator
                     execution.state = (
                         LaneTaskState.INTERRUPTED
-                        if contract.requires_write_access
+                        if requires_write
                         else LaneTaskState.QUEUED
                     )
                     execution.worker_id = ""
                     execution.error = (
                         "worker interrupted; repository mutations require revalidation"
-                        if contract.requires_write_access
+                        if requires_write
                         else "read-only work requeued after worker interruption"
                     )
                     execution.updated_at = _iso()
                     interrupted_task_ids.append(execution.task_id)
                     self.emit(
-                        "lane.failed" if contract.requires_write_access else "lane.queued",
+                        "lane.failed" if requires_write else "lane.queued",
                         task_id=execution.task_id,
                         lane_id=execution.owning_lane,
                         reason="worker_interrupted",
@@ -2750,7 +2851,7 @@ class LaneCoordinator:
 
     def _active_capacity_executions(self, *, exclude_task_id: str = "") -> list[LaneExecution]:
         """Return the executions that currently consume scheduler capacity."""
-        return [
+        active = [
             item
             for item in self._executions.values()
             if item.task_id != exclude_task_id
@@ -2765,6 +2866,29 @@ class LaneCoordinator:
             # must not occupy a worker, lane, or provider execution slot.
             and item.state != LaneTaskState.VERIFYING
         ]
+        active_ids = {item.task_id for item in active}
+        suspended = {parent for parent, child in self._synchronous_steps.items() if child in active_ids}
+        return [item for item in active if item.task_id not in suspended]
+
+    @contextmanager
+    def workflow_step_capacity(self, task_id: str, child_id: str) -> Iterator[None]:
+        """A synchronous mode step runs on its parent's gateway worker."""
+        parent = self.inspect_task(task_id)
+        if not parent.workflow_coordinator:
+            yield
+            return
+        with self._condition:
+            child = self.taskboard.get_task(child_id)
+            if (parent.state != LaneTaskState.RUNNING or child.parent_task_id != task_id
+                    or task_id in self._synchronous_steps):
+                raise LaneCapacityError("Only a running coordinator can lend its worker to its current step")
+            self._synchronous_steps[task_id] = child_id
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._synchronous_steps.pop(task_id, None)
+                self._condition.notify_all()
 
     def _ordered_waiters_locked(self) -> list[dict[str, Any]]:
         now = _now()
@@ -2859,6 +2983,9 @@ class LaneCoordinator:
     def _load(self) -> None:
         for execution in self.repository.list_executions():
             execution.supervisor_lease_token = ""
+            if execution.owning_lane == LaneId.CODING:
+                durable = self.execution_supervisor.store.get_task_or_none(execution.task_id)
+                execution.workflow_coordinator = bool(durable and durable.workflow_coordinator)
             self._executions[execution.task_id] = execution
         self._waiters = [dict(item) for item in self.repository.list_waiters()]
         self._wait_sequence = max((int(item.get("sequence", 0)) for item in self._waiters), default=0)
@@ -2891,6 +3018,7 @@ class LaneCoordinator:
                     task_id=execution.task_id,
                     parent_task_id=execution.parent_task_id,
                     task_type=execution.task_type,
+                    workflow_coordinator=execution.workflow_coordinator,
                     assigned_agent=f"lane:{execution.owning_lane.value}",
                     assigned_model=execution.model,
                     runtime_provider=execution.provider,

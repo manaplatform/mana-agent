@@ -30,6 +30,7 @@ class ExecutionPanel(_ActivityRendering, Vertical):
         self.trace = ExecutionTrace(turn_id=turn_id)
         self.backend = ""
         self.model = ""
+        self.workflow_mode = ""
         self.phase = "queued"
         self.events: list[dict[str, Any]] = []
         self._event_ids: set[str] = set()
@@ -135,6 +136,9 @@ class ExecutionPanel(_ActivityRendering, Vertical):
         if backend_val:
             self.backend = str(backend_val)
         self.model = str(event.get("model") or self.model)
+        workflow_mode = (event.get("metadata") or {}).get("mode")
+        if workflow_mode in {"auto", "debug", "plan"}:
+            self.workflow_mode = workflow_mode.upper()
         event_type = str(event.get("event_type") or event.get("type") or "activity")
         if event_type.startswith(("context.", "cost.", "budget.")):
             self.context_meter.update(event.get("payload") or event.get("metadata") or {})
@@ -169,7 +173,8 @@ class ExecutionPanel(_ActivityRendering, Vertical):
         # Update details title: only call it "coding activity" if a coding step is present
         has_coding = any(s.phase == "coding" for s in self.trace.steps) or len(self.coding_box.events) > 0
         if self.details:
-            self.details.title = "coding activity" if has_coding else "activity"
+            label = "coding activity" if has_coding else "activity"
+            self.details.title = f"{label} · {self.workflow_mode}" if self.workflow_mode else label
 
         # Overall footer statistics
         usage = event.get("token_usage") or {}

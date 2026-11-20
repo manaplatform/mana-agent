@@ -2,65 +2,63 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mana_agent.memory.models import MemoryRecord, MemoryScope
-from mana_agent.memory.providers.shared import (
-    flat_scalar_metadata,
-    record_from_document,
-    supermemory_container_tags,
-    supermemory_metadata,
-    supermemory_primary_container_tag,
-)
+from mana_agent.memory.providers.shared import record_from_document, supermemory_metadata
+
+if TYPE_CHECKING:
+    from supermemory.requests import FilterExpressionParams
+    from supermemory.types import Document, SearchResult
 
 
-def supermemory_filters(metadata: dict[str, Any] | None) -> dict[str, list[dict[str, str | int | float | bool]]]:
-    flattened = flat_scalar_metadata(metadata)
-    clauses = [{"key": key, "value": value} for key, value in flattened.items()]
-    return {"AND": clauses} if clauses else {}
+def supermemory_filter(metadata: dict[str, str | int | float | bool]) -> FilterExpressionParams | None:
+    clauses: list[FilterExpressionParams] = [
+        {"field": key, "operator": "eq", "value": value}
+        for key, value in metadata.items()
+    ]
+    return {"operator": "and", "operands": clauses} if clauses else None
 
 
-def search_result_to_record(result: Any, scope: MemoryScope) -> MemoryRecord:
-    result_metadata = flat_scalar_metadata(getattr(result, "metadata", None))
-    content = (
-        getattr(result, "memory", None)
-        or getattr(result, "content", None)
-        or getattr(result, "text", None)
-        or getattr(result, "chunk", None)
-        or " ".join(chunk.content for chunk in (getattr(result, "chunks", None) or []) if getattr(chunk, "content", None))
-    )
-    provider_metadata = {
-        "filepath": getattr(result, "filepath", None),
-        "documents": [
-            {
-                "id": getattr(doc, "id", None),
-                "title": getattr(doc, "title", None),
-                "type": getattr(doc, "type", None),
-            }
-            for doc in (getattr(result, "documents", None) or [])
-            if getattr(doc, "id", None)
-        ],
-        "is_aggregated": getattr(result, "is_aggregated", None),
-        "version": getattr(result, "version", None),
-    }
-    provider_metadata = {key: value for key, value in provider_metadata.items() if value not in (None, [], {})}
+def document_to_record(document: Document, scope: MemoryScope, namespace: str) -> MemoryRecord:
     return record_from_document(
-        document_id=str(getattr(result, "id", "")),
-        content=str(content or ""),
+        document_id=document.id,
+        content=document.content or "",
         scope=scope,
         provider="supermemory",
-        metadata=result_metadata,
-        provider_metadata=provider_metadata,
-        score=float(getattr(result, "similarity", 0.0) or 0.0),
-        updated_at=getattr(result, "updated_at", None),
+        metadata=supermemory_metadata(scope, document.metadata),
+        provider_metadata={
+            "namespace": namespace,
+            "status": document.system.status,
+            "dreaming_status": document.system.dreaming_status,
+            "title": document.title,
+            "type": document.type,
+        },
+        created_at=document.system.created_at,
+        updated_at=document.system.updated_at,
     )
 
 
-__all__ = [
-    "record_from_document",
-    "search_result_to_record",
-    "supermemory_container_tags",
-    "supermemory_filters",
-    "supermemory_metadata",
-    "supermemory_primary_container_tag",
-]
+def search_result_to_record(result: SearchResult, scope: MemoryScope) -> MemoryRecord:
+    provider_metadata: dict[str, Any] = {
+        "is_latest": result.is_latest,
+        "is_inference": result.is_inference,
+    }
+    document = result.included.document if result.included is not None else None
+    if document is not None:
+        provider_metadata["document"] = {
+            "id": document.id,
+            "title": document.title,
+            "type": document.type,
+        }
+    return record_from_document(
+        document_id=result.id,
+        content=result.memory or result.chunk or "",
+        scope=scope,
+        provider="supermemory",
+        metadata=result.metadata,
+        provider_metadata=provider_metadata,
+        score=result.similarity,
+        created_at=result.system.created_at,
+        updated_at=result.system.updated_at,
+    )

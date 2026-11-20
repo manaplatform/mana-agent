@@ -1081,7 +1081,9 @@ class HumanInboxService:
             }[field.expected_type]
             if not valid_type:
                 raise ValueError(f"clarification field {field_id} has the wrong response type")
-            if field.choices:
+            if field.choices and not (
+                field.expected_type is ExpectedResponseType.CHOICE and field.allow_free_form
+            ):
                 values = value if isinstance(value, list) else [value]
                 if any(str(candidate) not in field.choices for candidate in values):
                     raise ValueError(f"clarification field {field_id} contains a value outside its choices")

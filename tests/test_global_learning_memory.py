@@ -67,6 +67,25 @@ def test_1_failed_command_produces_learning_candidate(global_memory: GlobalMemor
     assert mem.failure_count == 1
 
 
+def test_tool_failure_category_is_normalized_before_analysis(global_memory: GlobalMemory):
+    reports = []
+    for index, category in enumerate(("tool", "Tool", LearningCategory.TOOL)):
+        report = global_memory.record_failure(
+            attempted_action=f"read_file call_{index}",
+            error="A path is required",
+            category=category,
+            metadata={"tool_name": "read_file"},
+        )
+        assert report is not None
+        assert report.category == LearningCategory.TOOL
+        assert report.failure_signature is not None
+        assert report.failure_signature.startswith("tool:read_file:")
+        reports.append(report)
+
+    assert {report.id for report in reports} == {reports[0].id}
+    assert reports[-1].failure_count == 3
+
+
 # 2. The corrected command is retrieved in a later execution
 def test_2_corrected_command_verified_and_retrieved(global_memory: GlobalMemory):
     mem = global_memory.record_failure(

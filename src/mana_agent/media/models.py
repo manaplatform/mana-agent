@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 
 def utc_now_iso() -> str:
@@ -109,12 +110,12 @@ class GenerationResult(StrictModel):
 
 
 class MediaOperationDecision(StrictModel):
-    operation: str = Field(
-        pattern=r"^(image.generate|voice.generate|video.generate|generation.status|generation.cancel)$"
+    operation: Literal["image.generate", "voice.generate", "video.generate", "generation.status", "generation.cancel"]
+    prompt: str = Field(default="", max_length=32_000, description="Required for image.generate and video.generate.")
+    text: str = Field(default="", max_length=4096, description="Required for voice.generate.")
+    generation_id: str = Field(
+        default="", max_length=200, description="Required for generation.status and generation.cancel.",
     )
-    prompt: str = Field(default="", max_length=32_000)
-    text: str = Field(default="", max_length=4096)
-    generation_id: str = Field(default="", max_length=200)
     model: str = Field(default="", max_length=300)
     size: str = Field(default="", max_length=32)
     count: int = Field(default=1, ge=1, le=4)
@@ -131,12 +132,15 @@ class MediaOperationDecision(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "MediaOperationDecision":
-        if self.operation in {"image.generate", "video.generate"} and not self.prompt.strip():
-            raise ValueError(f"{self.operation} requires prompt")
-        if self.operation == "voice.generate" and not self.text.strip():
-            raise ValueError("voice.generate requires text")
-        if self.operation in {"generation.status", "generation.cancel"} and not self.generation_id.strip():
-            raise ValueError(f"{self.operation} requires generation_id")
+        required_input = {
+            "image.generate": "prompt", "video.generate": "prompt", "voice.generate": "text",
+            "generation.status": "generation_id", "generation.cancel": "generation_id",
+        }[self.operation]
+        if not getattr(self, required_input).strip():
+            raise PydanticCustomError(
+                "media_operation_input", "Provide nonblank {field} for {operation}.",
+                {"operation": self.operation, "field": required_input},
+            )
         return self
 
     @field_validator("reference_artifact_ids")

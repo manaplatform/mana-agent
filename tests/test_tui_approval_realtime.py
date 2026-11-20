@@ -24,6 +24,23 @@ from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.tui.widgets.tool_card import ToolCard
 
 
+def test_main_activity_box_shows_rejected_decision_and_successful_correction(monkeypatch) -> None:
+    monkeypatch.setattr("mana_agent.config.user_config.get_setting",
+                        lambda key, default=None: "normal" if key == "MANA_ACTIVITY_VISIBILITY" else default)
+    box = MainActivityBox(turn_id="turn-1")
+    box.update_event({
+        "event_type": "model.failed", "operation_id": "first", "agent_id": "main", "status": "rejected",
+        "title": "Decision needs correction", "summary": "Missing required routing fields",
+    })
+    box.update_event({
+        "event_type": "model.completed", "operation_id": "second", "agent_id": "main", "status": "success",
+        "title": "Model responded",
+    })
+    assert "⚠ main — Decision needs correction" in box.activity_log.text
+    assert "✓ main — Model responded" in box.activity_log.text
+    assert box._active_status != "failed"
+
+
 def test_main_activity_box_shows_pending_approval_row() -> None:
     box = MainActivityBox(turn_id="turn-1")
     box.update_event({
@@ -59,7 +76,7 @@ def test_main_activity_box_shows_pending_approval_row() -> None:
 def test_coding_activity_box_shows_pending_approval_row() -> None:
     box = CodingActivityBox(turn_id="turn-2")
     box.backend = "internal"
-    box.phase = "coding"
+    box.task_status = "in_progress"
 
     box.update_event({
         "event_id": "ev-c1",
@@ -78,6 +95,26 @@ def test_coding_activity_box_shows_pending_approval_row() -> None:
     log_text = box.activity_log.text
     assert "Approval required: pytest" in log_text
     assert "[WAITING FOR APPROVAL]" in log_text
+
+
+def test_coding_activity_shows_status_and_counts_duplicate_receipts_once() -> None:
+    box = CodingActivityBox(turn_id="coding-turn")
+    search = {"event_type": "tool.completed", "task_id": "coding", "attempt_id": "attempt",
+              "operation_id": "search", "tool_name": "repo_search", "status": "success", "duration_ms": 4}
+    box.update_event({**search, "event_id": "first"})
+    box.update_event({**search, "event_id": "replayed"})
+    box.update_event({"event_type": "model.completed", "task_id": "coding", "attempt_id": "attempt",
+                      "operation_id": "model", "status": "success", "duration_ms": 15})
+    box.update_event({"event_type": "coding.progress", "task_id": "coding", "operation_id": "snapshot",
+                      "status": "success", "metadata": {"task_status": "in_progress", "phase": "exploration",
+                          "tool_budget_used": 1, "tool_budget_remaining": 2, "reused_evidence": 3}})
+
+    assert "in progress" in str(box.header.renderable)
+    assert "Phase" not in str(box.header.renderable)
+    footer = str(box.footer.renderable)
+    assert "searches 1 · reads 0 · reused 3" in footer
+    assert "model 15 ms" in footer and "tools 4 ms" in footer
+    assert "tools used 1" in footer and "tools remaining 2" in footer
 
 
 def test_tool_card_approval_header_badge() -> None:

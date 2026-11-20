@@ -140,7 +140,7 @@ def test_autonomous_loop_owns_execution_decisions(tmp_path: Path) -> None:
     assert result.answer == "Auth refactor complete and verified."
 
 
-def test_taskboard_stores_authoritative_task_progress(tmp_path: Path) -> None:
+def test_taskboard_stores_authoritative_task_progress(tmp_path: Path, complete_supervised_task) -> None:
     """2. TaskBoard stores authoritative task progress."""
     tb = TaskBoard(tmp_path / "workspace")
     root_task = tb.create_task(
@@ -160,7 +160,7 @@ def test_taskboard_stores_authoritative_task_progress(tmp_path: Path) -> None:
 
     # Cross off and complete sub1
     tb.mark_crossed_off(sub1.task_id, crossed_off=True)
-    tb.mark_completed(sub1.task_id, result_summary="Stripe SDK integrated")
+    complete_supervised_task(tb, sub1.task_id)
 
     assert tb.get_task(sub1.task_id).crossed_off is True
     assert tb.get_task(sub1.task_id).status == TaskStatus.DONE
@@ -280,27 +280,16 @@ def test_verified_completion_requires_evidence(tmp_path: Path) -> None:
     tb = TaskBoard(tmp_path / "workspace")
     task = tb.create_task(title="Bugfix", user_request="Fix issue #123")
 
-    # Marking task crossed_off does NOT mark it verified
+    from mana_agent.multi_agent.core.errors import InvalidTaskTransition
     tb.mark_crossed_off(task.task_id, crossed_off=True)
-    tb.mark_completed(task.task_id, result_summary="Checked off in checklist")
-
+    with pytest.raises(InvalidTaskTransition, match="supervisor"):
+        tb.mark_completed(task.task_id, result_summary="Checked off in checklist")
+    with pytest.raises(InvalidTaskTransition, match="supervisor"):
+        tb.verify_task(task.task_id, passed=True, commands=["pytest tests/test_bugfix.py"], summary="Agent says passed")
     item = tb.get_task(task.task_id)
     assert item.crossed_off is True
-    assert item.status == TaskStatus.DONE
-    # Verification results must be empty
-    assert len(item.verification_results) == 0
-
-    # Proper verification requires executed evidence
-    v_res = tb.verify_task(
-        task.task_id,
-        passed=True,
-        summary="pytest tests/test_bugfix.py passed with 5 assertions",
-        commands=["pytest tests/test_bugfix.py"],
-    )
-    assert v_res.passed is True
-    updated_item = tb.get_task(task.task_id)
-    assert len(updated_item.verification_results) == 1
-    assert updated_item.verification_results[0].passed is True
+    assert item.status != TaskStatus.DONE
+    assert item.verification_results == []
 
 
 def test_failed_verification_triggers_autonomous_replanning(tmp_path: Path) -> None:
@@ -308,7 +297,7 @@ def test_failed_verification_triggers_autonomous_replanning(tmp_path: Path) -> N
     supervisor = _make_supervisor(tmp_path)
     tb = TaskBoard(tmp_path / "workspace")
     task = tb.create_task(title="Deploy feature", user_request="Deploy to staging")
-    tb.mark_completed(task.task_id, result_summary="Deployment script ran")
+    tb.mark_crossed_off(task.task_id)  # A claimed action is not verified deployment.
 
     # Model tries to finalize with failed verification
     llm = FakeLLM(
@@ -399,14 +388,14 @@ def test_cancellation_and_approvals_enforced(tmp_path: Path) -> None:
         assert tb_task.status == TaskStatus.CANCELLED
 
 
-def test_interrupted_work_resumes_without_losing_progress(tmp_path: Path) -> None:
+def test_interrupted_work_resumes_without_losing_progress(tmp_path: Path, complete_supervised_task) -> None:
     """8. Interrupted work resumes without losing progress."""
     supervisor = _make_supervisor(tmp_path)
     tb = TaskBoard(tmp_path / "workspace")
     task = tb.create_task(title="Multi-stage migration", user_request="Run migration")
 
     sub1 = tb.create_task(title="Stage 1", parent_task_id=task.task_id)
-    tb.mark_completed(sub1.task_id, result_summary="Stage 1 completed successfully")
+    complete_supervised_task(tb, sub1.task_id)
 
     # Checkpoint progress in supervisor
     sup_task = supervisor.create_task(session_id="s1", requested_operation="migration")
@@ -428,7 +417,7 @@ def test_interrupted_work_resumes_without_losing_progress(tmp_path: Path) -> Non
     assert sub1_recovered.status == TaskStatus.DONE
 
 
-def test_model_directed_taskboard_operations(tmp_path: Path) -> None:
+def test_model_directed_taskboard_operations(tmp_path: Path, complete_supervised_task) -> None:
     """9. Model-directed TaskBoard operations work dynamically via tools and handler."""
     tb = TaskBoard(tmp_path / "workspace")
     handler = TaskBoardOperationsHandler(tb)
@@ -443,6 +432,7 @@ def test_model_directed_taskboard_operations(tmp_path: Path) -> None:
     assert sub["task_id"] in tb.get_task(t["task_id"]).subtasks
 
     # Mark completed
+    complete_supervised_task(tb, sub["task_id"])
     handler.mark_completed(task_id=sub["task_id"], evidence="Pydantic models added")
     assert tb.get_task(sub["task_id"]).status == TaskStatus.DONE
 
@@ -528,3 +518,14 @@ def test_main_agent_workflows_and_autonomous_execution(tmp_path: Path) -> None:
     )
     assert auto_result.route_name == "autonomous"
     assert auto_result.task_id
+
+
+def test_missing_subtask_executor_cannot_manufacture_completion(tmp_path):
+    board = TaskBoard(tmp_path / "workspace")
+    parent = board.create_task(title="Goal", user_request="Perform real work")
+    child = board.create_child_task(parent.task_id, title="Unbound work", user_request="Perform real work")
+    controller = AutonomousExecutionController(supervisor=_make_supervisor(tmp_path), taskboard=board)
+    result = controller._execute_single_subtask(parent.task_id, child, {})
+    assert not result["success"]
+    assert "No authorized executor" in result["error"]
+    assert board.get_task(child.task_id).status == TaskStatus.BLOCKED
