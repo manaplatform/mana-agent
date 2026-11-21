@@ -276,6 +276,43 @@ these tests or rerun CI.
 python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_auto_chat_tool_events.py
 ```
 
+### Release CI transcript scrolling and approval removal
+
+The Ubuntu Python package job failed when the operation-history test tried to
+scroll to row 2 before adding 100 completed operations. Its recorded starting
+position was already 88, and the next update moved it to 109. The Windows binary
+job recorded one correct `Allow once` decision while the resolved server approval
+widget was still in the DOM. Both jobs stopped at pytest before packaging.
+
+[`ChatLog`](../../src/mana_agent/tui/widgets/chat_log.py) previously queued a
+scroll to the bottom without checking whether the reader had moved or selected
+text while it waited for layout. The history test used fixed pauses and accepted
+any offset as its starting position. Follow callbacks now compare the current
+scroll target with the target captured when follow was requested and check for
+selection at execution time. The explicit latest action scrolls immediately and
+requests a guarded follow after layout. The test waits for the transcript to lay
+out, deliberately scrolls up with a follow queued, and requires row 2 to remain
+visible at the top after the activity update. It also checks the row cap and
+navigation to the previous operation page.
+
+[`ManaChatApp`](../../src/mana_agent/tui/app.py) hides the resolved drawer and
+schedules Textual to prune its controls. A single pilot pause can finish before
+that prune completes. The server approval test now waits for the buttons before
+pressing one and for the controls to leave the DOM afterward. It still checks
+that each button submits exactly one decision for the expected server request and
+that the drawer is hidden.
+
+**Do not reintroduce.** Recheck the scroll target and selection before applying a
+queued follow. Assert the intended starting offset in scroll regressions. Wait
+for approval controls to leave the DOM before asserting their removal.
+
+Run from the checkout root on Ubuntu and Windows with Python 3.12. The agent did
+not run these tests or the release jobs.
+
+```sh
+python -m pytest -q tests/test_operation_rows.py::test_history_keeps_reader_position_and_bounds_mounted_rows tests/test_computer_control.py::test_tui_chat_shows_inline_server_approval tests/test_tui_live_tools_scroll.py::test_chat_log_pins_to_end_of_chats_without_scroll_to_widget
+```
+
 ### PLAN dialogs, composer, and Windows prompt glyphs
 
 `/plan` used to clear the composer after dispatch returned. The command

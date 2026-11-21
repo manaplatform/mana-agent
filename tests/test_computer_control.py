@@ -972,7 +972,9 @@ def test_tui_chat_shows_permission_in_drawer() -> None:
     ("button", "expected_decision"),
     [(".inline-once", PermissionDecision.ALLOW_ONCE), (".inline-deny", None)],
 )
-def test_tui_chat_shows_inline_server_approval(button, expected_decision, tmp_path: Path, monkeypatch) -> None:
+def test_tui_chat_shows_inline_server_approval(
+    button, expected_decision, tmp_path: Path, monkeypatch, wait_for_tui_widgets,
+) -> None:
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana-home"))
     history = ChatHistory()
     app = ManaChatApp(history=history)
@@ -998,7 +1000,7 @@ def test_tui_chat_shows_inline_server_approval(button, expected_decision, tmp_pa
                     "server_approval": True,
                 },
             }))
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, "InlineApproval Button", count=2)
             controls = app.query_one(InlineApproval)
             assert controls.request.request_id == "server-approval-test"
             assert controls.request.server is True
@@ -1007,11 +1009,11 @@ def test_tui_chat_shows_inline_server_approval(button, expected_decision, tmp_pa
             assert {b.label.plain for b in controls.query("Button")} == {"Deny", "Allow once"}
             assert not decisions
             controls.query_one(button).press()
-            await pilot.pause()
+            await wait_for_tui_widgets(pilot, "InlineApproval", count=0)
             assert len(decisions) == 1
             assert decisions[0].request_id == "server-approval-test"
             assert decisions[0].server is True
             assert decisions[0].decision == expected_decision
-            assert not list(app.query(InlineApproval))
+            assert not app._approval_drawer.display
 
     run(exercise())

@@ -125,7 +125,7 @@ class ChatLog(VerticalScroll):
         self._pending_activity: dict[tuple[str, str], CodingActivityEvent] = {}
         self._pending_tokens: set[tuple[str, str | None]] = set()
         self._pending_wake = False
-        self._follow_pending = False
+        self._pending_follow_target: float | None = None
         self.startup = Static("", classes="startup", markup=False)
         self.startup.display = False
         self.live = Static("", id="live-status", markup=False)
@@ -203,23 +203,28 @@ class ChatLog(VerticalScroll):
 
     @property
     def following(self) -> bool:
-        return self.max_scroll_y - self.scroll_y <= 2 and not any(
-            widget.selected_text for widget in self.query(SelectableText)
-        )
+        return self.max_scroll_y - min(self.scroll_y, self.scroll_target_y) <= 2 and not self._has_selection()
+
+    def _has_selection(self) -> bool:
+        return any(widget.selected_text for widget in self.query(SelectableText))
 
     def follow_after_refresh(self) -> None:
-        if self._follow_pending:
+        pending = self._pending_follow_target is not None
+        self._pending_follow_target = self.scroll_target_y
+        if pending:
             return
-        self._follow_pending = True
 
         def follow() -> None:
-            self._follow_pending = False
-            self.scroll_end(animate=False, force=True)
+            target = self._pending_follow_target
+            self._pending_follow_target = None
+            # Layout can grow while the reader's scroll target stays the same.
+            if self.scroll_target_y == target and not self._has_selection():
+                self.scroll_end(animate=False, force=True, immediate=True)
 
         self.call_after_refresh(follow)
 
     def _scroll_to_latest(self) -> None:
-        self.scroll_end(animate=False, force=True)
+        self.scroll_end(animate=False, force=True, immediate=True)
         self.follow_after_refresh()
 
     def set_active_turn(self, turn_id: str | None) -> None:

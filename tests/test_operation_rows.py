@@ -37,7 +37,7 @@ def test_streaming_keeps_expanded_operation_row_and_command_identity():
     asyncio.run(scenario())
 
 
-def test_history_keeps_reader_position_and_bounds_mounted_rows() -> None:
+def test_history_keeps_reader_position_and_bounds_mounted_rows(wait_for_tui_widgets) -> None:
     from mana_agent.chat.events import AssistantMessageEvent, CodingActivityEvent, UserMessageEvent
     from mana_agent.chat.history import ChatHistory
     from mana_agent.tui.app import ManaChatApp
@@ -51,27 +51,29 @@ def test_history_keeps_reader_position_and_bounds_mounted_rows() -> None:
             for index in range(25):
                 history.add(AssistantMessageEvent(content=f"Previous reply {index}"))
             history.add(UserMessageEvent(content="Show recent commands.", turn_id="test"))
-            await pilot.pause(.15)
+            await wait_for_tui_widgets(pilot, "AssistantReply MarkdownParagraph", count=25)
+            await wait_for_tui_widgets(pilot, ".user-message")
             assert log.max_scroll_y > 10
+            app.action_latest_activity()
+            assert log.following
+            # Move away before the queued follow from the latest action can run.
             log.scroll_to(y=2, animate=False, immediate=True)
-            await pilot.pause()
-            original_y = log.scroll_y
+            assert log.scroll_y == 2
             for index in range(100):
                 history.add(CodingActivityEvent(turn_id="test", activity={
                     "type": "command.finished", "status": "success", "command": f"command {index}",
                     "operation_id": f"command-{index}", "sequence": index + 1,
                 }))
-            await pilot.pause(.2)
+            await wait_for_tui_widgets(pilot, "OperationRow", count=ExecutionPanel.PAGE_SIZE)
             panel = log.get_execution_panel("test")
             assert len(panel.query(OperationRow)) == panel.PAGE_SIZE
             assert panel.earlier.display
-            assert log.scroll_y == original_y
+            assert log.scroll_y == 2
 
             app.action_latest_activity()
-            await pilot.pause()
             assert log.max_scroll_y - log.scroll_y <= 2
             panel.earlier.press()
-            await pilot.pause(.15)
+            await wait_for_tui_widgets(pilot, ".recent-operations")
             assert "command 79" in " ".join(row.title for row in panel.query(OperationRow))
 
     asyncio.run(scenario())

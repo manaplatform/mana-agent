@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-21 — Release CI. Preserve the reader's scroll position when a queued transcript follow becomes stale, and wait for Textual to remove resolved server approval controls in the regression test. See the [incident and user verification command](docs/regressions/agent-activity-visibility.md#release-ci-transcript-scrolling-and-approval-removal). The agent did not run the tests or release jobs.
 - 2026-11-21 — Release metadata. Bump the project version from 0.15.0 to 0.15.1 in `pyproject.toml`. User verification: `grep -n '^version = ' pyproject.toml` should print `version = "0.15.1"`. The agent did not run tests, linters, builds, or verification scripts.
 
 - 2026-11-21 — OpenAI Responses. Include the required `summary` array when replaying new and saved encrypted reasoning receipts after tool calls, and surface safe provider diagnostics on HTTP failure. See the [incident and user verification commands](docs/native-llm-engine.md#openai-http-400-after-a-coding-tool-result). The agent did not run the tests or a live request.
