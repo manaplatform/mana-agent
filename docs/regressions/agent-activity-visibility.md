@@ -304,6 +304,38 @@ rerun release CI.
 python -m pytest -q tests/test_tui_tool_card_layout.py::test_runtime_and_legacy_tools_share_one_stream_and_keep_concurrent_attempts
 ```
 
+### Ubuntu CI live operation row timing
+
+The Ubuntu Python 3.10 push suite failed in
+`test_activity_updates_one_turn_scoped_row_live`. After the test submitted a
+`command.started` history event, its 120 ms pause ended with an `ExecutionPanel`
+in the DOM, and `query_one(OperationRow)` raised `NoMatches`. The regression
+expects that the command has one running row and that the completion event
+updates the same widget with its result.
+
+The live path queues the history event before mounting the panel. The panel
+then schedules its own 50 ms render timer before it mounts or updates rows.
+The fixed sleep does not synchronize with either step. Expanding a row also
+loads its details through a separate Textual message.
+
+The test waits for a laid-out row, then waits for that row to receive the
+completion event and for the expanded output to load. Panel and row identity,
+running and completed labels, and the reported duration remain assertions. The
+streaming and turn summary tests in the same file use the shared fixture for
+their deferred activity widgets and updates too.
+
+**Do not reintroduce.** Wait for the operation row and its expected update
+before asserting live activity. Keep display content and widget identity in
+the assertions.
+
+Run from the checkout root with Python 3.10. The agent reviewed the diff and
+did not run pytest or rerun CI.
+
+```sh
+python -m pytest -q tests/test_tui_tool_card_layout.py::test_activity_updates_one_turn_scoped_row_live
+python -m pytest -q tests/test_tui_tool_card_layout.py
+```
+
 ### Restored activity below its assistant reply
 
 The reported Linux Python 3.11 suite restored both saved messages, but the

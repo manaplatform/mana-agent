@@ -69,7 +69,7 @@ def test_read_only_messages_do_not_paint_an_inner_cursor_line() -> None:
     assert "background: transparent" in SelectableText.DEFAULT_CSS
 
 
-def test_activity_updates_one_turn_scoped_row_live() -> None:
+def test_activity_updates_one_turn_scoped_row_live(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
     event = {"operation_id": "cmd", "backend": "codex", "command": "pytest -q"}
@@ -80,7 +80,7 @@ def test_activity_updates_one_turn_scoped_row_live() -> None:
             history.add(CodingActivityEvent(turn_id="turn", activity={
                 **event, "type": "command.started", "status": "running",
             }))
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(pilot, "ExecutionPanel OperationRow")
             panel = app.query_one(ExecutionPanel)
             row = app.query_one(OperationRow)
             assert "Running pytest -q" in row.title
@@ -89,12 +89,17 @@ def test_activity_updates_one_turn_scoped_row_live() -> None:
             history.add(CodingActivityEvent(turn_id="turn", activity={
                 **event, "type": "command.finished", "status": "success", "duration_ms": 12,
             }))
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(
+                pilot, "ExecutionPanel OperationRow",
+                ready=lambda: row.event["type"] == "command.finished",
+            )
             assert list(app.query(ExecutionPanel)) == [panel]
             assert list(app.query(OperationRow)) == [row]
             assert "Ran pytest -q" in row.title
             row.collapsed = False
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(
+                pilot, "OperationRow OperationOutput", ready=lambda: bool(row.output.text),
+            )
             assert "Duration (ms): 12" in row.output.text
 
     _run(run())
@@ -176,7 +181,7 @@ def test_history_messages_wrap_at_available_card_width_after_replay_append_and_r
     _run(run())
 
 
-def test_expanded_operation_keeps_streaming_output_and_reflows() -> None:
+def test_expanded_operation_keeps_streaming_output_and_reflows(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
     correlation = {"operation_id": "check", "command": "pytest -q"}
@@ -193,11 +198,13 @@ def test_expanded_operation_keeps_streaming_output_and_reflows() -> None:
                 }
                 history.add(CodingActivityEvent(turn_id="turn", activity=activity))
                 history.add(CodingActivityEvent(turn_id="turn", activity=activity))
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(pilot, "ExecutionPanel OperationRow")
 
             row = app.query_one(OperationRow)
             row.collapsed = False
-            await pilot.pause()
+            await wait_for_tui_widgets(
+                pilot, "OperationRow OperationOutput", ready=lambda: bool(row.output.text),
+            )
             assert "$ pytest -q" in row.output.text
             assert "cwd: /workspace" in row.output.text
             assert row.output.text.count("first line") == 1
@@ -211,7 +218,10 @@ def test_expanded_operation_keeps_streaming_output_and_reflows() -> None:
                 **correlation, "type": "command.finished", "status": "failed", "duration_ms": 0,
                 "metadata": {"exit_code": 1, "error": "pytest failed"},
             }))
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(
+                pilot, "ExecutionPanel OperationRow",
+                ready=lambda: row.event["type"] == "command.finished",
+            )
             assert app.query_one(OperationRow) is row
             assert "Exit code: 1" in row.output.text
             assert "Duration (ms): 0" in row.output.text
@@ -292,7 +302,7 @@ def test_runtime_and_legacy_tools_share_one_stream_and_keep_concurrent_attempts(
     _run(run())
 
 
-def test_finish_shows_observed_changes_and_assistant_reply() -> None:
+def test_finish_shows_observed_changes_and_assistant_reply(wait_for_tui_widgets) -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
 
@@ -306,17 +316,17 @@ def test_finish_shows_observed_changes_and_assistant_reply() -> None:
             }))
             history.add(CodingActivityEvent(turn_id="turn", activity={"type": "turn.finished", "status": "success"}))
             history.add(AssistantMessageEvent(content="Updated `src/settings.py`.", turn_id="turn"))
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(pilot, "ExecutionPanel > .changed-files")
             panel = app.query_one(ExecutionPanel)
-            for _ in range(5):
-                if panel.summary.display:
-                    break
-                await pilot.pause(.05)
+            await wait_for_tui_widgets(pilot, "ExecutionPanel OperationRow")
             assert "Changed 1 file" in str(panel.summary.renderable)
             row = panel.query_one(OperationRow)
             assert "Edited src/settings.py (+1 -1)" in row.title
             row.collapsed = False
-            await pilot.pause()
+            await wait_for_tui_widgets(
+                pilot, "OperationRow OperationOutput", ready=lambda: bool(row.output.text),
+            )
+            await wait_for_tui_widgets(pilot, "AssistantReply > Markdown")
             assert "@@ -1 +1 @@\n-old\n+new" in row.output.text
             assert app.query_one(AssistantReply).markdown.display
 

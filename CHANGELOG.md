@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-22 — Ubuntu Python 3.10 CI. Synchronize Textual activity tests with operation row mounts, completion updates, and expanded details. See the [regression and user verification commands](docs/regressions/agent-activity-visibility.md#ubuntu-ci-live-operation-row-timing). The agent did not run the tests.
 - 2026-11-21 — macOS release CI. Wait for Textual operation rows to mount and lay out before asserting that legacy and runtime tool activity shares one panel and keeps concurrent attempts distinct. See the [regression and user verification command](docs/regressions/agent-activity-visibility.md#macos-ci-operation-row-timing). The agent did not run the tests.
 - 2026-11-21 — Textual chat. Mount replayed activity beside its turn's prompt so it appears before the saved reply as soon as it enters the transcript. See the [regression and user verification command](docs/regressions/agent-activity-visibility.md#restored-activity-below-its-assistant-reply). The agent did not run the tests.
 - 2026-11-21 — Internal Coding shell. Accept an exact duplicate of a single command or timeout across the nested and top-level fields. Reject conflicts before proposing an action. See the [incident and user verification command](docs/approval-action-binding-incident.md#duplicate-shell-command-arguments). The agent did not run the tests.
