@@ -508,11 +508,14 @@ class ToolExecutionDispatcher:
                 raise ValueError("shell action must be an object")
             shell_action = shell_action or {}
             if name == "shell" and ("commands" in shell_action or "commands" in args):
-                if "commands" in shell_action and "commands" in args:
-                    raise ValueError("provide shell commands in only one location")
+                if ("commands" in shell_action and "commands" in args
+                        and shell_action["commands"] != args["commands"]):
+                    raise ValueError(
+                        "Conflicting shell commands. Supply one command in action.commands or top-level commands."
+                    )
                 if any(key in args for key in ("command", "script", "cmd")):
                     raise ValueError("cannot combine shell commands with a command string")
-                commands = shell_action.get("commands") if "commands" in shell_action else args["commands"]
+                commands = shell_action.get("commands", args.get("commands"))
                 if not isinstance(commands, list) or len(commands) != 1 or not isinstance(commands[0], str):
                     raise ValueError("shell requires exactly one command per call")
                 cmd = commands[0]
@@ -521,8 +524,9 @@ class ToolExecutionDispatcher:
             if not cmd.strip():
                 raise ValueError("command must not be empty")
             cwd = args.get("cwd")
-            if "timeout_ms" in shell_action and "timeout_ms" in args:
-                raise ValueError("provide shell timeout in only one location")
+            if ("timeout_ms" in shell_action and "timeout_ms" in args
+                    and shell_action["timeout_ms"] != args["timeout_ms"]):
+                raise ValueError("Conflicting shell timeouts. Supply timeout_ms in one location.")
             timeout_ms = shell_action.get("timeout_ms", args.get("timeout_ms"))
             timeout_s = int(args.get("timeout") or (int(timeout_ms) // 1000 if timeout_ms is not None else 120))
             if timeout_s <= 0:

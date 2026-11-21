@@ -1002,7 +1002,10 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="shell",
-            description="Run one non-interactive shell command. Use action.commands with one command and an optional repository-relative cwd.",
+            description=(
+                "Run one non-interactive shell command. Put it in action.commands, or use top-level commands "
+                "as shorthand. Supply timeout_ms once and use top-level cwd for a repository-relative directory."
+            ),
             input_schema=_schema(
                 {
                     "action": {

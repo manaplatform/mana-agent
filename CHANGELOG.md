@@ -4,6 +4,11 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-21 — Internal Coding shell. Accept an exact duplicate of a single command or timeout across the nested and top-level fields. Reject conflicts before proposing an action. See the [incident and user verification command](docs/approval-action-binding-incident.md#duplicate-shell-command-arguments). The agent did not run the tests.
+
+- 2026-11-21 — Release metadata. Bump the project version from 0.15.1 to 0.15.2 in `pyproject.toml`. User verification: `grep -n '^version = ' pyproject.toml` should print `version = "0.15.2"`. The agent did not run tests, linters, builds, or verification scripts.
+
+- 2026-11-21 — Chat PLAN. Forward pasted `/plan` requests as one text argument so long prompts retain their formatting and reach the planning workflow. See the [incident and user verification command](docs/regressions/agent-activity-visibility.md#long-requests-rejected-by-plan). The agent did not run the tests.
 - 2026-11-21 — Release CI. Preserve the reader's scroll position when a queued transcript follow becomes stale, and wait for Textual to remove resolved server approval controls in the regression test. See the [incident and user verification command](docs/regressions/agent-activity-visibility.md#release-ci-transcript-scrolling-and-approval-removal). The agent did not run the tests or release jobs.
 - 2026-11-21 — Release metadata. Bump the project version from 0.15.0 to 0.15.1 in `pyproject.toml`. User verification: `grep -n '^version = ' pyproject.toml` should print `version = "0.15.1"`. The agent did not run tests, linters, builds, or verification scripts.
 

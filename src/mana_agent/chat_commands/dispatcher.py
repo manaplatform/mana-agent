@@ -11,6 +11,21 @@ class NaturalLanguageCommandResolver(Protocol):
     def resolve_command(self, text: str, *, commands: tuple[str, ...], context: CommandContext) -> CommandInvocation | None: ...
 
 
+def _free_text_arguments(text: str) -> list[str]:
+    if not text:
+        return []
+    if len(text) >= 2 and text[0] in {"'", '"'} and text[-1] == text[0]:
+        # Keep compatibility with requests passed as one shell-quoted value.
+        try:
+            quoted = shlex.split(text, posix=True)
+        except ValueError:
+            pass
+        else:
+            if len(quoted) == 1:
+                return quoted
+    return [text]
+
+
 class CommandDispatcher:
     def __init__(self, registry: CommandRegistry, *, natural_language_resolver: NaturalLanguageCommandResolver | None = None) -> None:
         self.registry = registry
@@ -26,13 +41,9 @@ class CommandDispatcher:
             definition = self.registry.resolve(name)
             argument_text = command_and_arguments[1] if len(command_and_arguments) > 1 else ""
             if definition is not None and definition.free_text_arguments:
-                try:
-                    arguments = shlex.split(argument_text, posix=True)
-                except ValueError:
-                    # These commands accept prose, not shell syntax. Keep unmatched
-                    # quote characters as literal user text instead of rejecting it.
-                    arguments = [argument_text] if argument_text else []
-                invocation = CommandInvocation(name=name, arguments=arguments, confirmed=confirmed)
+                invocation = CommandInvocation(
+                    name=name, arguments=_free_text_arguments(argument_text), confirmed=confirmed,
+                )
             else:
                 try:
                     parts = shlex.split(raw[1:], posix=True)
@@ -49,6 +60,10 @@ class CommandDispatcher:
             )
             if invocation is None:
                 return None
+        return self.dispatch_invocation(invocation, context)
+
+    def dispatch_invocation(self, invocation: CommandInvocation, context: CommandContext) -> CommandResult:
+        """Validate and execute a command with already parsed arguments."""
         definition = self.registry.resolve(invocation.name)
         if definition is None:
             return CommandResult(status="error", message=f"Unsupported command: /{invocation.name}. Use /help to list supported commands.")
@@ -58,20 +73,19 @@ class CommandDispatcher:
             return CommandResult(status="error", message=f"Missing capability: {definition.required_capability}.")
         try:
             validated_arguments = definition.argument_model.model_validate({"values": invocation.arguments})
-            invocation.arguments = list(getattr(validated_arguments, "values", invocation.arguments))
+            arguments = list(getattr(validated_arguments, "values", invocation.arguments))
         except ValueError as exc:
             return CommandResult(status="error", message=f"Invalid /{definition.canonical_name} arguments: {exc}")
         action_requires_confirmation = bool(
-            invocation.arguments
-            and invocation.arguments[0].lower() in definition.confirmation_actions
+            arguments and arguments[0].lower() in definition.confirmation_actions
         )
         if (definition.confirmation_required or action_requires_confirmation) and not invocation.confirmed:
             return CommandResult(
                 status="confirmation_required",
                 message=f"Confirm /{definition.canonical_name} before this irreversible action is executed.",
-                data={"command": definition.canonical_name, "arguments": invocation.arguments},
+                data={"command": definition.canonical_name, "arguments": arguments},
             )
         try:
-            return definition.handler(context, invocation.arguments)
+            return definition.handler(context, arguments)
         except (FileNotFoundError, ValueError, RuntimeError, PermissionError) as exc:
             return CommandResult(status="error", message=str(exc))

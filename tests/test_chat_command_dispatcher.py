@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from mana_agent.chat_commands.models import CommandResult
 from mana_agent.chat_commands import CommandContext, CommandDispatcher, build_default_registry
+from mana_agent.chat_commands.models import CommandInvocation, CommandResult
 
 
 class RecordingGateway:
@@ -57,6 +57,25 @@ def test_plan_command_still_accepts_quoted_request() -> None:
     assert "Implementation Plan: Improve the planning workflow" in result.message
 
 
+def test_plan_command_forwards_a_long_multiline_request() -> None:
+    gateway = RecordingGateway()
+    requirements = " ".join(f"requirement-{index}" for index in range(657))
+    request = r'Keep "existing flows" in C:\repo\settings.json.' + f"\n\n- {requirements}"
+
+    result = CommandDispatcher(build_default_registry()).dispatch(
+        f"/plan\n{request}",
+        CommandContext(
+            frontend="tui",
+            session_id="session-1",
+            capabilities={"gateway"},
+            gateway=gateway,
+        ),
+    )
+
+    assert result is not None and result.status == "success"
+    assert gateway.requests == [request]
+
+
 def test_structured_commands_still_reject_unmatched_quotes() -> None:
     result = CommandDispatcher(build_default_registry()).dispatch(
         "/mode 'plan",
@@ -66,6 +85,17 @@ def test_structured_commands_still_reject_unmatched_quotes() -> None:
     assert result is not None
     assert result.status == "error"
     assert result.message == "Invalid command arguments: No closing quotation"
+
+
+def test_structured_commands_still_reject_too_many_arguments() -> None:
+    arguments = " ".join(["review-id"] * 65)
+    result = CommandDispatcher(build_default_registry()).dispatch(
+        f"/approve {arguments}",
+        CommandContext(frontend="cli", capabilities={"gateway"}),
+    )
+
+    assert result is not None and result.status == "error"
+    assert result.message.startswith("Invalid /approve arguments:")
 
 
 def test_analyze_command_accepts_unmatched_quote_in_natural_language() -> None:
@@ -84,6 +114,24 @@ def test_analyze_command_accepts_unmatched_quote_in_natural_language() -> None:
     assert result.status == "success"
     assert gateway.requests == [
         "Run the registered analyze workflow: Check the user's requested behavior"
+    ]
+
+
+def test_analyze_invocation_preserves_already_parsed_arguments() -> None:
+    gateway = RecordingGateway()
+    result = CommandDispatcher(build_default_registry()).dispatch_invocation(
+        CommandInvocation(name="analyze", arguments=["Inspect", "the user's requested behavior"]),
+        CommandContext(
+            frontend="cli",
+            session_id="session-1",
+            capabilities={"gateway"},
+            gateway=gateway,
+        ),
+    )
+
+    assert result.status == "success"
+    assert gateway.requests == [
+        "Run the registered analyze workflow: Inspect the user's requested behavior"
     ]
 
 

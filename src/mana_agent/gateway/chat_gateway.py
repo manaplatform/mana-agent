@@ -37,6 +37,7 @@ from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.gateway.conversation_context import recent_conversation_context
 from mana_agent.batch.policy import TaskExecutionPolicy, BatchPending
 from mana_agent.chat.mode_display import mode_reply_metadata
+from mana_agent.chat_commands.models import CommandInvocation
 from mana_agent.gateway.checkpoint_resume import (
     CheckpointResumeDecider,
     CheckpointResumeDecision,
@@ -4897,7 +4898,7 @@ class AgentChatGateway:
 
     def dispatch_command(
         self,
-        text: str,
+        text: str | CommandInvocation,
         *,
         session_id: str,
         frontend: str,
@@ -4924,6 +4925,8 @@ class AgentChatGateway:
             connectors=self.connector_service,
             frontend_data=frontend_data or {},
         )
+        if isinstance(text, CommandInvocation):
+            return self.command_dispatcher.dispatch_invocation(text, context)
         return self.command_dispatcher.dispatch(text, context, confirmed=confirmed)
 
     def status(self, session_id: str) -> str:
@@ -6483,15 +6486,6 @@ class AgentChatGateway:
                             session_id=session_id, conversation_id=conversation_id, turn_id=turn_id,
                             text=text, state=state, memory_warning=memory_warning,
                         )
-                    import shlex
-
-                    command_text = "/" + entry_decision.command_name
-                    if entry_decision.command_arguments:
-                        command_text += " " + " ".join(
-                            shlex.quote(item)
-                            for item in entry_decision.command_arguments
-                        )
-
                     def publish_command_activity(activity: dict[str, Any]) -> None:
                         if not callable(sink):
                             return
@@ -6509,7 +6503,10 @@ class AgentChatGateway:
                         )
 
                     command_result = self.dispatch_command(
-                        command_text,
+                        CommandInvocation(
+                            name=entry_decision.command_name,
+                            arguments=list(entry_decision.command_arguments),
+                        ),
                         session_id=session_id,
                         frontend=str(state.get("frontend") or "cli"),
                         frontend_data={"activity_sink": publish_command_activity},
@@ -9470,15 +9467,10 @@ class AgentChatGateway:
                 error="plan_control_required", mode="plan-control-required",
             )
         elif decision.route == "command":
-            import shlex
-
-            command = "/" + decision.command_name
-            if decision.command_arguments:
-                command += " " + " ".join(
-                    shlex.quote(value) for value in decision.command_arguments
-                )
             command_result = self.dispatch_command(
-                command, session_id=context.session_id, frontend=str(state.get("frontend") or "api")
+                CommandInvocation(name=decision.command_name, arguments=list(decision.command_arguments)),
+                session_id=context.session_id,
+                frontend=str(state.get("frontend") or "api"),
             )
             result = ChatTurnResult(
                 answer=command_result.message

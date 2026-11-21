@@ -93,39 +93,49 @@ def test_programmatic_and_direct_schemas_expose_exact_approval_flow(tmp_path):
     assert "action_id" in programmatic["approval_request"]["output_schema"]["properties"]
 
 
-@pytest.mark.parametrize("nested", [True, False])
-def test_shell_exact_human_approval_and_wrapper_binding(tmp_path, monkeypatch, nested):
+@pytest.mark.parametrize(
+    ("nested", "flat"), [(True, False), (False, True), (True, True)],
+    ids=["nested", "top-level", "identical-duplicates"],
+)
+def test_shell_exact_human_approval_and_wrapper_binding(tmp_path, monkeypatch, nested, flat):
     import subprocess
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     agent = dispatcher(tmp_path)
-    command = "python -c 'print(123)'"
-    args = {"action": {"commands": [command], "timeout_ms": 5000}} if nested else {
-        "commands": [command], "timeout_ms": 5000,
-    }
+    command = "git add -- pyproject.toml"
+    args = {"cwd": "."}
+    if nested:
+        args["action"] = {"commands": [command], "timeout_ms": 10000}
+    if flat:
+        args.update(commands=[command], timeout_ms=10000)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
     pending = agent.dispatch("shell", args)
     assert pending["permission_required"] and pending["action_id"] and pending["inbox_item_id"]
     gateway = default_action_gateway(tmp_path)
     action = gateway.store.get_action(pending["action_id"])
     assert action.normalized_arguments["argv"][-1] == command
-    assert action.normalized_arguments["timeout_seconds"] == 5
+    assert action.normalized_arguments["timeout_seconds"] == 10
     grant = gateway.approve(action.action_id, approved_by=getpass.getuser())
     changed = agent.dispatch("shell", {**args, "action_approval_id": grant,
                                        "commands": ["python -V"]})
     assert not changed["ok"]
-    cross_wrapper = agent.dispatch("run_command", {"cmd": command, "timeout": 5, "action_approval_id": grant})
+    cross_wrapper = agent.dispatch("run_command", {"cmd": command, "timeout": 10, "action_approval_id": grant})
     assert cross_wrapper["error_code"] == "INVALID_APPROVAL"
     assert gateway.approvals.get(grant).consumed_at is None
-    calls = []
-
-    def fake_run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, "123\n", "")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert calls == []
     result = agent.dispatch("shell", {**args, "action_approval_id": grant})
     assert result["ok"] and result["action_id"] == pending["action_id"]
-    assert len(calls) == 1 and calls[0][0][-1] == command and calls[0][1]["timeout"] == 5
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv[-1] == command
+    assert kwargs["cwd"] == tmp_path.resolve()
+    assert kwargs["timeout"] == 10
     assert gateway.approvals.get(grant).consumed_at is not None
 
 
@@ -133,10 +143,16 @@ def test_shell_exact_human_approval_and_wrapper_binding(tmp_path, monkeypatch, n
     {"action": {"commands": []}},
     {"commands": ["python -V", "git status"]},
     {"action": {"commands": ["python -V"]}, "commands": ["git status"]},
+    {"action": {"commands": ["python -V", "git status"]}, "commands": ["python -V", "git status"]},
     {"action": {"commands": [""]}},
+    {"action": {"commands": ["git status"], "timeout_ms": 5000}, "commands": ["git status"], "timeout_ms": 10000},
 ])
 def test_shell_rejects_ambiguous_or_empty_commands(tmp_path, monkeypatch, arguments):
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "mana_agent.transactional_actions.runtime.default_action_gateway",
+        lambda *_: pytest.fail("invalid arguments must fail before proposing a shell action"),
+    )
     result = dispatcher(tmp_path).dispatch("shell", arguments)
     assert not result["ok"] and result["error_code"] == "TOOL_EXECUTION_ERROR"
 

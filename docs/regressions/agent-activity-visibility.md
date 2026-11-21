@@ -345,3 +345,30 @@ Run from the checkout root. The agent did not run the tests or rerun Windows CI.
 python -m pytest -q tests/test_chat_planning_mode.py tests/test_tui_message_layout.py tests/test_tui_multiline_input.py
 python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py
 ```
+
+### Long requests rejected by `/plan`
+
+A pasted `/plan` request was rejected with `Invalid /plan arguments` before
+the planning workflow started. The reported validation error counted 663 list
+items against a limit of 64. The dispatcher used shell tokenization even for
+commands marked as free text. The tests covered short quoted prose and unmatched
+quotes, which bypassed tokenization, so they missed the list limit and the loss
+of formatting in long requests with balanced quotes.
+
+The shared dispatcher forwards the free-text remainder as a single argument.
+Whole-request shell quoting and bare `/plan` remain supported. Structured
+commands still validate their token lists, and the gateway passes model-selected
+arguments directly through the same capability, confirmation, and validation
+checks.
+
+**Do not reintroduce.** Pass a free-text request to command validation as one
+argument regardless of its word count. Preserve its internal line breaks and
+literal punctuation when it is supplied as prose.
+
+Run from the checkout root to check the full request passed to planning and the
+existing quoting and structured argument behavior. The agent did not run the
+tests or exercise a live planning request.
+
+```sh
+python -m pytest -q tests/test_chat_command_dispatcher.py tests/test_chat_planning_mode.py
+```

@@ -52,6 +52,36 @@ The shared shell policy also treated an entire shell script as read-only based o
 
 An approval-required action already in `APPROVED` state also fails closed if its durable human decision is missing. A valid task-scoped grant can authorize a compatible action during the same execution call after its source decision is revalidated; if that call is interrupted before claiming execution, recovery fails closed rather than treating the persisted state as proof of a human decision for the new action.
 
+### Duplicate shell command arguments
+
+Internal Coding reported `provide shell commands in only one location` for
+`git add -- pyproject.toml`. The tool runner builds the displayed argv from the
+requested arguments before dispatch. The error identifies the presence of both
+`action.commands` and top-level `commands`. The display shows the nested command
+and leaves the top-level value unknown. The dispatcher returned the error
+before proposing a transactional action or starting Git.
+
+The registered shell schema permits both fields, while the dispatcher
+previously rejected any overlap. Existing approval tests covered each location
+on its own and rejected conflicts. They lacked a case with matching values.
+The dispatcher now accepts an identical single-command array in both locations
+and accepts matching nested and top-level `timeout_ms` values. Conflicts and
+invalid command arrays still fail before action creation. The same command,
+working directory, timeout, wrapper identity, and approval checks apply to
+each accepted form. No action or grant migration is required.
+
+**Do not reintroduce** rejecting identical command arrays solely because both
+locations are populated, or choosing one value when command or timeout fields
+conflict. Use `action.commands` with one command in new requests.
+
+The agent did not run this regression check. It stubs the subprocess and checks
+that staging reaches approval first and invokes the exact command once after
+approval.
+
+```sh
+./venv/bin/python -m pytest -q tests/coding/test_approval_binding_regressions.py -k 'shell_exact_human_approval_and_wrapper_binding or shell_rejects_ambiguous_or_empty_commands'
+```
+
 ### Supervisor cancellation fencing and atomic execution claim follow-up
 
 `ActionGateway._assert_branch_runnable` and `_claim_branch_execution` now enforce supervisor cancellation fencing for all supervised actions. Execution checks verify that:
