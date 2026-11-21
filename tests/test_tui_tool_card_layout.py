@@ -253,7 +253,9 @@ def test_is_coding_tool_classification() -> None:
     assert is_coding_tool("approval_request") is False
 
 
-def test_runtime_and_legacy_tools_share_one_stream_and_keep_concurrent_attempts() -> None:
+def test_runtime_and_legacy_tools_share_one_stream_and_keep_concurrent_attempts(
+    wait_for_tui_widgets,
+) -> None:
     history = ChatHistory()
     app = ManaChatApp(history=history)
 
@@ -261,20 +263,30 @@ def test_runtime_and_legacy_tools_share_one_stream_and_keep_concurrent_attempts(
         async with app.run_test(size=(90, 28)) as pilot:
             for call_id, name in (("read", "read_file"), ("search", "web_search")):
                 history.add(ToolCallEvent(turn_id="turn", call_id=call_id, tool_name=name))
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(pilot, "ExecutionPanel OperationRow", count=2)
             panel = app.query_one(ExecutionPanel)
-            original = next(row for row in panel.query(OperationRow) if "read_file" in row.title)
+            initial_rows = {row.event.get("tool_name"): row for row in panel.query(OperationRow)}
+            assert initial_rows.keys() == {"read_file", "web_search"}
+            original = initial_rows["read_file"]
+            assert "read_file" in original.title
             for attempt in ("a1", "a2"):
                 history.add(CodingActivityEvent(turn_id="turn", activity={
                     "type": "tool.completed", "operation_id": "read", "tool_name": "read_file",
                     "task_id": "task", "attempt_id": attempt, "status": "success", "path": "src/settings.py",
                 }))
             history.add(ToolResultEvent(turn_id="turn", call_id="read", tool_name="read_file", success=True))
-            await pilot.pause(.12)
+            await wait_for_tui_widgets(pilot, "ExecutionPanel OperationRow", count=3)
+            assert app.query_one(ExecutionPanel) is panel
             rows = list(panel.query(OperationRow))
             assert len(rows) == 3
             assert original in rows
-            assert {row.event.get("attempt_id") for row in rows if row.event.get("tool_name") == "read_file"} == {"a1", "a2"}
+            assert initial_rows["web_search"] in rows
+            read_attempts = {
+                row.event.get("attempt_id")
+                for row in rows
+                if row.event.get("tool_name") == "read_file"
+            }
+            assert read_attempts == {"a1", "a2"}
             assert not panel.changed_files
 
     _run(run())

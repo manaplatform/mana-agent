@@ -276,6 +276,34 @@ these tests or rerun CI.
 python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_auto_chat_tool_events.py
 ```
 
+### macOS CI operation row timing
+
+The macOS release suite on Python 3.12 failed in
+`test_runtime_and_legacy_tools_share_one_stream_and_keep_concurrent_attempts`.
+The test found the turn's `ExecutionPanel` after a 120 ms pause, but its query
+found no `read_file` row. The coroutine reported `RuntimeError` because its
+`next()` call raised `StopIteration`.
+
+`ChatLog` processes queued history events and mounts the activity panel.
+`ExecutionPanel` then schedules operation rendering on a 50 ms timer and
+mounts the rows in that callback. The test's fixed delay can expire between
+panel creation and row mounting. The test now uses the shared widget readiness
+fixture to wait for two mounted and laid-out rows before recording the legacy
+widgets, then for three after the runtime events.
+It checks that one panel retains the original read and search widgets, shows
+both read attempts, and records no changed files for a read.
+
+**Do not reintroduce.** Wait for the operation rows themselves in tests of
+deferred activity rendering. Assert tool names, attempt IDs, and widget
+identity after the readiness wait.
+
+Run from the checkout root with Python 3.12. The agent did not run pytest or
+rerun release CI.
+
+```sh
+python -m pytest -q tests/test_tui_tool_card_layout.py::test_runtime_and_legacy_tools_share_one_stream_and_keep_concurrent_attempts
+```
+
 ### Restored activity below its assistant reply
 
 The reported Linux Python 3.11 suite restored both saved messages, but the
