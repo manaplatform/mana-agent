@@ -724,8 +724,10 @@ class InternalCodingEngine(CodingEngine):
         llm: Any,
     ) -> str:
         """Run iterative model-driven tool-calling loop until the task is complete."""
+        from pydantic import ValidationError
+
         from mana_agent.llm.engine import NativeLLMEngine
-        from mana_agent.llm.errors import InvalidResponseError, StructuredOutputError
+        from mana_agent.llm.errors import InvalidResponseError, StructuredOutputError, describe_decision_validation
         from mana_agent.llm.messages import AssistantMessage, SystemMessage, ToolResultMessage, UserMessage
         from mana_agent.repository_evidence.handoff import (
             INVESTIGATION_REPORT_INSTRUCTION, INVESTIGATION_REPORT_TOOL, MISSING_EVIDENCE_INSTRUCTION,
@@ -856,8 +858,12 @@ class InternalCodingEngine(CodingEngine):
                 )
                 context_parts.append(REPOSITORY_INSPECTION_DESCRIPTION)
             if task.context.get("runtime_capability_change"):
-                context_parts.append("Completion requires source-backed runtime wiring edges and a passing check "
-                                     "that exercises the connected runtime path.")
+                context_parts.append(
+                    "Completion requires a passing check that exercises the changed runtime path. In wiring.edges, "
+                    "give one path from the production entrypoint to the changed behavior. For example, if the first "
+                    "edge goes from main to dispatch, the next edge must use dispatch as its source. Cite the file "
+                    "for each link and supply the line if known."
+                )
         else:
             context_parts.extend((CODING_DEBUGGING_HANDOFF_INSTRUCTION, MISSING_EVIDENCE_INSTRUCTION))
             if patch_proposal:
@@ -1092,12 +1098,20 @@ class InternalCodingEngine(CodingEngine):
                         return outcome.model_dump_json()
                     except ValueError as exc:
                         terminal_rejections += 1
+                        detail = (describe_decision_validation(exc, AdaptiveCodingResult.model_json_schema())
+                                  if isinstance(exc, ValidationError) else str(exc))
+                        emit_activity("coding.progress", title="Coding result rejected", summary=detail,
+                                      status="rejected", task_id=task.task_id, backend=self.name,
+                                      operation_id=f"coding-result-{task.task_id}-{turn}",
+                                      metadata={"reason_code": "CODING_RESULT_REJECTED"})
                         if terminal_rejections > 1:
-                            raise RuntimeError(f"Coding result was rejected after correction. {exc}") from exc
+                            raise StructuredOutputError(f"Coding result was rejected after correction. {detail}") from None
+                        if turn + 1 >= max_turns:
+                            raise StructuredOutputError(f"No model turn remains to correct the coding result. {detail}") from None
                         messages.append(getattr(response, "message", None) or AssistantMessage(content="", tool_calls=tool_calls))
                         for requested in tool_calls:
                             messages.append(ToolResultMessage(content=json.dumps({
-                                "ok": False, "error_code": "CODING_RESULT_REJECTED", "error": str(exc),
+                                "ok": False, "error_code": "CODING_RESULT_REJECTED", "error": detail,
                             }), tool_call_id=requested["id"], caller=requested.get("caller")))
                         turn += 1
                         continue

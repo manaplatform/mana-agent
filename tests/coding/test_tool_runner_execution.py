@@ -231,20 +231,100 @@ def test_mutation_digests_survive_exhausted_diff_capture(tmp_path):
     assert not result.trace_complete
 
 
-def test_unobserved_file_versions_remain_uncertain(tmp_path, monkeypatch):
+def test_git_command_hashes_source_past_byte_budget_without_reading_ignored_build_output(tmp_path, monkeypatch):
+    from hashlib import sha256
+
+    tmp_path = tmp_path.resolve()
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
+    build = tmp_path / "build"
+    build.mkdir()
+    artifact = build / "artifact.bin"
+    artifact.write_bytes(b"a" * 128)
+    tracked = build / "tracked.txt"
+    tracked.write_bytes(b"tracked input")
+    subprocess.run(["git", "add", "--force", "build/tracked.txt"], cwd=tmp_path, check=True)
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"s" * 64)
+
+    open_file = Path.open
+
+    def observe_open(path, *args, **kwargs):
+        if path == artifact:
+            pytest.fail("An ignored build artifact entered the source snapshot")
+        return open_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe_open)
     monkeypatch.setattr("mana_agent.multi_agent.agents.tool_runner_agent._MAX_MUTATION_HASH_BYTES", 8)
-    (tmp_path / "large.txt").write_bytes(b"x" * 32)
+    runner = make_runner(tmp_path, effect="command")
+    runner.capture_limit = 8
+
+    def create_branch(_arguments):
+        subprocess.run(["git", "checkout", "-b", "report-fix"], cwd=tmp_path,
+                       check=True, capture_output=True)
+        return {"ok": True, "returncode": 0}
+
+    result = invoke(runner, {}, create_branch)
+    assert result.status == "success"
+    assert not result.mutations
+
+    def edit_and_remove_from_index(_arguments):
+        subprocess.run(["git", "rm", "--cached", "--", "build/tracked.txt"], cwd=tmp_path,
+                       check=True, capture_output=True)
+        source.write_bytes(b"t" * 64)
+        return {"ok": True, "returncode": 0}
+
+    result = invoke(runner, {}, edit_and_remove_from_index, identity="call-two")
+    mutation, = result.mutations
+    assert (mutation.path, mutation.status) == ("source.txt", "applied")
+    assert mutation.before_sha256 == sha256(b"s" * 64).hexdigest()
+    assert mutation.after_sha256 == sha256(b"t" * 64).hexdigest()
+    assert not mutation.diff
+    assert not result.trace_complete
+
+
+def test_unobserved_file_versions_remain_uncertain(tmp_path, monkeypatch):
+    path = tmp_path.resolve() / "unreadable.txt"
+    path.write_bytes(b"before")
+    open_file = Path.open
+
+    def deny_read(candidate, mode="r", *args, **kwargs):
+        if candidate == path and mode == "rb":
+            raise PermissionError("The file cannot be observed")
+        return open_file(candidate, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_read)
     runner = make_runner(tmp_path, effect="mutation")
 
     def edit(_arguments):
-        (tmp_path / "large.txt").write_bytes(b"y" * 32)
+        path.write_bytes(b"after")
         return {"ok": True}
 
-    result = invoke(runner, {"path": "large.txt"}, edit)
+    result = invoke(runner, {"path": "unreadable.txt"}, edit)
 
     mutation, = result.mutations
-    assert (mutation.path, mutation.status) == ("large.txt", "unknown")
+    assert (mutation.path, mutation.status) == ("unreadable.txt", "unknown")
     assert not mutation.after_sha256
+
+
+def test_cancelled_post_command_snapshot_preserves_output_and_uncertainty(tmp_path):
+    source = tmp_path / "file.txt"
+    source.write_bytes(b"before")
+    cancelled = threading.Event()
+    runner = make_runner(tmp_path, effect="command", cancel=cancelled.is_set)
+
+    def edit(_arguments):
+        source.write_bytes(b"after")
+        cancelled.set()
+        return {"ok": True, "returncode": 0, "stdout": "command exited"}
+
+    result = invoke(runner, {}, edit)
+    assert result.status == "cancelled"
+    assert result.exit_code == 0
+    assert result.result["stdout"] == "command exited"
+    mutation, = result.mutations
+    assert (mutation.path, mutation.status) == ("file.txt", "unknown")
+    assert mutation.before_sha256 and not mutation.after_sha256
 
 
 def test_registered_actor_revocation_and_path_confinement(tmp_path):

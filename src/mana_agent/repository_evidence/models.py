@@ -307,10 +307,22 @@ class RuntimeReachabilityEdge(Contract):
 
 class RuntimeWiringEvidence(Contract):
     reason: str = Field(pattern=r"\S")
-    edges: tuple[RuntimeReachabilityEdge, ...] = Field(min_length=3, max_length=16)
+    edges: tuple[RuntimeReachabilityEdge, ...] = Field(
+        min_length=3, max_length=16,
+        description=("One ordered path from the production entrypoint to the changed behavior. Cite the source for each "
+                     "edge. The target of each edge must exactly match the source of the next edge."),
+    )
 
-    @model_validator(mode="after")
-    def connected(self):
-        if any(first.target != second.source for first, second in zip(self.edges, self.edges[1:])):
-            raise ValueError("Runtime reachability must describe a connected path from the entrypoint")
-        return self
+    @field_validator("edges")
+    @classmethod
+    def connected(cls, edges: tuple[RuntimeReachabilityEdge, ...]) -> tuple[RuntimeReachabilityEdge, ...]:
+        gaps = [f"{index} → {index + 1}" for index, (first, second) in enumerate(zip(edges, edges[1:]), start=1)
+                if first.target != second.source]
+        if gaps:
+            raise PydanticCustomError(
+                "runtime_wiring_disconnected",
+                "At edge pairs {gaps}, the first target must exactly match the next source. "
+                "Use source-backed links in execution order and omit side branches.",
+                {"gaps": ", ".join(gaps)},
+            )
+        return edges

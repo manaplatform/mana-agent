@@ -64,6 +64,40 @@ did not run this check.
 venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_corrects_a_missing_tool_call
 ```
 
+## Disconnected runtime wiring in a completion report
+
+At 00:21 Tehran time on November 21, Internal AUTO task
+`task_20261121_000006` edited `src/cli/cli_scan.c` and recorded two passing
+checkout checks. Its completion report was rejected after a correction because
+the runtime wiring edges formed a disconnected path. The retained logs do not
+identify the first rejection or the actual mismatched edge pairs.
+
+The validator required consecutive edges to have matching identifiers. The
+tool schema omitted that ordering rule and the correction only gave a generic
+connectivity error. The terminal traceback also included an excerpt of the
+rejected model payload. Existing rejection coverage exercised unsupported
+completion on a read-only task.
+
+The [wiring contract](../../src/mana_agent/repository_evidence/models.py)
+now describes the order in the schema and reports all disconnected pairs by
+their one-based edge numbers. [Internal Coding](../../src/mana_agent/coding/internal_engine.py)
+gives an example in its instructions and sends the same field-specific error
+to Coding Activity and the existing single correction. Rejected schema inputs
+stay out of diagnostics. A corrected path still needs the current passing
+checkout receipt and the existing runtime integration check.
+
+**Do not reintroduce** raw rejected inputs in correction messages or accept a
+completion report with disconnected wiring. Keep the model responsible for
+supplying source-backed links and keep correction within its allotted turns.
+
+The regression exercises a corrected chain and a second disconnected report
+after a passing check. Both cases keep the original edit and check receipts.
+The agent did not run the tests or replay the blocked task.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'corrects_runtime_wiring or rejects_unsupported_completion'
+```
+
 ## Evidence exhausted the edit budget
 
 On November 20 at 12:00:55 Tehran time, realtime Internal AUTO task
@@ -253,9 +287,9 @@ worker treated gaps in diff capture as unknown file versions, so the gateway
 could neither checkpoint the work nor evaluate another build or renewal.
 
 ToolRunner compares content digests independently of the bytes held for
-diffs. If a file genuinely cannot be observed within the hashing budget, the
-checkpoint identifies the uncertain path. Existing uncertain receipts still
-require review. [ToolRunner](../../src/mana_agent/multi_agent/agents/tool_runner_agent.py)
+diffs. If a file genuinely cannot be observed, the checkpoint identifies the
+uncertain path. Existing uncertain receipts still require review.
+[ToolRunner](../../src/mana_agent/multi_agent/agents/tool_runner_agent.py)
 
 For realtime Internal write assignments, `verify_coding_change` runs the
 model-selected build or check and optional prerequisites in the assigned
@@ -280,6 +314,46 @@ The agent did not run these checks or replay either cancelled assignment.
 ```sh
 python -m pytest -q tests/coding/test_tool_runner_execution.py -k 'digests_survive or unobserved_file_versions'
 python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'adaptive_checkout_build or adaptive_coding_renews or model_wait_failure'
+```
+
+### Ignored build output at command checkpoints
+
+At 00:11 Tehran time on November 21, the Internal AUTO coding assignment
+`task_20261121_000004` passed its build and all four CTest tests. The shell then
+created the requested branch and committed `sections.c` as `1612a2a`. Its
+receipt contained an unknown edit for `os_signatures.c` with both digests
+empty. The gateway blocked while saving the checkpoint. Git showed the
+commit changed only `sections.c`, and the coding task was later cancelled.
+
+The checkout verification path used Git's source list. The shell path walked
+the whole checkout and spent most of its 100 MiB aggregate hashing allowance
+on ignored build output. Applying that selection to the reviewed checkout
+left roughly 2.4 MiB when it reached the unchanged 4.4 MiB source file. This
+produced an unknown receipt even though the shell had exited successfully.
+The earlier regression covered exhausted diff retention and genuinely
+unavailable digests. It did not cover a Git shell command after a build.
+
+ToolRunner now uses the same tracked and non-ignored source selection for
+mutating Git checkout commands. Previously observed files remain candidates
+for the post-command snapshot when the command changes Git's index or ignore
+rules. Native snapshots stream digests under their cancellation and deadline
+checks. The capture limit still bounds retained diff data. An unreadable file
+or interrupted observation still yields uncertain evidence. The gateway
+continues to require reconciliation of preexisting uncertain receipts.
+[ToolRunner](../../src/mana_agent/multi_agent/agents/tool_runner_agent.py)
+
+**Do not reintroduce** an aggregate byte allowance that makes a readable
+file appear unobserved in a running native command. Keep ignored build
+output out of implicit Git source snapshots and require evidence for uncertain
+side effects.
+
+User verification covers the Git command, digest retention, unreadable files,
+interrupted observations, discovery, and the surrounding adaptive workflow.
+The agent did not run these tests or replay the cancelled task.
+
+```sh
+venv/bin/python -m pytest -q tests/coding/test_tool_runner_execution.py tests/test_intent_driven_discovery.py -k 'git_command_hashes_source or digests_survive or unobserved_file_versions or cancelled_post_command_snapshot or plain_shell_operation'
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'adaptive_checkout_build or adaptive_coding_edits_and_repairs'
 ```
 
 ### Failed checkout checks during successful repairs

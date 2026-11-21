@@ -75,6 +75,7 @@ class ChatHistory:
         Returns the event (for chaining).
         """
         from .activity import project_activity, safe_text, operation_key, TERMINAL, accepts_activity_update
+        from .operations import merge_operation
         from mana_agent.services.activity_context import current_activity_context
         context = current_activity_context()
         protected = context.protected_text if context else ()
@@ -104,7 +105,7 @@ class ChatHistory:
                     recorded = bool(event.activity.get("sequence"))
                     for message in self._events:
                         if isinstance(message, UserMessageEvent) and message.is_steering and message.request_id == request_id:
-                            if not message.steering_recorded or message.steering_status not in {"applied", "rejected", "superseded"}:
+                            if not message.steering_recorded or message.steering_status not in {"applied", "rejected", "superseded", "failed"}:
                                 message.steering_status = status
                                 message.steering_recorded = recorded
                 key = operation_key(event.activity)
@@ -113,10 +114,11 @@ class ChatHistory:
                     if isinstance(previous, ActivityEvent) and previous.turn_id == event.turn_id and operation_key(previous.activity) == key:
                         if not accepts_activity_update(previous.activity, event.activity):
                             return previous
-                        event = replace(event, activity={**event.activity, "started_at": previous.activity.get("started_at") or event.activity.get("started_at")})
+                        event = replace(event, activity=merge_operation(previous.activity, event.activity))
                         self._events[index] = event
                         break
                 else:
+                    event = replace(event, activity=merge_operation({}, event.activity))
                     self._events.append(event)
                 completed = [row for row in self._events if isinstance(row, ActivityEvent) and row.turn_id == event.turn_id
                              and str(row.activity.get("status")) in TERMINAL]

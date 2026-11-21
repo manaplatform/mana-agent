@@ -783,6 +783,88 @@ def test_adaptive_coding_rejects_unsupported_completion_and_read_only_write(mode
     assert (gateway.root / "app.py").read_text() == "before\n"
 
 
+@pytest.mark.parametrize("corrected", [True, False], ids=["repaired-chain", "still-disconnected"])
+def test_adaptive_coding_corrects_runtime_wiring(mode_gateway, monkeypatch, corrected):
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+
+    gateway, workflow = mode_gateway
+    gateway._entry_router.llm = Decisions()
+    checks, accepted = [], []
+
+    async def check(root, command, *, task_id):
+        assert (root / "app.py").read_text() == "fixed\n"
+        checks.append(task_id)
+        return {"passed": True, "exit_code": 0, "output": "passed"}
+
+    def accept_wiring(_task_id, state, plan):
+        assert plan is None
+        assert len(state["verification"]) == 1
+        assert state["verification"][0]["source_versions"] == state["adaptive_file_versions"]
+        accepted.append(state["runtime_wiring"])
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
+    monkeypatch.setattr(workflow, "_require_runtime_evidence", accept_wiring)
+
+    def edge(source, target):
+        return {"source": source, "target": target, "path": "app.py", "relation": "calls", "line": 1}
+
+    finish = {"disposition": "complete", "summary": "Verified the change."}
+    connected = {"reason": "Main calls the new handler.", "edges": [
+        edge("main", "dispatch"), edge("dispatch", "handler"), edge("handler", "render"),
+    ]}
+    disconnected = {"reason": "The submitted report skipped intermediate links.", "edges": [
+        edge("main", "dispatch"), edge("rejected_source_label", "other_path"), edge("handler", "render"),
+    ]}
+    selections = [
+        ("write_file", {"path": "app.py", "content": "fixed\n"}),
+        (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"]}),
+        (CODING_RESULT_TOOL, {**finish, "wiring": disconnected}),
+        (CODING_RESULT_TOOL, {**finish, "wiring": connected if corrected else disconnected}),
+    ]
+
+    class Model:
+        calls = 0
+
+        def with_tools(self, tools):
+            schema = next(tool["function"]["parameters"] for tool in tools
+                          if tool["function"]["name"] == CODING_RESULT_TOOL)
+            assert "Required for complete" in schema["properties"]["wiring"]["description"]
+            edges = schema["$defs"]["RuntimeWiringEvidence"]["properties"]["edges"]
+            assert "exactly match the source of the next edge" in edges["description"]
+            return self
+
+        async def generate(self, messages, *, continuation):
+            if self.calls == 3:
+                feedback = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
+                assert feedback["error_code"] == "CODING_RESULT_REJECTED"
+                assert "wiring.edges" in feedback["error"]
+                assert "1 → 2, 2 → 3" in feedback["error"]
+                assert "input_value" not in feedback["error"] and "rejected_source_label" not in feedback["error"]
+            name, args = selections[self.calls]
+            self.calls += 1
+            return SimpleNamespace(tool_calls=[{"id": f"wiring-{self.calls}", "name": name, "args": args}])
+
+    model = Model()
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=model, programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Add the default handler", mode="auto", repair=True,
+                            runtime_capability_change=True, workflow=workflow_choice())
+
+    assert model.calls == 4
+    assert len(checks) == 1
+    assert result.data["changed_files"] == ["app.py"]
+    if corrected:
+        assert result.status == "success", result.message
+        assert accepted == [connected]
+    else:
+        assert result.status == "error"
+        assert "after correction" in result.message and "1 → 2, 2 → 3" in result.message
+        assert "input_value" not in result.message and "rejected_source_label" not in result.message
+        assert not accepted and not result.data["goal_satisfied"]
+
+
 def test_adaptive_coding_corrects_evidence_reference_and_reuses_the_read(mode_gateway):
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine

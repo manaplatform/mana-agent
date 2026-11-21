@@ -7,7 +7,7 @@ authority; the event hub and context artifacts remain the public trace stores.
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -18,7 +18,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from stat import S_ISREG
+from stat import S_ISDIR, S_ISREG
 import threading
 import time
 from typing import Any
@@ -267,13 +267,18 @@ class RunningOperation:
             "provenance": "native_tool_runner", "streaming": True,
             "delegation_path": [self.request.requested_by_agent_id, self.request.agent_id]}, self.protected)
 
+    def check_active(self) -> None:
+        if self.authority.cancel():
+            raise InterruptedError("Execution cancelled by its owner")
+        if self.request.deadline and datetime.now(timezone.utc) >= self.request.deadline:
+            raise TimeoutError("Execution deadline expired")
+
     def validate_live(self) -> None:
         registry = self.authority.registry
         owner, worker = registry.agents.get(self.authority.actor_id), registry.agents.get(self.authority.worker_id)
         if owner is None or worker is None or owner.role != self.authority.actor_role or worker.role != AgentRole.TOOL_WORKER or owner.state == AgentState.DONE or worker.state == AgentState.DONE or worker.parent_agent_id != owner.agent_id:
             raise ExecutionAuthorityError("Execution owner or ToolRunner registration was revoked")
-        if self.authority.cancel():
-            raise InterruptedError("Execution cancelled by its owner")
+        self.check_active()
         if self.authority.taskboard is not None and hasattr(self.authority.taskboard, "store"):
             from mana_agent.repository_evidence.tasks import validate_assignment
             validate_assignment(self.authority.taskboard, self.request.task_id,
@@ -284,8 +289,6 @@ class RunningOperation:
             root = assigned.execution_repo_root or assigned.managed_worktree_path
             if root and Path(root).resolve() != Path(self.request.workspace_root):
                 raise ExecutionAuthorityError("Execution workspace assignment changed")
-        if self.request.deadline and datetime.now(timezone.utc) >= self.request.deadline:
-            raise TimeoutError("Execution deadline expired")
         context = self.authority.activity
         if context is not None:
             with context.publication():
@@ -574,9 +577,10 @@ class ToolRunnerAgent:
             policy.effect == "command" and not _is_read_only_observation(request.tool_name, request.arguments)
         )
         root = Path(request.workspace_root)
-        source_candidates = request.tool_name == ISOLATED_CHECK_TOOL and (root / ".git").exists()
+        source_candidates = policy.repository and policy.effect == "command" and (root / ".git").exists()
         before = _snapshot(root, request.arguments, self.capture_limit,
-                           source_candidates=source_candidates) if observe_mutations else FileSnapshot()
+                           source_candidates=source_candidates,
+                           check_active=operation.check_active) if observe_mutations else FileSnapshot()
         queue_store = None
         operation_key = ""
         if self.authority.taskboard is not None and hasattr(self.authority.taskboard, "store"):
@@ -610,11 +614,23 @@ class ToolRunnerAgent:
             status = "interrupted" if getattr(exc, "outcome_unknown", False) else "timed_out" if isinstance(exc, subprocess.TimeoutExpired) else "failed"
             raw = {"ok": False, "error": safe_text(str(exc), protected=operation.protected), "error_code": type(exc).__name__,
                    "stdout": str(getattr(exc, "stdout", "") or ""), "stderr": str(getattr(exc, "stderr", "") or "")}
-        after = _snapshot(root, request.arguments, self.capture_limit,
-                          source_candidates=source_candidates) if observe_mutations else FileSnapshot()
+        after = FileSnapshot()
+        if observe_mutations:
+            try:
+                after = _snapshot(root, request.arguments, self.capture_limit,
+                                  source_candidates=source_candidates, previous_paths=before,
+                                  check_active=operation.check_active)
+            except (InterruptedError, TimeoutError) as exc:
+                # Preserve the command result without claiming its writes were observed.
+                after.complete = False
+                status = "cancelled" if isinstance(exc, InterruptedError) else "timed_out"
+                raw["ok"] = False
+                raw[status] = True
+                raw.setdefault("error", str(exc))
         mutations = _mutations(before, after, partial=status != "success")
         if not before.complete or not after.complete or any(
-            version is None or version.content is None for version in (*before.values(), *after.values())
+            version is None or version.content is None
+            for snapshot in (before, after) for version in snapshot.values()
         ):
             operation.trace_complete = False
         for mutation in mutations:
@@ -733,7 +749,8 @@ class FileSnapshot(dict[str, _FileVersion | None]):
     complete: bool = True
 
 
-def _file_version(path: Path, size: int, *, capture_content: bool) -> _FileVersion | None:
+def _file_version(path: Path, size: int, *, capture_content: bool,
+                  check_active: Callable[[], None] | None) -> _FileVersion | None:
     with path.open("rb") as stream:
         if capture_content:
             content = stream.read(size + 1)
@@ -741,6 +758,8 @@ def _file_version(path: Path, size: int, *, capture_content: bool) -> _FileVersi
         digest = hashlib.sha256()
         remaining = size
         while remaining:
+            if check_active is not None:
+                check_active()
             block = stream.read(min(remaining, 65_536))
             if not block:
                 return None
@@ -751,9 +770,12 @@ def _file_version(path: Path, size: int, *, capture_content: bool) -> _FileVersi
     return _FileVersion(digest.hexdigest(), None)
 
 
-def _snapshot(root: Path, arguments: dict[str, Any], limit: int, *, source_candidates: bool = False) -> FileSnapshot:
+def _snapshot(root: Path, arguments: dict[str, Any], limit: int, *, source_candidates: bool = False,
+              previous_paths: Collection[str] = (), check_active: Callable[[], None] | None = None) -> FileSnapshot:
     """Bounded observation within the worker lock; never execute another tool."""
     import os
+    if check_active is not None:
+        check_active()
     paths: set[str] = set()
     complete = True
     def collect(value):
@@ -775,29 +797,35 @@ def _snapshot(root: Path, arguments: dict[str, Any], limit: int, *, source_candi
                 for prefix in ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "):
                     if line.startswith(prefix):
                         paths.add(line[len(prefix):])
-    if source_candidates:
+    collect(arguments)
+    source_listing = not paths and source_candidates
+    if source_listing:
         from mana_agent.tools.repository import checkout_file_candidates
 
-        candidates = checkout_file_candidates(root)
-        paths.update(candidates[:5000])
-        complete = len(candidates) <= 5000
-    else:
-        collect(arguments)
+        paths.update(checkout_file_candidates(root))
+        # The command can change Git's index or ignore rules without deleting a file.
+        paths.update(previous_paths)
     if not paths and not source_candidates:
         for directory, dirs, files in os.walk(root, followlinks=False):
+            if check_active is not None:
+                check_active()
             dirs[:] = [d for d in dirs if d not in {".git", ".mana", "node_modules", "venv", ".venv", "__pycache__"} and not (Path(directory) / d).is_symlink()]
             for name in files:
                 paths.add((Path(directory) / name).relative_to(root).as_posix())
-                if len(paths) >= 5000:
+                if check_active is None and len(paths) >= 5000:
                     complete = False
                     break
-            if len(paths) >= 5000:
+            if not complete:
                 break
     snapshot = FileSnapshot()
     snapshot.complete = complete
     content_remaining = limit
-    hash_remaining = _MAX_MUTATION_HASH_BYTES
+    # Native tools already have a deadline and cancellation. Only unguarded
+    # callers need a separate byte ceiling for hashing.
+    hash_remaining = None if check_active is not None else _MAX_MUTATION_HASH_BYTES
     for path in sorted(paths):
+        if check_active is not None:
+            check_active()
         target = (root / path).resolve()
         if not target.is_relative_to(root) or any(p in {".git", ".mana"} or p.startswith(".env") for p in Path(path).parts):
             snapshot.complete = False
@@ -810,18 +838,26 @@ def _snapshot(root: Path, arguments: dict[str, Any], limit: int, *, source_candi
         except OSError:
             snapshot[relative] = None
             continue
+        if source_listing and S_ISDIR(info.st_mode) and relative not in previous_paths:
+            # Git can list a submodule or a nested repository as one directory entry.
+            continue
         size = info.st_size
-        if not S_ISREG(info.st_mode) or size > hash_remaining:
+        if not S_ISREG(info.st_mode) or (hash_remaining is not None and size > hash_remaining):
             snapshot[relative] = None
             continue
-        hash_remaining -= size
+        if hash_remaining is not None:
+            hash_remaining -= size
         try:
-            version = _file_version(target, size, capture_content=size <= content_remaining)
+            version = _file_version(target, size, capture_content=size <= content_remaining, check_active=check_active)
+        except (InterruptedError, TimeoutError):
+            raise
         except OSError:
             version = None
         snapshot[relative] = version
         if version is not None and version.content is not None:
             content_remaining -= size
+    if check_active is not None:
+        check_active()
     return snapshot
 
 

@@ -132,7 +132,7 @@ def test_plain_shell_operation_does_not_take_repository_snapshots(checkout, monk
     worker = ToolExecutionDispatcher.for_coding_task(repo_root=root, task_id="shell-no-discovery")
     calls = []
 
-    def observe(root, arguments, limit, *, source_candidates=False):
+    def observe(root, arguments, limit, *, source_candidates=False, previous_paths=(), check_active=None):
         calls.append((arguments["cmd"], source_candidates))
         return tool_runner_agent.FileSnapshot()
 

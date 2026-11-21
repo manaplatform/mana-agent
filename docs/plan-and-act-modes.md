@@ -50,6 +50,6 @@ Patch proposals and application use the assigned checkout. In the staged workflo
 
 ## Debug a failure
 
-Describe the failure in ordinary chat. A stack trace, failing command, or affected file and line helps Mana select the first action. Ask it to diagnose the problem or to diagnose and fix it. Realtime Internal DEBUG can read the identified code, apply the smallest supported repair, and iterate on a focused build or check in the assigned checkout. The Coding Activity panel shows failed builds, budget renewals, and repeated actions without progress. [Adaptive coding runtime](adaptive-coding-runtime.md)
+Describe the failure in ordinary chat. A stack trace, failing command, or affected file and line helps Mana select the first action. Ask it to diagnose the problem or to diagnose and fix it. Realtime Internal DEBUG can read the identified code, apply the smallest supported repair, and iterate on a focused build or check in the assigned checkout. The Textual execution stream shows failed builds, budget renewals, and repeated actions without progress. [Adaptive coding runtime](adaptive-coding-runtime.md)
 
 A reproduction command that expects failure requires a literal output marker that identifies the intended failure. If the evidence cannot establish that diagnostic, the repair plan can record the uncertainty and use a regression check that expects to pass. The same decision rules apply when repository inspection reaches its no-progress limit and the workflow must use saved observations.

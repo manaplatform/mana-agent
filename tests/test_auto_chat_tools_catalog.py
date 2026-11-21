@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from io import StringIO
 from pathlib import Path
 
 from rich.console import Console
 
-from mana_agent.chat.events import AssistantMessageEvent
 from mana_agent.chat.history import ChatHistory
 from mana_agent.cli.chat_ui import ChatUIState, render_startup_header
 from mana_agent.cli.events import make_event
@@ -147,25 +147,26 @@ def test_startup_header_quiet_skips_full_catalog(tmp_path: Path, monkeypatch) ->
     assert "server_shell_execute" not in rendered
 
 
-def test_tui_welcome_hides_available_tools_catalog(monkeypatch) -> None:
+def test_tui_welcome_hides_available_tools_catalog() -> None:
     from mana_agent.tui.app import ManaChatApp
 
     history = ChatHistory()
     app = ManaChatApp(history=history, repo_root=Path.cwd(), model="gpt-test")
-    monkeypatch.setattr(app, "call_after_refresh", lambda callback: None)
 
-    app.on_mount()
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            startup = app.chat_log.startup
+            assert startup.display
+            welcome = str(startup.renderable)
+            assert "Mana-Agent" in welcome
+            assert "gpt-test" in welcome
+            assert "Available auto-chat tools" not in welcome
+            assert "web_search" not in welcome
+            assert "email_read" not in welcome
+            assert not history.get_events()
 
-    messages = [
-        event.content
-        for event in history.get_events()
-        if isinstance(event, AssistantMessageEvent)
-    ]
-    assert len(messages) == 1
-    assert "mana-agent" in messages[0]
-    assert "Available auto-chat tools" not in messages[0]
-    assert "web_search" not in messages[0]
-    assert "email_read" not in messages[0]
+    asyncio.run(run())
 
 
 def test_tools_command_lists_available_catalog(tmp_path: Path) -> None:

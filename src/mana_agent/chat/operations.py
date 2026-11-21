@@ -9,6 +9,16 @@ def merge_operation(previous: dict[str, Any], event: dict[str, Any]) -> dict[str
     old_meta = previous.get("metadata") or previous.get("details") or {}
     new_meta = event.get("metadata") or event.get("details") or {}
     metadata = {**old_meta, **new_meta}
+    mutations = {}
+    for details in (old_meta, new_meta):
+        records = list(details.get("mutations") or ())
+        if isinstance(details.get("mutation"), dict):
+            records.append(details["mutation"])
+        for record in records:
+            if isinstance(record, dict) and isinstance(record.get("path"), str) and record.get("status") in {"applied", "partial"}:
+                mutations[record["path"]] = record
+    if mutations:
+        metadata["mutations"] = list(mutations.values())[-100:]
     if old_meta.get("trace_complete") is False:
         metadata["trace_complete"] = False
     metadata["omitted_bytes"] = max(int(old_meta.get("omitted_bytes") or 0), int(new_meta.get("omitted_bytes") or 0))

@@ -288,75 +288,14 @@ def test_execution_trace_idempotent_replay() -> None:
     assert len(trace.steps[0].sub_events) == 1
 
 
-def test_execution_panel_renders_trace_steps_with_subtle_running() -> None:
-    panel = ExecutionPanel(turn_id="test-turn")
-    assert panel.steps_view is not None
-
-    # Apply running routing step
-    panel.update_trace_event({
-        "event_type": "routing_started",
-        "status": "running",
-    })
-    rendered = str(panel.steps_view.render())
-    assert "routing" in rendered.lower()
-    assert "running" in rendered.lower()
-    assert "◌" in rendered
-    # Header should say routing, NOT coding
-    header_text = str(panel.header.render()).lower()
-    assert "routing" in header_text
-    assert "coding" not in header_text
-    assert panel.details.title == "activity"
-
-    # Complete routing step
-    panel.update_trace_event({
-        "event_type": "routing_completed",
-        "status": "success",
-        "duration_ms": 50,
-    })
-    rendered_done = str(panel.steps_view.render())
-    assert "✓" in rendered_done
-    assert "50ms" in rendered_done
-
-    # Start searching step
-    panel.update_trace_event({
-        "event_id": "search-1",
-        "event_type": "search.started",
-        "status": "running",
-        "title": "Searching (web_search)",
-        "tool_name": "web_search",
-    })
-    search_rendered = str(panel.steps_view.render()).lower()
-    assert "searching" in search_rendered
-    search_header = str(panel.header.render()).lower()
-    assert "searching" in search_header
-    assert "coding" not in search_header
-
-    # Start coding step with activity
-    panel.update_trace_event({
-        "event_id": "act-1",
-        "event_type": "coding_started",
-        "status": "running",
-        "metadata": {"backend": "codex"},
-    })
-    assert panel.details.title == "coding activity"
-    panel.update_trace_event({
-        "event_id": "act-2",
-        "event_type": "command.started",
-        "status": "running",
-        "title": "pytest tests/unit",
-    })
-    assert panel.activity_log is not None
-    assert "pytest tests/unit" in panel.activity_log.text
-
-    # Complete turn
-    panel.update_trace_event({
-        "event_type": "turn.finished",
-        "status": "success",
-    })
-    final_render = str(panel.steps_view.render())
-    assert "✓" in final_render
-    assert "completed" in final_render.lower()
-    assert panel.details.collapsed is True
+def test_execution_stream_exposes_live_state_and_terminal_outcome() -> None:
+    panel = ExecutionPanel(turn_id="turn-live")
+    panel.update_event({"type": "command.started", "operation_id": "one", "command": "git status", "status": "running"})
+    assert panel.live_label() == "Running command"
+    panel.update_event({"type": "turn.finished", "status": "success"})
+    assert panel.live_label() == ""
+    assert panel._terminal
+    assert panel._status(panel.events[0]) == "unverified"
 
 
 def test_chat_log_places_panel_under_user_message_and_clears_on_new() -> None:
@@ -387,12 +326,11 @@ def test_chat_log_places_panel_under_user_message_and_clears_on_new() -> None:
             panel = chat_log.get_execution_panel("turn-user-1")
             assert panel is not None
             assert panel in chat_log.children
-            user_msg = app.query_one(".user-message")
+            user_msg = app.query_one(".user-message-row")
             assert list(chat_log.children).index(panel) == list(chat_log.children).index(user_msg) + 1
 
-            step = panel.trace.get_step("turn-user-1:tool:c-1")
-            assert step is not None
-            assert step.phase == "tool"
+            assert panel.events[0]["tool_name"] == "list_dir"
+            assert panel.events[0]["operation_id"] == "c-1"
 
             # Post assistant message
             asst_ev = AssistantMessageEvent(
@@ -401,18 +339,18 @@ def test_chat_log_places_panel_under_user_message_and_clears_on_new() -> None:
             )
             history.add(asst_ev)
             await pilot.pause()
-            assert panel.trace.is_completed is False
+            assert not panel._terminal
             history.add(CodingActivityEvent(activity={"type": "turn.finished", "status": "success"}, turn_id="turn-user-1"))
             await pilot.pause()
-            assert panel.trace.is_completed is True
+            assert panel._terminal
 
             # Clear log on /new
             chat_log.clear_log()
             for _ in range(5):
-                if len(chat_log.children) == 0:
+                if not list(chat_log.query(".user-message-row, AssistantReply, ExecutionPanel")):
                     break
                 await pilot.pause(0.05)
-            assert len(chat_log.children) == 0
+            assert not list(chat_log.query(".user-message-row, AssistantReply, ExecutionPanel"))
             assert chat_log.get_execution_panel("turn-user-1") is None
 
     asyncio.run(run())
@@ -438,92 +376,41 @@ def test_execution_trace_and_activity_boxes_handle_string_args_without_error() -
     assert trace.changed_files == []  # Inspection arguments are not mutation evidence
 
 
-def test_activity_box_stays_open_on_new_activity_and_scrolls_to_latest() -> None:
-    """Verify that when an activity box is open, receiving new activity does NOT close it,
-    only advances/scrolls to the latest activity, and preserves user collapse choices."""
-    panel = ExecutionPanel(turn_id="turn-open-test")
+def test_operation_expansion_survives_completion_and_sibling_activity() -> None:
+    import asyncio
+    from textual.app import App, ComposeResult
+    from mana_agent.tui.widgets.operation_row import OperationRow
 
-    # 1. Start first tool activity - box is open
-    panel.update_trace_event({
-        "event_id": "call-1",
-        "event_type": "tool.started",
-        "tool_name": "web_search",
-        "tool_call_id": "c1",
-        "status": "running",
-        "detail": "searching web",
-    })
-    assert panel.main_box.details.collapsed is False
+    class Host(App):
+        def compose(self) -> ComposeResult:
+            yield ExecutionPanel(turn_id="turn-open-test")
 
-    # 2. Complete first tool with success - MUST NOT CLOSE
-    panel.update_trace_event({
-        "event_id": "res-1",
-        "event_type": "tool.finished",
-        "tool_name": "web_search",
-        "tool_call_id": "c1",
-        "status": "success",
-        "detail": "found 5 links",
-    })
-    assert panel.main_box.details.collapsed is False, "MainActivityBox should remain open after tool success"
+    async def run() -> None:
+        app = Host()
+        async with app.run_test() as pilot:
+            panel = app.query_one(ExecutionPanel)
+            panel.update_event({"type": "tool.started", "tool_name": "web_search",
+                                "tool_call_id": "c1", "status": "running"})
+            await pilot.pause(.12)
+            row = panel.query_one(OperationRow)
+            row.collapsed = False
+            panel.update_event({"type": "tool.finished", "tool_name": "web_search",
+                                "tool_call_id": "c1", "status": "success", "detail": "found 5 links"})
+            panel.update_event({"type": "tool.started", "tool_name": "fetch_page",
+                                "tool_call_id": "c2", "status": "running"})
+            await pilot.pause(.12)
+            siblings = list(panel.query(OperationRow))
+            assert siblings[0] is row and not row.collapsed
+            assert "found 5 links" in row.output.text
+            assert "fetch_page" in siblings[1].title and siblings[1].collapsed
 
-    # 3. New tool activity arrives - MUST NOT CLOSE, must show latest activity
-    panel.update_trace_event({
-        "event_id": "call-2",
-        "event_type": "tool.started",
-        "tool_name": "fetch_page",
-        "tool_call_id": "c2",
-        "status": "running",
-        "detail": "fetching page",
-    })
-    assert panel.main_box.details.collapsed is False
-    assert "fetch_page" in panel.main_box.activity_log.text
+            row.collapsed = True
+            panel.update_event({"type": "tool.finished", "tool_name": "fetch_page",
+                                "tool_call_id": "c2", "status": "success"})
+            await pilot.pause(.12)
+            assert row.collapsed
 
-    # 4. Coding activity arrives and completes with coding.terminal - MUST NOT CLOSE coding box
-    panel.update_trace_event({
-        "event_id": "code-1",
-        "event_type": "command.started",
-        "status": "running",
-        "command": "git status",
-        "title": "git status",
-    })
-    assert panel.coding_box.details.collapsed is False
-
-    panel.update_trace_event({
-        "event_id": "code-2",
-        "event_type": "coding.terminal",
-        "status": "success",
-        "command": "git status",
-        "title": "git status",
-    })
-    assert panel.coding_box.details.collapsed is False, "CodingActivityBox should remain open after coding.terminal"
-
-    # 5. User explicitly collapses main activity box
-    panel.main_box.details.collapsed = True
-    panel.main_box._user_collapsed = True
-
-    # 6. New activity arrives - MUST NOT force open if user collapsed it
-    panel.update_trace_event({
-        "event_id": "call-3",
-        "event_type": "tool.started",
-        "tool_name": "calculator",
-        "tool_call_id": "c3",
-        "status": "running",
-    })
-    assert panel.main_box.details.collapsed is True, "MainActivityBox should stay closed if user explicitly collapsed it"
-
-    # 7. User explicitly reopens main activity box
-    panel.main_box.details.collapsed = False
-    panel.main_box._user_collapsed = False
-
-    # 8. New activity arrives - stays open
-    panel.update_trace_event({
-        "event_id": "res-3",
-        "event_type": "tool.finished",
-        "tool_name": "calculator",
-        "tool_call_id": "c3",
-        "status": "success",
-    })
-    assert panel.main_box.details.collapsed is False, "MainActivityBox should stay open when user explicitly opened it"
-    assert "calculator" in panel.main_box.activity_log.text
+    asyncio.run(run())
 
 
 def test_lifecycle_events_do_not_create_duplicate_steps() -> None:
@@ -614,14 +501,8 @@ def test_tool_execution_start_and_finish_update_step_in_place() -> None:
     assert "approval bound" in step_b_fail.detail
 
 
-def test_execution_panel_steps_view_is_hidden_by_default() -> None:
-    """ExecutionPanel.steps_view must be hidden by default to avoid duplicating activity boxes."""
-    panel = ExecutionPanel(turn_id="turn-hide-steps")
-    assert panel.steps_view.display is False
-
-
-def test_execution_panel_keeps_main_and_internal_coding_activity_without_archive() -> None:
-    panel = ExecutionPanel(turn_id="turn-live-boxes")
+def test_execution_stream_preserves_main_and_coding_provenance() -> None:
+    panel = ExecutionPanel(turn_id="turn-live-stream")
     panel.update_event({
         "event_id": "main-plan", "type": "agent.planning", "status": "running",
         "operation_id": "planning", "agent_id": "MainAgent", "title": "Reviewing requirements",
@@ -631,13 +512,6 @@ def test_execution_panel_keeps_main_and_internal_coding_activity_without_archive
         "operation_id": "read", "backend": "internal", "tool_name": "read_file",
         "agent_id": "CodingAgent", "title": "Reading implementation",
     })
-
-    assert [row["event_id"] for row in panel.main_box.events] == ["main-plan"]
-    assert [row["event_id"] for row in panel.coding_box.events] == ["internal-read"]
-    assert "Reviewing requirements" in panel.main_box.activity_log.text
-    assert "Reading implementation" in panel.coding_box.activity_log.text
-    root_widgets = list(panel.compose())
-    assert root_widgets.count(panel.main_box) == 1
-    assert root_widgets.count(panel.coding_box) == 1
-    assert not any("Earlier activity" in str(getattr(widget, "label", "") or getattr(widget, "title", ""))
-                   for widget in root_widgets)
+    assert [row["event_id"] for row in panel.events] == ["main-plan", "internal-read"]
+    assert [row["agent_id"] for row in panel.events] == ["MainAgent", "CodingAgent"]
+    assert not panel.earlier.display and not panel.newer.display

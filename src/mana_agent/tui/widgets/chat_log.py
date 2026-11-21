@@ -1,598 +1,397 @@
-"""
-ChatLog
-
-Reactive beautiful chat log widget for ManaChatApp.
-
-- Subscribes to a ChatHistory instance.
-- Renders distinct visual cards for User / Assistant / ToolCall / ToolResult / tokens.
-- Supports live streaming: incoming StreamTokenEvent appends to the current
-  assistant message (and also updates the on-screen widget).
-- Uses Textual compose + dynamic mounting for message "cards".
-- Renders read-only selectable text for messages and Markdown source.
-
-This widget + ChatHistory subscription is the core fix for the
-"tool events only on first message" bug.
-"""
+"""The scrollable transcript, including inline execution and steering."""
 
 from __future__ import annotations
 
+import json
 import threading
+import time
 from collections.abc import Callable
 
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Static
+from textual.widgets import Button, Markdown, Static
 
+from mana_agent.chat.activity import safe_text, sanitize_legacy_envelope
+from mana_agent.chat.attachments import format_size
 from mana_agent.chat.events import (
-    AssistantMessageEvent,
-    ChatEvent,
-    CodingActivityEvent,
-    StreamTokenEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    UserMessageEvent,
+    AssistantMessageEvent, ChatEvent, CodingActivityEvent, StreamTokenEvent,
+    ToolCallEvent, ToolResultEvent, UserMessageEvent,
 )
-from mana_agent.chat.execution_trace import is_coding_tool
 from mana_agent.chat.history import ChatHistory
-from mana_agent.chat.activity import delivery_key, safe_text
-from mana_agent.tui.widgets.tool_card import ToolCard
+from mana_agent.tui.presentation import glyph
 from mana_agent.tui.widgets.execution_panel import ExecutionPanel
 from mana_agent.tui.widgets.selectable_text import SelectableText
 
 
-class ChatHistoryMessage(Message):
-    """Thread-safe notification that ChatHistory received a new event.
+class HistoryReady(Message):
+    """Wake the Textual thread once for a burst of history updates."""
 
-    Posted via ``Widget.post_message`` (non-blocking, safe from worker threads).
-    Prefer this over ``App.call_from_thread`` which blocks the worker until the
-    UI callback finishes and can deadlock if the UI thread is waiting on that worker.
+
+class UserMessage(Horizontal):
+    DEFAULT_CSS = """
+    UserMessage { width: 1fr; height: auto; }
+    UserMessage > Static { width: 2; height: 1; }
     """
 
-    def __init__(self, event: ChatEvent) -> None:
-        super().__init__()
-        self.event = event
+    def __init__(self, text: str) -> None:
+        super().__init__(classes="user-message-row")
+        self.source = SelectableText(text, classes="user-message")
+
+    def compose(self):
+        yield Static(glyph("❯", ">"), classes="user-prompt", markup=False)
+        yield self.source
 
 
-class ActivityHistoryMessage(Message):
-    """One wake-up for a burst of activity; history retains the reduced state."""
+class AssistantReply(Vertical):
+    def __init__(self, text: str, *, streaming: bool) -> None:
+        super().__init__(classes="assistant-message")
+        self.source = SelectableText(text)
+        self.markdown = Markdown(text if not streaming else "", open_links=False)
+        self.copy_mode = Button("Copy mode", classes="copy-mode")
+        self._streaming = streaming
+        self._copying = False
+        self._pending: str | None = None
+
+    @property
+    def text(self) -> str:
+        return self._pending if self._pending is not None else self.source.text
+
+    def compose(self):
+        self.markdown.display = not self._streaming
+        self.copy_mode.display = not self._streaming
+        self.source.display = self._streaming
+        yield self.markdown
+        yield self.source
+        yield self.copy_mode
+
+    def update_text(self, text: str) -> None:
+        if self.source.selected_text:
+            self._pending = text
+        else:
+            self._pending = None
+            if self.source.text != text:
+                self.source.load_text(text)
+
+    def on_text_area_selection_changed(self, event) -> None:
+        if self._pending is not None and event.selection.is_empty:
+            self.update_text(self._pending)
+            if not (self._copying or self._streaming):
+                self.source.display = False
+
+    def finalize(self, text: str) -> None:
+        self._streaming = False
+        self._copying |= bool(self.source.selected_text)
+        self.update_text(text)
+        if self.markdown.is_mounted:
+            self.markdown.update(text)
+        else:
+            self.markdown = Markdown(text, open_links=False)
+        self.markdown.display = not self._copying
+        self.source.display = self._copying
+        self.copy_mode.display = True
+        if self._copying:
+            self.copy_mode.label = "Rendered view"
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is not self.copy_mode:
+            return
+        event.stop()
+        self._copying = not self._copying
+        self.source.display = self._copying
+        self.markdown.display = not self._copying
+        self.copy_mode.label = "Rendered view" if self._copying else "Copy mode"
+        if self._copying:
+            self.source.focus()
 
 
 class ChatLog(VerticalScroll):
-    """
-    Scrollable log that stays in sync with ChatHistory via subscription.
-
-    Usage:
-        log = ChatLog()
-        log.set_history(history)   # subscribes automatically
-        # later:
-        history.add(UserMessageEvent("hello"))
-    """
-
-    DEFAULT_CSS = """
-    ChatLog {
-        height: 1fr;
-        padding: 0 1;
-        background: $surface;
-        border: round $primary 40%;
-    }
-
-    .user-message {
-        background: $primary 15%;
-        border: round $primary;
-        padding: 0 1;
-        margin: 1 0;
-    }
-
-    .assistant-message {
-        background: $success 8%;
-        border: round $success;
-        padding: 0 1;
-        margin: 1 0;
-    }
-
-    .system-note {
-        color: $text-muted;
-        text-style: italic;
-        padding: 0 1;
-    }
-    """
-
-    # reactive so textual can observe
     message_count: reactive[int] = reactive(0)
 
     def __init__(self, history: ChatHistory | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._history: ChatHistory | None = None
+        self._history: ChatHistory | None = history
         self._unsubscribe: Callable[[], None] | None = None
-        self._assistant_widgets: dict[str, SelectableText] = {}  # event_id -> widget
-        self._tool_cards: dict[str, ToolCard] = {}  # call_id -> card
+        self._assistant_widgets: dict[str, AssistantReply] = {}
+        self._streaming: dict[str, tuple[AssistantMessageEvent, AssistantReply]] = {}
         self._execution_panels: dict[str, ExecutionPanel] = {}
-        self._user_widgets_by_turn: dict[str, SelectableText] = {}
-        self._latest_user_widget: SelectableText | None = None
-        self._latest_steered_widget: SelectableText | None = None
-        self._steered_widgets_by_turn: dict[str, SelectableText] = {}
-        self._steering_widgets: dict[str, SelectableText] = {}
-        self._activity_notification_lock = threading.Lock()
-        self._pending_activity_turns: set[str] = set()
-        self._activity_notification_pending = False
+        self._user_widgets_by_turn: dict[str, UserMessage] = {}
+        self._steered_widgets_by_turn: dict[str, UserMessage] = {}
+        self._steering_widgets: dict[str, UserMessage] = {}
         self._current_turn_id: str | None = None
-        # Deduplicate live + replay so the same event_id is only painted once
         self._rendered_ids: set[str] = set()
-        # App thread id once mounted (for low-latency same-thread rendering)
-        self._ui_thread_id: int | None = None
+        self._pending_lock = threading.Lock()
+        self._pending_events: list[ChatEvent] = []
+        self._pending_activity: dict[tuple[str, str], CodingActivityEvent] = {}
+        self._pending_tokens: set[tuple[str, str | None]] = set()
+        self._pending_wake = False
+        self._follow_pending = False
+        self.startup = Static("", classes="startup", markup=False)
+        self.startup.display = False
+        self.live = Static("", id="live-status", markup=False)
+        self.live.display = False
+        self._active_turn = ""
+        self._live_started: float | None = None
+        self._status_timer = None
 
-        if history is not None:
-            self.set_history(history)
+    def compose(self):
+        yield self.startup
+        yield self.live
 
     def set_history(self, history: ChatHistory) -> None:
-        """Attach (or re-attach) to a history. Safe to call multiple times.
-
-        NOTE: Replay of past events is deferred to on_mount + call_after_refresh
-        to avoid "Can't mount widget(s) before Vertical() is mounted" errors.
-        Live events are scheduled onto the UI thread immediately (thread-safe).
-        """
         if self._unsubscribe:
             self._unsubscribe()
-
+            self._unsubscribe = None
         self._history = history
-        self._unsubscribe = history.subscribe(self._on_event)
-        # Do NOT replay here (constructor time). on_mount will handle it safely.
+        if self.is_mounted:
+            self.clear_log()
+            self._subscribe()
+            self._replay_history()
 
-    def _on_event(self, event: ChatEvent) -> None:
-        """Callback from ChatHistory.add().
-
-        Must be thread-safe: tool start/end often arrive from worker threads
-        (CodingAgent / tool workers via emit_tool_event bridge). We schedule
-        rendering onto the UI thread so ToolCards and messages appear immediately
-        while the agent is still running, not only after the turn finishes.
-        """
-        self._schedule_render(event)
-
-    def _schedule_render(self, event: ChatEvent) -> None:
-        """Schedule _safe_render on the Textual UI thread with minimal latency.
-
-        - Same UI thread: mount immediately (user pressed Enter → bubble shows now).
-        - Other threads: non-blocking ``post_message`` (thread-safe; no deadlock risk
-          with ``asyncio.to_thread`` / blocking workers).
-        """
-        if isinstance(event, CodingActivityEvent) and threading.get_ident() != self._ui_thread_id:
-            with self._activity_notification_lock:
-                self._pending_activity_turns.add(event.turn_id)
-                if self._activity_notification_pending:
-                    return
-                self._activity_notification_pending = True
-            # Posting once avoids an unbounded Textual message queue during
-            # replay or a fast producer burst. The history already upserts and
-            # bounds active/recent operations before notifying this listener.
-            self.post_message(ActivityHistoryMessage())
-            return
-
-        # Same UI thread: mount immediately when possible so user messages appear
-        # in the message box without waiting for the next refresh cycle.
-        if self._ui_thread_id is not None and threading.get_ident() == self._ui_thread_id:
-            if self.is_mounted:
-                try:
-                    self._safe_render(event)
-                    return
-                except Exception:
-                    pass
-
-        # Worker / other thread (or not yet ready for direct mount):
-        # post_message is non-blocking and thread-safe in Textual.
-        try:
-            self.post_message(ChatHistoryMessage(event))
-            return
-        except Exception:
-            pass
-
-        # Last-resort fallbacks (e.g. very early lifecycle)
-        def _render() -> None:
-            self._safe_render(event)
-
-        try:
-            self.call_later(_render)
-        except Exception:
-            try:
-                self.call_after_refresh(_render)
-            except Exception:
-                pass
-
-    def on_chat_history_message(self, message: ChatHistoryMessage) -> None:
-        """Handle thread-safe history notifications posted from any thread."""
-        self._safe_render(message.event)
-
-    def on_activity_history_message(self, message: ActivityHistoryMessage) -> None:
-        with self._activity_notification_lock:
-            turns = self._pending_activity_turns
-            self._pending_activity_turns = set()
-            self._activity_notification_pending = False
+    def _subscribe(self) -> None:
         if self._history is not None:
-            for event in self._history.get_events():
-                if isinstance(event, CodingActivityEvent) and event.turn_id in turns:
-                    self._safe_render(event)
+            current = self._history
+            self._unsubscribe = current.subscribe(lambda event: self._enqueue(event) if self._history is current else None)
 
-    def _safe_render(self, event: ChatEvent) -> None:
-        """Render only when mounted; skip duplicates (live vs history replay)."""
+    def on_mount(self) -> None:
+        self._subscribe()
+        self._status_timer = self.set_interval(1, self.refresh_activity_status)
+        self.call_after_refresh(self._replay_history)
+
+    def on_unmount(self) -> None:
+        if self._unsubscribe:
+            self._unsubscribe()
+            self._unsubscribe = None
+        if self._status_timer:
+            self._status_timer.stop()
+            self._status_timer = None
+
+    def _enqueue(self, event: ChatEvent) -> None:
+        from mana_agent.chat.activity import operation_key
+
+        with self._pending_lock:
+            if isinstance(event, CodingActivityEvent) and not event.activity["type"].startswith("steering."):
+                self._pending_activity[event.turn_id, operation_key(event.activity)] = event
+            elif isinstance(event, StreamTokenEvent):
+                self._pending_tokens.add((event.turn_id, event.assistant_event_id))
+            else:
+                self._pending_events.append(event)
+            if self._pending_wake:
+                return
+            self._pending_wake = True
+        self.post_message(HistoryReady())
+
+    def on_history_ready(self, _: HistoryReady) -> None:
+        with self._pending_lock:
+            events, self._pending_events = self._pending_events, []
+            activity, self._pending_activity = self._pending_activity, {}
+            tokens, self._pending_tokens = self._pending_tokens, set()
+            self._pending_wake = False
+        follow = self.following
+        for event in events:
+            self._safe_render(event)
+        for event in activity.values():
+            self._safe_render(event)
+        if tokens:
+            for event, reply in self._streaming.values():
+                addresses = {(event.turn_id, event.event_id), (event.turn_id, None), ("", event.event_id), ("", None)}
+                if addresses & tokens:
+                    reply.update_text(event.content)
+        self.refresh_activity_status()
+        if follow:
+            self.follow_after_refresh()
+
+    @property
+    def following(self) -> bool:
+        return self.max_scroll_y - self.scroll_y <= 2 and not any(
+            widget.selected_text for widget in self.query(SelectableText)
+        )
+
+    def follow_after_refresh(self) -> None:
+        if self._follow_pending:
+            return
+        self._follow_pending = True
+
+        def follow() -> None:
+            self._follow_pending = False
+            self.scroll_end(animate=False, force=True)
+
+        self.call_after_refresh(follow)
+
+    def _scroll_to_latest(self) -> None:
+        self.scroll_end(animate=False, force=True)
+        self.follow_after_refresh()
+
+    def set_active_turn(self, turn_id: str | None) -> None:
+        turn = turn_id or ""
+        if turn != self._active_turn:
+            self._active_turn = turn
+            self._live_started = time.monotonic() if turn else None
+        self.refresh_activity_status()
+
+    def refresh_activity_status(self) -> None:
         if not self.is_mounted:
             return
-        event_id = delivery_key(event.activity) if isinstance(event, CodingActivityEvent) else getattr(event, "event_id", None)
-        if event_id and event_id in self._rendered_ids:
-            return
-        if event_id:
-            self._rendered_ids.add(event_id)
-            if len(self._rendered_ids) > 4000:
-                self._rendered_ids = {event_id}
-        self._render_event(event)
-
-    def _render_event(self, event: ChatEvent) -> None:
-        """Create appropriate visual representation and mount it."""
-        was_near_bottom = self.max_scroll_y - self.scroll_y <= 2
-        focus_widget = None
-        if isinstance(event, UserMessageEvent):
-            focus_widget = self._add_user_message(event)
-        elif isinstance(event, AssistantMessageEvent):
-            focus_widget = self._add_or_update_assistant(event)
-        elif isinstance(event, ToolCallEvent):
-            focus_widget = self._add_tool_call(event)
-        elif isinstance(event, ToolResultEvent):
-            focus_widget = self._add_tool_result(event)
-        elif isinstance(event, StreamTokenEvent):
-            focus_widget = self._handle_stream_token(event)
-        elif isinstance(event, CodingActivityEvent):
-            focus_widget = self._add_coding_activity(event)
-
-        self.message_count = len(self._history.get_events()) if self._history else self.message_count + 1
-
-        is_tool_event = isinstance(event, (ToolCallEvent, ToolResultEvent, CodingActivityEvent))
-        # Keep chat history pinned at the end of chats (not snapped/pinned to tool widgets)
-        if was_near_bottom or isinstance(event, UserMessageEvent):
-            self._scroll_to_latest()
-
-    def _pin_to_tool(self, tool_widget: Static | SelectableText | ToolCard | ExecutionPanel | None = None) -> None:
-        """Pin chat history viewport to the end of chats."""
-        self._scroll_to_latest()
-
-    def _scroll_to_latest(self, focus_widget: Static | SelectableText | ToolCard | None = None) -> None:
-        """Keep chat history pinned to the end of chats.
-
-        Uses Textual anchor on the latest child so size growth stays visible,
-        and scroll_end (deferred until after layout) so the virtual height is
-        correct when content is newly mounted, without forcibly snapping to
-        intermediate tool cards or execution panels.
-        """
-        try:
-            children = list(self.children)
-            if children:
-                try:
-                    children[-1].anchor(animate=False)
-                except Exception:
-                    pass
-            self.scroll_end(animate=False, force=True)
-        except Exception:
-            pass
-
-        def _repin_end() -> None:
-            try:
-                self.scroll_end(animate=False, force=True)
-            except Exception:
-                pass
-
-        try:
-            self.call_after_refresh(_repin_end)
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Individual renderers
-    # ------------------------------------------------------------------
+        panel = self._execution_panels.get(self._active_turn)
+        if panel is None and not self._active_turn and self._current_turn_id:
+            panel = self._execution_panels.get(self._current_turn_id)
+            if panel is not None and not panel._waiting:
+                panel = None
+        label = panel.live_label() if panel else ""
+        if (self._active_turn or getattr(self.app, "has_pending_execution_approval", False)) and getattr(self.app, "interrupt_requested", False) and not (panel and panel._terminal):
+            label = "Interrupt requested"
+        elif getattr(self.app, "has_pending_execution_approval", False):
+            label = "Waiting for approval"
+        elif self._active_turn and not label and not (panel and panel._terminal):
+            label = "Thinking"
+        elapsed = int(time.monotonic() - self._live_started) if self._live_started is not None else None
+        if label:
+            suffix = []
+            if elapsed is not None:
+                suffix.append(f"{elapsed}s")
+            if self._active_turn and getattr(self.app, "can_interrupt", False) and not getattr(self.app, "interrupt_requested", False):
+                suffix.append("Esc to interrupt")
+            separator = glyph(" · ", " | ")
+            if suffix:
+                label += f" ({separator.join(suffix)})"
+            label = f"{glyph('•', '*')} {label}"
+        if str(self.live.renderable) != label:
+            self.live.update(label)
+        self.live.display = bool(label)
+        refresh_footer = getattr(self.app, "refresh_footer", None)
+        if refresh_footer is not None:
+            refresh_footer()
 
     def get_execution_panel(self, turn_id: str) -> ExecutionPanel | None:
         return self._execution_panels.get(turn_id)
 
-    def _ensure_panel_after_steered(self, panel: ExecutionPanel | None) -> None:
-        """Keep the active execution panel (activity box) positioned after the latest steered message."""
-        if panel is None or panel not in self.children:
-            return
-        steered = self._steered_widgets_by_turn.get(panel.turn_id)
-        if steered is not None and steered in self.children:
-            try:
-                children = list(self.children)
-                if children.index(panel) < children.index(steered):
-                    self.move_child(panel, after=steered)
-            except Exception:
-                pass
-
     def _get_or_create_execution_panel(self, turn_id: str) -> ExecutionPanel:
         panel = self._execution_panels.get(turn_id)
         if panel is None:
-            panel = ExecutionPanel(turn_id=turn_id)
-            self._execution_panels[turn_id] = panel
-            steered = self._steered_widgets_by_turn.get(turn_id)
-            target = steered if (steered is not None and steered in self.children) else None
-            if target is None:
-                target = self._user_widgets_by_turn.get(turn_id) or self._latest_user_widget
-            if target is not None and target in self.children:
-                self.mount(panel, after=target)
-            else:
-                self.mount(panel)
-        else:
-            self._ensure_panel_after_steered(panel)
+            panel = self._execution_panels[turn_id] = ExecutionPanel(turn_id=turn_id)
+            self.mount(panel, before=self.live)
+            self.call_after_refresh(self._position_panel, turn_id)
         return panel
 
-    def _add_user_message(self, event: UserMessageEvent) -> SelectableText:
-        display_text = safe_text(event.content or "", 100000)
-        if event.is_steering:
-            display_text = f"⚡ Steering [{event.steering_status}]: {display_text}"
-        if event.attachments:
-            from mana_agent.chat.attachments import format_size
+    def _position_panel(self, turn_id: str) -> None:
+        panel = self._execution_panels.get(turn_id)
+        target = self._steered_widgets_by_turn.get(turn_id) or self._user_widgets_by_turn.get(turn_id)
+        children = list(self.children)
+        if panel in children and target in children and children.index(panel) != children.index(target) + 1:
+            self.move_child(panel, after=target)
 
-            att_lines = []
-            for att in event.attachments:
-                name = att.get("filename") if isinstance(att, dict) else getattr(att, "filename", "file")
-                size = att.get("size_bytes", 0) if isinstance(att, dict) else getattr(att, "size_bytes", 0)
-                mime = att.get("mime_type", "") if isinstance(att, dict) else getattr(att, "mime_type", "")
-                cat = att.get("category", "") if isinstance(att, dict) else getattr(att, "category", "")
-                att_lines.append(f"  📎 {name} ({cat}, {mime}, {format_size(size)})")
-            att_block = "\n".join(att_lines)
-            if display_text:
-                display_text = f"{display_text}\n\nAttachments:\n{att_block}"
-            else:
-                display_text = f"Attachments:\n{att_block}"
-        widget = SelectableText(display_text, classes="user-message")
-        panel = self._execution_panels.get(event.turn_id) if event.turn_id else None
-        if event.is_steering and panel is not None and panel in self.children:
-            self.mount(widget, before=panel)
-        else:
-            self.mount(widget)
+    def _add_user_message(self, event: UserMessageEvent) -> UserMessage:
+        content = safe_text(event.content, 100000)
         if event.is_steering:
-            setattr(widget, "_steering_instruction", safe_text(event.content, 16000))
-            setattr(widget, "_steering_status", event.steering_status)
-            setattr(widget, "_steering_recorded", event.steering_recorded)
+            content += f"\nSteering {event.steering_status or 'pending'}"
+        if event.attachments:
+            for attachment in event.attachments:
+                get = attachment.get if isinstance(attachment, dict) else lambda key, default: getattr(attachment, key, default)
+                name = safe_text(get("filename", "file"))
+                content += f"\n  {glyph('📎', '+')} {name} ({format_size(get('size_bytes', 0))})"
+        widget = UserMessage(content)
+        panel = self._execution_panels.get(event.turn_id)
+        self.mount(widget, before=panel if panel is not None and panel in self.children else self.live)
+        if event.is_steering:
             self._steering_widgets[event.request_id] = widget
             self._steered_widgets_by_turn[event.turn_id] = widget
-            self._latest_steered_widget = widget
-            self._ensure_panel_after_steered(panel)
-            return widget
-        turn_id = event.turn_id or self._current_turn_id
-        if turn_id:
-            self._current_turn_id = turn_id
-            self._user_widgets_by_turn[turn_id] = widget
-        self._latest_user_widget = widget
+        else:
+            self._user_widgets_by_turn[event.turn_id] = widget
+            self._current_turn_id = event.turn_id
+        if panel is not None:
+            self.call_after_refresh(self._position_panel, event.turn_id)
         return widget
 
-    def _add_or_update_assistant(self, event: AssistantMessageEvent) -> SelectableText:
-        """Create or replace the assistant message widget."""
+    def _add_or_update_assistant(self, event: AssistantMessageEvent) -> AssistantReply:
         content = event.content or ""
-        is_steering = bool(getattr(event, "is_steering", False) or "Live Steering submitted" in content)
-        classes = "assistant-message live-steering-message" if is_steering else "assistant-message"
-        widget = SelectableText(content or "…", language="markdown", classes=classes)
-        setattr(widget, "is_steering", is_steering)
-        setattr(widget, "_turn_id", event.turn_id)
+        streaming = None if event.is_streaming else self._streaming.pop(event.turn_id, None)
+        if streaming is not None:
+            _, reply = streaming
+            reply.finalize(content)
+        else:
+            reply = AssistantReply(content, streaming=event.is_streaming)
+            self.mount(reply, before=self.live)
+            if event.is_streaming:
+                self._streaming[event.turn_id] = event, reply
+        self._assistant_widgets[event.event_id] = reply
+        return reply
 
-        if not is_steering:
-            # store for streaming updates
-            self._assistant_widgets[event.event_id] = widget
-
-            # If we already have a streaming assistant for this turn, replace its content
-            # Remove previous placeholder if present for same turn (simple heuristic)
-            if event.turn_id:
-                for existing_id, w in list(self._assistant_widgets.items()):
-                    if getattr(w, "_turn_id", None) == event.turn_id and existing_id != event.event_id:
-                        try:
-                            w.remove()
-                        except Exception:
-                            pass
-
-        self.mount(widget)
-
-        if is_steering:
-            self._steered_widgets_by_turn[event.turn_id] = widget
-            self._latest_steered_widget = widget
-            target_panel = None
-            if event.turn_id and event.turn_id in self._execution_panels:
-                target_panel = self._execution_panels[event.turn_id]
-
-            if target_panel is not None and target_panel in self.children and widget in self.children:
-                try:
-                    self.move_child(target_panel, after=widget)
-                except Exception:
-                    pass
-            self._scroll_to_latest()
-
-        return widget
-
-    def _add_tool_call(self, event: ToolCallEvent) -> ToolCard | ExecutionPanel | None:
-        tool_name = str(event.tool_name or "").strip()
-        coding = is_coding_tool(tool_name)
-        turn_id = (
-            event.turn_id
-            or getattr(self._latest_user_widget, "_turn_id", "")
-            or getattr(self, "_current_turn_id", "")
-            or ("turn-coding" if coding else "")
-        )
-        panel = None
-        if turn_id:
-            panel = self._get_or_create_execution_panel(turn_id)
-            self._ensure_panel_after_steered(panel)
-            is_search = "search" in tool_name.lower() or tool_name in {
-                "find_by_name", "grep_search", "document_query"
-            }
-            if coding:
-                evt_type = "coding.progress"
-                evt_title = f"Code: {tool_name}"
-            elif is_search:
-                evt_type = "search.started"
-                evt_title = f"Searching ({tool_name})"
-            else:
-                evt_type = "tool.started"
-                evt_title = f"Tool: {tool_name}"
-            panel.update_event({
-                "event_type": evt_type,
-                "title": evt_title,
-                "tool_name": tool_name,
-                "tool_call_id": event.call_id,
-                "status": "running",
-                "detail": event.summary or "",
-                "backend": "coding" if coding else "",
-                "payload": {"args": event.args},
-            })
-        if coding or tool_name in {"approval_request", "request_user_approval", "wait_for_approval"}:
-            # Coding and approval tools stay in the activity stream, not a separate card.
-            return panel
-
-        # General agent activities route inside MainActivityBox within ExecutionPanel
-        card = panel.main_box.add_tool_call(event)
-        self._tool_cards[event.call_id] = card
-        return card
-
-    def _add_tool_result(self, event: ToolResultEvent) -> Static | ToolCard | ExecutionPanel | None:
-        tool_name = str(event.tool_name or "").strip()
-        coding = is_coding_tool(tool_name)
-        turn_id = (
-            event.turn_id
-            or getattr(self._latest_user_widget, "_turn_id", "")
-            or getattr(self, "_current_turn_id", "")
-            or ("turn-coding" if coding else "turn-main")
-        )
-        panel = self._get_or_create_execution_panel(turn_id) if turn_id else None
-        if panel is not None:
-            self._ensure_panel_after_steered(panel)
-            is_search = "search" in tool_name.lower() or tool_name in {
-                "find_by_name", "grep_search", "document_query"
-            }
-            if coding:
-                evt_type = "coding.terminal" if event.success else "coding.progress"
-                evt_title = f"Code: {tool_name}"
-            elif is_search:
-                evt_type = "search.finished"
-                evt_title = f"Searching ({tool_name})"
-            else:
-                evt_type = "tool.finished"
-                evt_title = f"Tool: {tool_name}"
-            panel.update_event({
-                "event_type": evt_type,
-                "title": evt_title,
-                "tool_name": tool_name,
-                "tool_call_id": event.call_id,
-                "status": "success" if event.success else "failed",
-                "detail": event.summary or event.error or "",
-                "duration_ms": event.duration_ms,
-                "backend": "coding" if coding else "",
-            })
-        if coding:
-            # Coding tools are displayed exclusively in the ExecutionPanel (activity code),
-            # never as separate individual cards mounted in the timeline one by one.
-            return panel
-
-        if panel is not None:
-            card = panel.main_box.add_tool_result(event)
-            if card is not None:
-                self.refresh(layout=True)
-                return card
-
-        card = self._tool_cards.get(event.call_id)
-        if card is not None:
-            card.set_result(event)
-            self.refresh(layout=True)
-            return card
-        return panel
-
-    def _handle_stream_token(self, event: StreamTokenEvent) -> SelectableText | None:
-        """Append token to the live assistant message widget if we can find it."""
-        # Prefer explicit assistant_event_id
-        target_id = event.assistant_event_id
-        if target_id and target_id in self._assistant_widgets:
-            w = self._assistant_widgets[target_id]
-            self._append_to_assistant_widget(w, event.token)
-            return w
-
-        # Fallback: update the most recent assistant widget
-        if self._assistant_widgets:
-            last = list(self._assistant_widgets.values())[-1]
-            self._append_to_assistant_widget(last, event.token)
-            return last
-        return None
-
-    def _add_coding_activity(self, event: CodingActivityEvent) -> ExecutionPanel:
+    def _add_tool_call(self, event: ToolCallEvent) -> ExecutionPanel:
         panel = self._get_or_create_execution_panel(event.turn_id)
-        self._ensure_panel_after_steered(panel)
-        panel.update_event(event.activity)
-        if str(event.activity.get("event_type") or "").startswith("steering."):
-            meta = event.activity.get("metadata") or {}
-            request_id = str(meta.get("request_id") or event.activity.get("request_id") or "")
-            widget = self._steering_widgets.get(request_id)
-            if widget is not None:
-                status = str(event.activity.get("event_type", "")).split(".")[-1]
-                instruction = meta.get("text") or meta.get("instruction") or getattr(widget, "_steering_instruction", "")
-                if instruction:
-                    setattr(widget, "_steering_instruction", instruction)
-                previous_status = getattr(widget, "_steering_status", "pending")
-                recorded = bool(event.activity.get("sequence"))
-                if previous_status not in {"applied", "rejected", "superseded"} or not getattr(widget, "_steering_recorded", False) and recorded:
-                    setattr(widget, "_steering_status", status)
-                    setattr(widget, "_steering_recorded", recorded)
-                    widget.load_text(f"⚡ Steering [{status}]: {instruction}")
+        panel.update_event({
+            "type": "tool.started", "event_id": event.event_id, "tool_name": event.tool_name,
+            "tool_call_id": event.call_id, "status": "running", "title": event.tool_name,
+            "detail": event.summary, "started_at": event.timestamp,
+        }, legacy=True)
         return panel
 
-    def _append_to_assistant_widget(self, widget: SelectableText, token: str) -> None:
-        """Append streaming content without invalidating an active selection."""
-        try:
-            widget.load_text(widget.text + token)
-            widget.refresh(layout=True)
-        except Exception:
-            # If live update fails, the final AssistantMessageEvent will still render correctly
-            pass
+    def _add_tool_result(self, event: ToolResultEvent) -> ExecutionPanel:
+        panel = self._get_or_create_execution_panel(event.turn_id)
+        result = event.result
+        if isinstance(result, (dict, list)):
+            result = sanitize_legacy_envelope({"result": result}).get("result")
+            result = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+        panel.update_event({
+            "type": "tool.finished", "event_id": event.event_id, "tool_name": event.tool_name,
+            "tool_call_id": event.call_id, "title": event.tool_name,
+            "status": "success" if event.success else "failed", "duration_ms": event.duration_ms,
+            "summary": event.summary, "output_preview": safe_text(result),
+            "metadata": {"error": safe_text(event.error)},
+        }, legacy=True)
+        return panel
+
+    def _add_coding_activity(self, event: CodingActivityEvent) -> None:
+        data = event.activity
+        panel = self._get_or_create_execution_panel(event.turn_id)
+        panel.update_event(data, projected=True)
+        if data["type"].startswith("steering."):
+            meta = data.get("metadata") or {}
+            request_id = str(meta.get("request_id") or data.get("operation_id") or "")
+            widget = self._steering_widgets.get(request_id)
+            if widget is not None and self._history is not None:
+                message = next((row for row in self._history.get_events(event.turn_id)
+                                if isinstance(row, UserMessageEvent) and row.request_id == request_id), None)
+                if message and not widget.source.selected_text:
+                    widget.source.load_text(f"{safe_text(message.content, 16000)}\nSteering {message.steering_status}")
+
+    def _safe_render(self, event: ChatEvent) -> None:
+        if isinstance(event, CodingActivityEvent):
+            self._add_coding_activity(event)
+            return
+        if event.event_id in self._rendered_ids:
+            return
+        self._rendered_ids.add(event.event_id)
+        if isinstance(event, UserMessageEvent):
+            self._add_user_message(event)
+            self.message_count += 1
+        elif isinstance(event, AssistantMessageEvent):
+            self._add_or_update_assistant(event)
+            self.message_count += 1
+        elif isinstance(event, ToolCallEvent):
+            self._add_tool_call(event)
+        elif isinstance(event, ToolResultEvent):
+            self._add_tool_result(event)
 
     def clear_log(self) -> None:
-        """Remove all children (used for new session)."""
-        for child in list(self.children):
-            try:
-                child.remove()
-            except Exception:
-                pass
-        try:
-            self.remove_children()
-        except Exception:
-            pass
-        try:
-            self._nodes._clear()
-        except Exception:
-            pass
+        self.remove_children(child for child in self.children if child not in (self.startup, self.live))
         self._assistant_widgets.clear()
-        self._tool_cards.clear()
+        self._streaming.clear()
         self._execution_panels.clear()
         self._user_widgets_by_turn.clear()
         self._steering_widgets.clear()
         self._steered_widgets_by_turn.clear()
-        with self._activity_notification_lock:
-            self._pending_activity_turns.clear()
-            self._activity_notification_pending = False
-        self._latest_user_widget = None
-        self._latest_steered_widget = None
         self._current_turn_id = None
         self._rendered_ids.clear()
-        try:
-            self.refresh(layout=True)
-        except Exception:
-            pass
-
-    def on_mount(self) -> None:
-        """Defer initial replay until after this VerticalScroll (and its internal Vertical)
-        has been mounted. This prevents MountError when populating from history.
-        """
-        self._ui_thread_id = threading.get_ident()
-        with self._activity_notification_lock:
-            self._pending_activity_turns.clear()
-            self._activity_notification_pending = False
-        if self._history:
-            self.call_after_refresh(self._replay_history)
+        self.message_count = 0
+        self.set_active_turn(None)
+        with self._pending_lock:
+            self._pending_events.clear()
+            self._pending_activity.clear()
+            self._pending_tokens.clear()
+            self._pending_wake = False
 
     def _replay_history(self) -> None:
-        """Replay past events safely (called via call_after_refresh)."""
-        if not self._history:
-            return
-        for ev in self._history.get_events():
-            self._safe_render(ev)
-        # After replaying a session, land on the latest message.
+        if self._history is not None:
+            for event in self._history.get_events():
+                self._safe_render(event)
         self._scroll_to_latest()

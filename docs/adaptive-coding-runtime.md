@@ -60,12 +60,24 @@ outputs. A failed prerequisite stops that sequence and returns its output for
 the next repair. A required build must pass against the current source versions
 before the assignment can report success.
 
+ToolRunner fingerprints observed files before and after mutating commands.
+In a Git checkout this covers tracked files and non-ignored candidates. Tools
+with explicit file targets still observe those paths. The capture budget limits
+retained diff data. Hashing streams the file contents under the operation's
+deadline and cancellation checks.
+
 Each model turn must select an offered coding tool or submit a terminal result
 with one direct `submit_coding_result` call. If the model replies with prose
 alone, Coding requests one correction from the same model within the remaining
 turn budget. The model retains completed operations and their tool results.
 A second reply without a tool call stops the attempt. See the
 [missing tool call regression](regressions/unified-adaptive-coding.md#missing-tool-call-in-a-native-coding-response).
+
+When an assignment changes production runtime behavior, completion requires a
+passing check and one source-backed wiring chain in execution order. Every edge
+target must match the next edge's source. If a report breaks the chain, Coding
+returns the disconnected edge pairs to the model for one correction when a turn
+remains. The correction uses the existing edit and check receipts.
 
 Native file reads default to the whole source within the smaller of the
 remaining model context allowance and the 48,000-byte tool-content ceiling.

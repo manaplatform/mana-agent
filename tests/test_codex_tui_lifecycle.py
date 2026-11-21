@@ -295,7 +295,7 @@ def test_scope_plus_hub_delivery_does_not_duplicate_events(tmp_path: Path):
     }
 
     # Scope delivery
-    app._delivered_coding_event_ids.add("evt_shared_123")
+    app._activity_revisions.add(("evt_shared_123", "command.started", "running", ""))
     app.history.add(CodingActivityEvent(activity=event_payload, turn_id="turn_1"))
 
     # Hub delivers the exact same event

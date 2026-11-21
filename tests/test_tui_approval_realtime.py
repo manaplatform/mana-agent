@@ -18,116 +18,25 @@ from mana_agent.human_inbox import default_human_inbox_service
 from mana_agent.human_inbox.models import InboxStatus, ResponseOperation, ResponseSubmission
 from mana_agent.transactional_actions.runtime import default_action_gateway
 from mana_agent.tui.app import ManaChatApp
-from mana_agent.tui.computer_permission import ComputerPermissionChoice, ComputerPermissionRequested, ComputerPermissionScreen
-from mana_agent.tui.widgets.activity_boxes import CodingActivityBox, MainActivityBox
+from mana_agent.tui.computer_permission import ComputerPermissionChoice, ComputerPermissionRequested
 from mana_agent.tui.widgets.execution_panel import ExecutionPanel
-from mana_agent.tui.widgets.tool_card import ToolCard
 
 
-def test_main_activity_box_shows_rejected_decision_and_successful_correction(monkeypatch) -> None:
-    monkeypatch.setattr("mana_agent.config.user_config.get_setting",
-                        lambda key, default=None: "normal" if key == "MANA_ACTIVITY_VISIBILITY" else default)
-    box = MainActivityBox(turn_id="turn-1")
-    box.update_event({
+def test_unified_activity_keeps_decision_correction_and_ignores_replayed_receipts() -> None:
+    panel = ExecutionPanel(turn_id="turn-1")
+    panel.update_event({
         "event_type": "model.failed", "operation_id": "first", "agent_id": "main", "status": "rejected",
         "title": "Decision needs correction", "summary": "Missing required routing fields",
     })
-    box.update_event({
-        "event_type": "model.completed", "operation_id": "second", "agent_id": "main", "status": "success",
-        "title": "Model responded",
-    })
-    assert "⚠ main — Decision needs correction" in box.activity_log.text
-    assert "✓ main — Model responded" in box.activity_log.text
-    assert box._active_status != "failed"
-
-
-def test_main_activity_box_shows_pending_approval_row() -> None:
-    box = MainActivityBox(turn_id="turn-1")
-    box.update_event({
-        "event_id": "ev-1",
-        "event_type": "tool.call.started",
-        "tool_name": "repo_search",
-        "status": "success",
-        "summary": "found files",
-    })
-    assert "✓" in box.header.renderable
-    assert "completed" in box.header.renderable
-
-    # Post an approval required event
-    box.update_event({
-        "event_id": "ev-2",
-        "event_type": "action.approval.required",
-        "tool_name": "approval_request",
-        "status": "waiting_approval",
-        "summary": "Run git commit",
-    })
-    header_text = str(box.header.renderable)
-    assert "⚠️" in header_text
-    assert "WAITING APPROVAL" in header_text
-    assert box._active_status == "waiting_approval"
-
-    # Pending approvals are visible in the activity stream as well as the approval drawer
-    stream_text = box.activity_log.text
-    assert "approval_request" in stream_text
-    assert "[WAITING FOR APPROVAL]" in stream_text
-    assert "repo_search" in stream_text
-
-
-def test_coding_activity_box_shows_pending_approval_row() -> None:
-    box = CodingActivityBox(turn_id="turn-2")
-    box.backend = "internal"
-    box.task_status = "in_progress"
-
-    box.update_event({
-        "event_id": "ev-c1",
-        "event_type": "action.approval.required",
-        "tool_name": "approval_request",
-        "title": "Approval required: pytest",
-        "status": "waiting_approval",
-        "output_preview": "pytest tests/",
-    })
-
-    header_text = str(box.header.renderable)
-    assert "⚠️" in header_text
-    assert "WAITING APPROVAL" in header_text
-
-    # Pending approvals are visible in the activity stream as well as the approval drawer
-    log_text = box.activity_log.text
-    assert "Approval required: pytest" in log_text
-    assert "[WAITING FOR APPROVAL]" in log_text
-
-
-def test_coding_activity_shows_status_and_counts_duplicate_receipts_once() -> None:
-    box = CodingActivityBox(turn_id="coding-turn")
-    search = {"event_type": "tool.completed", "task_id": "coding", "attempt_id": "attempt",
-              "operation_id": "search", "tool_name": "repo_search", "status": "success", "duration_ms": 4}
-    box.update_event({**search, "event_id": "first"})
-    box.update_event({**search, "event_id": "replayed"})
-    box.update_event({"event_type": "model.completed", "task_id": "coding", "attempt_id": "attempt",
-                      "operation_id": "model", "status": "success", "duration_ms": 15})
-    box.update_event({"event_type": "coding.progress", "task_id": "coding", "operation_id": "snapshot",
-                      "status": "success", "metadata": {"task_status": "in_progress", "phase": "exploration",
-                          "tool_budget_used": 1, "tool_budget_remaining": 2, "reused_evidence": 3}})
-
-    assert "in progress" in str(box.header.renderable)
-    assert "Phase" not in str(box.header.renderable)
-    footer = str(box.footer.renderable)
-    assert "searches 1 · reads 0 · reused 3" in footer
-    assert "model 15 ms" in footer and "tools 4 ms" in footer
-    assert "tools used 1" in footer and "tools remaining 2" in footer
-
-
-def test_tool_card_approval_header_badge() -> None:
-    call_ev = ToolCallEvent(
-        call_id="call-appr-1",
-        tool_name="approval_request",
-        args={"command": "pytest", "reason": "run tests"},
-        summary="run pytest",
-    )
-    card = ToolCard(call_ev)
-    header = card._build_call_header()
-    assert "⚠️ [APPROVAL REQUIRED]" in header
-    assert "approval_request" in header
+    response = {
+        "event_type": "model.completed", "operation_id": "second", "agent_id": "main",
+        "status": "success", "title": "Model responded", "duration_ms": 15,
+    }
+    panel.update_event({**response, "event_id": "response"})
+    panel.update_event({**response, "event_id": "replay"})
+    assert [row["title"] for row in panel.events] == ["Decision needs correction", "Model responded"]
+    assert panel.events[0]["summary"] == "Missing required routing fields"
+    assert panel.events[1]["duration_ms"] == 15
 
 
 @pytest.mark.parametrize("tool_name", ["approval_request", "request_user_approval", "wait_for_approval"])
@@ -140,13 +49,12 @@ def test_approval_tools_do_not_create_separate_cards(tool_name: str) -> None:
     event = ToolCallEvent(call_id="call-1", tool_name=tool_name, args={}, turn_id="turn-1")
     assert log._add_tool_call(event) is panel
     panel.update_event.assert_called_once()
-    panel.main_box.add_tool_call.assert_not_called()
+    assert panel.update_event.call_args.kwargs == {"legacy": True}
 
 
-@pytest.mark.parametrize("backend,box_name", [("", "main_box"), ("internal", "coding_box")])
-def test_approval_drawer_and_retry(tmp_path: Path, monkeypatch, backend: str, box_name: str) -> None:
+@pytest.mark.parametrize("backend", ["", "internal"])
+def test_approval_drawer_and_retry(tmp_path: Path, monkeypatch, backend: str) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -167,44 +75,37 @@ def test_approval_drawer_and_retry(tmp_path: Path, monkeypatch, backend: str, bo
             }))
             await pilot.pause()
             panel = app.chat_log.get_execution_panel("turn-approval")
-            box = getattr(panel, box_name)
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            assert not list(box.query(ComputerPermissionScreen))
-            assert app.screen.preview.find("git commit") >= 0
+            assert app._active_approval is not None
+            assert not list(panel.query("OperationRow"))
+            assert app._active_approval.request.preview.find("git commit") >= 0
             assert not decisions
-            app.screen.query_one(".inline-once").press()
+            app._active_approval.query_one(".inline-once").press()
             await pilot.pause()
             assert len(decisions) == 1
-            # Re-open/push for retry
-            app._show_permission_modal(ComputerPermissionRequested(
-                request_id="item-1", scope="transactional_action.once", preview="git commit", transactional=True,
-            ))
-            await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            app.screen.query_one(".inline-deny").press()
+            assert not app._active_approval.query_one(".inline-once").disabled
+            assert app._active_approval is not None
+            app._active_approval.query_one(".inline-deny").press()
             await pilot.pause()
             assert len(decisions) == 2 and decisions[-1].decision is None
-            assert not isinstance(app.screen, ComputerPermissionScreen)
-            assert any(e.get("status") == "failed" for e in box.events)
-            assert "Review commit" not in box.activity_log.text
+            assert app._active_approval is None
+            assert any(row.get("status") == "rejected" for row in panel.events)
 
     anyio.run(exercise)
 
 
-@pytest.mark.parametrize("box_class", [MainActivityBox, CodingActivityBox])
-def test_approval_decision_does_not_resolve_other_requests(box_class) -> None:
-    box = box_class(turn_id="turn")
+def test_approval_decision_does_not_resolve_other_requests() -> None:
+    panel = ExecutionPanel(turn_id="turn")
     for request_id in ("one", "two"):
-        box.update_event({"event_type": "action.approval.required", "status": "waiting_approval", "metadata": {"inbox_item_id": request_id}})
-    box.update_event({"event_type": "action.approval.granted", "status": "completed", "metadata": {"inbox_item_id": "one", "decision": "approve"}})
-    assert box.events[0]["status"] == "completed"
-    assert box.events[1]["status"] == "waiting_approval"
+        panel.update_event({"event_type": "action.approval.required", "status": "waiting_approval", "metadata": {"inbox_item_id": request_id}})
+    panel.resolve_approvals({"one"}, approved=True, expired=False)
+    assert panel.events[0]["status"] == "completed"
+    assert panel.events[1]["status"] == "waiting_approval"
 
 
 @pytest.mark.parametrize("kind", ["server", "api"])
 def test_approval_drawer_external_decision_and_replay(tmp_path: Path, monkeypatch, kind: str) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen, InlineApprovalDecided
+    from mana_agent.tui.computer_permission import InlineApprovalDecided
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -216,26 +117,26 @@ def test_approval_drawer_external_decision_and_replay(tmp_path: Path, monkeypatc
                 server=kind == "server", api=kind == "api",
             ))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            assert app.screen.preview == "Exact preview"
+            assert app._active_approval is not None
+            assert app._active_approval.request.preview == "Exact preview"
             assert app.chat_log.get_execution_panel("pending-approvals") is None
             app.post_message(InlineApprovalDecided({"recovered"}, approved=True))
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
             # A late request delivery must not resurrect resolved controls.
             app.post_message(ComputerPermissionRequested(
                 request_id="recovered", scope="once", preview="Exact preview",
                 server=kind == "server", api=kind == "api",
             ))
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
 
     anyio.run(exercise)
 
 
 def test_drawer_keeps_other_requests_and_clears_on_session_change(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen, InlineApprovalDecided
+    from mana_agent.tui.computer_permission import InlineApprovalDecided
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -245,19 +146,19 @@ def test_drawer_keeps_other_requests_and_clears_on_session_change(tmp_path: Path
             for request_id in ("one", "two"):
                 app.post_message(ComputerPermissionRequested(request_id=request_id, scope="once", preview=request_id, api=True))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            assert app.screen.request_id == "one"
+            assert app._active_approval is not None
+            assert app._active_approval.request.request_id == "one"
             assert [r.request_id for r in app._modal_request_queue] == ["two"]
             app.post_message(InlineApprovalDecided({"one"}, approved=False))
             for _ in range(5):
                 await pilot.pause()
-                if isinstance(app.screen, ComputerPermissionScreen) and getattr(app.screen, "request_id", None) == "two":
+                if app._active_approval is not None and app._active_approval.request.request_id == "two":
                     break
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            assert app.screen.request_id == "two"
+            assert app._active_approval is not None
+            assert app._active_approval.request.request_id == "two"
             app._handle_session_replacement("new-session", clear_view=False)
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
             assert len(app._modal_request_queue) == 0
 
     anyio.run(exercise)
@@ -271,7 +172,6 @@ def test_drawer_keeps_other_requests_and_clears_on_session_change(tmp_path: Path
 ])
 def test_computer_drawer_preserves_scoped_choices(tmp_path: Path, monkeypatch, button: str, decision: str | None) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen
     from mana_agent.integrations.computer_control.models import PermissionDecision
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
@@ -288,20 +188,19 @@ def test_computer_drawer_preserves_scoped_choices(tmp_path: Path, monkeypatch, b
         async with app.run_test(size=(140, 40)) as pilot:
             app.post_message(ComputerPermissionRequested(request_id="computer", scope="screen", preview="Capture"))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
-            app.screen.query_one(button).press()
+            assert app._active_approval is not None
+            app._active_approval.query_one(button).press()
             await pilot.pause()
             expected = {"allow_once": PermissionDecision.ALLOW_ONCE, "allow_session": PermissionDecision.ALLOW_SESSION,
                         "always_allow": PermissionDecision.ALWAYS_ALLOW, None: None}[decision]
             assert choices[0].decision == expected
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
 
     anyio.run(exercise)
 
 
 def test_computer_external_decision_closes_drawer(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -310,12 +209,12 @@ def test_computer_external_decision_closes_drawer(tmp_path: Path, monkeypatch) -
         async with app.run_test() as pilot:
             app.post_message(ComputerPermissionRequested(request_id="computer", scope="screen", preview="Capture"))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is not None
             app._handle_hub_session_event({"type": "computer.permission_decided", "metadata": {
                 "permission_request_id": "computer", "decision": "allow_once",
             }})
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
 
     anyio.run(exercise)
 
@@ -323,7 +222,6 @@ def test_computer_external_decision_closes_drawer(tmp_path: Path, monkeypatch) -
 def test_expired_approval_is_not_displayed_in_drawer(tmp_path: Path, monkeypatch) -> None:
     import anyio
     from datetime import datetime, timezone, timedelta
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionRequested
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -339,7 +237,7 @@ def test_expired_approval_is_not_displayed_in_drawer(tmp_path: Path, monkeypatch
                 expires_at=expired_time,
             ))
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
 
             # 2. Activity event with past expires_at in metadata
             app.history.add(CodingActivityEvent(turn_id="turn-exp", activity={
@@ -353,14 +251,13 @@ def test_expired_approval_is_not_displayed_in_drawer(tmp_path: Path, monkeypatch
                 },
             }))
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
 
     anyio.run(exercise)
 
 
 def test_inbox_item_expired_event_closes_drawer(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionRequested
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -369,7 +266,7 @@ def test_inbox_item_expired_event_closes_drawer(tmp_path: Path, monkeypatch) -> 
         async with app.run_test() as pilot:
             app.post_message(ComputerPermissionRequested(request_id="item-exp-close", scope="screen", preview="Capture"))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is not None
 
             app.history.add(CodingActivityEvent(turn_id="turn-exp", activity={
                 "event_type": "inbox.item.expired",
@@ -377,14 +274,13 @@ def test_inbox_item_expired_event_closes_drawer(tmp_path: Path, monkeypatch) -> 
                 "metadata": {"inbox_item_id": "item-exp-close"},
             }))
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
 
     anyio.run(exercise)
 
 
 def test_approval_drawer_handles_terminal_expired_error(tmp_path: Path, monkeypatch) -> None:
     import anyio
-    from mana_agent.tui.computer_permission import ComputerPermissionScreen, ComputerPermissionRequested
 
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana_home"))
     app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
@@ -395,7 +291,7 @@ def test_approval_drawer_handles_terminal_expired_error(tmp_path: Path, monkeypa
                 request_id="item-terminal-err", scope="action.once", preview="Do command", transactional=True,
             ))
             await pilot.pause()
-            assert isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is not None
 
             class DummyExcService:
                 class dummy_repo:
@@ -413,37 +309,49 @@ def test_approval_drawer_handles_terminal_expired_error(tmp_path: Path, monkeypa
             app.gateway = MagicMock()
             app.gateway.human_inbox_service = DummyExcService()
 
-            app.screen.query_one(".inline-once").press()
+            app._active_approval.query_one(".inline-once").press()
             await pilot.pause()
-            assert not isinstance(app.screen, ComputerPermissionScreen)
+            assert app._active_approval is None
 
     anyio.run(exercise)
 
 
-def test_transactional_permission_screen_offers_matching_batch() -> None:
+def test_inline_matching_approval_keeps_unmatched_request_and_composer_draft(tmp_path) -> None:
     import anyio
-    from textual.app import App
+    from mana_agent.tui.computer_permission import InlineApproval
 
-    class TestApp(App):
-        choice = None
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path)
+    choices = []
 
-        def on_mount(self) -> None:
-            self.push_screen(ComputerPermissionScreen(
-                request_id="request-1", scope="transactional_action.once",
-                preview="Preview", transactional=True, pending_count=1,
-            ), self.record_choice)
+    async def complete(choice, *, batch_ids=None):
+        choices.append(choice)
+        assert batch_ids == ["matching", "different"]
+        app._transactional_modal_queue.remove("matching")
+        return True
 
-        def record_choice(self, choice) -> None:
-            self.choice = choice
+    app._complete_computer_permission = complete
 
     async def exercise() -> None:
-        app = TestApp()
-        async with app.run_test() as pilot:
-            assert app.screen.query_one("#permission-all").label.plain == "Allow all matching queued"
-            await pilot.click("#permission-all")
+        async with app.run_test(size=(80, 25)) as pilot:
+            app.input.value = "Unsent draft"
+            app.post_message(ComputerPermissionRequested(
+                request_id="request-1", scope="transactional_action.once",
+                preview="Run an exact command", transactional=True,
+            ))
             await pilot.pause()
-            assert app.choice.approve_all is True
-            assert app.choice.request_id == "request-1"
+            controls = app.query_one(InlineApproval)
+            app._transactional_modal_queue.extend(("matching", "different"))
+            app._sync_approval_drawer()
+            assert "3 pending" in str(controls._heading.renderable)
+            assert app.focused is app.input
+            await pilot.press("ctrl+g")
+            assert controls.has_focus_within
+            controls.query_one(".inline-all").press()
+            await pilot.pause()
+            assert choices[0].approve_all and choices[0].request_id == "request-1"
+            assert "matching" in app._resolved_inline_approvals
+            assert "different" not in app._resolved_inline_approvals
+            assert app.input.value == "Unsent draft"
 
     anyio.run(exercise)
 
@@ -459,13 +367,8 @@ def test_execution_panel_renders_waiting_approval() -> None:
         "detail": "git push origin main",
     })
 
-    header_text = str(panel.header.renderable)
-    assert "⚠️" in header_text
-    assert "waiting for approval" in header_text
-
-    steps_text = str(panel.steps_view.renderable)
-    assert "⚠️" in steps_text
-    assert "waiting for approval" in steps_text
+    assert panel.live_label() == "Waiting for approval"
+    assert not panel._showable(panel.events[0])
 
 
 def test_tool_execution_dispatcher_dispatches_approval_request(tmp_path: Path, monkeypatch) -> None:
@@ -532,7 +435,7 @@ def test_app_complete_computer_permission_fallback(tmp_path: Path, monkeypatch) 
     updated_item = inbox.repository.get(item.inbox_item_id)
     assert updated_item.status == InboxStatus.APPROVED
 
-    app.chat_log._scroll_to_latest.assert_called_once()
+    app.chat_log._scroll_to_latest.assert_not_called()
 
     # Verify event was posted to history
     events = history.get_events()

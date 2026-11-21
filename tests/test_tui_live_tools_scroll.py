@@ -97,17 +97,13 @@ def test_chat_log_has_scroll_to_latest_helper() -> None:
 def test_chat_log_pins_to_end_of_chats_without_scroll_to_widget() -> None:
     from unittest.mock import MagicMock
     from mana_agent.tui.widgets.chat_log import ChatLog
-    from textual.widgets import Static
 
     log = ChatLog()
     log.scroll_end = MagicMock()
     log.scroll_to_widget = MagicMock()
     log.call_after_refresh = MagicMock()
 
-    dummy_widget = Static("test")
-
-    # _pin_to_tool delegates to pinning at end of chats
-    log._pin_to_tool(dummy_widget)
+    log._scroll_to_latest()
 
     log.scroll_end.assert_called_with(animate=False, force=True)
     log.scroll_to_widget.assert_not_called()
