@@ -274,16 +274,12 @@ class ChatLog(VerticalScroll):
         panel = self._execution_panels.get(turn_id)
         if panel is None:
             panel = self._execution_panels[turn_id] = ExecutionPanel(turn_id=turn_id)
-            self.mount(panel, before=self.live)
-            self.call_after_refresh(self._position_panel, turn_id)
+            anchor = self._steered_widgets_by_turn.get(turn_id) or self._user_widgets_by_turn.get(turn_id)
+            if anchor is not None and anchor in self.children:
+                self.mount(panel, after=anchor)
+            else:
+                self.mount(panel, before=self.live)
         return panel
-
-    def _position_panel(self, turn_id: str) -> None:
-        panel = self._execution_panels.get(turn_id)
-        target = self._steered_widgets_by_turn.get(turn_id) or self._user_widgets_by_turn.get(turn_id)
-        children = list(self.children)
-        if panel in children and target in children and children.index(panel) != children.index(target) + 1:
-            self.move_child(panel, after=target)
 
     def _add_user_message(self, event: UserMessageEvent) -> UserMessage:
         content = safe_text(event.content, 100000)
@@ -296,15 +292,19 @@ class ChatLog(VerticalScroll):
                 content += f"\n  {glyph('📎', '+')} {name} ({format_size(get('size_bytes', 0))})"
         widget = UserMessage(content)
         panel = self._execution_panels.get(event.turn_id)
-        self.mount(widget, before=panel if panel is not None and panel in self.children else self.live)
+        if panel is None or panel not in self.children:
+            self.mount(widget, before=self.live)
+        elif not event.is_steering and event.turn_id in self._steered_widgets_by_turn:
+            # Keep the panel attached to the steering row if the original prompt arrives late.
+            self.mount(widget, after=panel)
+        else:
+            self.mount(widget, before=panel)
         if event.is_steering:
             self._steering_widgets[event.request_id] = widget
             self._steered_widgets_by_turn[event.turn_id] = widget
         else:
             self._user_widgets_by_turn[event.turn_id] = widget
             self._current_turn_id = event.turn_id
-        if panel is not None:
-            self.call_after_refresh(self._position_panel, event.turn_id)
         return widget
 
     def _add_or_update_assistant(self, event: AssistantMessageEvent) -> AssistantReply:

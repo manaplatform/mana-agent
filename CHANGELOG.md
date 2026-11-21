@@ -4,6 +4,7 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-21 — Textual chat. Mount replayed activity beside its turn's prompt so it appears before the saved reply as soon as it enters the transcript. See the [regression and user verification command](docs/regressions/agent-activity-visibility.md#restored-activity-below-its-assistant-reply). The agent did not run the tests.
 - 2026-11-21 — Internal Coding shell. Accept an exact duplicate of a single command or timeout across the nested and top-level fields. Reject conflicts before proposing an action. See the [incident and user verification command](docs/approval-action-binding-incident.md#duplicate-shell-command-arguments). The agent did not run the tests.
 
 - 2026-11-21 — Release metadata. Bump the project version from 0.15.1 to 0.15.2 in `pyproject.toml`. User verification: `grep -n '^version = ' pyproject.toml` should print `version = "0.15.2"`. The agent did not run tests, linters, builds, or verification scripts.

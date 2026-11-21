@@ -276,6 +276,32 @@ these tests or rerun CI.
 python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_auto_chat_tool_events.py
 ```
 
+### Restored activity below its assistant reply
+
+The reported Linux Python 3.11 suite restored both saved messages, but the
+startup regression observed the activity panel after the assistant reply. The
+startup worker had already restored the transcript before replaying durable
+activity. `ChatLog` inserted the panel at the end of the transcript and exposed
+it through `get_execution_panel` while its move to the user row still depended
+on `call_after_refresh`. Panel lookup therefore succeeded during the interval
+when the transcript had the wrong order.
+
+`ChatLog` now mounts new activity directly after its turn's user or steering
+row when available. When activity arrives first, the later prompt is inserted
+before the existing panel. The startup test waits for the three widgets to
+mount and lay out, then asserts their order. The widget replay regression checks
+the child order before any deferred layout callbacks can run. It covers activity
+arriving after the reply and activity arriving before the prompt and steering row.
+
+**Do not reintroduce.** Insert an anchored activity panel in its turn's position
+during registration. Keep transcript order out of the test's readiness condition.
+
+Run from the checkout root. The agent did not run the tests.
+
+```sh
+python -m pytest -q tests/test_tui_auto_chat_tool_events.py -k 'mounts_late_activity or startup_restores_saved_messages'
+```
+
 ### Release CI transcript scrolling and approval removal
 
 The Ubuntu Python package job failed when the operation-history test tried to

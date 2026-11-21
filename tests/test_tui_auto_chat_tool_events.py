@@ -315,7 +315,46 @@ def test_tui_records_api_approval_denial_as_terminal_assistant_message(
     assert any(severity == "warning" for _, severity in notifications)
 
 
-def test_tui_startup_restores_saved_messages_before_durable_activity(tmp_path: Path) -> None:
+def test_tui_mounts_late_activity_in_turn_order_without_a_refresh(tmp_path: Path) -> None:
+    history = ChatHistory()
+    history.add(UserMessageEvent(content="First question", turn_id="first"))
+    history.add(AssistantMessageEvent(content="First reply", turn_id="first"))
+    history.add(CodingActivityEvent(turn_id="second", activity={
+        "type": "command.finished", "operation_id": "second-check", "status": "success",
+    }))
+    history.add(UserMessageEvent(content="Second question", turn_id="second"))
+    history.add(UserMessageEvent(
+        content="Refine the second question", turn_id="second",
+        is_steering=True, request_id="second-steering",
+    ))
+    history.add(AssistantMessageEvent(content="Second reply", turn_id="second"))
+    history.add(CodingActivityEvent(turn_id="first", activity={
+        "type": "command.finished", "operation_id": "first-check", "status": "success",
+    }))
+    app = ManaChatApp(history=ChatHistory(), repo_root=tmp_path, model="gpt-test")
+
+    async def run() -> None:
+        async with app.run_test():
+            log = app.chat_log
+            assert log is not None
+            log.set_history(history)
+            # Inspect the child order before any deferred layout callbacks can run.
+            first_user, second_user, steering = log.query(".user-message-row")
+            first_reply, second_reply = log.query(".assistant-message")
+            assert list(log.children) == [
+                log.startup,
+                first_user, log.get_execution_panel("first"), first_reply,
+                second_user, steering, log.get_execution_panel("second"), second_reply,
+                log.live,
+            ]
+
+    asyncio.run(run())
+
+
+def test_tui_startup_restores_saved_messages_before_durable_activity(
+    tmp_path: Path,
+    wait_for_tui_widgets,
+) -> None:
     from mana_agent.services.chat_session_history import ChatSessionHistory
     from mana_agent.services.execution_event_hub import get_execution_event_hub
     from mana_agent.workspaces.paths import repository_id_for_path
@@ -340,11 +379,10 @@ def test_tui_startup_restores_saved_messages_before_durable_activity(tmp_path: P
 
     async def run() -> None:
         async with app.run_test() as pilot:
-            for _ in range(20):
-                await pilot.pause(.05)
-                panel = app.chat_log.get_execution_panel("past")
-                if panel is not None:
-                    break
+            transcript = ".user-message-row, .assistant-message, ExecutionPanel"
+            await wait_for_tui_widgets(pilot, transcript, count=3)
+            assert app.chat_log is not None
+            panel = app.chat_log.get_execution_panel("past")
             assert panel is not None
             nodes = list(app.chat_log.children)
             assert nodes.index(panel) == nodes.index(app.query_one(".user-message-row")) + 1
