@@ -1501,6 +1501,9 @@ def test_optional_scoped_investigation_does_not_block_implementation(mode_gatewa
 
 
 def test_draft_waits_for_exact_approval_and_executes_ordered_steps(mode_gateway, monkeypatch):
+    from mana_agent.services.activity_context import ActivityContext, activity_scope
+    from mana_agent.services.execution_event_hub import get_execution_event_hub
+
     gateway, workflow = mode_gateway
     events = []
     (gateway.root / "untouched.txt").write_text("user work")
@@ -1529,7 +1532,11 @@ def test_draft_waits_for_exact_approval_and_executes_ordered_steps(mode_gateway,
     from mana_agent.approval.models import ApprovalMode
 
     set_approval_mode(ApprovalMode.FULL_ACCESS)
-    result = workflow.start("session", "Fix the handler", save=False)
+    repository_id = workflow.board.store.repository_id
+    with activity_scope(ActivityContext(
+        conversation_id="session", execution_id="plan-request-turn", repository_id=repository_id,
+    )):
+        result = workflow.start("session", "Fix the handler", save=False)
     assert result.status == "input_required", result.message
     assert result.data["phase"] == "awaiting_approval"
     assert not events and (gateway.root / "app.py").read_text() == "before\n"
@@ -1544,10 +1551,24 @@ def test_draft_waits_for_exact_approval_and_executes_ordered_steps(mode_gateway,
     task = workflow.board.get_task(result.data["task_id"])
     assert set(task.mode_workflow["done_steps"]) == {"fix", "verify"}
     assert task.mode_workflow["approved_digest"] == result.data["digest"]
+    activity = get_execution_event_hub().history(conversation_id="session", repository_id=repository_id)
+    assert {"PLAN · Drafting plan", "PLAN · Approved", "PLAN · Executing"} <= {
+        event["title"] for event in activity
+        if event.get("task_id") == task.task_id and event.get("execution_id") == "plan-request-turn"
+    }
 
 
-def test_clarification_is_structured_and_kept_in_revision(mode_gateway):
+def test_clarification_is_structured_and_kept_in_revision(mode_gateway, monkeypatch):
+    from mana_agent.chat.events import AssistantMessageEvent
+    from mana_agent.chat.history import ChatHistory
+
     gateway, workflow = mode_gateway
+    history = ChatHistory()
+    monkeypatch.setattr("mana_agent.chat.history.get_history", lambda: history)
+    published = Event()
+    durable_messages = []
+    gateway._append_session_message = lambda _session_id, **message: durable_messages.append(message)
+    gateway._event_sink = lambda *args, **kwargs: published.set()
     decisions = Decisions({
         "action": "clarify", "reason": "Two behaviors are possible",
         "questions": [{"field_id": "behavior", "prompt": "What should an empty value do?",
@@ -1559,8 +1580,13 @@ def test_clarification_is_structured_and_kept_in_revision(mode_gateway):
     assert waiting.next_prompt["kind"] == "mode.clarification"
     result = workflow.receive("session", "reject", task=workflow.active("session"))
     assert result.status == "success", result.message
+    assert result.data["mode_response_operation"] == "answer"
     proposed = workflow.wait_for_response(waiting.data["task_id"], waiting.data["inbox_id"], timeout=8)
     assert proposed.next_prompt["kind"] == "mode.approval"
+    assert published.wait(8)
+    assert durable_messages[0]["content"] == proposed.message
+    assert durable_messages[0]["metadata"] == {"mode_prompt_kind": "mode.approval"}
+    assert not [event for event in history.get_events() if isinstance(event, AssistantMessageEvent)]
     assert decisions.inputs[-1]["constraints"] == {"behavior": "reject"}
     plan = PlanRevision.model_validate(workflow.active("session").mode_workflow["plan"])
     assert plan.constraints == {"behavior": "reject"}

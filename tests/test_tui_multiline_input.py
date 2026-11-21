@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
+
+import pytest
 
 from mana_agent.chat.events import UserMessageEvent
 from mana_agent.chat.history import ChatHistory
@@ -100,6 +103,60 @@ def test_empty_message_is_not_submitted_and_existing_clear_shortcut_still_works(
             await pilot.press("ctrl+l")
             await pilot.pause()
             assert app.status_text == "Log cleared (history preserved)"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["success", "error"])
+def test_plan_submission_clears_composer_before_dispatch_returns(tmp_path, wait_for_tui_widgets, status) -> None:
+    from mana_agent.chat.events import AssistantMessageEvent
+    from mana_agent.chat_commands.models import CommandResult
+    from mana_agent.chat_commands.registry import build_default_registry
+    from mana_agent.services.activity_context import current_activity_context
+
+    started, release = Event(), Event()
+    submitted = []
+
+    class Gateway:
+        command_registry = build_default_registry()
+
+        def create_session(self, **_kwargs):
+            return "tui-blocked-plan"
+
+        def dispatch_command(self, text, *, session_id, frontend):
+            submitted.append((text, session_id, frontend, current_activity_context()))
+            started.set()
+            assert release.wait(8), "test did not release planning dispatch"
+            return CommandResult(status=status, message="Planning reply")
+
+    history = ChatHistory()
+    app = ManaChatApp(history=history, repo_root=tmp_path, gateway=Gateway())
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            composer = app.query_one(MessageInput)
+            composer.value = "/plan"
+            assert composer.menu.display
+            try:
+                await pilot.press("enter")
+                assert await asyncio.to_thread(started.wait, 5)
+                assert composer.value == ""
+                assert not composer.menu.display
+                assert app._turn_in_progress
+                await pilot.press("n")
+                assert composer.value == "n"
+                request, session, frontend, scope = submitted[0]
+                assert (request, session, frontend) == ("/plan", "tui-blocked-plan", "tui")
+                turn = next(event for event in history.get_events() if isinstance(event, UserMessageEvent))
+                assert scope.execution_id == turn.turn_id
+                assert scope.conversation_id == session
+            finally:
+                release.set()
+            await wait_for_tui_widgets(pilot, "AssistantReply")
+            assert composer.value == "n"
+            assert [event.content for event in history.get_events() if isinstance(event, AssistantMessageEvent)] == [
+                "Planning reply",
+            ]
 
     asyncio.run(run())
 

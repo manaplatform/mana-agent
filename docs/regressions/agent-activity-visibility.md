@@ -275,3 +275,36 @@ these tests or rerun CI.
 ```powershell
 python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_auto_chat_tool_events.py
 ```
+
+### PLAN dialogs, composer, and Windows prompt glyphs
+
+`/plan` used to clear the composer after dispatch returned. The command
+handler also printed a copy of the plan or clarification beneath Activity.
+Background inbox resumes could add another copy through chat history. On
+narrow terminals, four Textual buttons with fixed minimum widths overflowed
+the dialog, and long previews pushed its controls down with the content.
+
+The TUI clears the submitted draft before starting the command worker.
+Structured workflow replies keep review text in the dialog and preserve
+decisions and final results on the original workflow. Saved reply metadata
+lets the TUI apply the same rule during replay. Earlier untagged messages are
+read as ordinary chat history. The dialog reserves space for the controls
+and gives the preview or answer form its own scrolling area.
+
+The Windows release test expected the Unicode prompt after setting `TERM`.
+Textual replaces standard output with a capture that has no encoding, so the
+glyph helper consults the original stream. The test now supplies that encoding
+and checks both Unicode and ASCII behavior. The supplied CI trace showed the
+ASCII prompt on Windows. It did not include the original stream's encoding.
+
+**Do not reintroduce.** Clear the composer when it accepts `/plan` and
+preserve any draft entered during dispatch. Keep structured review replies
+in their dialogs and the decision controls inside the viewport. Set the
+output encoding explicitly in terminal glyph tests.
+
+Run from the checkout root. The agent did not run the tests or rerun Windows CI.
+
+```sh
+python -m pytest -q tests/test_chat_planning_mode.py tests/test_tui_message_layout.py tests/test_tui_multiline_input.py
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py
+```

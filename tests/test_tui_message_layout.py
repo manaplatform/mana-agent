@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import sys
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
@@ -192,24 +195,34 @@ def test_consecutive_messages_do_not_retain_another_widgets_wrap_width(wait_for_
     _run(run())
 
 
-def test_prompt_glyphs_and_footer_across_terminal_profiles(monkeypatch) -> None:
-    async def scenario(theme: str, terminal: str, expected_prompt: str, *, no_color: bool) -> None:
-        monkeypatch.setenv("TERM", terminal)
-        monkeypatch.delenv("COLORTERM", raising=False)
-        if no_color:
-            monkeypatch.setenv("NO_COLOR", "1")
-        app = ManaChatApp(history=ChatHistory(), model="gpt-test")
-        if theme:
-            app.theme = theme
-        async with app.run_test(size=(42, 20)) as pilot:
-            await pilot.pause()
-            assert str(app.query_one("#prompt-indicator", Static).renderable) == expected_prompt
-            assert app.no_color is no_color
-            assert app.query_one("#chat-status").region.height == 1
-            if terminal == "dumb":
-                assert app.ansi_color
-
+@pytest.mark.parametrize(("theme", "terminal", "encoding", "expected_prompt", "no_color"), [
+    ("textual-light", "xterm-256color", "utf-8", "❯", False),
+    ("textual-dark", "xterm-256color", "utf-8", "❯", False),
+    ("textual-dark", "xterm-256color", "cp1252", ">", False),
+    ("", "dumb", "utf-8", ">", True),
+])
+def test_prompt_glyphs_and_footer_across_terminal_profiles(
+    monkeypatch, wait_for_tui_widgets, theme, terminal, encoding, expected_prompt, no_color,
+) -> None:
+    monkeypatch.setenv("TERM", terminal)
+    monkeypatch.delenv("COLORTERM", raising=False)
     monkeypatch.delenv("NO_COLOR", raising=False)
-    _run(scenario("textual-light", "xterm-256color", "❯", no_color=False))
-    _run(scenario("textual-dark", "xterm-256color", "❯", no_color=False))
-    _run(scenario("", "dumb", ">", no_color=True))
+    if no_color:
+        monkeypatch.setenv("NO_COLOR", "1")
+
+    async def scenario() -> None:
+        # Textual replaces sys.stdout with a capture that has no encoding.
+        with io.TextIOWrapper(io.BytesIO(), encoding=encoding) as terminal_output, monkeypatch.context() as terminal_patch:
+            terminal_patch.setattr(sys, "__stdout__", terminal_output)
+            app = ManaChatApp(history=ChatHistory(), model="gpt-test")
+            if theme:
+                app.theme = theme
+            async with app.run_test(size=(42, 20)) as pilot:
+                await wait_for_tui_widgets(pilot, "#chat-status")
+                assert str(app.query_one("#prompt-indicator", Static).renderable) == expected_prompt
+                assert app.no_color is no_color
+                assert app.query_one("#chat-status").region.height == 1
+                if terminal == "dumb":
+                    assert app.ansi_color
+
+    _run(scenario())

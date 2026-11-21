@@ -6,7 +6,7 @@ import pytest
 from mana_agent.llm.messages import UserMessage, AssistantMessage, ToolCall, ToolResultMessage
 from mana_agent.llm.providers.openai import OpenAIProvider
 from mana_agent.llm.providers.anthropic import AnthropicProvider
-from mana_agent.llm.types import InferenceRequest
+from mana_agent.llm.types import ContinuationState, InferenceRequest
 from mana_agent.llm.errors import InvalidResponseError, StructuredOutputError
 
 def request(**values):
@@ -33,6 +33,38 @@ def test_responses_preserves_program_caller_and_stateless_replay():
     encoded = adapter.encode(selected)
     assert encoded["input"][-1]["caller"]["caller_id"] == "program-1"
     assert sum(item.get("type") == "function_call" for item in encoded["input"]) == 1
+
+
+@pytest.mark.parametrize("legacy_checkpoint", [False, True])
+def test_responses_replays_encrypted_reasoning_with_required_summary(legacy_checkpoint):
+    adapter = OpenAIProvider(provider="openai", api_key="test", base_url="https://example.org", endpoint="responses")
+    selected = request(tools=[{"name": "echo", "parameters": {"type": "object"}}])
+    reasoning = {
+        "type": "reasoning", "id": "rs_fixture", "encrypted_content": "opaque",
+        "summary": [{"type": "summary_text", "text": "Public summary"}],
+        "content": [{"type": "reasoning_text", "text": "Private fixture text"}],
+    }
+    call = {"type": "function_call", "id": "fc_fixture", "call_id": "call_fixture", "name": "echo", "arguments": "{}"}
+    response = adapter.normalize({"id": "resp_fixture", "status": "completed", "output": [reasoning, call]}, selected)
+    assert response.public_summaries == ["Public summary"]
+    assert response.continuation is not None
+    receipt = {"type": "reasoning", "id": "rs_fixture", "encrypted_content": "opaque", "summary": []}
+    assert response.continuation.items[1] == receipt
+
+    saved = response.continuation.model_dump(mode="json")
+    if legacy_checkpoint:
+        del saved["items"][1]["summary"]
+    selected.continuation = ContinuationState.model_validate(saved)
+    selected.messages.extend([response.message, ToolResultMessage(content="result", tool_call_id="call_fixture")])
+    payload = adapter.encode(selected)
+
+    assert payload["store"] is False
+    assert "previous_response_id" not in payload
+    assert payload["input"][1:] == [
+        receipt, call, {"type": "function_call_output", "call_id": "call_fixture", "output": "result"},
+    ]
+    assert selected.continuation.items == saved["items"]
+
 
 def test_native_schema_uses_provider_schema_parameter():
     schema = {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": False}

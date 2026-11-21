@@ -36,6 +36,12 @@ Explicit PLAN uses the same Coding-owned repository observations while preparing
 - Review the exact requirements, boundaries, dependencies, file operations, and checks. Use the TUI approval controls or `/approve <item-id>` (`/accept` and `/act` are aliases in that context). In a standalone invocation, use the displayed review prompt or run `mana-agent inbox approve <item-id>`. A bare `--yes` or a Full Access session does not approve a generated revision.
 - Use `/revise <change>` to update the plan. To correct a stored clarification answer, supply a JSON object keyed by its question ID. A new revision requires a new approval. Use `/reject` or the existing cancellation controls to stop the task.
 
+In the TUI, submitting `/plan` clears the composer immediately. Plan previews and
+clarification questions appear in dialogs with scrollable content and a fixed
+row area for the decision buttons. Choose **Later** to return to chat, then use
+`/plan` to reopen the pending dialog. After you submit a decision, the
+conversation shows activity for the originating turn and the eventual result.
+
 If a model response fails validation, Mana requests one correction using the same model and response format. If the correction fails, Mana shows the failed field or check. Run `/plan` to see the blocked task, then use the displayed `/task resume <task-id>` command to retry planning.
 
 The model returns typed records for file operations and clarification choices. Mana validates those records before using them. Saved revisions and their approval digests use the existing plan format.

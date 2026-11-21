@@ -36,6 +36,7 @@ from mana_agent._version import get_runtime_git_sha, get_version
 from mana_agent.gateway.config import ChatGatewayConfig
 from mana_agent.gateway.conversation_context import recent_conversation_context
 from mana_agent.batch.policy import TaskExecutionPolicy, BatchPending
+from mana_agent.chat.mode_display import mode_reply_metadata
 from mana_agent.gateway.checkpoint_resume import (
     CheckpointResumeDecider,
     CheckpointResumeDecision,
@@ -5901,7 +5902,10 @@ class AgentChatGateway:
                     )
                 turn_id = str(options.get("turn_id") or f"turn_{uuid.uuid4().hex[:20]}")
                 self._append_session_message(session_id, role="user", content=text, turn_id=turn_id)
-                self._append_session_message(session_id, role="assistant", content=rendered.message, turn_id=turn_id)
+                self._append_session_message(
+                    session_id, role="assistant", content=rendered.message, turn_id=turn_id,
+                    metadata=mode_reply_metadata(rendered.data, rendered.next_prompt),
+                )
                 return self._mode_turn_result(rendered)
         self._bind_runtime_session(session_id)
         self._active.add(session_id)
@@ -8304,7 +8308,10 @@ class AgentChatGateway:
                 role="assistant",
                 content=result.answer,
                 turn_id=turn_id,
-                metadata={"model": self.config.model, "mode": result.mode},
+                metadata={
+                    "model": self.config.model, "mode": result.mode,
+                    **mode_reply_metadata(result.payload, result.payload.get("next_prompt")),
+                },
             )
         else:
             self._append_session_message(

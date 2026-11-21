@@ -157,7 +157,14 @@ class OpenAIProvider:
                     raise InvalidResponseError("Server continuation has no response receipt")
                 body["previous_response_id"] = request.continuation.response_id
             elif request.continuation:
-                items = [*request.continuation.items, *items]
+                # Older checkpoints omitted the required summary array on encrypted reasoning.
+                history = [
+                    dict(item, summary=[])
+                    if item.get("type") == "reasoning" and item.get("encrypted_content") and "summary" not in item
+                    else item
+                    for item in request.continuation.items
+                ]
+                items = [*history, *items]
             body["input"] = items
             body.setdefault("store", False)
             if body.get("store") is False and (request.tools or body.get("reasoning") or body.get("reasoning_effort")):
@@ -261,7 +268,9 @@ class OpenAIProvider:
                 elif kind == "reasoning":
                     summaries.extend(part["text"] for part in item.get("summary", []) if part.get("type") == "summary_text")
                     if item.get("encrypted_content"):
-                        receipts.append({key: item[key] for key in ("type", "id", "encrypted_content") if key in item})
+                        # Replay the opaque receipt with the required array. Summaries are handled above.
+                        receipts.append({"type": kind, "id": item["id"], "summary": [],
+                                         "encrypted_content": item["encrypted_content"]})
                     elif request.parameters.get("store") is not True and any(part.get("type") == "function_call" for part in data["output"]):
                         raise InvalidResponseError("Stateless reasoning/tool continuation requires the provider's encrypted reasoning receipt")
                 elif kind in {"programmatic_tool_call", "programmatic_tool_calling", "program", "program_output"}:

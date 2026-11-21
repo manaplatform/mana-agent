@@ -1,6 +1,8 @@
 """Typed inference failures; exceptions never select another semantic action."""
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -86,11 +88,59 @@ class ProviderRequestError(InferenceError):
 
     @property
     def public_detail(self) -> str:
-        # Native inference classifies by status alone, with no upstream body.
+        # Failures carrying upstream prose are unsuitable for public activity.
         if self.failure is not None and not self.failure.upstream_body_snippet:
             return self.failure.safe_message
         status = f" (HTTP {self.status_code})" if self.status_code is not None else ""
         return f"The selected provider could not complete the request{status}."
+
+
+_REQUEST_VALIDATION_CODES = frozenset({
+    "context_length_exceeded", "invalid_function_parameters", "invalid_json", "invalid_parameter",
+    "invalid_schema", "invalid_type", "invalid_value", "missing_required_parameter", "unknown_parameter",
+    "unsupported_feature", "unsupported_parameter", "unsupported_value",
+})
+
+
+def classify_sdk_http_failure(
+    exc: BaseException, status: int, *, provider: str, model: str, endpoint: str,
+) -> ProviderFailure:
+    """Classify an SDK rejection using bounded protocol fields and no provider prose."""
+    from mana_agent.integrations.provider_failure import classify_http_status, sanitize_provider_body
+
+    def protocol_field(value: Any, pattern: str) -> str:
+        if (isinstance(value, str) and len(value) <= 128 and re.fullmatch(pattern, value)
+                and sanitize_provider_body(value) == value):
+            return value
+        return ""
+
+    response_headers = getattr(getattr(exc, "response", None), "headers", {}) or {}
+    request_id = protocol_field(
+        getattr(exc, "request_id", None) or response_headers.get("x-request-id") or response_headers.get("request-id"),
+        r"[A-Za-z0-9_-]+",
+    )
+    failure = classify_http_status(
+        status, provider=provider, model=model, operation="native_inference", endpoint=endpoint,
+        headers={"x-request-id": request_id} if request_id else None,
+    )
+    details = []
+    if status in {400, 422}:
+        body = getattr(exc, "body", None)
+        error = body.get("error", body) if isinstance(body, dict) else None
+        if isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, str) and code in _REQUEST_VALIDATION_CODES:
+                details.append(f"Provider code {code}.")
+            parameter = protocol_field(
+                error.get("param"), r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+|\[[0-9]+\])*",
+            )
+            if parameter:
+                details.append(f"Parameter {parameter}.")
+    if request_id:
+        details.append(f"Request ID {request_id}.")
+    if details:
+        failure = replace(failure, safe_message=" ".join([failure.safe_message, *details]))
+    return failure
 
 
 def format_provider_error(exc: BaseException, *, provider: str | None = None, model: str | None = None) -> str:

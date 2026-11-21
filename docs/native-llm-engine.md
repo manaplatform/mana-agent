@@ -47,6 +47,39 @@ JSON strings on the wire, decode them once, then validate the native schema. Thi
 keeps arbitrary tool-input dictionaries representable without a plain-text retry.
 Missing or invalid native decisions stop the affected operation.
 
+## OpenAI HTTP 400 after a coding tool result
+
+On 2026-11-21, two Internal AUTO runs on `gpt-6-luna` completed local reads but
+received HTTP 400 on a follow-up Responses request. The session journals identify
+the failed requests for `task_20261121_000023` and `task_20261121_000025`. The saved
+stateless continuations show that both requests replayed an encrypted reasoning
+item without its required `summary` array. The adapter had retained only the item
+type, ID, and encrypted content. The earlier continuation fixture exercised a
+program and function call without a reasoning item. The original provider error
+body was discarded, so OpenAI's exact rejection diagnostic is unavailable.
+[OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses)
+
+New receipts include an empty `summary` array. The request encoder also supplies
+the array on older encrypted receipts that lack it. No checkpoint migration is
+required. The replay retains the encrypted content and call IDs, and public
+summaries still use the separate activity path. Native HTTP failures surface
+recognized validation codes, field paths, and request IDs when available. Error
+messages and raw response bodies stay out of the activity and exception text.
+
+**Do not reintroduce** stateless reasoning receipts that omit `summary`, expose
+private reasoning text, or replay a rejected request automatically.
+
+Run the targeted checks from the checkout.
+
+```bash
+venv/bin/python -m pytest -q tests/llm/test_providers.py::test_responses_replays_encrypted_reasoning_with_required_summary tests/llm/test_engine.py::test_mode_decision_reports_provider_http_failure_without_replaying tests/llm/test_engine.py::test_sdk_http_failure_drops_unsafe_diagnostic_fields
+```
+
+For live acceptance, restart Mana-Agent and start a fresh read-only Internal AUTO
+task on `gpt-6-luna` that needs several repository reads. Confirm that a model
+response arrives after each tool result. The agent did not run the tests or a live
+provider request.
+
 ## Configuration workflow
 
 1. Run `mana-agent configure`. Select a provider and save its credentials and URL.

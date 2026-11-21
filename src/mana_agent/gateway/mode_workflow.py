@@ -35,6 +35,7 @@ from mana_agent.agent.repository_investigation import (
 )
 from mana_agent.batch.policy import BatchPending, TaskExecutionPolicy
 from mana_agent.chat.activity import safe_text
+from mana_agent.chat.mode_display import mode_reply_metadata, mode_transcript_text
 from mana_agent.chat_commands.models import CommandResult
 from mana_agent.coding.models import ISOLATED_CHECK_TOOL
 from mana_agent.execution_supervisor.errors import StaleLeaseError
@@ -388,7 +389,7 @@ class ModeWorkflow:
         return self._drive(task_id, state, llm=llm)
 
     @contextmanager
-    def _activity(self, task_id: str, state: dict, *, read_only: bool):
+    def _activity(self, task_id: str, state: dict, *, read_only: bool, originating_turn: bool = False):
         supervisor = self.lane.execution_supervisor
         execution = self.lane.inspect_task(task_id)
         durable = supervisor.get_task(task_id)
@@ -396,7 +397,7 @@ class ModeWorkflow:
         activity = current_activity_context()
         if activity and activity.conversation_id != task.session_id:
             activity = None
-        turn_id = activity.execution_id if activity else ""
+        turn_id = activity.execution_id if activity and not originating_turn else ""
         protected = activity.protected_text if activity else activity_protected_text(getattr(self.gateway, "settings", None))
         governor = getattr(getattr(self.gateway, "_stack", None), "context_cost_governor", None)
         identity = governor.scoped_execution_identity(
@@ -1615,10 +1616,11 @@ class ModeWorkflow:
         if state["phase"] in {Phase.COMPLETED, Phase.BLOCKED}:
             return self._outcome(task.task_id, state, text, self._repository_report(state),
                                  completed=state["phase"] == Phase.COMPLETED)
+        data = {"task_id": task.task_id, "phase": state["phase"]}
         if state.get("plan") and state["phase"] not in _TERMINAL:
+            data["mode_status_message"] = text
             text += "\n\n" + PlanRevision.model_validate(state["plan"]).to_markdown()
-        return CommandResult(status="success", message=text,
-                             data={"task_id": task.task_id, "phase": state["phase"]})
+        return CommandResult(status="success", message=text, data=data)
 
     def receive(self, session_id, text, *, task=None, read_only=False, question_limit=None, actor_id=None):
         if task is None:
@@ -1661,7 +1663,8 @@ class ModeWorkflow:
             answer=answer or {}, comment=comment,
         ))
         return CommandResult(status="success", message=f"{result.title}: {result.status.value}.",
-                             data={"task_id": task.task_id, "inbox_id": item_id})
+                             data={"task_id": task.task_id, "inbox_id": item_id,
+                                   "mode_response_operation": operation.value})
 
     def wait_for_response(self, task_id, inbox_id, *, timeout=600):
         end = time.monotonic() + timeout
@@ -1778,30 +1781,31 @@ class ModeWorkflow:
             if item.action_digest != plan.digest or plan.digest != PlanRevision.model_validate(state["plan"]).digest:
                 raise PermissionError("Approval does not match the current plan revision")
         self.lane.start(LaneReservation(self.lane.inspect_task(task_id)))
-        if item.status == InboxStatus.DENIED:
-            comment = item.response.comment
-            if comment.startswith("Revise plan:\n"):
-                self._revise(task_id, state, comment.split("\n", 1)[1])
+        with self._activity(task_id, state, read_only=True, originating_turn=True):
+            if item.status == InboxStatus.DENIED:
+                comment = item.response.comment
+                if comment.startswith("Revise plan:\n"):
+                    self._revise(task_id, state, comment.split("\n", 1)[1])
+                    result = self._drive(task_id, state)
+                else:
+                    self._transition(task_id, state, Phase.CANCELLED, "User rejected the plan")
+                    self.lane.cancel_tree(task_id)
+                    result = CommandResult(status="success", message="Plan rejected.")
+            elif item.status == InboxStatus.ANSWERED:
+                answer = self.inbox.consume_for_agent(item.inbox_item_id, requesting_agent_id=_OWNER, task_id=task_id).answer
+                state["constraints"].update(redact_secrets(answer))
+                state["inbox_id"] = ""
+                state["investigation_epoch"] = state.get("investigation_epoch", 0) + 1
+                self._transition(task_id, state, Phase.ACTIVE, "Clarification answered")
                 result = self._drive(task_id, state)
+            elif plan:
+                state["approved_digest"] = plan.digest
+                state["approval_id"] = item.inbox_item_id
+                state["inbox_id"] = ""
+                self._transition(task_id, state, Phase.APPROVED, f"Revision {plan.revision} approved")
+                result = self._execute(task_id, state, self._service(state=state))
             else:
-                self._transition(task_id, state, Phase.CANCELLED, "User rejected the plan")
-                self.lane.cancel_tree(task_id)
-                result = CommandResult(status="success", message="Plan rejected.")
-        elif item.status == InboxStatus.ANSWERED:
-            answer = self.inbox.consume_for_agent(item.inbox_item_id, requesting_agent_id=_OWNER, task_id=task_id).answer
-            state["constraints"].update(redact_secrets(answer))
-            state["inbox_id"] = ""
-            state["investigation_epoch"] = state.get("investigation_epoch", 0) + 1
-            self._transition(task_id, state, Phase.ACTIVE)
-            result = self._drive(task_id, state)
-        elif plan:
-            state["approved_digest"] = plan.digest
-            state["approval_id"] = item.inbox_item_id
-            state["inbox_id"] = ""
-            self._transition(task_id, state, Phase.APPROVED, f"Revision {plan.revision} approved")
-            result = self._execute(task_id, state, self._service(state=state))
-        else:
-            return
+                return
         self._publish_result(task_id, result)
 
     def _publish_result(self, task_id, result):
@@ -1810,9 +1814,12 @@ class ModeWorkflow:
 
         task = self.board.get_task(task_id)
         durable = self.lane.execution_supervisor.get_task(task_id)
-        turn_id = durable.trigger_turn_id or f"mode-{task_id}-{task.mode_workflow['revision']}-{task.mode_workflow['phase']}"
-        self.gateway._append_session_message(task.session_id, role="assistant", content=result.message, turn_id=turn_id)
-        get_history().add(AssistantMessageEvent(content=result.message, turn_id=turn_id))
+        turn_id = durable.trigger_turn_id or task_id
+        metadata = mode_reply_metadata(result.data, result.next_prompt)
+        self.gateway._append_session_message(task.session_id, role="assistant", content=result.message,
+                                             turn_id=turn_id, metadata=metadata)
+        if text := mode_transcript_text(result.message, metadata):
+            get_history().add(AssistantMessageEvent(content=text, turn_id=turn_id))
         inbox_id = result.data.get("inbox_id")
         if (result.next_prompt and inbox_id and durable.state == ExecutionState.WAITING
                 and durable.waiting_inbox_item_id == inbox_id):

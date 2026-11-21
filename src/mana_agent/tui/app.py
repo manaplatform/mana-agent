@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import getpass
 import json
@@ -32,6 +33,8 @@ from mana_agent.chat.events import (
 )
 from mana_agent.chat.history import ChatHistory, get_history
 from mana_agent.chat.activity import delivery_key, project_activity, safe_text
+from mana_agent.chat.mode_display import mode_reply_metadata, mode_transcript_text
+from mana_agent.chat_commands.models import CommandResult
 from mana_agent.tui.presentation import glyph
 from mana_agent.tui.widgets.attachment_bar import AttachmentBar
 from mana_agent.tui.widgets.chat_log import ChatLog
@@ -1582,35 +1585,49 @@ class ManaChatApp(App):
 
         if isinstance(self.screen, ModePrompt):
             return
+        session_id = self._gateway_session_id
         workflow = self.gateway.mode_workflow
-        prompt = workflow.pending_prompt(self._gateway_session_id, prompt["task_id"], prompt["inbox_id"])
+        prompt = workflow.pending_prompt(session_id, prompt["task_id"], prompt["inbox_id"])
         if prompt is None:
             return
 
         def finish(result):
-            if result:
-                self.run_worker(self._respond_to_mode_prompt(prompt, result))
+            if result and session_id == self._gateway_session_id:
+                self.run_worker(self._respond_to_mode_prompt(session_id, prompt, result))
 
         self.push_screen(ModePrompt(prompt), finish)
 
-    async def _respond_to_mode_prompt(self, prompt, result) -> None:
+    async def _respond_to_mode_prompt(self, session_id, prompt, result) -> None:
         from mana_agent.human_inbox.models import ResponseOperation
 
         action, value = result
         operation = {"approve": ResponseOperation.APPROVE, "reject": ResponseOperation.DENY,
                      "revise": ResponseOperation.DENY, "answer": ResponseOperation.ANSWER}[action]
         try:
-            response = await asyncio.to_thread(
-                self.gateway.mode_workflow.respond, self._gateway_session_id,
+            await asyncio.to_thread(
+                self.gateway.mode_workflow.respond, session_id,
                 prompt["inbox_id"], operation, frontend="tui",
                 answer=value if action == "answer" else None,
                 comment="Revise plan:\n" + value if action == "revise" else "",
             )
-            self.history.add(AssistantMessageEvent(content=response.message))
-        except (PermissionError, ValueError, RuntimeError) as exc:
-            self.notify(str(exc), severity="error")
-            if action == "answer":
+        except (FileNotFoundError, PermissionError, ValueError, RuntimeError) as exc:
+            if session_id == self._gateway_session_id:
+                self.notify(str(exc), severity="error")
                 self._show_mode_prompt(prompt)
+
+    def _present_gateway_reply(
+        self,
+        message: str,
+        data: dict[str, Any],
+        next_prompt: dict[str, Any] | None,
+        turn_id: str = "",
+    ) -> None:
+        metadata = mode_reply_metadata(data, next_prompt)
+        if text := mode_transcript_text(message, metadata):
+            self.history.add(AssistantMessageEvent(content=text, turn_id=turn_id))
+        if kind := metadata.get("mode_prompt_kind"):
+            self.update_status("Waiting for your answers" if kind == "mode.clarification" else "Waiting for plan review")
+            self._show_mode_prompt(next_prompt)
 
     def update_status(self, text: str) -> None:
         """Update the status reactive. The watcher + refresh_footer will keep the footer in sync."""
@@ -1970,102 +1987,25 @@ class ManaChatApp(App):
             if not self._gateway_session_id:
                 self._gateway_session_id = self.gateway.create_session(frontend="tui")
             command_name = text.split(maxsplit=1)[0].lower()
-            plan_command = command_name == "/plan"
-            approval_command = command_name in {"/approve", "/accept", "/act", "/revise", "/reject"}
-            activity_turn = UserMessageEvent(content=text) if plan_command or approval_command else None
-            if activity_turn is not None:
-                self.history.add(activity_turn)
-
-            if plan_command:
-                self._turn_in_progress = True
-                self._current_frontend_turn_id = activity_turn.turn_id
-                self._refresh_command_menu()
-                if self.chat_log:
-                    self.chat_log.set_active_turn(activity_turn.turn_id)
-                self.update_status("Preparing plan…")
-                await asyncio.sleep(0)
-
-                def _plan_activity(activity: dict[str, Any]) -> None:
-                    self._safe_post_activity(activity, activity_turn.turn_id)
-                    title = str(activity.get("title") or "Preparing plan")
-                    try:
-                        self.call_from_thread(self.update_status, f"{title}…")
-                    except Exception:
-                        pass
-
-                try:
-                    result = await asyncio.to_thread(
-                        self.gateway.dispatch_command,
-                        text,
-                        session_id=self._gateway_session_id,
-                        frontend="tui",
-                        frontend_data={"activity_sink": _plan_activity, "activity_turn_id": activity_turn.turn_id},
-                    )
-                except Exception as exc:
-                    result = None
-                    self._safe_post_activity(
-                        {
-                            "event_id": f"plan-preparation-{self._gateway_session_id}",
-                            "event_type": "agent.planning",
-                            "title": "Plan preparation failed",
-                            "status": "failed",
-                            "detail": str(exc),
-                        },
-                        activity_turn.turn_id,
-                    )
-                finally:
-                    self._finish_active_turn()
-            elif approval_command:
-                self._turn_in_progress = True
-                self._current_frontend_turn_id = activity_turn.turn_id
-                self._refresh_command_menu()
-                if self.chat_log:
-                    self.chat_log.set_active_turn(activity_turn.turn_id)
-                self.update_status("Approving plan…")
-                await asyncio.sleep(0)
-                try:
-                    result = await asyncio.to_thread(
-                        self.gateway.dispatch_command,
-                        text,
-                        session_id=self._gateway_session_id,
-                        frontend="tui",
-                    )
-                except Exception as exc:
-                    result = None
-                    self.history.add(
-                        AssistantMessageEvent(
-                            content=f"Plan approval failed: {exc}",
-                            turn_id=activity_turn.turn_id,
-                        )
-                    )
-                finally:
-                    self._finish_active_turn()
-            else:
-                result = self.gateway.dispatch_command(
-                    text, session_id=self._gateway_session_id, frontend="tui"
-                )
-            if result is None and (plan_command or approval_command):
-                if plan_command:
-                    self.history.add(AssistantMessageEvent(
-                        content="Plan preparation failed. See Activity for details.",
-                        turn_id=activity_turn.turn_id,
-                    ))
+            if command_name in {"/plan", "/approve", "/accept", "/act", "/revise", "/reject"}:
                 if self.input and self.input.value == event.value:
                     self.input.reset()
-                self.update_status("Ready")
-                self._turn_in_progress = False
-                return
-            if plan_command and result is not None and result.status == "error":
-                self._safe_post_activity(
-                    {
-                        "event_id": f"plan-preparation-{self._gateway_session_id}",
-                        "event_type": "agent.planning",
-                        "title": "Plan preparation failed",
-                        "status": "failed",
-                        "detail": result.message,
-                    },
-                    activity_turn.turn_id,
+                turn = UserMessageEvent(content=text)
+                self.history.add(turn)
+                self._turn_in_progress = True
+                self._current_frontend_turn_id = turn.turn_id
+                if self.chat_log:
+                    self.chat_log.set_active_turn(turn.turn_id)
+                self._refresh_command_menu()
+                self.update_status("Preparing plan…" if command_name == "/plan" else "Submitting plan decision…")
+                self.run_worker(
+                    self._run_mode_command(self._gateway_session_id, turn, preparing=command_name == "/plan"),
+                    group="chat-turn",
+                    exclusive=True,
                 )
+                return
+
+            result = self.gateway.dispatch_command(text, session_id=self._gateway_session_id, frontend="tui")
             if result is not None:
                 if result.data.get("activity_visibility") in {"minimal", "normal", "verbose"}:
                     self.activity_visibility = result.data["activity_visibility"]
@@ -2086,20 +2026,12 @@ class ManaChatApp(App):
                     from mana_agent.tui.session_management import TelegramSetupScreen
 
                     self.push_screen(TelegramSetupScreen(self.repo_root), self._apply_telegram_setup)
-                if result.message:
-                    self.history.add(AssistantMessageEvent(
-                        content=result.message,
-                        turn_id=activity_turn.turn_id if activity_turn is not None else "",
-                    ))
-                self._show_mode_prompt(result.next_prompt)
                 if self.input and self.input.value == event.value:
                     self.input.reset()
-                waiting_for_answers = (result.next_prompt or {}).get("kind") == "mode.clarification"
-                self.update_status("Waiting for your answers" if waiting_for_answers else "Ready")
+                self.update_status("Ready")
+                self._present_gateway_reply(result.message, result.data, result.next_prompt)
                 self._refresh_runtime_labels()
                 return
-            if approval_command:
-                self._turn_in_progress = False
 
         if text.strip() == "/new" and self.gateway is not None and hasattr(self.gateway, "start_new_conversation"):
             if not self._gateway_session_id:
@@ -2134,6 +2066,46 @@ class ManaChatApp(App):
 
         self.run_worker(self._handle_real_turn_guarded(user_event), group="chat-turn", exclusive=True)
 
+    async def _run_mode_command(self, session_id: str, turn: UserMessageEvent, *, preparing: bool) -> None:
+        from mana_agent.services.activity_context import ActivityContext, activity_protected_text, activity_scope
+        from mana_agent.workspaces.paths import repository_id_for_path
+
+        # A new plan takes its originating turn from this context. Inbox decisions
+        # resume the existing task using that task's saved execution identity.
+        protected = activity_protected_text(getattr(self.gateway, "settings", None))
+        try:
+            scope = activity_scope(ActivityContext(
+                conversation_id=session_id,
+                execution_id=turn.turn_id,
+                repository_id=repository_id_for_path(self.repo_root),
+                execution_mode="plan",
+                protected_text=protected,
+            )) if preparing else nullcontext()
+            with scope:
+                result = await asyncio.to_thread(
+                    self.gateway.dispatch_command, turn.content, session_id=session_id, frontend="tui"
+                )
+            if result is None:
+                raise RuntimeError("The gateway did not return a command result.")
+        except Exception as exc:
+            label = "Plan preparation failed" if preparing else "Plan decision failed"
+            result = CommandResult(status="error", message=f"{label}: {safe_text(exc, protected=protected)}")
+        finally:
+            if self._current_frontend_turn_id == turn.turn_id:
+                self._finish_active_turn()
+
+        if self._gateway_session_id != session_id:
+            return
+        if preparing and result.status == "error":
+            self._safe_post_activity({
+                "event_type": "agent.planning",
+                "title": "Plan preparation failed",
+                "status": "failed",
+                "detail": result.message,
+            }, turn.turn_id)
+        self.update_status("Ready")
+        self._present_gateway_reply(result.message, result.data, result.next_prompt, turn.turn_id)
+
     def _start_new_conversation(self) -> str:
         """Apply the same gateway-owned conversation boundary as the plain CLI."""
         if self.gateway is None or not hasattr(self.gateway, "start_new_conversation"):
@@ -2157,7 +2129,8 @@ class ManaChatApp(App):
                 attachments = tuple(message.get("attachments") or ())
                 self.history.add(UserMessageEvent(content=content, turn_id=turn_id, attachments=attachments, **identity))
             elif role == "assistant":
-                self.history.add(AssistantMessageEvent(content=content, turn_id=turn_id, **identity))
+                if text := mode_transcript_text(content, message.get("metadata") or {}):
+                    self.history.add(AssistantMessageEvent(content=text, turn_id=turn_id, **identity))
 
     def _clear_conversation_view(self) -> None:
         """Clear both canonical TUI events and already-mounted timeline widgets."""
@@ -2621,21 +2594,9 @@ class ManaChatApp(App):
                     if self._count_tool_events_for_turn(turn_id) <= tools_before:
                         self._replay_tool_traces_from_result(result, turn_id=turn_id)
 
-                    if answer or str(getattr(result, "mode", "") or "") != "command":
-                        self.history.add(
-                            AssistantMessageEvent(
-                                content=answer or "(No response)",
-                                turn_id=turn_id,
-                            )
-                        )
-                    next_prompt = result_payload.get("next_prompt")
-                    self._show_mode_prompt(next_prompt)
-                    if (next_prompt or {}).get("kind") == "mode.clarification":
-                        self.update_status("Waiting for your answers")
-                    elif not route_mode:
-                        self.update_status("Ready")
-                    else:
-                        self.update_status(f"Ready ({route_mode})")
+                    self.update_status(f"Ready ({route_mode})" if route_mode else "Ready")
+                    message = answer or ("" if route_mode == "command" else "(No response)")
+                    self._present_gateway_reply(message, result_payload, result_payload.get("next_prompt"), turn_id)
                     return
                 except Exception as exc:
                     answer = f"Gateway execution failed: {exc}. No direct model fallback was executed."

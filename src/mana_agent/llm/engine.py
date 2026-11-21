@@ -13,7 +13,7 @@ from pydantic import BaseModel, ValidationError
 from mana_agent.llm.capabilities import ModelProfile
 from mana_agent.llm.errors import (
     CapabilityError, InvalidResponseError, InferenceTimeoutError, ProviderRequestError,
-    StructuredOutputError, describe_decision_validation,
+    StructuredOutputError, classify_sdk_http_failure, describe_decision_validation,
 )
 from mana_agent.llm.messages import messages_from_records, validate_conversation
 from mana_agent.llm.registry import metadata_binding, resolve_profile
@@ -347,10 +347,9 @@ class NativeLLMEngine:
         request_error = None
         status_code = getattr(exc, "status_code", None)
         if not isinstance(exc, ProviderRequestError) and type(status_code) is int and 400 <= status_code < 600:
-            from mana_agent.integrations.provider_failure import classify_http_status
-
-            failure = classify_http_status(status_code, provider=request.provider, model=request.model,
-                operation="native_inference", endpoint=self.endpoint)
+            failure = classify_sdk_http_failure(
+                exc, status_code, provider=request.provider, model=request.model, endpoint=self.endpoint,
+            )
             request_error = ProviderRequestError(failure.safe_message, provider=request.provider,
                 status_code=status_code, failure=failure)
         error = request_error or exc

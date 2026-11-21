@@ -999,8 +999,12 @@ def test_mode_decision_reports_provider_http_failure_without_replaying(
 
     async def create(**body):
         requests.append(body)
-        response = httpx.Response(status, request=httpx.Request("POST", "https://example.org/chat/completions"))
-        raise APIStatusError(protected, response=response, body={"error": {"message": protected}})
+        response = httpx.Response(status, request=httpx.Request("POST", "https://example.org/chat/completions"),
+                                  headers={"x-request-id": "req_fixture"})
+        rejection = {"message": protected}
+        if status == 400:
+            rejection.update(code="missing_required_parameter", param="messages[0].content")
+        raise APIStatusError(protected, response=response, body=rejection)
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     adapter = OpenAIProvider(provider="openrouter", api_key="test", base_url="https://example.org",
@@ -1024,8 +1028,32 @@ def test_mode_decision_reports_provider_http_failure_without_replaying(
     assert failed["operation_id"] == started["operation_id"]
     assert f"HTTP {status}" in failed["summary"]
     assert failed["metadata"]["reason_code"] == reason_code
+    assert "Request ID req_fixture." in failed["summary"]
+    if status == 400:
+        for detail in ("Provider code missing_required_parameter.", "Parameter messages[0].content."):
+            assert detail in failed["summary"]
+            assert detail in str(exc.value)
     assert protected not in str(exc.value)
     assert protected not in str(activity)
+
+
+def test_sdk_http_failure_drops_unsafe_diagnostic_fields():
+    import httpx
+    from openai import APIStatusError
+
+    from mana_agent.llm.errors import classify_sdk_http_failure
+
+    response = httpx.Response(400, request=httpx.Request("POST", "https://example.org/responses"),
+                              headers={"x-request-id": "sk-fixture-secret"})
+    exc = APIStatusError("private body", response=response, body={"error": {
+        "code": "private_code_from_request", "param": "input[0].fixture private value", "message": "private body",
+    }})
+    failure = classify_sdk_http_failure(exc, 400, provider="openai", model="test-model", endpoint="responses")
+
+    assert failure.safe_message == "openai rejected the request (HTTP 400). model=test-model"
+    assert failure.provider_request_id is None
+    assert not failure.upstream_body_snippet
+    assert not failure.retryable
 
 
 def test_anthropic_mode_decision_uses_messages_and_preserves_validation(tmp_path, native_profile, monkeypatch):
