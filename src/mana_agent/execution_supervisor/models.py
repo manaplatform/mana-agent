@@ -136,6 +136,8 @@ LOCAL_REPOSITORY_TOOLS = frozenset(
     }
 )
 
+_LOCAL_COMMAND_TOOLS = frozenset({"shell", "run_command", "run_script_once", "verify_project", "verify_coding_change"})
+
 
 class ActionRecord(StrictModel):
     action_id: str = Field(default_factory=lambda: stable_id("action"))
@@ -170,16 +172,16 @@ class ActionRecord(StrictModel):
         ):
             tool = str(data.get("tool_name") or "")
             classification = data.get("classification")
-            if tool in {"shell", "run_command", "run_script_once", "verify_project"}:
+            if tool in _LOCAL_COMMAND_TOOLS:
                 if classification in {
                     SideEffectClassification.READ_ONLY.value,
                     SideEffectClassification.READ_ONLY,
                 }:
-                    data["effect_scope"] = ActionEffectScope.LOCAL_PROCESS.value
+                    data["effect_scope"] = ActionEffectScope.LOCAL_PROCESS
                 else:
-                    data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY.value
+                    data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY
             elif tool in LOCAL_REPOSITORY_TOOLS:
-                data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY.value
+                data["effect_scope"] = ActionEffectScope.LOCAL_REPOSITORY
             elif tool in {
                 "read_file",
                 "view_file",
@@ -209,7 +211,7 @@ class ActionRecord(StrictModel):
                 SideEffectClassification.READ_ONLY.value,
                 SideEffectClassification.READ_ONLY,
             }:
-                data["effect_scope"] = ActionEffectScope.LOCAL_PROCESS.value
+                data["effect_scope"] = ActionEffectScope.LOCAL_PROCESS
             elif tool in {
                 "cloud_deploy",
                 "send_payment",
@@ -221,9 +223,9 @@ class ActionRecord(StrictModel):
                 SideEffectClassification.NON_IDEMPOTENT.value,
                 SideEffectClassification.NON_IDEMPOTENT,
             }:
-                data["effect_scope"] = ActionEffectScope.EXTERNAL_CONSEQUENTIAL.value
+                data["effect_scope"] = ActionEffectScope.EXTERNAL_CONSEQUENTIAL
             else:
-                data["effect_scope"] = ActionEffectScope.UNKNOWN.value
+                data["effect_scope"] = ActionEffectScope.UNKNOWN
         return data
 
 
@@ -244,7 +246,7 @@ def infer_effect_scope(
             classification = SideEffectClassification.READ_ONLY
         elif tool_name in LOCAL_REPOSITORY_TOOLS:
             classification = SideEffectClassification.NON_IDEMPOTENT
-        elif tool_name in {"shell", "run_command", "run_script_once", "verify_project"}:
+        elif tool_name in _LOCAL_COMMAND_TOOLS:
             classification = SideEffectClassification.NON_IDEMPOTENT
         else:
             classification = SideEffectClassification.READ_ONLY

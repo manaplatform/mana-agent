@@ -770,8 +770,9 @@ def test_p09_unknown_action_scope_fails_closed(runtime):
         tool_name="unregistered_action",
         action_fingerprint="fp-unknown",
         classification=SideEffectClassification.UNKNOWN,
-        request_state=ActionRequestState.STARTED,
     )
+    action.request_state = ActionRequestState.STARTED
+    assert action.effect_scope is ActionEffectScope.UNKNOWN
     supervisor.store.save_action(action)
     clock.advance(11)
     summary = supervisor.recover()
@@ -1684,7 +1685,8 @@ def test_local_action_can_reexecute_after_completion(runtime):
     assert action2.request_state == ActionRequestState.PREPARED
 
 
-def test_run_command_action_can_reexecute_after_completion(runtime):
+@pytest.mark.parametrize("tool_name", ["run_command", "verify_coding_change"])
+def test_run_command_action_can_reexecute_after_completion(runtime, tool_name):
     supervisor, clock, tmp_path = runtime
     task = create(supervisor, tmp_path)
     attempt_id, token = running(supervisor, task)
@@ -1692,21 +1694,21 @@ def test_run_command_action_can_reexecute_after_completion(runtime):
         task.task_id,
         attempt_id=attempt_id,
         lease_token=token,
-        tool_name="run_command",
-        action_fingerprint="run_command:git status --short",
+        tool_name=tool_name,
+        action_fingerprint=f"{tool_name}:pytest tests/test_foo.py",
         classification=SideEffectClassification.IDEMPOTENT,
         idempotency_key="tool_call_cmd_1",
     )
-    assert action1.effect_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
+    assert action1.effect_scope is ActionEffectScope.LOCAL_REPOSITORY
     supervisor.update_action(action1.action_id, request_state=ActionRequestState.SUCCEEDED)
 
-    # Re-executing run_command with identical fingerprint must succeed once previous succeeded
+    # A fresh tool call may run the same command after the first call succeeds.
     action2 = supervisor.prepare_action(
         task.task_id,
         attempt_id=attempt_id,
         lease_token=token,
-        tool_name="run_command",
-        action_fingerprint="run_command:git status --short",
+        tool_name=tool_name,
+        action_fingerprint=f"{tool_name}:pytest tests/test_foo.py",
         classification=SideEffectClassification.IDEMPOTENT,
         idempotency_key="tool_call_cmd_2",
     )
@@ -1714,7 +1716,8 @@ def test_run_command_action_can_reexecute_after_completion(runtime):
     assert action2.request_state == ActionRequestState.PREPARED
 
 
-def test_existing_unknown_effect_scope_is_reconciled_on_reexecution(runtime):
+@pytest.mark.parametrize("tool_name", ["run_command", "verify_coding_change"])
+def test_existing_unknown_effect_scope_is_reconciled_on_reexecution(runtime, tool_name):
     supervisor, clock, tmp_path = runtime
     task = create(supervisor, tmp_path)
     attempt_id, token = running(supervisor, task)
@@ -1722,31 +1725,49 @@ def test_existing_unknown_effect_scope_is_reconciled_on_reexecution(runtime):
         task.task_id,
         attempt_id=attempt_id,
         lease_token=token,
-        tool_name="run_command",
-        action_fingerprint="run_command:git status --short",
+        tool_name=tool_name,
+        action_fingerprint=f"{tool_name}:pytest tests/test_foo.py",
         classification=SideEffectClassification.IDEMPOTENT,
         idempotency_key="tool_call_legacy_1",
     )
     # Simulate an older record persisted with UNKNOWN effect_scope
-    action1.effect_scope = ActionEffectScope.UNKNOWN
-    action1.request_state = ActionRequestState.SUCCEEDED
-    supervisor.store.save_action(action1)
+    supervisor.store.save_action(action1.model_copy(update={
+        "effect_scope": ActionEffectScope.UNKNOWN, "request_state": ActionRequestState.SUCCEEDED,
+    }))
 
     # Preparing the action again must reconcile the UNKNOWN effect_scope and allow re-execution
     action2 = supervisor.prepare_action(
         task.task_id,
         attempt_id=attempt_id,
         lease_token=token,
-        tool_name="run_command",
-        action_fingerprint="run_command:git status --short",
+        tool_name=tool_name,
+        action_fingerprint=f"{tool_name}:pytest tests/test_foo.py",
         classification=SideEffectClassification.IDEMPOTENT,
         idempotency_key="tool_call_legacy_2",
     )
     assert action2.action_id != action1.action_id
     assert action2.request_state == ActionRequestState.PREPARED
-    # The stored legacy record should now also be healed
+    # Loading the legacy record infers the same scope as for a new action.
     reloaded1 = supervisor.store.get_action(action1.action_id)
-    assert reloaded1.effect_scope in {ActionEffectScope.LOCAL_REPOSITORY, ActionEffectScope.LOCAL_PROCESS}
+    assert reloaded1.effect_scope is ActionEffectScope.LOCAL_REPOSITORY
+
+
+@pytest.mark.parametrize("state", [ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN])
+def test_checkout_verification_repeat_fences_unsettled_action(runtime, state):
+    supervisor, _, tmp_path = runtime
+    task = create(supervisor, tmp_path)
+    attempt_id, token = running(supervisor, task)
+    action_args = {
+        "attempt_id": attempt_id, "lease_token": token,
+        "tool_name": "verify_coding_change", "action_fingerprint": "pytest:tests/test_foo.py",
+        "classification": SideEffectClassification.IDEMPOTENT,
+    }
+    first = supervisor.prepare_action(task.task_id, idempotency_key="check-1", **action_args)
+    supervisor.update_action(first.action_id, request_state=state)
+
+    with pytest.raises(RetrySafetyError, match="reconcile"):
+        supervisor.prepare_action(task.task_id, idempotency_key="check-2", **action_args)
+    assert [action.action_id for action in supervisor.store.actions_for_task(task.task_id)] == [first.action_id]
 
 
 def test_git_and_batch_tools_infer_local_repository_scope(runtime):

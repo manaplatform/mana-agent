@@ -16,6 +16,10 @@ A failed check returns its exit code and bounded output to Coding, which can
 repair the implementation in the same attempt. Passing checks must match the
 current versions of files associated with the assignment's tool receipts and
 any observed source drift.
+
+Selecting the same command again after a settled checkout check creates a new
+receipt. An unfinished check or one with an uncertain outcome still requires
+supervisor reconciliation before it can run again.
 The native terminal decision can report completion, identify a blocker, or
 ask for material clarification. Production capability changes additionally
 require source-backed runtime reachability and existing integration verification.

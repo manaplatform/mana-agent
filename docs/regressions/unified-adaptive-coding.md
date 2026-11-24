@@ -443,6 +443,40 @@ The agent did not run the regression tests.
 venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'filters_ignored_command_artifacts or reconciles_workspace_drift or resumes_after_a_model_wait_failure'
 ```
 
+### Repeating a completed checkout check after source changes
+
+The user ran the workspace-change regressions on November 25, 2026. The
+artifact and checkpoint-resume cases passed. The same-attempt source-change
+case failed when Coding selected the same `verify_coding_change` command
+against the new file contents. The supervisor rejected the selection as a
+matching consequential action before the second check could execute.
+
+The supervisor already permits a fresh call for a completed local command.
+Its effect-scope mapping omitted `verify_coding_change`, so the first check
+had an `UNKNOWN` action scope even after a successful exit. The action model's
+assignment validator also wrote a string into the enum field when updating
+an unknown action, which produced the serializer warning in the same run.
+
+The action model now infers checkout verification as a local repository
+command, including when loading a legacy receipt with unknown scope. It
+preserves enum values during assignment. A fresh selection receives its own
+action receipt after a settled check, and current-source verification remains
+required. The supervisor still fences a matching action with an unsettled
+outcome. The existing gateway regression exercises two runs of the same
+command on one assignment. The supervisor regressions cover completed,
+legacy, and unsettled action records.
+
+**Do not reintroduce** unknown effect scope for checkout verification or reuse
+a prior pass when the current source hashes differ. Preserve duplicate-action
+fencing until the previous command's outcome has been reconciled.
+
+The agent did not run these checks.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'filters_ignored_command_artifacts or reconciles_workspace_drift or resumes_after_a_model_wait_failure'
+venv/bin/python -m pytest -q tests/execution_supervisor/test_supervisor_core.py -k 'run_command_action_can_reexecute or existing_unknown_effect_scope or checkout_verification_repeat_fences or unknown_action_scope_fails_closed'
+```
+
 ## Verification
 
 Run the focused regressions first.
