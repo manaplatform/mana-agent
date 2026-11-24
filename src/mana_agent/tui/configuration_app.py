@@ -810,7 +810,11 @@ class ManaConfigurationApp(App[bool]):
                     "output_video", "input_modalities", "output_modalities", "programmatic_tool_calling",
                     "image_request_format", "image_flexible_dimensions", "image_quality_levels", "image_input_fidelity",
                     "public_reasoning_summaries", "decisions_api", "batch", "batch_endpoints", "batch_completion_windows"}
-                if set(overrides) - allowed:
+                unknown = {
+                    k for k in overrides
+                    if k not in allowed and not ("." in k and k.split(".", 1)[0] in allowed)
+                }
+                if unknown:
                     raise ValueError("Unknown capability override name")
                 for value in overrides.values():
                     if isinstance(value, dict):

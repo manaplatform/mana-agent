@@ -248,8 +248,9 @@ def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_versio
             if ModelCapability.TEXT_GENERATION in caps:
                 facts["input_text"] = observation(True, source="provider", scope=scope)
                 facts["output_text"] = observation(True, source="provider", scope=scope)
-            if ModelCapability.TOOL_CALLING in caps and provider in {"openai", "anthropic"}:
+            if ModelCapability.TOOL_CALLING in caps and provider in {"openai", "anthropic", "azure", "azure_openai"}:
                 facts["native_structured_output"] = observation(True, source="provider", scope=scope)
+                facts["tool_choice"] = observation(["auto", "required", "none", "function"], source="provider", scope=scope)
             if provider in {"openai", "azure_openai", "azure"} and caps & {ModelCapability.TEXT_GENERATION, ModelCapability.EMBEDDING, ModelCapability.CODE}:
                 if not (ModelCapability.REALTIME in caps and "realtime" in model.lower()) and "realtime" not in model.lower():
                     facts["batch"] = observation(True, source="provider", scope=scope)
@@ -261,6 +262,9 @@ def resolve_profile(provider: str, model: str, *, endpoint: str = "", api_versio
                 facts["max_output_tokens"] = observation(limits[1], source="provider", scope=scope)
             if facts:
                 profile = GLOBAL_CAPABILITY_REGISTRY.merge(profile, facts)
+    if profile.supports("tool_calling") and not profile.supports("tool_choice") and provider in {"openai", "anthropic", "azure", "azure_openai"}:
+        tool_choice_fact = observation(["auto", "required", "none", "function"], source="provider", scope=scope)
+        profile = GLOBAL_CAPABILITY_REGISTRY.merge(profile, {"tool_choice": tool_choice_fact})
     overrides = get_setting("MANA_MODEL_CAPABILITY_OVERRIDES", []) or []
     if isinstance(overrides, str):
         try:

@@ -2640,9 +2640,18 @@ class AskAgent:
             bound_tools = [tool for tool in tools if not allowed_tools or tool.name in allowed_tools]
         bound = self.llm.with_tools(bound_tools)
         bound_revision = capability_registry.active.revision if capability_registry is not None else 0
+        supports_required = False
+        try:
+            profile_getter = getattr(self.llm, "profile", None)
+            if callable(profile_getter):
+                supports_required = bool(profile_getter().supports_value("tool_choice", "required"))
+            else:
+                supports_required = True
+        except Exception:
+            supports_required = False
         bound_initial_required = (
             self.llm.with_tools(bound_tools, tool_choice="required")
-            if bool(policy.get("require_initial_tool_call"))
+            if bool(policy.get("require_initial_tool_call")) and supports_required
             else None
         )
 
@@ -2852,7 +2861,7 @@ class AskAgent:
                     bound = self.llm.with_tools(bound_tools)
                     bound_initial_required = (
                         self.llm.with_tools(bound_tools, tool_choice="required")
-                        if bool(policy.get("require_initial_tool_call")) and step_idx == 0
+                        if bool(policy.get("require_initial_tool_call")) and step_idx == 0 and supports_required
                         else None
                     )
                     bound_revision = capability_registry.active.revision

@@ -244,7 +244,12 @@ async def _execute_capability_probe(engine, capability: str, *, user_initiated: 
             facts = {scoped_capability: fact}
             if result.state is CapabilityState.SUPPORTED:
                 if scoped_capability != capability:
-                    facts[capability] = fact.model_copy(update={"value": value})
+                    existing_fact = profile.facts.get(capability)
+                    if existing_fact and isinstance(existing_fact.value, list):
+                        combined_val = list(dict.fromkeys(existing_fact.value + value))
+                    else:
+                        combined_val = value
+                    facts[capability] = fact.model_copy(update={"value": combined_val})
                 demonstrated = "tool_calling" if response.tool_calls else "reasoning" if capability == "reasoning_effort" else None
                 if demonstrated and demonstrated != scoped_capability:
                     facts[demonstrated] = observation(True, source="probe", scope=profile.configuration_fingerprint,

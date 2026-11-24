@@ -89,3 +89,44 @@ def test_deleted_settings_override_does_not_survive_in_memory(native_profile, mo
     assert resolve().supports("streaming")
     settings.clear()
     assert resolve().fact("streaming").state is CapabilityState.UNKNOWN
+
+
+def test_tool_choice_evidence_populated_for_tool_calling_models():
+    from mana_agent.llm.registry import resolve_profile
+
+    profile = resolve_profile("openai", "gpt-6-luna", catalog_records=[])
+    assert profile.supports("tool_calling")
+    assert profile.supports("tool_choice")
+    assert profile.supports_value("tool_choice", "required")
+    assert profile.supports_value("tool_choice", "auto")
+    assert profile.supports_value("tool_choice", "none")
+    assert profile.supports_value("tool_choice", "function")
+
+
+def test_tool_choice_supports_value_truthy_and_string_overrides(tmp_path):
+    registry = ModelCapabilityRegistry(tmp_path / "registry.json")
+    profile = ModelProfile(provider="custom", model_id="model")
+
+    # Boolean True parent enables standard modes
+    profile = registry.merge(profile, {"tool_choice": observation(True, source="provider")})
+    assert profile.supports_value("tool_choice", "required")
+    assert profile.supports_value("tool_choice", "auto")
+    assert profile.supports_value("tool_choice", "none")
+    assert profile.supports_value("tool_choice", "function")
+    assert not profile.supports_value("tool_choice", "custom_mode")
+
+    # Specific probe failure disables that mode
+    profile = registry.merge(profile, {"tool_choice.required": observation(False, source="probe")})
+    assert not profile.supports_value("tool_choice", "required")
+    assert profile.supports_value("tool_choice", "auto")
+
+    # User override re-enables it
+    profile = registry.merge(profile, {"tool_choice.required": observation(True, source="override")})
+    assert profile.supports_value("tool_choice", "required")
+
+    # String value override
+    profile2 = ModelProfile(provider="custom", model_id="model2")
+    profile2 = registry.merge(profile2, {"tool_choice": observation("required", source="override")})
+    assert profile2.supports_value("tool_choice", "required")
+    assert not profile2.supports_value("tool_choice", "auto")
+
