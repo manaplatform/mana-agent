@@ -117,9 +117,16 @@ class ModelProfile(BaseModel):
                 continue
             if parent.state is CapabilityState.UNSUPPORTED or parent.value is False:
                 choices.append((parent, False))
-            elif isinstance(parent.value, list):
+            elif isinstance(parent.value, (list, tuple, set)):
                 if value in parent.value or parent.source != "probe":
                     choices.append((parent, value in parent.value))
+            elif parent.value is True:
+                if capability == "tool_choice":
+                    choices.append((parent, value in {"auto", "required", "none", "function"}))
+                elif parent.source != "probe":
+                    choices.append((parent, True))
+            elif isinstance(parent.value, str):
+                choices.append((parent, parent.value == value))
         for specific in specifics:
             if specific.state is not CapabilityState.UNKNOWN and specific.scope in {"", self.configuration_fingerprint}:
                 choices.append((specific, (specific.state is CapabilityState.SUPPORTED or specific.state is CapabilityState.STALE) and specific.value is not False))
