@@ -180,7 +180,7 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
 def test_adaptive_coding_reconciles_legacy_mutation_paths(mode_gateway, monkeypatch):
     from mana_agent.repository_evidence.tool_queue import ToolQueueStore
 
-    _, workflow = mode_gateway
+    gateway, workflow = mode_gateway
     receipts = [
         {"mutations": [{"status": "applied", "path": os.path.join("pkg", "handler.py"),
                         "old_path": os.path.join("src", "original.py"),
@@ -190,7 +190,110 @@ def test_adaptive_coding_reconciles_legacy_mutation_paths(mode_gateway, monkeypa
     ]
     monkeypatch.setattr(ToolQueueStore, "operation_receipts", lambda _store, _task_id: receipts)
 
-    assert workflow._adaptive_mutations("child") == {"pkg/handler.py": "updated", "src/original.py": "missing"}
+    assert workflow._adaptive_mutations("child", root=gateway.root) == {
+        "pkg/handler.py": "updated", "src/original.py": "missing",
+    }
+
+
+def test_adaptive_coding_filters_ignored_command_artifacts(mode_gateway, monkeypatch):
+    from mana_agent.repository_evidence.tool_queue import ToolQueueStore
+
+    gateway, workflow = mode_gateway
+    root = gateway.root
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "tracked.cache").write_text("tracked\n")
+    subprocess.run(["git", "add", "-f", "tracked.cache"], cwd=root, check=True)
+    (root / ".gitignore").write_text("node_modules/\n*.cache\n")
+
+    def mutation(path, status="applied"):
+        return {"status": status, "path": path, "before_sha256": "", "after_sha256": "recorded"}
+
+    lockfile = "frontend/node_modules/.package-lock.json"
+    command_paths = (lockfile, "frontend/package-lock.json", "tracked.cache", "explicit.cache")
+    receipts = [
+        {"tool_name": "shell", "mutations": [mutation(path) for path in command_paths]},
+        {"tool_name": "write_file", "mutations": [mutation("explicit.cache")]},
+    ]
+    monkeypatch.setattr(ToolQueueStore, "operation_receipts", lambda _store, _task_id: receipts)
+
+    assert workflow._adaptive_mutations("child", root=root) == {
+        "frontend/package-lock.json": "recorded", "tracked.cache": "recorded", "explicit.cache": "recorded",
+    }
+    receipts.append({"tool_name": "shell", "mutations": [mutation(lockfile, "unknown")]})
+    with pytest.raises(PermissionError, match="uncertain mutation"):
+        workflow._adaptive_mutations("child", root=root)
+
+
+def test_adaptive_coding_reconciles_workspace_drift_before_dispatch(mode_gateway, monkeypatch):
+    from hashlib import sha256
+
+    from mana_agent.coding.facade import UnifiedCodingAgentFacade
+    from mana_agent.coding.internal_engine import InternalCodingEngine
+    from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+    from mana_agent.repository_evidence.tool_queue import ToolQueueStore
+
+    gateway, workflow = mode_gateway
+    path = gateway.root / "app.py"
+    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "app.py"]})
+    read = ("read_file", {"path": "app.py", "evidence_need": "Check the file version before editing."})
+    complete = (CODING_RESULT_TOOL, {"disposition": "complete", "summary": "Verified the current workspace."})
+    selections = [
+        ("write_file", {"path": "app.py", "content": "tool edit\n"}),
+        read,
+        verify,
+        ("write_file", {"path": "app.py", "content": "stale selection\n"}),
+        read,
+        complete,
+        verify,
+        complete,
+    ]
+    check_inputs = []
+
+    class Model:
+        index = 0
+
+        def with_tools(self, tools):
+            self.offered = {tool["function"]["name"] for tool in tools}
+            return self
+
+        async def generate(self, messages, *, continuation):
+            index = self.index
+            self.index += 1
+            if index == 3:
+                path.write_text("external edit\n")
+            if index == 4:
+                assert any("Repository files changed" in message.content for message in messages)
+                assert any('"stale": true' in message.content for message in messages)
+                assert continuation is None
+                assert not any(call.id == "drift-3" for message in messages for call in message.tool_calls)
+            if index == 5:
+                latest_read = next(message for message in reversed(messages) if message.role == "tool")
+                assert json.loads(latest_read.content)["content"] == "external edit\n"
+            if index == 6:
+                rejection = next(message for message in reversed(messages) if message.role == "tool")
+                assert json.loads(rejection.content)["error_code"] == "CODING_RESULT_REJECTED"
+            tool, args = selections[index]
+            assert tool in self.offered
+            return SimpleNamespace(tool_calls=[{"id": f"drift-{index}", "name": tool, "args": args}])
+
+    async def check(root, command, *, task_id):
+        check_inputs.append((task_id, path.read_text()))
+        return {"passed": True, "exit_code": 0, "output": "passed"}
+
+    monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
+    gateway._coding_agent = UnifiedCodingAgentFacade(repo_root=gateway.root, default_mode="internal",
+        internal_engine=InternalCodingEngine(llm_client=Model(), programmatic_tool_calling_enabled=False))
+    result = workflow.start("session", "Fix app.py", mode="debug", repair=True, workflow=workflow_choice(mode="debug"))
+
+    assert result.status == "success", result.message
+    child, = workflow.board.list_tasks(parent_task_id=result.data["task_id"])
+    assert check_inputs == [(child.task_id, "tool edit\n"), (child.task_id, "external edit\n")]
+    assert len({receipt["attempt_id"] for receipt in result.data["verification"]}) == 1
+    assert result.data["verification"][-1]["source_versions"] == {"app.py": sha256(b"external edit\n").hexdigest()}
+    assert result.data["changed_files"] == []
+    assert path.read_text() == "external edit\n"
+    receipts = ToolQueueStore(workflow.board.store.db).operation_receipts(child.task_id)
+    assert [row["tool_name"] for row in receipts].count("write_file") == 1
 
 
 @pytest.mark.parametrize("rejected_kind", [
@@ -625,7 +728,8 @@ def test_adaptive_checkout_build_renews_or_alarms_on_repeat(mode_gateway, monkey
         assert not alarms
 
 
-def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkeypatch):
+@pytest.mark.parametrize("external_edit", [False, True])
+def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkeypatch, external_edit):
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
     from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
@@ -660,7 +764,7 @@ def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkey
             return SimpleNamespace(tool_calls=[{"id": f"resume-{len(calls)}", "name": tool, "args": args}])
 
     async def check(root, command, *, task_id):
-        assert (root / "app.py").read_text() == "fixed\n"
+        assert (root / "app.py").read_text() == ("external edit\n" if external_edit else "fixed\n")
         return {"passed": True, "exit_code": 0, "output": "passed"}
 
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
@@ -673,10 +777,12 @@ def test_adaptive_coding_resumes_after_a_model_wait_failure(mode_gateway, monkey
     assert first.status == "error"
     assert first.data["changed_files"] == ["app.py"]
     assert child.evidence_refs
+    if external_edit:
+        (gateway.root / "app.py").write_text("external edit\n")
 
     resumed = workflow.retry(task_id)
     assert resumed.status == "success", resumed.message
-    assert resumed.data["changed_files"] == ["app.py"]
+    assert resumed.data["changed_files"] == ([] if external_edit else ["app.py"])
     assert len(workflow.board.list_tasks(parent_task_id=task_id)) == 1
     assert resumed.data["verification"][0]["attempt_id"] != initial_attempt
 

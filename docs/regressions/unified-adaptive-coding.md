@@ -25,10 +25,10 @@ repeated work from no-progress detection.
   Repeated reads return an observation reference without echoing the content.
 - Realtime write verification runs in the assigned checkout. A failed check
   returns to Coding. Completion validates observed passing checks against the
-  latest changed-file receipts.
+  current source versions associated with tool receipts and observed drift.
 - Recovery reconciles tool operation identities with supervisor action receipts
   before continuing. A revoked lease or an uncertain operation stops execution.
-  Previously completed writes retain their verified source hashes.
+  Previously completed writes retain their original receipt hashes.
 
 **Do not reintroduce** a required repository investigation, read quota, plan
 draft, or patch-proposal handoff on the realtime Internal AUTO or DEBUG path.
@@ -402,6 +402,45 @@ The agent did not run these checks.
 ```sh
 python -m pytest -q tests/llm/test_engine.py -k 'native_shell_schema or unregistered_and_invalid_tool_calls'
 python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k preserves_patch_budget_after_evidence_rejection
+```
+
+## Workspace changes after a tool receipt
+
+On November 25, 2026, a realtime Internal coding task in `mana-agent-test`
+stopped at its checkpoint with `A changed file no longer matches its tool
+receipt`. The saved shell receipts from task `task_20261125_000002` contain
+6,634 mutations from the initial dependency setup before `.gitignore` was
+created. After it was added, the later install commands completed and Git
+excluded dependency directories from their source snapshots. The only saved
+digest still differing from the checkout during investigation was
+`frontend/node_modules/.package-lock.json`. The top-level frontend lockfile
+was a separate, non-ignored source candidate.
+
+Checkpointing treated an earlier command's artifact receipts as permanent
+source inputs. It also converted a mismatch on a genuine source path into an
+exception before the model could read the new version. The recovery and
+verification gates used the same assumed post-tool hashes. Existing tests
+covered repeated checks and provider interruption with stable files.
+
+The gateway now reconciles command receipts with the checkout's current Git
+ignore rules and keeps tracked and explicitly edited paths. It records the
+current versions for verification and reports only edits still supported by
+their receipts. Internal Coding keeps completed operations and continues on
+the same assignment with refreshed observations and bounded model turns. If a
+file changes during inference, the runtime drops the superseded selection
+before dispatch. A checkpoint resume makes the same source comparison using
+the saved operations. Older receipts remain intact. Verification requires a
+pass on current inputs, and ambiguous operations still require reconciliation
+under the supervisor's existing action rules.
+
+**Do not reintroduce** a terminal error solely because a current workspace
+file differs from a settled tool receipt. Preserve the receipt, refresh the
+affected observations, and require current verification before completion.
+
+The agent did not run the regression tests.
+
+```sh
+venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'filters_ignored_command_artifacts or reconciles_workspace_drift or resumes_after_a_model_wait_failure'
 ```
 
 ## Verification

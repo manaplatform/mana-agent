@@ -10,10 +10,12 @@ Execution Supervisor fences the attempt and confirms completion. Explicit PLAN
 retains its exact-revision approval boundary. External Codex, explicit Batch,
 and existing staged tasks keep their staged execution contracts.
 
-`verify_coding_change` runs selected arguments through the existing isolated
-Docker verifier. A failed check returns its exit code and bounded output to
-Coding, which can repair the implementation in the same attempt. Passing
-checks must match the current changed-file hashes from durable tool receipts.
+`verify_coding_change` runs selected arguments in the assigned checkout for
+realtime write tasks. Read-only verification uses the isolated Docker verifier.
+A failed check returns its exit code and bounded output to Coding, which can
+repair the implementation in the same attempt. Passing checks must match the
+current versions of files associated with the assignment's tool receipts and
+any observed source drift.
 The native terminal decision can report completion, identify a blocker, or
 ask for material clarification. Production capability changes additionally
 require source-backed runtime reachability and existing integration verification.
@@ -90,9 +92,16 @@ The Repository Evidence Board saves source-backed observations as tools return
 and checks their hashes before reuse. Duplicate observations reference existing
 results, and invalid references return a correction diagnostic. On recovery,
 the supervisor resumes the saved Coding assignment when action receipts reconcile.
-Source reads whose hashes changed are marked stale in the recovered history.
+If a previously observed source file changes between tools or during a model
+request, Coding retains the completed operations, marks stale reads, and asks
+the model to select its next action from the current workspace. It discards a
+pending model response based on superseded source and requires fresh verification
+for the current versions. A version that diverged from its tool receipt stays
+out of the task's reported edits until a new tool receipt accounts for it.
+Command outputs covered by the checkout's current Git ignore rules are omitted
+from this comparison. Tracked files and explicit file edits remain in scope.
 Coding Activity labels reads, searches, edits, diagnostics, checks, and review
-in one stream. See the [unified coding regression](regressions/unified-adaptive-coding.md).
+in one stream. See the [workspace drift regression](regressions/unified-adaptive-coding.md#workspace-changes-after-a-tool-receipt).
 
 ## Unresolved bugs and external evidence in staged workflows
 

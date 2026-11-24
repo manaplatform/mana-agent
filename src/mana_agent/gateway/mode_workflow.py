@@ -569,7 +569,6 @@ class ModeWorkflow:
                 ActionRequestState.PREPARED, ActionRequestState.STARTED, ActionRequestState.OUTCOME_UNKNOWN,
             } for action in actions):
                 raise PermissionError("Reconcile the coding action receipts before resuming this checkout.")
-            self._adaptive_checks(state, root, write=False)
             recovery = RecoveryDecision(
                 decision_id=f"adaptive-retry:{child.task_id}:{time.time_ns()}", task_id=child.task_id,
                 action=RecoveryAction.RESUME_CHECKPOINT if saved.checkpoint_id else RecoveryAction.RETRY,
@@ -602,7 +601,6 @@ class ModeWorkflow:
         from mana_agent.tools.contracts import ToolContract
 
         child = self.board.get_task(child_id)
-        self._adaptive_checks(state, root, write=False)
         if not child.coding_assignment:
             assignment_for(self.board, child_id, backend="internal",
                            decision_id=state.get("routing_decision_id") or f"{task_id}:mode")
@@ -623,23 +621,28 @@ class ModeWorkflow:
                 self._check_live(child_id)
                 operation(task_id, state)
 
-        def save(context):
+        receipt_versions = self._adaptive_mutations(child_id, root=root)
+
+        def synchronize(context, *, poll=False, starting=False):
+            nonlocal receipt_versions
             activity = current_activity_context()
             with activity.publication():
                 self._check_live(task_id)
-                versions = self._adaptive_mutations(child_id)
-                if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
-                    raise PermissionError("A changed file no longer matches its tool receipt.")
-                state["files_changed"] = sorted(versions)
-                state["adaptive_file_versions"] = versions
+                self._check_live(child_id)
+                if not (poll or starting):
+                    receipt_versions = self._adaptive_mutations(child_id, root=root)
+                refreshed = self._reconcile_adaptive_context(root, state, context, receipt_versions, poll=poll)
+                if poll and refreshed is context:
+                    return None
+                context = refreshed
                 state["adaptive_evidence_refs"] = self.board.get_task(child_id).evidence_refs[-12:]
                 serialized = json.dumps(redact_secrets(context), ensure_ascii=False)
                 clean = safe_text(serialized, limit=None, protected=activity.protected_text)
                 if clean != json.dumps(context, ensure_ascii=False):
                     # Never replay a provider continuation whose containing history was redacted.
-                    context = {key: context[key] for key in (
+                    context = {key: context.get(key, []) for key in (
                         "changed_files", "commands_run", "verification_results", "executed_operations"
-                    )}
+                    )} | {"adaptive_source_changes": bool(state.get("adaptive_source_versions"))}
                     context["executed_operations"] = [
                         {key: row[key] for key in ("tool", "call_id", "fingerprint") if key in row}
                         for row in context["executed_operations"]
@@ -648,12 +651,15 @@ class ModeWorkflow:
                                       limit=None, protected=activity.protected_text)
                 state["adaptive_continuation"] = json.loads(clean)
                 self._persist(task_id, state)
-            self.lane.checkpoint(child_id, boundary="adaptive_coding_tools",
-                resume_payload={"mode_task_id": task_id, "changed_files": state["files_changed"]})
+            if not starting:
+                self.lane.checkpoint(child_id, boundary="adaptive_coding_tools",
+                    resume_payload={"mode_task_id": task_id, "changed_files": state["files_changed"]})
+            return refreshed
 
-        resume = state.get("adaptive_continuation", {})
-        if resume:
-            resume = self._refresh_adaptive_history(root, resume)
+        saved = state.get("adaptive_continuation", {})
+        if saved:
+            saved = {**saved, "adaptive_source_changes": bool(state.get("adaptive_source_versions", state.get("adaptive_file_versions")))}
+        resume = synchronize(saved, starting=True)
 
         def verify(**arguments):
             return self._verify_adaptive(task_id, child_id, root, state, verifier.model_validate(arguments))
@@ -695,7 +701,7 @@ class ModeWorkflow:
                     "execution_registry": current_activity_context().execution_registry, "tool_authorize": authorize,
                     "allowed_tools": allowed, "registered_tools": {ISOLATED_CHECK_TOOL: verify},
                     "charge_model": lambda: charge(self._charge_model), "charge_tool": lambda: charge(self._charge_tool),
-                    "save_native_continuation": save, "remaining_model_turns": self._remaining_decisions(state),
+                    "save_native_continuation": synchronize, "remaining_model_turns": self._remaining_decisions(state),
                     "validate_adaptive_completion": lambda: self._adaptive_checks(state, root, write=write),
                     "remaining_tool_calls": self._remaining_tools(state),
                     "max_no_progress_cycles": controller.config.max_no_progress_cycles, **accounting_runtime})
@@ -717,7 +723,7 @@ class ModeWorkflow:
             if renewal.adaptive_renewals_remaining(len(grants)) == 0:
                 return {"ok": False, "error": "The assignment reached its accounting renewal limit."}
 
-            versions = self._adaptive_mutations(child_id)
+            versions = self._adaptive_mutations(child_id, root=self._workspace_root(state).resolve())
             checks = {canonical_digest([row["argv"], row["cwd"], row["image"], row["source_versions"], row["exit_code"]])
                       for row in state.get("verification", [])}
             progress = canonical_digest([versions, sorted(checks)])
@@ -755,19 +761,66 @@ class ModeWorkflow:
             return {"ok": True, "model_turns": grant["model_turns"], "tool_calls": grant["tool_calls"],
                     "renewals_remaining": renewal.adaptive_renewals_remaining(len(grants) + 1)}
 
-    def _refresh_adaptive_history(self, root, resume):
+    def _reconcile_adaptive_context(self, root: Path, state: dict, resume: dict,
+                                    receipts: dict[str, str], *, poll: bool) -> dict:
+        # A settled tool receipt identifies an edit. The checkout supplies the inputs for the next check.
+        read_paths = set(state.get("adaptive_read_drift_paths", ()))
+        observed = {path: self._file_digest(root, path) for path in receipts.keys() | read_paths}
+        messages, stale_reads = self._refresh_adaptive_history(root, resume, observed)
+        read_paths.update(path for path in stale_reads if path not in receipts and observed[path] != "unavailable")
+        versions = {path: observed[path] for path in sorted(receipts.keys() | read_paths)}
+        owned = {path: digest for path, digest in receipts.items() if versions[path] == digest}
+        previous_owned = state.get("adaptive_file_versions", {})
+        previous = state.get("adaptive_source_versions", previous_owned)
+        if not stale_reads and previous == versions and previous_owned == owned:
+            return resume
+
+        changed = sorted(
+            path for path in versions if (poll or path not in owned)
+            and (previous.get(path) != versions[path] or (path in previous_owned and path not in owned))
+        )
+        state.update(adaptive_file_versions=owned, adaptive_source_versions=versions,
+                     adaptive_read_drift_paths=sorted(read_paths), files_changed=sorted(owned))
+        if changed:
+            protected = current_activity_context().protected_text
+            paths = safe_text(", ".join(changed[:8]), limit=400, protected=protected)
+            notice = (f"Repository files changed since the saved observations: {paths}. "
+                      "Continue from the current files. Refresh affected evidence before editing "
+                      "and run the required checks against the current versions.")
+            messages.append({"role": "user", "content": notice})
+            emit_activity("coding.progress", title="Repository changes detected", summary=notice, status="running")
+        return {**resume, "changed_files": sorted(owned), "adaptive_source_changes": bool(versions),
+                "native_messages": messages,
+                "native_continuation": None if stale_reads or changed else resume.get("native_continuation"),
+                "native_seen_evidence": [] if stale_reads else resume.get("native_seen_evidence", []),
+                "verification_results": [row for row in resume.get("verification_results", [])
+                                         if row.get("tool") != ISOLATED_CHECK_TOOL
+                                         or row.get("result", {}).get("source_versions") == versions]}
+
+    def _refresh_adaptive_history(self, root: Path, resume: dict, versions: dict[str, str]) -> tuple[list[dict], set[str]]:
         messages = []
-        stale = False
-        versions = {}
+        stale = set()
         for message in resume.get("native_messages", []):
             if message.get("role") != "tool":
                 messages.append(message)
                 continue
-            result = json.loads(message["content"])
-            for row in result.get("files", [result]):
-                source = row.get("source_evidence") or {}
+            try:
+                result = json.loads(message["content"])
+            except (TypeError, ValueError):
+                messages.append(message)
+                continue
+            if not isinstance(result, dict):
+                messages.append(message)
+                continue
+            updated = False
+            for row in result.get("files", [result]) or [result]:
+                if not isinstance(row, dict) or row.get("stale"):
+                    continue
+                source = row.get("source_evidence")
+                if not isinstance(source, dict) or source.get("source_kind") != "file":
+                    continue
                 path, revision = source.get("path"), source.get("sha256")
-                if path and revision and source.get("source_kind") == "file":
+                if path and revision:
                     if path not in versions:
                         try:
                             versions[path] = self._file_digest(root, path)
@@ -775,12 +828,12 @@ class ModeWorkflow:
                             versions[path] = "unavailable"
                     if versions[path] != revision:
                         row.pop("content", None)
+                        source.pop("excerpt", None)
                         row.update(ok=False, stale=True, error="The file changed since this observation. Refresh only if needed.")
-                        stale = True
-            messages.append({**message, "content": json.dumps(result, ensure_ascii=False)})
-        if stale:
-            return {**resume, "native_messages": messages, "native_continuation": None, "native_seen_evidence": []}
-        return resume
+                        stale.add(path)
+                        updated = True
+            messages.append({**message, "content": json.dumps(result, ensure_ascii=False)} if updated else message)
+        return messages, stale
 
     def _verify_adaptive(self, task_id, child_id, root, state, command):
         from mana_agent.coding.adaptive import AdaptiveVerificationCommand
@@ -788,9 +841,9 @@ class ModeWorkflow:
 
         assert_tool_runner(ISOLATED_CHECK_TOOL)
         operation = current_operation()
-        versions = self._adaptive_mutations(child_id)
-        if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
-            raise PermissionError("Verification requires reconciling a change outside its tool receipt.")
+        receipts = self._adaptive_mutations(child_id, root=root)
+        versions = {path: self._file_digest(root, path)
+                    for path in sorted(receipts.keys() | set(state.get("adaptive_read_drift_paths", ())))}
         run = run_checkout_verification if isinstance(command, AdaptiveVerificationCommand) else run_isolated_verification
         outcome = asyncio.run(run(root, command, task_id=child_id))
         if outcome.get("permission_required"):
@@ -814,11 +867,15 @@ class ModeWorkflow:
             self._persist(task_id, state)
         return {"ok": receipt["passed"], **receipt}
 
-    def _adaptive_mutations(self, child_id) -> dict[str, str]:
+    def _adaptive_mutations(self, child_id: str, *, root: Path) -> dict[str, str]:
+        from mana_agent.coding.adaptive import SHELL_TOOL_NAMES
         from mana_agent.repository_evidence.tool_queue import ToolQueueStore
 
         before, after = {}, {}
+        command_paths, explicit_paths = set(), set()
+        command_tools = SHELL_TOOL_NAMES | {ISOLATED_CHECK_TOOL}
         for receipt in ToolQueueStore(self.board.store.db).operation_receipts(child_id):
+            paths = command_paths if receipt.get("tool_name") in command_tools else explicit_paths
             for mutation in receipt.get("mutations", []):
                 # Older receipts used the host's path separator.
                 path = mutation["path"].replace(os.sep, "/")
@@ -828,17 +885,30 @@ class ModeWorkflow:
                     raise PermissionError(f"Reconcile an uncertain mutation for {label}. "
                                           "Review the checkout before resuming the build.")
                 old_path = (mutation.get("old_path") or "").replace(os.sep, "/")
+                paths.add(path)
                 if old_path:
+                    paths.add(old_path)
                     before.setdefault(old_path, mutation["before_sha256"])
                     after[old_path] = "missing"
                 before.setdefault(path, "missing" if old_path else mutation["before_sha256"] or "missing")
                 after[path] = mutation["after_sha256"] or "missing"
-        return {path: digest for path, digest in after.items() if before[path] != digest}
+        changed = {path: digest for path, digest in after.items() if before[path] != digest}
+        candidates = changed.keys() & (command_paths - explicit_paths)
+        if candidates and (root / ".git").exists():
+            # Git preserves tracked files even when an ignore rule matches them.
+            ignored_paths = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=root,
+                input=b"\0".join(os.fsencode(repository_relative_path(path)) for path in sorted(candidates)) + b"\0",
+                capture_output=True, timeout=15)
+            if ignored_paths.returncode not in {0, 1}:
+                raise RuntimeError("Git could not determine which command outputs are ignored.")
+            for path in ignored_paths.stdout.split(b"\0"):
+                changed.pop(os.fsdecode(path), None)
+        return changed
 
     def _adaptive_checks(self, state, root, *, write):
-        versions = state.get("adaptive_file_versions", {})
+        versions = state.get("adaptive_source_versions", state.get("adaptive_file_versions", {}))
         if any(self._file_digest(root, path) != digest for path, digest in versions.items()):
-            raise PermissionError("Files from the saved coding assignment changed. Reconcile the checkout before continuing.")
+            raise ValueError("Repository files changed. Refresh affected evidence and verify the current versions.")
         checks = {}
         for row in state.get("verification", []):
             if row["expected"] == "pass":
@@ -2185,6 +2255,8 @@ class ModeWorkflow:
                         and row.get("operation_id") and row.get("attempt_id")
                         and (tuple(row["argv"]), row["cwd"]) in checks
                         and targets.issubset(row.get("source_versions", {}))
+                        and (plan is not None or row["source_versions"] == state.get(
+                            "adaptive_source_versions", state.get("adaptive_file_versions", {})))
                         and all(self._file_digest(root, path) == version for path, version in row["source_versions"].items())]
             if not receipts:
                 raise RuntimeError("Runtime reachability requires a passing approved check against the current patched checkout")

@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-25 — Realtime Internal Coding. Resume with current workspace files when settled tool receipts or reads become stale, recheck the current source versions, and omit ignored command artifacts from source reconciliation. See the [incident and user verification command](docs/regressions/unified-adaptive-coding.md#workspace-changes-after-a-tool-receipt). The agent did not run the tests.
+
 - 2026-11-24 — Model capability evidence and tool-choice routing. Record baseline provider `tool_choice` capability facts (`auto`, `required`, `none`, `function`) for OpenAI and Anthropic tool-calling models during profile resolution, support boolean `True`, string, and tuple/set capability values in `supports_value`, allow dotted capability override keys in the configuration UI, accumulate probed tool choice modes in probe results, and guard initial required tool binding in `AskAgent` with capability evidence checks. User verification: `pytest tests/llm/test_registry.py -k "test_tool_choice"`. The agent did not run tests or verification commands.
 
 - 2026-11-22 — Ubuntu Python 3.10 CI. Synchronize Textual activity tests with operation row mounts, completion updates, and expanded details. See the [regression and user verification commands](docs/regressions/agent-activity-visibility.md#ubuntu-ci-live-operation-row-timing). The agent did not run the tests.

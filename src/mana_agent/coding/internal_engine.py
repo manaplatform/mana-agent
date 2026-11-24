@@ -728,7 +728,7 @@ class InternalCodingEngine(CodingEngine):
 
         from mana_agent.llm.engine import NativeLLMEngine
         from mana_agent.llm.errors import InvalidResponseError, StructuredOutputError, describe_decision_validation
-        from mana_agent.llm.messages import AssistantMessage, SystemMessage, ToolResultMessage, UserMessage
+        from mana_agent.llm.messages import AssistantMessage, SystemMessage, ToolResultMessage, UserMessage, messages_from_records
         from mana_agent.repository_evidence.handoff import (
             INVESTIGATION_REPORT_INSTRUCTION, INVESTIGATION_REPORT_TOOL, MISSING_EVIDENCE_INSTRUCTION,
             investigation_result_schema, validate_investigation_report_arguments,
@@ -895,8 +895,8 @@ class InternalCodingEngine(CodingEngine):
         if saved_native.get("native_pending_calls"):
             raise RuntimeError("Interrupted native tool results require supervisor receipt reconciliation before continuation")
         if saved_native.get("native_messages"):
-            from mana_agent.llm.messages import messages_from_records
-            messages = messages_from_records(saved_native["native_messages"])
+            history = messages_from_records(saved_native["native_messages"])
+            messages = history if history[0].role == "system" else [*messages, *history]
             if investigation:
                 messages.append(UserMessage(INVESTIGATION_REPORT_INSTRUCTION))
             elif task.context.get("coding_continuation_id"):
@@ -921,18 +921,36 @@ class InternalCodingEngine(CodingEngine):
         terminal_rejections = 0
         missing_action_corrected = False
         selection_corrections = set(saved_native.get("native_selection_corrections", ())) if adaptive_write else set()
+        source_changes = bool(saved_native.get("adaptive_source_changes"))
         renewal_available = callable(renew_budget)
         renewal_waiting_for_progress = False
         evidence_misses = 0
         max_evidence_misses = getattr(self, "max_no_progress_cycles", 3)
 
-        def checkpoint():
-            if callable(getattr(self, "save_native_continuation", None)):
-                self.save_native_continuation({key: getattr(session.state, key) for key in (
-                    "changed_files", "commands_run", "verification_results", "executed_operations",
-                    "native_continuation", "native_messages", "native_pending_calls",
-                )} | {"native_seen_evidence": sorted(seen_evidence),
-                      "native_selection_corrections": sorted(selection_corrections)})
+        def checkpoint(*, poll=False):
+            nonlocal continuation, messages, source_changes
+            save = getattr(self, "save_native_continuation", None)
+            if not callable(save):
+                return False
+            session.state.native_messages = [message.model_dump(mode="json") for message in messages]
+            context = {key: getattr(session.state, key) for key in (
+                "changed_files", "commands_run", "verification_results", "executed_operations",
+                "native_continuation", "native_messages", "native_pending_calls",
+            )} | {"native_seen_evidence": sorted(seen_evidence),
+                  "native_selection_corrections": sorted(selection_corrections),
+                  "adaptive_source_changes": source_changes}
+            refreshed = save(context, poll=poll)
+            if refreshed is None or refreshed is context:
+                return False
+            for key in ("changed_files", "verification_results", "native_messages", "native_continuation"):
+                setattr(session.state, key, refreshed[key])
+            messages = messages_from_records(session.state.native_messages)
+            source_changes = refreshed["adaptive_source_changes"]
+            seen_evidence.clear()
+            seen_evidence.update(refreshed["native_seen_evidence"])
+            if session.state.native_continuation is None:
+                continuation = None
+            return True
 
         def request_selection_correction(code: str, detail: str, budget: AdaptiveWriteBudget):
             session.state.native_messages = [message.model_dump(mode="json") for message in messages]
@@ -961,7 +979,7 @@ class InternalCodingEngine(CodingEngine):
             offered_names: set[str] = set()
             if adaptive_write:
                 tool_reserve = 2
-                if session.state.changed_files:
+                if session.state.changed_files or source_changes:
                     isolated_checks = [receipt for receipt in session.state.verification_results
                                        if receipt.get("tool") == ISOLATED_CHECK_TOOL]
                     if not isolated_checks:
@@ -1027,6 +1045,11 @@ class InternalCodingEngine(CodingEngine):
                 for name, value in usage.model_dump().items():
                     if isinstance(value, int):
                         session.state.total_tokens[name] = session.state.total_tokens.get(name, 0) + value
+            if adaptive_mode and checkpoint(poll=True):
+                # The response was based on older source. Ask for a fresh selection before dispatch.
+                evidence_misses = 0
+                turn += 1
+                continue
             raw_tool_calls = getattr(response, "tool_calls", None) or []
             protocol_pending = getattr(response, "protocol_pending", False)
             protocol_events = getattr(response, "protocol_events", ())
@@ -1113,6 +1136,7 @@ class InternalCodingEngine(CodingEngine):
                             messages.append(ToolResultMessage(content=json.dumps({
                                 "ok": False, "error_code": "CODING_RESULT_REJECTED", "error": detail,
                             }), tool_call_id=requested["id"], caller=requested.get("caller")))
+                        session.state.native_pending_calls = []
                         turn += 1
                         continue
                 if not tool_calls:
