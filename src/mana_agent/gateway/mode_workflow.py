@@ -512,6 +512,7 @@ class ModeWorkflow:
                 try:
                     with self._activity(child.task_id, state, read_only=not write):
                         result = self._run_adaptive_model(task_id, child.task_id, state, root, write, configured)
+                        self._remember_adaptive_searches(parent, child.task_id, root)
                     if result.get("adaptive_result") is None:
                         detail = "\n".join(result.get("errors") or []) or result.get("answer") or "No coding result was returned."
                         if result.get("human_input", {}).get("inbox_item_id"):
@@ -2809,6 +2810,34 @@ class ModeWorkflow:
                       operation_id=operation_id, duration_ms=outcome["duration_ms"])
         if not outcome["passed"]:
             raise VerificationFailed(command, outcome)
+
+    def _remember_adaptive_searches(self, parent, child_id, root):
+        if not getattr(getattr(self.gateway, "config", None), "coding_memory", False):
+            return
+        from mana_agent.repository_evidence.models import EvidenceRef
+        from mana_agent.services.coding_memory_service import CodingMemoryService
+
+        try:
+            with current_activity_context().publication():
+                self._check_live(child_id)
+                board = self.board.evidence_board(root=root)
+                flow_id = canonical_digest([parent.workspace_id, parent.primary_repository_id, parent.task_id])
+                memory = None
+                for value in self.board.get_task(child_id).evidence_refs:
+                    ref = EvidenceRef.model_validate(value)
+                    record = board.get(ref, refresh=False)
+                    observation = record.observation
+                    if record.validation != "supported" or not observation.get("match_locations"):
+                        continue
+                    if memory is None:
+                        memory = CodingMemoryService(project_root=root, session_id=parent.session_id)
+                        memory.ensure_flow(flow_id=flow_id, request=parent.user_request, activate=False)
+                    memory.record_tool_call(flow_id=flow_id, tool_name=observation["tool"],
+                        arguments={"evidence_ref": ref.model_dump(mode="json")},
+                        result={"match_locations": observation["match_locations"], "truncated": observation["truncated"]},
+                        status="observed", deduplicate=True)
+        except (KeyError, OSError, ValueError, sqlite3.Error) as exc:
+            logger.warning("Coding search history unavailable: %s", type(exc).__name__)
 
     def _remember_verification(self, plan, outcome):
         if not getattr(getattr(self.gateway, "config", None), "coding_memory", False):

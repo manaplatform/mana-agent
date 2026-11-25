@@ -718,6 +718,12 @@ class AskAgent:
         if bool(args.get("regex", False)):
             payload["regex"] = True
             payload["q"] = raw
+        if any(key in args for key in ("globs", "exclude_dirs", "case_sensitive", "context")):
+            from mana_agent.tools.repository_search import search_selection_key
+
+            selected = search_selection_key(tool_name, args)
+            if selected is not None:
+                return cls.tool_signature(tool_name, {"selection": selected})
         return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
     @classmethod
@@ -1899,10 +1905,13 @@ class AskAgent:
                 ))
 
         def repo_search(query: str, glob: str = "**/*", regex: bool = False, limit: int = 100,
-                        paths: list[str] | None = None, repository_reason: str = "") -> str:
+                        paths: list[str] | None = None, repository_reason: str = "",
+                        globs: list[str] | None = None, exclude_dirs: list[str] | None = None,
+                        case_sensitive: bool = True, context: int = 0) -> str:
             started = perf_counter()
             args = {"query": query, "glob": glob, "regex": regex, "limit": limit,
-                    "paths": paths, "repository_reason": repository_reason}
+                    "paths": paths, "repository_reason": repository_reason, "globs": globs,
+                    "exclude_dirs": exclude_dirs, "case_sensitive": case_sensitive, "context": context}
             result = discover("repo_search", args)
             record_matches(result)
             encoded = dumps_tool_result(result)
@@ -1938,9 +1947,11 @@ class AskAgent:
             return content
 
         def list_files(glob: str = "**/*", limit: int = 200, paths: list[str] | None = None,
-                       repository_reason: str = "") -> str:
+                       repository_reason: str = "", globs: list[str] | None = None,
+                       exclude_dirs: list[str] | None = None) -> str:
             return dumps_tool_result(discover("list_files", {
                 "glob": glob, "limit": limit, "paths": paths, "repository_reason": repository_reason,
+                "globs": globs, "exclude_dirs": exclude_dirs,
             }))
 
         def find_symbols(query: str = "", limit: int = 100, glob: str = "**/*",

@@ -29,7 +29,38 @@ top-level `ls` are ordinary tool choices alongside edits and checks. Each source
 `evidence_need` with the missing fact and the edit or check it could affect.
 Searches name specific paths or a targeted glob. Use `ls` when the top-level
 location is unknown. An edit or useful diagnostic can be the first action, and
-a failing check can lead to another scoped read.
+a failing check can lead directly to a scoped search and patch. DEBUG uses
+the error and affected paths to guide searches for declarations and imports.
+AUTO inspects additional source as implementation and verification uncover
+questions.
+
+`repo_search` and `list_files` use `rg` and `rg --files` through the
+existing command runtime. Without ripgrep, a case-sensitive literal query
+over explicitly selected Git checkout files can use `git grep`. Other
+selections use a portable fallback, including regular expressions that
+need Python syntax. Search runs in the assigned checkout, with protected
+paths, skipped directories, and symbolic links excluded. It covers
+eligible untracked files and preserves the structured tools' search
+coverage across ignore rules. Native tool activity shows the executed
+arguments, exit code, duration, and a bounded result preview.
+
+Supply `glob` or alternative `globs`, including `**/*.{ts,tsx}`, and
+optional literal `exclude_dirs`. Slashless exclusions apply at any depth.
+`repo_search` defaults to case-sensitive literal matching. Set `regex`
+or `case_sensitive` to change matching, and set `context` to return up to
+ten surrounding lines on either side. Search status distinguishes matches,
+empty results, invalid patterns, permission errors, timeouts, and execution
+errors. If a backend is missing, results identify it and the backend used.
+Search again with a different query or scope, or read an identified file.
+Equivalent searches within the same source state are stopped before a
+second command launches. A write or detected checkout drift allows a new
+search. Empty results can guide the next decision, but provide no progress
+credit. Coding can report a concrete blocker if recovery runs out.
+
+The Evidence Board retains bounded observed match locations and provenance.
+When coding memory is enabled, the adaptive attempt mirrors supported search
+observations using their evidence references. Read or cite current source
+when verifying a finding.
 
 The loop shows the remaining tool calls and model turns before each decision.
 It leaves capacity for an edit and a focused check before the first change and
@@ -43,6 +74,8 @@ limit. See the [search correction regression](regressions/unified-adaptive-codin
 After a source-inspection shell rejection, Coding pauses the generic shell
 tools while the model corrects its selection. The model can use offered
 repository tools, edits, or `verify_coding_change` with direct arguments.
+For an advanced search outside the structured options, `run_command`
+accepts a direct `argv` array and applies its existing approval policy.
 For a top-level `ls`, supply only `evidence_need`. Provider argument errors
 refer to the offered schema for the affected tool. The pending correction
 survives a saved continuation. See the [shell inspection incident](regressions/unified-adaptive-coding.md#shell-inspection-repeated-during-correction).
@@ -184,8 +217,8 @@ High-throughput batch tools allow models to perform multiple operations in a sin
 - `batch_read_files`: Concurrently reads multiple repository files with per-file SHA-256 hashes, line range slicing, and size caps.
 - `batch_write_files`: Staged atomic writes into temporary files with optimistic concurrency check (`expected_sha256`) and transactional rollback on partial failure.
 - `batch_apply_patches`: Multi-file Codex patch application with dry-run validation pass and rollback support.
-- `batch_search_files`: Concurrent regex and literal searches across repository text.
-- `batch_list_files`: Evaluates multiple glob patterns in a single filesystem pass.
+- `batch_search_files`: Scoped regex or literal searches with per-query results and one shared deadline.
+- `batch_list_files`: Scoped file listings with per-pattern limits and counts that indicate whether capture was complete.
 - `batch_move_files`: Relocates files safely with boundary checks and rollback.
 - `batch_delete_files`: Safe multi-file deletion preventing directory removal and path escapes.
 

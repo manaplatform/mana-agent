@@ -142,9 +142,15 @@ def ingest_operation(authority, result) -> None:
     observation = {"tool": result.tool_name, "status": result.status, "exit_code": result.exit_code,
                    "operation_id": result.operation_id}
     if result.tool_name in {"repo_search", "batch_search_files", "repo_batch_search"}:
-        matches = result.result.get("matches", result.result.get("results", []))
+        rows = result.result.get("results", [result.result])
+        locations = list(dict.fromkeys((match["file"], match["line"])
+                                       for row in rows if row.get("ok")
+                                       for match in row.get("matches", [])))
+        observation["search_status"] = result.result.get("search_status", result.status)
+        observation["match_locations"] = [{"file": path, "line": line} for path, line in locations[:50]]
+        observation["truncated"] = len(locations) > 50 or any(row.get("truncated") for row in rows)
         observation["content_digest"] = sha256(json.dumps(
-            [matches, result.result.get("truncated")], sort_keys=True).encode()).hexdigest()
+            [(row.get("matches", []), row.get("truncated")) for row in rows], sort_keys=True).encode()).hexdigest()
     selected_policy = authority.policies.get(result.tool_name)
     category = "test_results" if selected_policy and selected_policy.capability == "test_execution" else "code_behavior" if sources and sources[0].source_kind == "file" else "error_observation" if result.status != "success" else "repository_structure"
     record = board.record_observation(

@@ -7,12 +7,15 @@ import pytest
 
 from mana_agent.agent.plan_service import EvidenceRequest, PlanService
 from mana_agent.coding.programmatic import ToolExecutionDispatcher
-from mana_agent.tools import repository
+from mana_agent.tools import repository, repository_search
 from mana_agent.multi_agent.agents import tool_runner_agent
 
 
 @pytest.fixture
 def checkout(tmp_path, monkeypatch):
+    # Python-level spies see file accesses only in the portable backend. Native
+    # execution and its argv scoping have separate repository-tool regressions.
+    monkeypatch.setattr(repository_search, "_executable", lambda _: None)
     root = tmp_path / "project"
     expected = {
         "runtime/command.py": "def run_command():\n    return authorize()\n",
@@ -115,7 +118,7 @@ def test_unscoped_content_search_requires_a_model_selection_then_can_expand(chec
     assert ".env" not in opens
 
 
-def test_batch_search_shares_traversal_and_content(checkout):
+def test_batch_search_keeps_each_query_within_its_selected_files(checkout):
     root, opens, walks = checkout
     worker = ToolExecutionDispatcher.for_coding_task(repo_root=root, task_id="batch-search")
     result = worker.dispatch("repo_batch_search", {"patterns": [
@@ -123,7 +126,7 @@ def test_batch_search_shares_traversal_and_content(checkout):
         {"query": "authorize", "paths": ["runtime/command.py"]},
     ]})
     assert result["ok"] and all(row["matches"] for row in result["results"])
-    assert opens == ["runtime/command.py", "runtime/command.py"]  # Binary probe plus shared text read.
+    assert opens == ["runtime/command.py", "runtime/command.py"]
     assert not walks
 
 

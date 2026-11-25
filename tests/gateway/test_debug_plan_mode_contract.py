@@ -77,6 +77,7 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
     from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+    from mana_agent.repository_evidence.models import EvidenceRef
 
     gateway, workflow = mode_gateway
     filename = "src/handler.py" if mode == "auto" else "app.py"
@@ -96,13 +97,13 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
         if not passed and check_changes_source:
             (root / "other.py").write_text("other = 2\n")
         outcome = {"passed": passed, "exit_code": 0 if passed else failed_exit_code,
-                   "output": "passed" if passed else "check failed"}
+                   "output": "passed" if passed else f"{filename}:1: typecheck found 'first attempt'"}
         if check_has_setup:
             outcome["setup_receipts"] = [{"exit_code": 1 if not passed and first_check == "setup_failure" else 0}]
         return outcome
 
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
-    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"],
+    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "typecheck.py"],
                                   **({"setup_argv": [["python", "setup.py"]]} if check_has_setup else {})})
     selections = []
     if mode == "auto":
@@ -112,8 +113,11 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
         ("read_file", {"path": filename, "evidence_need": "Confirm the handler body before editing it."}),
         ("write_file", {"path": filename, "content": "first attempt\n"}),
         verify,
-        ("read_file", {"path": filename, "evidence_need": "Confirm the emitted value before repairing the failed check."}),
-        ("write_file", {"path": filename, "content": "fixed\n"}),
+        ("repo_search", {"query": "first attempt", "paths": [filename], "glob": "**/*.{py,",
+                         "evidence_need": "Find the value flagged by the typecheck."}),
+        ("repo_search", {"query": "first attempt", "paths": [filename],
+                         "evidence_need": "Locate the value flagged by the typecheck before patching it."}),
+        ("apply_patch", {"patch": f"*** Begin Patch\n*** Update File: {filename}\n@@\n-first attempt\n+fixed\n*** End Patch"}),
     ])
     if mode == "auto":
         selections.append(("write_file", {"path": "other.py", "content": "other = 1\n"}))
@@ -129,14 +133,19 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
         async def generate(self, messages, *, continuation):
             if self.index:
                 observation = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
-                previous = selections[self.index - 1][0]
+                previous, previous_arguments = selections[self.index - 1]
                 if previous == "repo_search":
-                    assert any(match["file"] == filename for match in observation["matches"])
+                    if "glob" in previous_arguments:
+                        assert observation["search_status"] == "invalid_pattern"
+                    else:
+                        assert any(match["file"] == filename for match in observation["matches"])
                 if previous == ISOLATED_CHECK_TOOL:
                     is_first_check = self.index == selections.index(verify) + 1
                     assert observation.get("exit_code") == (failed_exit_code if is_first_check else 0), observation
-                if previous == "read_file" and self.index > selections.index(verify):
-                    assert observation["content"] == "first attempt\n"
+                    if is_first_check:
+                        assert "typecheck" in observation["output"]
+                if previous == "repo_search" and "glob" not in previous_arguments and self.index > selections.index(verify):
+                    assert observation["matches"] == [{"file": filename, "line": 1, "text": "first attempt"}]
             name, args = selections[self.index]
             self.index += 1
             assert name in self.tools
@@ -162,7 +171,10 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     checks = result.data["verification"]
     assert [check["exit_code"] for check in checks] == expected_exits
     assert len({check["attempt_id"] for check in checks}) == 1
-    assert children[0].evidence_refs
+    evidence_board = workflow.board.evidence_board(root=gateway.root)
+    evidence = [evidence_board.get(EvidenceRef.model_validate(ref), refresh=False)
+                for ref in children[0].evidence_refs]
+    assert any({"file": filename, "line": 1} in row.observation.get("match_locations", []) for row in evidence)
     actions = workflow.lane.execution_supervisor.store.actions_for_task(children[0].task_id)
     failed_check, = [action for action in actions if action.tool_name == ISOLATED_CHECK_TOOL
                      and action.verification_state["status"] == "failed"]

@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
@@ -619,7 +620,9 @@ def batch_list_files(
 ) -> dict[str, Any]:
     """List repository files matching multiple patterns in a single filesystem traversal."""
     root = repo_root.resolve()
-    from mana_agent.tools.repository import _discovery_files, _glob_root, _selected_discovery_scope
+    from mana_agent.tools.repository import _discovery_files, _glob_root, _selected_discovery_scope, list_files
+    from mana_agent.tools.repository_search import SEARCH_TIMEOUT_SECONDS
+    deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
 
     query_specs: list[dict[str, Any]] = []
     for item in queries or ["**/*"]:
@@ -641,6 +644,13 @@ def batch_list_files(
         except (TypeError, ValueError) as exc:
             errors.append({"pattern": pat, "error": str(exc)})
             grouped_results.append({"pattern": pat, "files": [], "total_matches": 0, "truncated": False})
+            continue
+        if model_selected:
+            result = list_files(root, glob=pat, globs=spec.get("globs"), exclude_dirs=spec.get("exclude_dirs"),
+                                scope=scope, limit=lim, count_all=True, deadline=deadline)
+            grouped_results.append({**result, "pattern": pat})
+            if not result["ok"]:
+                errors.append({"pattern": pat, "error": result["error"], "error_code": result["error_code"]})
             continue
         key = (_glob_root(pat), scope)
         if key not in listings:

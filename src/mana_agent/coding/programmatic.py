@@ -172,7 +172,10 @@ class ToolExecutionDispatcher:
         from mana_agent.coding.scheduler import OperationReadCache
 
         self.read_cache = OperationReadCache(ttl_seconds=cache_ttl_seconds) if cache_enabled else None
-        self._read_locks: dict[str, threading.Lock] = {}
+        self._read_locks: dict[str | tuple, threading.Lock] = {}
+        self._search_generation = 0
+        self._completed_searches: dict[tuple, str] = {}
+        self._search_lock = threading.Lock()
         self.runner = None
         self.allowed_tools: frozenset[str] | None = None
         self.evidence_tools: CodingEvidenceTools | None = None
@@ -253,6 +256,11 @@ class ToolExecutionDispatcher:
         policy = self.runner.authority.policies[name]
         return self.workspace.sandbox != "readOnly" or policy.effect == "read_only"
 
+    def invalidate_searches(self) -> None:
+        with self._search_lock:
+            self._search_generation += 1
+            self._completed_searches.clear()
+
     def dispatch(self, tool_name: str, arguments: dict[str, Any], *, call_id: str = "", _cached_result: dict[str, Any] | None = None) -> dict[str, Any]:
         """Submit exactly one selected operation to the deterministic worker."""
         from mana_agent.multi_agent.agents.tool_runner_agent import ExecutionAuthorityError
@@ -285,18 +293,46 @@ class ToolExecutionDispatcher:
                 selected_arguments["_mana_call_id"] = cid
             try:
                 return self._execute_builtin_tool(name, selected_arguments)
+            except (InterruptedError, TimeoutError):
+                raise
             except Exception as exc:
                 return {"ok": False, "error": str(exc), "error_code": "TOOL_EXECUTION_ERROR"}
 
         def execute(selected_arguments):
-            if self.read_cache is None or name in self.extra_tools or tool_name in self.extra_tools:
+            if policy.effect != "read_only":
+                return execute_once(selected_arguments)
+            if name in self.extra_tools or tool_name in self.extra_tools:
+                return execute_once(selected_arguments)
+            from mana_agent.tools.repository_search import search_selection_key
+
+            search_key = search_selection_key(name, selected_arguments)
+            if search_key is not None:
+                with self._read_locks.setdefault(search_key, threading.Lock()):
+                    with self._search_lock:
+                        generation = self._search_generation
+                        previous = self._completed_searches.get(search_key)
+                    if previous is not None:
+                        return {"ok": False, "search_status": "repeated_search",
+                                "error_code": "REPEATED_SEARCH",
+                                "error": f"Equivalent search already ran ({previous}). Use its result, change scope "
+                                         "or query, or read a relevant file directly."}
+                    result = execute_once(selected_arguments)
+                    status = result.get("search_status")
+                    if status is None and result.get("results"):
+                        status = "batch completed" if result.get("ok") else "batch returned errors"
+                    if status:
+                        with self._search_lock:
+                            if self._search_generation == generation:
+                                self._completed_searches[search_key] = status
+                    return result
+            if self.read_cache is None:
                 return execute_once(selected_arguments)
             if name == "read_file":
                 paths = [selected_arguments.get("path")]
             elif name in {"repo_batch_read", "batch_read_files"}:
                 paths = [item.get("path") if isinstance(item, dict) else item
                          for item in selected_arguments.get("files", [])]
-            elif name in {"repo_search", "find_symbols", "call_graph", "list_files"}:
+            elif name in {"find_symbols", "call_graph"}:
                 paths = selected_arguments.get("paths") or []
             else:
                 return execute_once(selected_arguments)
@@ -322,7 +358,10 @@ class ToolExecutionDispatcher:
             from mana_agent.multi_agent.agents.tool_runner_agent import model_result
             if name != INVESTIGATE and callable(getattr(self, "charge_tool", None)):
                 self.charge_tool()
-            return model_result(self.runner.execute(request, execute), self.runner.authority)
+            result = self.runner.execute(request, execute)
+            if policy.effect == "mutation" or result.mutations:
+                self.invalidate_searches()
+            return model_result(result, self.runner.authority)
         except (ExecutionAuthorityError, ValueError) as exc:
             return {"ok": False, "error_code": "SANDBOX_VIOLATION" if self.workspace.sandbox == "readOnly" else "EXECUTION_AUTHORITY_REJECTED", "error": str(exc)}
 
@@ -370,13 +409,12 @@ class ToolExecutionDispatcher:
             from mana_agent.repository_evidence.observations import read_directory
             return read_directory(self.repo_root)
 
-        elif name == "list_files" and args.get("paths") == ["."] and not args.get("repository_reason"):
+        elif (name == "list_files" and args.get("paths") == ["."] and not args.get("repository_reason")
+              and not args.get("globs") and not args.get("exclude_dirs") and args.get("glob", "**/*") == "**/*"):
             from mana_agent.repository_evidence.observations import read_directory
-            from mana_agent.tools.repository import _matches_file_glob
             manifest = read_directory(self.repo_root)
             limit = max(1, min(int(args.get("limit") or 200), 5000))
-            pattern = str(args.get("glob") or "**/*")
-            selected = [path for path in manifest.get("files", []) if _matches_file_glob(path, pattern)]
+            selected = manifest.get("files", [])
             return {**manifest, "files": selected[:limit], "limit": limit,
                     "truncated": bool(manifest.get("truncated") or len(selected) >= limit)}
 
@@ -503,6 +541,9 @@ class ToolExecutionDispatcher:
             )
 
         elif name in {"run_command", "run_script_once", "shell"}:
+            direct_argv = args.get("argv") if name == "run_command" else None
+            if direct_argv is not None and any(key in args for key in ("cmd", "command", "script", "commands", "action")):
+                raise ValueError("Select argv or a shell command string")
             shell_action = args.get("action") if name == "shell" else None
             if shell_action is not None and not isinstance(shell_action, dict):
                 raise ValueError("shell action must be an object")
@@ -521,7 +562,7 @@ class ToolExecutionDispatcher:
                 cmd = commands[0]
             else:
                 cmd = str(args.get("command") or args.get("script") or args.get("cmd") or "")
-            if not cmd.strip():
+            if direct_argv is None and not cmd.strip():
                 raise ValueError("command must not be empty")
             cwd = args.get("cwd")
             if ("timeout_ms" in shell_action and "timeout_ms" in args
@@ -541,7 +582,8 @@ class ToolExecutionDispatcher:
             approval_id = str(args.get("action_approval_id") or "").strip()
             current_task_id = self.task_id or "internal-coding"
             operation_key = hashlib.sha256(json.dumps({"task_id": self.task_id,
-                "call_id": args["_mana_call_id"], "command": cmd, "cwd": str(working)}, sort_keys=True).encode()).hexdigest()
+                "call_id": args["_mana_call_id"], "command": cmd if direct_argv is None else direct_argv,
+                "cwd": str(working)}, sort_keys=True).encode()).hexdigest()
             # Resume only the original action. Never translate a foreign grant,
             # retry a rejected grant without it, or let a model impersonate a reviewer.
             approved_action = None
@@ -552,7 +594,7 @@ class ToolExecutionDispatcher:
                     return {"ok": False, "error_code": "INVALID_APPROVAL", "error": "Approval is missing or belongs to a different task."}
                 operation_key = approved_action.idempotency_key
             safe_adapter = ShellActionAdapter(
-                argv=local_shell_argv(cmd), cwd=working, environment={},
+                argv=local_shell_argv(cmd) if direct_argv is None else direct_argv, cwd=working, environment={},
                 parent_task_id=current_task_id, actor="user",
                 originating_agent="internal_coding", policy_context={"tool": name},
                 idempotency_key=operation_key, timeout_seconds=timeout_s,

@@ -133,11 +133,11 @@ class OperationRow(Collapsible):
         meta = event.get("metadata") or {}
         body = [operation_details(event)]
         for key, label in (
-            ("duration_ms", "Duration (ms)"), ("display_arguments", "Arguments"),
+            ("duration_ms", "Duration (ms)"), ("exit_code", "Exit code"), ("display_arguments", "Arguments"),
             ("display_argv", "Command arguments"), ("tool_name", "Tool"), ("backend", "Backend"),
             ("agent_id", "Agent"), ("parent_agent_id", "Parent agent"), ("task_id", "Task"),
             ("attempt_id", "Attempt"), ("operation_attempt_id", "Operation attempt"),
-            ("result_summary", "Result"), ("error", "Error"),
+            ("result_summary", "Result"), ("error", "Error"), ("termination_reason", "Termination"),
         ):
             value = meta.get(key, event.get(key))
             if value is not None and value != "" and value != [] and value != {}:

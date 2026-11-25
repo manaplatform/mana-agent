@@ -13,19 +13,41 @@ The repository matcher passed brace syntax to Python's `fnmatch`, which treats
 the braces literally. The matcher expands bounded comma-separated alternatives
 before matching, including for batched searches and file listings. Malformed
 brace patterns return a discovery error. Existing path scope and file filters
-continue to apply. The native command-backed search refactor remains pending.
+continue to apply. The older matcher also failed to distinguish certain
+invalid filters from empty results and had no command receipt for operators
+to inspect. Those gaps made repeated empty observations harder to diagnose.
+
+Structured text search and file listing now use ripgrep through the existing
+command runtime, with bounded glob normalization and repository-relative
+arguments. An unavailable ripgrep can select Git grep for compatible explicit
+file searches, including untracked files, or the portable implementation.
+An invalid pattern, permission error, timeout, or execution failure is
+reported to Coding as an explicit outcome. The portable matcher remains in
+use for machines without native utilities. Evidence fingerprints omit
+transient timing and backend metadata. Coding rejects an equivalent search
+before launch until the observed source state changes. It may proceed directly
+from a failed typecheck through a focused search to a patch in the same
+assignment.
+
 When replanning still produces no progress, the coding loop gives the model one
 remaining turn to submit a typed outcome describing its blocker and completed
 work. Further tool actions stop the attempt. Existing completion checks apply.
 
 **Do not reintroduce** literal interpretation of brace alternatives as an
-empty search result. Keep search results confined to the selected scope.
+empty search result, silent fallback after a search error, or search command
+replays for equivalent selections on the same source state. Keep the selected
+scope and all command and evidence authority checks in force.
 
-User verification covers declaration discovery and invalid patterns.
+Run the commands below on Windows, macOS, and Linux with ripgrep and Git
+available. The tests also force executable absence to exercise portable
+search, verify error outcomes, and cover a failed typecheck followed by a
+targeted search and patch. The agent did not run these tests.
 
 ```sh
-venv/bin/python -m pytest -q tests/test_repository_tools.py -k 'brace_glob or invalid_brace'
-venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_reports_blocker_after_repeated_reads
+python -m pytest -q tests/test_repository_tools.py tests/test_intent_driven_discovery.py tests/coding/test_tool_runner_execution.py
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k adaptive_coding_edits_and_repairs_on_one_assignment
+python -m pytest -q tests/coding/test_approval_binding_regressions.py -k direct_command_argv
+python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_reports_blocker_after_repeated_reads
 ```
 
 ## Symptom and cause

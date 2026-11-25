@@ -227,18 +227,22 @@ def _selected_discovery_scope(
             raise ValueError("Discovery paths must be relative strings")
         normalized.append(normalize_discovery_path(raw, allow_root_listing=allow_root_listing))
 
-    glob = str(args.get("glob") or "**/*").replace("\\", "/")
-    if glob.startswith("/") or ".." in glob.split("/") or "\x00" in glob or ":" in glob:
-        raise ValueError("Discovery globs must be repository-relative")
-    _expand_file_glob(glob)
+    from mana_agent.tools.repository_search import directory_filters, file_filters
+
+    filters = file_filters(str(args.get("glob") or "**/*"), args.get("globs"))
+    directory_filters(args.get("exclude_dirs"))
     if normalized:
         return tuple(dict.fromkeys(normalized))
-    if _glob_root(glob):
-        return None  # Traversal is anchored at the literal directory prefix.
-    name = glob.rsplit("/", 1)[-1]
-    stem = name.rsplit(".", 1)[0] if "." in name else name
-    if any(char.isalnum() for char in re.sub(r"\[[^]]*\]", "", stem)):
-        return None  # Only matching candidates are opened; names may be visited.
+
+    def targeted(glob: str) -> bool:
+        if _glob_root(glob):
+            return True
+        name = glob.rsplit("/", 1)[-1]
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        return any(char.isalnum() for char in re.sub(r"\[[^]]*\]", "", stem))
+
+    if filters and all(targeted(pattern) for pattern in filters):
+        return None
     reason = args.get("repository_reason")
     if isinstance(reason, str) and reason.strip():
         if not repository_search_allowed:
@@ -279,6 +283,8 @@ def execute_repository_discovery(
     root: Path, tool: str, args: dict[str, Any], *, repository_search_allowed: bool = True,
 ) -> dict[str, Any]:
     """Execute a model-selected discovery operation; missing scope never triggers a scan."""
+    from mana_agent.tools.repository_search import InvalidSearchPattern
+
     if tool in {"repo_batch_search", "batch_search_files"}:
         result = repo_batch_search(root, patterns=args.get("patterns") or [], model_selected=True,
                                    repository_search_allowed=repository_search_allowed,
@@ -298,18 +304,26 @@ def execute_repository_discovery(
             ),
         }
         if tool == "list_files":
-            return list_files(root, limit=int(args.get("limit") or 200), **options)
+            return list_files(root, limit=int(args.get("limit") or 200), globs=args.get("globs"),
+                              exclude_dirs=args.get("exclude_dirs"), **options)
         query = str(args.get("query") or "")
         limit = int(args.get("limit") or 100)
         if tool == "repo_search":
-            return repo_search(root, query=query, regex=bool(args.get("regex")), limit=limit, **options)
+            return repo_search(root, query=query, limit=limit, **options, **_text_search_options(args))
         if tool == "find_symbols":
             return find_symbols(root, query=query, limit=limit, **options)
         if tool == "call_graph":
             return call_graph(root, query=query, limit=limit, **options)
         raise ValueError("Unknown repository discovery tool")
-    except (ValueError, re.error) as exc:
-        return {"ok": False, "error": str(exc), "error_code": "INVALID_DISCOVERY_SELECTION"}
+    except (TypeError, ValueError, re.error) as exc:
+        status = "invalid_pattern" if isinstance(exc, InvalidSearchPattern) else "invalid_selection"
+        return {"ok": False, "error": str(exc), "error_code": "INVALID_DISCOVERY_SELECTION", "search_status": status}
+
+
+def _text_search_options(args: dict[str, Any]) -> dict[str, Any]:
+    return {"globs": args.get("globs"), "exclude_dirs": args.get("exclude_dirs"),
+            "regex": bool(args.get("regex")), "case_sensitive": args.get("case_sensitive", True),
+            "context": max(0, min(int(args.get("context") or 0), 10))}
 
 
 def _is_binary(path: Path) -> bool:
@@ -357,62 +371,32 @@ def _matches_file_glob(rel_path: str, pattern: str) -> bool:
 
 
 def list_files(repo_root: Path, *, glob: str = "**/*", limit: int = 200,
-               scope: tuple[str, ...] | None = None) -> dict[str, Any]:
-    """List repository files with deterministic ordering."""
+               scope: tuple[str, ...] | None = None, globs: list[str] | None = None,
+               exclude_dirs: list[str] | None = None, count_all: bool = False,
+               deadline: float | None = None) -> dict[str, Any]:
+    """List repository files via the same scoped backend as text search."""
+    from mana_agent.tools.repository_search import directory_filters, file_filters, search_repository
 
-    root = repo_root.resolve()
-    pattern = str(glob or "**/*")
-    _expand_file_glob(pattern)
-    max_items = max(1, min(int(limit or 200), 5000))
-    files: list[str] = []
-    for path in _discovery_files(root, pattern, scope):
-        rel = path.relative_to(root).as_posix()
-        if _matches_file_glob(rel, pattern):
-            files.append(rel)
-            if len(files) >= max_items:
-                break
-    return {"ok": True, "files": files, "limit": max_items, "truncated": len(files) >= max_items}
+    return search_repository(repo_root.resolve(), filters=file_filters(glob, globs),
+                             exclusions=directory_filters(exclude_dirs),
+                             limit=max(1, min(int(limit or 200), 5000)), scope=scope, count_all=count_all,
+                             deadline=deadline)
 
 
 def repo_search(
-    repo_root: Path,
-    *,
-    query: str,
-    glob: str = "**/*",
-    regex: bool = False,
-    limit: int = 100,
-    scope: tuple[str, ...] | None = None,
+    repo_root: Path, *, query: str, glob: str = "**/*", regex: bool = False, limit: int = 100,
+    scope: tuple[str, ...] | None = None, globs: list[str] | None = None,
+    exclude_dirs: list[str] | None = None, case_sensitive: bool = True, context: int = 0,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
-    """Search text files in the repository."""
+    """Search text files within the selected repository scope."""
+    from mana_agent.tools.repository_search import directory_filters, file_filters, search_repository
 
-    root = repo_root.resolve()
-    needle = str(query or "")
-    if not needle:
-        return {"ok": False, "error": "query is required", "matches": []}
-    _expand_file_glob(glob)
-    max_items = max(1, min(int(limit or 100), 1000))
-    pattern = re.compile(needle) if regex else None
-    matches: list[dict[str, Any]] = []
-    for path in _discovery_files(root, glob, scope):
-        rel = path.relative_to(root).as_posix()
-        if not _matches_file_glob(rel, glob):
-            continue
-        if not _searchable(root, path):
-            continue
-        if _is_binary(path):
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            continue
-        for line_no, line in enumerate(lines, start=1):
-            found = bool(pattern.search(line)) if pattern is not None else needle in line
-            if found:
-                from mana_agent.utils.redaction import redact_secrets
-                matches.append({"file": rel, "line": line_no, "text": redact_secrets(line[:500])})
-                if len(matches) >= max_items:
-                    return {"ok": True, "matches": matches, "limit": max_items, "truncated": True}
-    return {"ok": True, "matches": matches, "limit": max_items, "truncated": False}
+    return search_repository(repo_root.resolve(), filters=file_filters(glob, globs),
+                             exclusions=directory_filters(exclude_dirs),
+                             limit=max(1, min(int(limit or 100), 1000)), scope=scope,
+                             query=str(query or ""), regex=regex, case_sensitive=case_sensitive,
+                             context=max(0, min(context, 10)), deadline=deadline)
 
 
 def repo_batch_read(
@@ -486,53 +470,32 @@ def repo_batch_search(
     repo_root: Path, *, patterns: list[dict[str, Any]], model_selected: bool = False, default_limit: int = 20,
     repository_search_allowed: bool = True,
 ) -> dict[str, Any]:
-    """Share traversal and reads between queries with the same selected roots."""
-    from mana_agent.utils.redaction import redact_secrets
+    """Execute selected queries with individual results and one shared deadline."""
+    from mana_agent.tools.repository_search import InvalidSearchPattern, SEARCH_TIMEOUT_SECONDS
 
-    root = repo_root.resolve()
-    grouped: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    candidates: dict[tuple[str, tuple[str, ...] | None], list[tuple[dict[str, Any], Any]]] = {}
+    deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
+    results = []
+    errors = []
     for index, item in enumerate((patterns or [])[:50]):
         item = item if isinstance(item, dict) else {}
         query = str(item.get("query") or "")
         glob = str(item.get("glob") or "**/*")
-        regex = bool(item.get("regex", False))
-        row = {"index": index, "query": query, "glob": glob, "regex": regex, "matches": [], "truncated": False}
-        grouped.append(row)
+        row = {"index": index, "query": query, "glob": glob, "regex": bool(item.get("regex")),
+               "matches": [], "truncated": False}
         try:
-            if not query:
-                raise ValueError("query is required")
-            _expand_file_glob(glob)
             scope = (_selected_discovery_scope(item, repository_search_allowed=repository_search_allowed)
                      if model_selected else None)
-            row.update(ok=True, limit=max(1, min(int(item.get("limit") or default_limit), 1000)))
-            matcher = re.compile(query).search if regex else lambda line, term=query: term in line
-            candidates.setdefault((_glob_root(glob), scope), []).append((row, matcher))
-        except (TypeError, ValueError, re.error) as exc:
-            row.update(ok=False, error=str(exc))
+            row.update(repo_search(repo_root, query=query, glob=glob, scope=scope, deadline=deadline,
+                                   limit=int(item.get("limit") or default_limit), **_text_search_options(item)))
+        except (TypeError, ValueError) as exc:
+            status = "invalid_pattern" if isinstance(exc, InvalidSearchPattern) else "invalid_selection"
+            row.update(ok=False, error=str(exc), error_code="INVALID_DISCOVERY_SELECTION", search_status=status)
+        results.append(row)
+        if not row["ok"]:
             errors.append(row)
-    for (prefix, scope), queries in candidates.items():
-        for path in _discovery_files(root, f"{prefix}/**" if prefix else "**/*", scope):
-            if all(row["truncated"] for row, _ in queries):
-                break
-            rel = path.relative_to(root).as_posix()
-            active = [(row, matcher) for row, matcher in queries
-                      if not row["truncated"] and _matches_file_glob(rel, row["glob"])]
-            if not active or not _searchable(root, path) or _is_binary(path):
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeDecodeError):
-                continue
-            for row, matcher in active:
-                for number, line in enumerate(lines, 1):
-                    if matcher(line):
-                        row["matches"].append({"file": rel, "line": number, "text": redact_secrets(line[:500])})
-                        if len(row["matches"]) >= row["limit"]:
-                            row["truncated"] = True
-                            break
-    return {"ok": not errors, "results": grouped, "errors": errors}
+    return {"ok": not errors, "results": results, "errors": errors,
+            "summary": f"{sum(len(row['matches']) for row in results)} matching lines across {len(results)} queries"
+                       + (f", {len(errors)} failed" if errors else "")}
 
 
 _DESTRUCTIVE_SCRIPT_PATTERNS = (
