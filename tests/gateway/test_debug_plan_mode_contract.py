@@ -224,7 +224,8 @@ def test_adaptive_coding_filters_ignored_command_artifacts(mode_gateway, monkeyp
         workflow._adaptive_mutations("child", root=root)
 
 
-def test_adaptive_coding_reconciles_workspace_drift_before_dispatch(mode_gateway, monkeypatch):
+@pytest.mark.parametrize("external_edit", [b"external edit\n", b"external edit\r\n"], ids=["lf", "crlf"])
+def test_adaptive_coding_reconciles_workspace_drift_before_dispatch(mode_gateway, monkeypatch, external_edit):
     from hashlib import sha256
 
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
@@ -260,7 +261,7 @@ def test_adaptive_coding_reconciles_workspace_drift_before_dispatch(mode_gateway
             index = self.index
             self.index += 1
             if index == 3:
-                path.write_text("external edit\n")
+                path.write_bytes(external_edit)
             if index == 4:
                 assert any("Repository files changed" in message.content for message in messages)
                 assert any('"stale": true' in message.content for message in messages)
@@ -289,9 +290,9 @@ def test_adaptive_coding_reconciles_workspace_drift_before_dispatch(mode_gateway
     child, = workflow.board.list_tasks(parent_task_id=result.data["task_id"])
     assert check_inputs == [(child.task_id, "tool edit\n"), (child.task_id, "external edit\n")]
     assert len({receipt["attempt_id"] for receipt in result.data["verification"]}) == 1
-    assert result.data["verification"][-1]["source_versions"] == {"app.py": sha256(b"external edit\n").hexdigest()}
+    assert result.data["verification"][-1]["source_versions"] == {"app.py": sha256(external_edit).hexdigest()}
     assert result.data["changed_files"] == []
-    assert path.read_text() == "external edit\n"
+    assert path.read_bytes() == external_edit
     receipts = ToolQueueStore(workflow.board.store.db).operation_receipts(child.task_id)
     assert [row["tool_name"] for row in receipts].count("write_file") == 1
 

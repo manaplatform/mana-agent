@@ -477,6 +477,30 @@ venv/bin/python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k '
 venv/bin/python -m pytest -q tests/execution_supervisor/test_supervisor_core.py -k 'run_command_action_can_reexecute or existing_unknown_effect_scope or checkout_verification_repeat_fences or unknown_action_scope_fails_closed'
 ```
 
+### Windows CI source hash after workspace drift
+
+The Windows Python 3.12 CI run reached successful completion in
+`test_adaptive_coding_reconciles_workspace_drift_before_dispatch` and then
+failed the final verification receipt's `source_versions` assertion.
+`Path.write_text()` wrote CRLF on Windows, while the expected SHA-256 used
+LF bytes. The observed hash matches the CRLF bytes on disk. The test's text
+reads normalized the line endings, so their assertions passed.
+
+The gateway regression now writes explicit LF and CRLF bytes in separate
+cases and checks each receipt against the hash of the corresponding input.
+Both cases require refreshed reads, a new check on the same attempt, and
+preservation of the external edit. The receipt contract binds verification
+to the exact checkout bytes.
+
+**Do not reintroduce** platform-default text writes in fixtures that assert
+an exact source hash. Supply the file's bytes explicitly.
+
+Run both cases on Windows with the following command. The agent did not run it.
+
+```powershell
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k reconciles_workspace_drift_before_dispatch
+```
+
 ## Verification
 
 Run the focused regressions first.
