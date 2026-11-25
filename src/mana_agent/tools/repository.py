@@ -118,10 +118,35 @@ def _glob_root(glob: str) -> str:
     parts = glob.replace("\\", "/").removeprefix("./").split("/")
     prefix: list[str] = []
     for part in parts[:-1]:
-        if not part or part in {".", ".."} or any(token in part for token in "*?["):
+        if not part or part in {".", ".."} or any(token in part for token in "*?[{"):
             break
         prefix.append(part)
     return "/".join(prefix)
+
+
+def _expand_file_glob(pattern: str) -> list[str]:
+    """Expand bounded brace alternatives before matching repository paths."""
+    patterns = [pattern]
+    while any("{" in item or "}" in item for item in patterns):
+        expanded = []
+        for item in patterns:
+            if "{" not in item and "}" not in item:
+                expanded.append(item)
+                continue
+            match = re.search(r"\{([^{}]+)\}", item)
+            if not match:
+                raise ValueError("Invalid glob brace pattern")
+            alternatives = match.group(1).split(",")
+            if len(alternatives) < 2 or any(not part or "/" in part or "\\" in part for part in alternatives):
+                raise ValueError("Glob braces require comma-separated filename alternatives")
+            expanded.extend(item[:match.start()] + part + item[match.end():] for part in alternatives)
+        if len(expanded) > 64:
+            raise ValueError("Glob has too many brace alternatives")
+        patterns = expanded
+    for item in patterns:
+        if item.count("[") != item.count("]"):
+            raise ValueError("Invalid glob character class")
+    return patterns
 
 
 def _discovery_files(root: Path, glob: str, scope: tuple[str, ...] | None) -> list[Path]:
@@ -205,6 +230,7 @@ def _selected_discovery_scope(
     glob = str(args.get("glob") or "**/*").replace("\\", "/")
     if glob.startswith("/") or ".." in glob.split("/") or "\x00" in glob or ":" in glob:
         raise ValueError("Discovery globs must be repository-relative")
+    _expand_file_glob(glob)
     if normalized:
         return tuple(dict.fromkeys(normalized))
     if _glob_root(glob):
@@ -303,6 +329,9 @@ def _matches_file_glob(rel_path: str, pattern: str) -> bool:
     file under ``dir``.
     """
     pattern = str(pattern or "**/*").replace("\\", "/").removeprefix("./")
+    alternatives = _expand_file_glob(pattern)
+    if len(alternatives) > 1:
+        return any(_matches_file_glob(rel_path, alternative) for alternative in alternatives)
     if pattern in {"**", "**/*"}:
         return True
     if "/" not in pattern:
@@ -333,6 +362,7 @@ def list_files(repo_root: Path, *, glob: str = "**/*", limit: int = 200,
 
     root = repo_root.resolve()
     pattern = str(glob or "**/*")
+    _expand_file_glob(pattern)
     max_items = max(1, min(int(limit or 200), 5000))
     files: list[str] = []
     for path in _discovery_files(root, pattern, scope):
@@ -359,6 +389,7 @@ def repo_search(
     needle = str(query or "")
     if not needle:
         return {"ok": False, "error": "query is required", "matches": []}
+    _expand_file_glob(glob)
     max_items = max(1, min(int(limit or 100), 1000))
     pattern = re.compile(needle) if regex else None
     matches: list[dict[str, Any]] = []
@@ -472,6 +503,7 @@ def repo_batch_search(
         try:
             if not query:
                 raise ValueError("query is required")
+            _expand_file_glob(glob)
             scope = (_selected_discovery_scope(item, repository_search_allowed=repository_search_allowed)
                      if model_selected else None)
             row.update(ok=True, limit=max(1, min(int(item.get("limit") or default_limit), 1000)))

@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-26 — Repository search and Coding. Expand brace alternatives in file globs, reject malformed patterns, and request a typed outcome when replanning still stalls. Bump the project version to 0.15.5. The native search backend remains pending. User verification: `venv/bin/python -m pytest -q tests/test_repository_tools.py -k 'brace_glob or invalid_brace'` and `venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_reports_blocker_after_repeated_reads`. See the [incident](docs/regressions/unified-adaptive-coding.md#brace-globs-returned-false-empty-search-results).
+
 - 2026-11-25 — Windows release CI. Wait for the live steering acknowledgement to reach the Activity panel before checking its queued record and transcript placement. See the [regression and user verification command](docs/regressions/agent-activity-visibility.md#windows-release-ci-queued-steering-timing). The agent did not run the tests.
 
 - 2026-11-25 — Windows CI. Exercise workspace drift verification with explicit LF and CRLF source bytes and check the receipt against the SHA-256 of each input. See the [regression and user verification command](docs/regressions/unified-adaptive-coding.md#windows-ci-source-hash-after-workspace-drift). The agent did not run the tests.

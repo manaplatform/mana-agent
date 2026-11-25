@@ -5,6 +5,35 @@ from pathlib import Path
 from mana_agent.tools.repository import apply_patch_batch, list_files, repo_batch_read, repo_batch_search, run_script_once
 
 
+def test_brace_globs_find_typescript_declarations_in_scope(tmp_path: Path) -> None:
+    from mana_agent.tools.repository import execute_repository_discovery
+
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "types.ts").write_text("export interface StorageAreaUsage {}\n", encoding="utf-8")
+    (source / "view.tsx").write_text("export interface StorageAreaUsage {}\n", encoding="utf-8")
+    (source / "other.js").write_text("export interface StorageAreaUsage {}\n", encoding="utf-8")
+    result = execute_repository_discovery(tmp_path, "repo_search", {
+        "query": "StorageAreaUsage", "paths": ["src"], "glob": "**/*.{ts,tsx}",
+    })
+    assert result["ok"]
+    assert [row["file"] for row in result["matches"]] == ["src/types.ts", "src/view.tsx"]
+    assert list_files(tmp_path, glob="src/**/*.{ts,tsx}")["files"] == ["src/types.ts", "src/view.tsx"]
+    batch = repo_batch_search(tmp_path, patterns=[{"query": "StorageAreaUsage", "glob": "**/*.{ts,tsx}"}])
+    assert [row["file"] for row in batch["results"][0]["matches"]] == ["src/types.ts", "src/view.tsx"]
+
+
+def test_invalid_brace_glob_returns_search_error(tmp_path: Path) -> None:
+    from mana_agent.tools.repository import execute_repository_discovery
+
+    for pattern in ("**/*.{ts,tsx", "**/*.{ts}", "**/*.{ts,}", "**/*.[ts"):
+        result = execute_repository_discovery(tmp_path, "repo_search", {
+            "query": "value", "paths": ["src"], "glob": pattern,
+        })
+        assert not result["ok"]
+        assert result["error_code"] == "INVALID_DISCOVERY_SELECTION"
+
+
 def test_list_files_flat_and_recursive_globs_include_existing_files(tmp_path: Path) -> None:
     skill_dir = tmp_path / "src" / "mana_agent" / "default_skills"
     nested = skill_dir / "nested"

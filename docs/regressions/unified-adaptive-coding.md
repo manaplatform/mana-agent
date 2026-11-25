@@ -1,5 +1,33 @@
 # Unified adaptive coding
 
+## Brace globs returned false empty search results
+
+On 2026-11-26, an Internal AUTO task repairing an Aria typecheck searched for
+`StorageAreaUsage` using `**/*.{ts,tsx}`. The search returned no matches even
+though `packages/shared/src/settings.ts` contained the declaration. Later
+searches also returned no matches and the no-progress guard stopped the task.
+The checkout still had a failing typecheck. The log does not establish that
+the glob issue caused every empty result.
+
+The repository matcher passed brace syntax to Python's `fnmatch`, which treats
+the braces literally. The matcher expands bounded comma-separated alternatives
+before matching, including for batched searches and file listings. Malformed
+brace patterns return a discovery error. Existing path scope and file filters
+continue to apply. The native command-backed search refactor remains pending.
+When replanning still produces no progress, the coding loop gives the model one
+remaining turn to submit a typed outcome describing its blocker and completed
+work. Further tool actions stop the attempt. Existing completion checks apply.
+
+**Do not reintroduce** literal interpretation of brace alternatives as an
+empty search result. Keep search results confined to the selected scope.
+
+User verification covers declaration discovery and invalid patterns.
+
+```sh
+venv/bin/python -m pytest -q tests/test_repository_tools.py -k 'brace_glob or invalid_brace'
+venv/bin/python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_reports_blocker_after_repeated_reads
+```
+
 ## Symptom and cause
 
 An ordinary Internal AUTO or DEBUG request could identify the failing file and

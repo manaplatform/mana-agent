@@ -926,6 +926,7 @@ class InternalCodingEngine(CodingEngine):
         renewal_waiting_for_progress = False
         evidence_misses = 0
         max_evidence_misses = getattr(self, "max_no_progress_cycles", 3)
+        no_progress_result_required = False
 
         def checkpoint(*, poll=False):
             nonlocal continuation, messages, source_changes
@@ -988,6 +989,8 @@ class InternalCodingEngine(CodingEngine):
                         tool_reserve = 0
                 write_budget = AdaptiveWriteBudget(remaining, max_turns - turn, tool_reserve)
                 definitions = [entry for entry in tool_defs if write_budget.allows(entry["function"]["name"])]
+                if no_progress_result_required:
+                    definitions = [entry for entry in definitions if entry["function"]["name"] == CODING_RESULT_TOOL]
                 if USE_REPOSITORY_TOOL in selection_corrections:
                     definitions = [entry for entry in definitions if entry["function"]["name"] not in SHELL_TOOL_NAMES]
                 instruction = write_budget.instruction()
@@ -1101,6 +1104,8 @@ class InternalCodingEngine(CodingEngine):
 
             tool_calls = raw_tool_calls
             if adaptive_mode:
+                if no_progress_result_required and any(call.get("name") != CODING_RESULT_TOOL for call in tool_calls):
+                    raise RuntimeError("Coding stopped after repeated actions. The model did not report a blocker.")
                 terminal_calls = [call for call in tool_calls if call.get("name") == CODING_RESULT_TOOL]
                 if terminal_calls:
                     call = terminal_calls[0]
@@ -1609,7 +1614,13 @@ class InternalCodingEngine(CodingEngine):
                     renewal_waiting_for_progress = False
                 evidence_misses = 0 if novel else evidence_misses + 1
                 if adaptive_mode and evidence_misses > max_evidence_misses:
-                    raise RuntimeError("Repeated coding actions produced no new information or change after the model was asked to replan")
+                    if no_progress_result_required or turn + 1 >= max_turns:
+                        raise RuntimeError("Repeated coding actions produced no new information or change after the model was asked to replan")
+                    no_progress_result_required = True
+                    messages.append(UserMessage(
+                        f"Repeated actions did not advance the assignment. Call {CODING_RESULT_TOOL} alone "
+                        "and describe the actual blocker, relevant failed checks, and work completed."
+                    ))
                 if not patch_proposal and evidence_misses == max_evidence_misses:
                     if adaptive_mode:
                         emit_activity("coding.progress", title="Repeated coding actions are not progressing",
