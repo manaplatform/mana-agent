@@ -276,6 +276,33 @@ these tests or rerun CI.
 python -m pytest -q tests/test_tui_message_layout.py tests/test_tui_tool_card_layout.py tests/test_tui_auto_chat_tool_events.py
 ```
 
+### Windows release CI queued steering timing
+
+The Windows standalone release job on Python 3.12 failed in
+`test_tui_steered_message_shows_activity_box_on_last_message`. The steering row
+was visible and the Activity panel was already directly below it, but the
+panel still had zero `steering.queued` records. It should contain one record
+with the instruction and queued status after the gateway acknowledges it.
+
+`ManaChatApp` schedules steering submission in a background task. That task
+adds the pending row before awaiting the gateway call in a thread. Once the
+call returns, it posts the queued event to history, and `ChatLog` consumes it
+on its own message queue. A single `Pilot.pause()` does not synchronize with
+that acknowledgement. The test now uses the shared readiness fixture to wait
+for the transcript and the queued event, then checks the row label, event
+count, instruction, status, and panel position. It also waits for the next
+coding update to reach the same panel before checking its position again.
+
+**Do not reintroduce.** Keep test synchronization tied to the queued activity
+event. Check panel order and event content after that event arrives.
+
+Run from the checkout root with the Windows release environment on Python
+3.12. The agent did not run pytest or rerun the release job.
+
+```sh
+uv run python -m pytest -q tests/execution/test_live_steering_integration.py::test_tui_steered_message_shows_activity_box_on_last_message
+```
+
 ### macOS CI operation row timing
 
 The macOS release suite on Python 3.12 failed in

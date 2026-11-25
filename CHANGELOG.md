@@ -4,6 +4,8 @@ All notable repository changes should be recorded here.
 
 ## Unreleased — 2026-11-20
 
+- 2026-11-25 — Windows release CI. Wait for the live steering acknowledgement to reach the Activity panel before checking its queued record and transcript placement. See the [regression and user verification command](docs/regressions/agent-activity-visibility.md#windows-release-ci-queued-steering-timing). The agent did not run the tests.
+
 - 2026-11-25 — Windows CI. Exercise workspace drift verification with explicit LF and CRLF source bytes and check the receipt against the SHA-256 of each input. See the [regression and user verification command](docs/regressions/unified-adaptive-coding.md#windows-ci-source-hash-after-workspace-drift). The agent did not run the tests.
 
 - 2026-11-25 — Execution Supervisor. Recognize checkout verification as a local command so Coding can rerun it after source changes, preserve typed effect scopes on action updates, and retain reconciliation for unsettled actions. See the [incident and user verification commands](docs/regressions/unified-adaptive-coding.md#repeating-a-completed-checkout-check-after-source-changes). The agent did not run the tests.
