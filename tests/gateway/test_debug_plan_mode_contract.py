@@ -1881,23 +1881,44 @@ def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion
     assert set(opened) == {"app.py"}
 
 
-def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeypatch):
-    from mana_agent.tools import repository
+@pytest.fixture(params=["rg", "python"])
+def discovery_scope_trace(request, monkeypatch):
+    from mana_agent.tools import repository_search
 
+    calls = []
+    if request.param == "rg":
+        if repository_search._executable("rg") is None:
+            pytest.skip("native ripgrep is unavailable")
+        command = repository_search._command
+
+        def track(argv, root, deadline):
+            separator = argv.index("--")
+            options = argv[:separator]
+            targets = tuple(path.removeprefix("./") for path in argv[separator + 1:])
+            shallow = "--max-depth" in options and options[options.index("--max-depth") + 1] == "1"
+            calls.append((root, targets, shallow))
+            return command(argv, root, deadline)
+
+        monkeypatch.setattr(repository_search, "_command", track)
+    else:
+        monkeypatch.setattr(repository_search, "_executable", lambda _: None)
+        portable = repository_search._portable
+
+        def track(root, targets, shallow, *args):
+            calls.append((root, tuple(targets), shallow))
+            yield from portable(root, targets, shallow, *args)
+
+        monkeypatch.setattr(repository_search, "_portable", track)
+    return calls
+
+
+def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, discovery_scope_trace):
     gateway, workflow = mode_gateway
     root = gateway.root
     for directory in ("runtime", "docs", ".private", ".venv"):
         (root / directory).mkdir(exist_ok=True)
     (root / "runtime" / "handler.py").write_text("raise ValueError('Unknown handler value')\n")
     (root / "docs" / "example.py").write_text("# Unknown handler value\n")
-    visited = []
-    iter_files = repository._iter_files
-
-    def track(directory):
-        visited.append(directory)
-        yield from iter_files(directory)
-
-    monkeypatch.setattr(repository, "_iter_files", track)
     model = Decisions(
         inspection(None, evidence_call("layout", "ls", reason="Locate the owning directory")),
         inspection(None, evidence_call("locate", "repo_search", glob="runtime/**/*.py", query="Unknown handler value")),
@@ -1914,7 +1935,7 @@ def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeyp
     assert layout["result"]["directories"] == ["docs", "runtime"]
     assert model.inputs[1]["evidence"][0]["result"] == layout["result"]
     assert [match["file"] for match in search["result"]["matches"]] == ["runtime/handler.py"]
-    assert visited == [root.resolve() / "runtime"]
+    assert discovery_scope_trace == [(root.resolve(), ("runtime",), False)]
 
 
 @pytest.mark.parametrize(("root_args", "expected"), [
@@ -1922,9 +1943,7 @@ def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeyp
     ({}, ["app.py", "notes.txt"]),
     ({"glob": "**/*.py"}, ["app.py"]),
 ])
-def test_investigation_list_files_keeps_root_shallow(mode_gateway, monkeypatch, root_args, expected):
-    from mana_agent.tools import repository
-
+def test_investigation_list_files_keeps_root_shallow(mode_gateway, discovery_scope_trace, root_args, expected):
     gateway, workflow = mode_gateway
     root = gateway.root
     (root / "runtime").mkdir()
@@ -1932,14 +1951,6 @@ def test_investigation_list_files_keeps_root_shallow(mode_gateway, monkeypatch, 
     (root / "notes.txt").write_text("fixture\n")
     (root / ".env").write_text("EXAMPLE=fixture\n")
     (root / "root-alias.py").symlink_to(root / "app.py")
-    visited = []
-    iter_files = repository._iter_files
-
-    def track(directory):
-        visited.append(directory)
-        yield from iter_files(directory)
-
-    monkeypatch.setattr(repository, "_iter_files", track)
     model = Decisions(
         inspection(None, evidence_call("root", "list_files", **root_args),
                    evidence_call("runtime", "list_files", paths=["./runtime//"])),
@@ -1952,7 +1963,9 @@ def test_investigation_list_files_keeps_root_shallow(mode_gateway, monkeypatch, 
     assert result.status == "success", result.message
     listings = [item["result"]["files"] for item in model.inputs[-1]["evidence"]]
     assert listings == [expected, ["runtime/handler.py"]]
-    assert visited == [root.resolve() / "runtime"]
+    assert discovery_scope_trace == [
+        (root.resolve(), (".",), True), (root.resolve(), ("runtime",), False),
+    ]
 
 
 def test_debug_mode_activity_keeps_the_frontend_turn(mode_gateway):
@@ -2783,7 +2796,16 @@ def test_coding_inspection_reuses_saved_layout_in_mixed_batch(mode_gateway, monk
 
 
 @pytest.mark.parametrize("reuse", [False, True])
-def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(mode_gateway, reuse):
+def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(mode_gateway, monkeypatch, reuse):
+    from mana_agent.tools import repository
+
+    repository_search = repository.repo_search
+    durations = iter((11, 37, 23))
+
+    def search_with_variable_duration(*args, **kwargs):
+        return {**repository_search(*args, **kwargs), "duration_ms": next(durations)}
+
+    monkeypatch.setattr(repository, "repo_search", search_with_variable_duration)
     gateway, workflow = mode_gateway
     gateway._autonomous_controller.config = AutonomousExecutionConfig(max_no_progress_cycles=2)
     queries = [
