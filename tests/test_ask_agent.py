@@ -234,6 +234,41 @@ def test_ask_agent_executes_canvas_create_through_transactional_adapter(
     assert snapshot.components[0].id == "root"
 
 
+def test_ask_agent_executes_automation_create_through_transactional_adapter(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from mana_agent.automations.service import AutomationService
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    monkeypatch.setattr(
+        "mana_agent.automations.service.reconcile_deployment",
+        lambda root, automation_id: AutomationService(root).get(automation_id),
+    )
+    agent = _build_agent(tmp_path)
+    agent.llm = _FakeLLM([
+        _FakeAssistantMessage("", tool_calls=[{
+            "id": "automation-1", "name": "automation_create", "args": {
+                "source_decision_id": "decision-1", "name": "Scheduled check",
+                "description": "", "trigger": {"type": "interval", "every_seconds": 18000, "anchor_at": "2030-01-01T00:00:00Z"},
+                "job": {"type": "agent_prompt", "prompt": "Check the workspace."},
+                "timezone": "UTC", "target_runtime": "local", "permission_references": [],
+                "retry_policy": {}, "misfire_policy": {}, "idempotency_key": "test-create",
+            },
+        }]),
+        _FakeAssistantMessage("Created.", tool_calls=[]),
+    ])
+    result = agent.run(
+        "Schedule a check.", tmp_path / ".mana/index", 2, max_steps=3,
+        timeout_seconds=2, tool_policy={"allowed_tools": ["automation_create"]},
+        transactional_parent_task_id="task-automation",
+    )
+    assert result.trace[0].status == "ok", result.trace[0].output_preview
+    assert '"action_state": "committed"' in result.trace[0].output_preview
+    records = AutomationService(tmp_path).list()
+    assert len(records) == 1
+    assert records[0].job.prompt == "Check the workspace."
+
+
 class _CountingTool:
     """Records every invocation so tests can assert dedup behavior."""
 

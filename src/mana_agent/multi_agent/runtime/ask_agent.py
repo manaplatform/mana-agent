@@ -3261,6 +3261,31 @@ class AskAgent:
                                     ensure_ascii=False,
                                     default=str,
                                 )
+                        elif tool_metadata.get("transactional_adapter") == "automation_create" and name == "automation_create":
+                            from mana_agent.automations.transactional import AutomationCreateAdapter
+                            from mana_agent.transactional_actions.gateway import ApprovalRequired
+                            from mana_agent.transactional_actions.runtime import default_action_gateway
+
+                            adapter = AutomationCreateAdapter(
+                                root=self.project_root,
+                                arguments=dict(args) if isinstance(args, dict) else {},
+                                invoke=lambda: tool_gate.invoke(name, args, call_id=str(call.get("id") or ""), config=cfg),
+                                parent_task_id=str(transactional_parent_task_id or run_id or flow_id or "ask-automation"),
+                            )
+                            try:
+                                outcome = default_action_gateway(self.project_root).execute(adapter)
+                            except ApprovalRequired as exc:
+                                action = exc.action
+                                inbox_item_id = str(exc.inbox_item_id or action.inbox_item_id or "")
+                                content = json.dumps({"ok": False, "error_code": "approval_required", "permission_required": True,
+                                    "permission_request_id": inbox_item_id, "inbox_item_id": inbox_item_id,
+                                    "action_id": action.action_id, "preview": action.preview.redacted() if action.preview else {},
+                                    "preview_digest": action.preview_digest})
+                            else:
+                                content = json.dumps({"ok": outcome.action.state.value == "committed",
+                                    "action_id": outcome.action.action_id, "action_state": outcome.action.state.value,
+                                    "verification": outcome.action.verification.model_dump(mode="json") if outcome.action.verification else {},
+                                    "result": outcome.result, "error": outcome.action.error or ""}, ensure_ascii=False, default=str)
                         elif tool_metadata.get("transactional_adapter") == "canvas":
                             from mana_agent.canvas.transactional import CanvasActionAdapter
                             from mana_agent.transactional_actions.gateway import ApprovalRequired

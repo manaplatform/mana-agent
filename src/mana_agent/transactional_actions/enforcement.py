@@ -63,6 +63,8 @@ def assert_model_tool_routed(tool_name: str, metadata: dict | None = None) -> No
     declared = dict(metadata or {})
     if declared.get("read_only") is True and declared.get("side_effecting") is not True:
         return
+    if name == "automation_create" and declared.get("transactional_adapter") == "automation_create":
+        return
     if name.startswith("mcp__") and declared.get("transactional_adapter") == "mcp":
         return
     if (
