@@ -400,6 +400,10 @@ def test_tool_permissions_are_enforced_by_capability() -> None:
     assert validate_tool_permission(
         contracts[LaneId.OPERATIONS], "automation_create", task_capabilities=("automation",)
     ) == {"automation"}
+    for core_tool in ("capability_search", "capability_load", "capability_unload", "context_read_artifact"):
+        assert validate_tool_permission(
+            contracts[LaneId.OPERATIONS], core_tool, task_capabilities=("automation",)
+        ) == {"context"}
     with pytest.raises(LanePermissionError):
         validate_tool_permission(contracts[LaneId.REVIEW], "edit_file")
 

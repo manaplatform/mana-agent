@@ -1105,14 +1105,23 @@ class TaskBoard:
                 snapshot = (str(task.status), task.aggregate_progress, tuple(task.plan), tuple(task.blockers), task.owner_agent_id, task.row_version)
                 if self._activity_snapshots.get(task.task_id) != snapshot:
                     snapshots[task.task_id] = snapshot
+                    summary_source = "agent" if task.aggregate_progress or task.blockers else "observable"
+                    if summary_source != "observable":
+                        evidence_status = "unverified"
+                    elif task.verification_status == "passed":
+                        evidence_status = "verified"
+                    elif task.status in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}:
+                        evidence_status = "observed"
+                    else:
+                        evidence_status = "attempted"
                     notifications.append({
                         "type": "task.updated", "task_id": task.task_id,
                         "root_task_id": task.root_task_id or task.task_id, "parent_task_id": task.parent_task_id,
                         "agent_id": task.owner_agent_id or "main", "title": task.title,
                         "status": task.status.value, "summary": "; ".join(task.blockers) if task.blockers else task.aggregate_progress,
                         "operation_id": f"{task.task_id}:taskboard",
-                        "metadata": {"summary_source": "agent" if task.aggregate_progress or task.blockers else "observable",
-                                     "evidence_status": "unverified"},
+                        "metadata": {"summary_source": summary_source,
+                                     "evidence_status": evidence_status},
                         "conversation_id": task.session_id or "", "repository_id": task.primary_repository_id or "",
                     })
             self._activity_snapshots.update(snapshots)
