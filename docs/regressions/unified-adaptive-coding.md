@@ -1,5 +1,100 @@
 # Unified adaptive coding
 
+## Brace globs returned false empty search results
+
+On 2026-11-26, an Internal AUTO task repairing an Aria typecheck searched for
+`StorageAreaUsage` using `**/*.{ts,tsx}`. The search returned no matches even
+though `packages/shared/src/settings.ts` contained the declaration. Later
+searches also returned no matches and the no-progress guard stopped the task.
+The checkout still had a failing typecheck. The log does not establish that
+the glob issue caused every empty result.
+
+The repository matcher passed brace syntax to Python's `fnmatch`, which treats
+the braces literally. The matcher expands bounded comma-separated alternatives
+before matching, including for batched searches and file listings. Malformed
+brace patterns return a discovery error. Existing path scope and file filters
+continue to apply. The older matcher also failed to distinguish certain
+invalid filters from empty results and had no command receipt for operators
+to inspect. Those gaps made repeated empty observations harder to diagnose.
+
+Structured text search and file listing now use ripgrep through the existing
+command runtime, with bounded glob normalization and repository-relative
+arguments. An unavailable ripgrep can select Git grep for compatible explicit
+file searches, including untracked files, or the portable implementation.
+An invalid pattern, permission error, timeout, or execution failure is
+reported to Coding as an explicit outcome. The portable matcher remains in
+use for machines without native utilities. Evidence fingerprints omit
+transient timing and backend metadata. Coding rejects an equivalent search
+before launch until the observed source state changes. It may proceed directly
+from a failed typecheck through a focused search to a patch in the same
+assignment.
+
+When replanning still produces no progress, the coding loop gives the model one
+remaining turn to submit a typed outcome describing its blocker and completed
+work. Further tool actions stop the attempt. Existing completion checks apply.
+
+**Do not reintroduce** literal interpretation of brace alternatives as an
+empty search result, silent fallback after a search error, or search command
+replays for equivalent selections on the same source state. Keep the selected
+scope and all command and evidence authority checks in force.
+
+Run the commands below on Windows, macOS, and Linux with ripgrep and Git
+available. The tests also force executable absence to exercise portable
+search, verify error outcomes, and cover a failed typecheck followed by a
+targeted search and patch. The agent did not run these tests.
+
+```sh
+python -m pytest -q tests/test_repository_tools.py tests/test_intent_driven_discovery.py tests/coding/test_tool_runner_execution.py
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k adaptive_coding_edits_and_repairs_on_one_assignment
+python -m pytest -q tests/coding/test_approval_binding_regressions.py -k direct_command_argv
+python -m pytest -q tests/test_internal_coding_engine_workflow.py -k adaptive_coding_reports_blocker_after_repeated_reads
+```
+
+## Search timing counted as new DEBUG evidence
+
+The November 26 gateway suite reported five failures after the native search
+refactor. Four scope checks received the expected search results and file
+listings, but still expected calls to the old Python walker. The repeated
+results case ran different queries that returned the same line. DEBUG kept
+offering inspection because its evidence fingerprint included each search's
+duration along with its findings.
+
+The shared observation fingerprint now compares the returned paths, matching
+lines, and context independently of execution metadata. The gateway
+regression gives identical findings different durations and checks that
+inspection stops before the final decision. The scope regressions check the
+actual command targets and depth with ripgrep, and the selected targets and
+depth with the forced portable fallback.
+
+**Do not reintroduce** elapsed time, backend identity, or command receipts
+into the identity of a search finding. Keep evidence progress tied to the
+repository content observed.
+
+The agent did not run the suite. Verify with:
+
+```sh
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k 'debug_can_find_an_error_with_no_reported_location or investigation_list_files_keeps_root_shallow or repeated_repository_results_stop_inspection'
+```
+
+## AskAgent search scope tracing
+
+After the November 26 search refactor, AskAgent returned exactly the selected
+sources in the command-approval search regression. The test still expected
+`Path.open` to record the reads, but ripgrep opened the files in a child
+process. The regression now checks the checkout and exact file argument for
+each ripgrep invocation. A forced portable run checks the files opened by
+Python. Both runs reject compatibility-index lookups and check the returned
+source paths.
+
+**Do not reintroduce** a Python file-open assertion for native search. Check
+the native command's scope and the paths returned to the caller.
+
+The agent did not run the test. Verify with:
+
+```sh
+python -m pytest -q tests/test_ask_agent.py -k chat_sudo_request_searches_only_selected_files
+```
+
 ## Symptom and cause
 
 An ordinary Internal AUTO or DEBUG request could identify the failing file and

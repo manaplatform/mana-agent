@@ -77,6 +77,7 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     from mana_agent.coding.facade import UnifiedCodingAgentFacade
     from mana_agent.coding.internal_engine import InternalCodingEngine
     from mana_agent.coding.models import CODING_RESULT_TOOL, ISOLATED_CHECK_TOOL
+    from mana_agent.repository_evidence.models import EvidenceRef
 
     gateway, workflow = mode_gateway
     filename = "src/handler.py" if mode == "auto" else "app.py"
@@ -96,13 +97,13 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
         if not passed and check_changes_source:
             (root / "other.py").write_text("other = 2\n")
         outcome = {"passed": passed, "exit_code": 0 if passed else failed_exit_code,
-                   "output": "passed" if passed else "check failed"}
+                   "output": "passed" if passed else f"{filename}:1: typecheck found 'first attempt'"}
         if check_has_setup:
             outcome["setup_receipts"] = [{"exit_code": 1 if not passed and first_check == "setup_failure" else 0}]
         return outcome
 
     monkeypatch.setattr("mana_agent.gateway.mode_workflow.run_checkout_verification", check)
-    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "check.py"],
+    verify = (ISOLATED_CHECK_TOOL, {"argv": ["python", "typecheck.py"],
                                   **({"setup_argv": [["python", "setup.py"]]} if check_has_setup else {})})
     selections = []
     if mode == "auto":
@@ -112,8 +113,11 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
         ("read_file", {"path": filename, "evidence_need": "Confirm the handler body before editing it."}),
         ("write_file", {"path": filename, "content": "first attempt\n"}),
         verify,
-        ("read_file", {"path": filename, "evidence_need": "Confirm the emitted value before repairing the failed check."}),
-        ("write_file", {"path": filename, "content": "fixed\n"}),
+        ("repo_search", {"query": "first attempt", "paths": [filename], "glob": "**/*.{py,",
+                         "evidence_need": "Find the value flagged by the typecheck."}),
+        ("repo_search", {"query": "first attempt", "paths": [filename],
+                         "evidence_need": "Locate the value flagged by the typecheck before patching it."}),
+        ("apply_patch", {"patch": f"*** Begin Patch\n*** Update File: {filename}\n@@\n-first attempt\n+fixed\n*** End Patch"}),
     ])
     if mode == "auto":
         selections.append(("write_file", {"path": "other.py", "content": "other = 1\n"}))
@@ -129,14 +133,19 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
         async def generate(self, messages, *, continuation):
             if self.index:
                 observation = json.loads(next(message.content for message in reversed(messages) if message.role == "tool"))
-                previous = selections[self.index - 1][0]
+                previous, previous_arguments = selections[self.index - 1]
                 if previous == "repo_search":
-                    assert any(match["file"] == filename for match in observation["matches"])
+                    if "glob" in previous_arguments:
+                        assert observation["search_status"] == "invalid_pattern"
+                    else:
+                        assert any(match["file"] == filename for match in observation["matches"])
                 if previous == ISOLATED_CHECK_TOOL:
                     is_first_check = self.index == selections.index(verify) + 1
                     assert observation.get("exit_code") == (failed_exit_code if is_first_check else 0), observation
-                if previous == "read_file" and self.index > selections.index(verify):
-                    assert observation["content"] == "first attempt\n"
+                    if is_first_check:
+                        assert "typecheck" in observation["output"]
+                if previous == "repo_search" and "glob" not in previous_arguments and self.index > selections.index(verify):
+                    assert observation["matches"] == [{"file": filename, "line": 1, "text": "first attempt"}]
             name, args = selections[self.index]
             self.index += 1
             assert name in self.tools
@@ -162,7 +171,10 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
     checks = result.data["verification"]
     assert [check["exit_code"] for check in checks] == expected_exits
     assert len({check["attempt_id"] for check in checks}) == 1
-    assert children[0].evidence_refs
+    evidence_board = workflow.board.evidence_board(root=gateway.root)
+    evidence = [evidence_board.get(EvidenceRef.model_validate(ref), refresh=False)
+                for ref in children[0].evidence_refs]
+    assert any({"file": filename, "line": 1} in row.observation.get("match_locations", []) for row in evidence)
     actions = workflow.lane.execution_supervisor.store.actions_for_task(children[0].task_id)
     failed_check, = [action for action in actions if action.tool_name == ISOLATED_CHECK_TOOL
                      and action.verification_state["status"] == "failed"]
@@ -1869,23 +1881,44 @@ def test_debug_search_stays_with_reported_file_and_rejects_unjustified_expansion
     assert set(opened) == {"app.py"}
 
 
-def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeypatch):
-    from mana_agent.tools import repository
+@pytest.fixture(params=["rg", "python"])
+def discovery_scope_trace(request, monkeypatch):
+    from mana_agent.tools import repository_search
 
+    calls = []
+    if request.param == "rg":
+        if repository_search._executable("rg") is None:
+            pytest.skip("native ripgrep is unavailable")
+        command = repository_search._command
+
+        def track(argv, root, deadline):
+            separator = argv.index("--")
+            options = argv[:separator]
+            targets = tuple(path.removeprefix("./") for path in argv[separator + 1:])
+            shallow = "--max-depth" in options and options[options.index("--max-depth") + 1] == "1"
+            calls.append((root, targets, shallow))
+            return command(argv, root, deadline)
+
+        monkeypatch.setattr(repository_search, "_command", track)
+    else:
+        monkeypatch.setattr(repository_search, "_executable", lambda _: None)
+        portable = repository_search._portable
+
+        def track(root, targets, shallow, *args):
+            calls.append((root, tuple(targets), shallow))
+            yield from portable(root, targets, shallow, *args)
+
+        monkeypatch.setattr(repository_search, "_portable", track)
+    return calls
+
+
+def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, discovery_scope_trace):
     gateway, workflow = mode_gateway
     root = gateway.root
     for directory in ("runtime", "docs", ".private", ".venv"):
         (root / directory).mkdir(exist_ok=True)
     (root / "runtime" / "handler.py").write_text("raise ValueError('Unknown handler value')\n")
     (root / "docs" / "example.py").write_text("# Unknown handler value\n")
-    visited = []
-    iter_files = repository._iter_files
-
-    def track(directory):
-        visited.append(directory)
-        yield from iter_files(directory)
-
-    monkeypatch.setattr(repository, "_iter_files", track)
     model = Decisions(
         inspection(None, evidence_call("layout", "ls", reason="Locate the owning directory")),
         inspection(None, evidence_call("locate", "repo_search", glob="runtime/**/*.py", query="Unknown handler value")),
@@ -1902,7 +1935,7 @@ def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeyp
     assert layout["result"]["directories"] == ["docs", "runtime"]
     assert model.inputs[1]["evidence"][0]["result"] == layout["result"]
     assert [match["file"] for match in search["result"]["matches"]] == ["runtime/handler.py"]
-    assert visited == [root.resolve() / "runtime"]
+    assert discovery_scope_trace == [(root.resolve(), ("runtime",), False)]
 
 
 @pytest.mark.parametrize(("root_args", "expected"), [
@@ -1910,9 +1943,7 @@ def test_debug_can_find_an_error_with_no_reported_location(mode_gateway, monkeyp
     ({}, ["app.py", "notes.txt"]),
     ({"glob": "**/*.py"}, ["app.py"]),
 ])
-def test_investigation_list_files_keeps_root_shallow(mode_gateway, monkeypatch, root_args, expected):
-    from mana_agent.tools import repository
-
+def test_investigation_list_files_keeps_root_shallow(mode_gateway, discovery_scope_trace, root_args, expected):
     gateway, workflow = mode_gateway
     root = gateway.root
     (root / "runtime").mkdir()
@@ -1920,14 +1951,6 @@ def test_investigation_list_files_keeps_root_shallow(mode_gateway, monkeypatch, 
     (root / "notes.txt").write_text("fixture\n")
     (root / ".env").write_text("EXAMPLE=fixture\n")
     (root / "root-alias.py").symlink_to(root / "app.py")
-    visited = []
-    iter_files = repository._iter_files
-
-    def track(directory):
-        visited.append(directory)
-        yield from iter_files(directory)
-
-    monkeypatch.setattr(repository, "_iter_files", track)
     model = Decisions(
         inspection(None, evidence_call("root", "list_files", **root_args),
                    evidence_call("runtime", "list_files", paths=["./runtime//"])),
@@ -1940,7 +1963,9 @@ def test_investigation_list_files_keeps_root_shallow(mode_gateway, monkeypatch, 
     assert result.status == "success", result.message
     listings = [item["result"]["files"] for item in model.inputs[-1]["evidence"]]
     assert listings == [expected, ["runtime/handler.py"]]
-    assert visited == [root.resolve() / "runtime"]
+    assert discovery_scope_trace == [
+        (root.resolve(), (".",), True), (root.resolve(), ("runtime",), False),
+    ]
 
 
 def test_debug_mode_activity_keeps_the_frontend_turn(mode_gateway):
@@ -2771,7 +2796,16 @@ def test_coding_inspection_reuses_saved_layout_in_mixed_batch(mode_gateway, monk
 
 
 @pytest.mark.parametrize("reuse", [False, True])
-def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(mode_gateway, reuse):
+def test_repeated_repository_results_stop_inspection_and_leave_a_final_decision(mode_gateway, monkeypatch, reuse):
+    from mana_agent.tools import repository
+
+    repository_search = repository.repo_search
+    durations = iter((11, 37, 23))
+
+    def search_with_variable_duration(*args, **kwargs):
+        return {**repository_search(*args, **kwargs), "duration_ms": next(durations)}
+
+    monkeypatch.setattr(repository, "repo_search", search_with_variable_duration)
     gateway, workflow = mode_gateway
     gateway._autonomous_controller.config = AutonomousExecutionConfig(max_no_progress_cycles=2)
     queries = [

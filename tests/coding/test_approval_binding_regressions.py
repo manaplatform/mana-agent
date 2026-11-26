@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,23 @@ def test_human_approval_resumes_exact_pending_action(tmp_path, monkeypatch):
     result = agent.dispatch("run_command", {**args, "action_approval_id": grant}, call_id="second")
     assert result["ok"] and "123" in result["stdout"]
     assert result["action_id"] == pending["action_id"]
+
+
+def test_direct_command_argv_preserves_literals_and_exact_approval(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    script = tmp_path / "print_argument.py"
+    script.write_text("import sys\nprint(sys.argv[1])\n", encoding="utf-8")
+    agent = dispatcher(tmp_path)
+    args = {"argv": [sys.executable, script.name, "literal ; $HOME"]}
+    pending = agent.dispatch("run_command", args, call_id="pending-argv")
+    assert pending["permission_required"]
+    gateway = default_action_gateway(tmp_path)
+    grant = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
+    changed = agent.dispatch("run_command", {**args, "argv": [*args["argv"][:-1], "changed"],
+                                            "action_approval_id": grant}, call_id="changed-argv")
+    assert changed["error_code"] == "INVALID_APPROVAL"
+    result = agent.dispatch("run_command", {**args, "action_approval_id": grant}, call_id="approved-argv")
+    assert result["ok"] and result["stdout"].strip() == "literal ; $HOME"
 
 
 def test_model_cannot_approve_or_deny_pending_request(tmp_path, monkeypatch):

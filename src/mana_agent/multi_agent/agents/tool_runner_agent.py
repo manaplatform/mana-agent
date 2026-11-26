@@ -253,7 +253,7 @@ class RunningOperation:
             CodingActivity.VERIFYING if tool in {ISOLATED_CHECK_TOOL, "verify_project"}
             else CodingActivity.INVESTIGATING if tool in {"investigate_repository", "integrate_repository_evidence"}
             else CodingActivity.REVIEWING if tool == "git_diff"
-            else CodingActivity.SEARCHING if "search" in tool or tool in {"find_symbols", "call_graph"}
+            else CodingActivity.SEARCHING if "search" in tool or tool in {"list_files", "batch_list_files", "find_symbols", "call_graph"}
             else {
                 OperationKind.READ: CodingActivity.READING, OperationKind.WRITE: CodingActivity.EDITING,
                 OperationKind.EXECUTE: CodingActivity.EXECUTING,
@@ -262,7 +262,8 @@ class RunningOperation:
         return _public_value({"command": str(command), "display_argv": argv or [], "cwd": str(cwd),
             "path": str(path), "coding_activity": activity.value if activity else "",
             "display_arguments": {key: value for key, value in args.items() if key in {
-                "path", "paths", "file_path", "query", "glob", "regex", "start_line", "end_line", "limit",
+                "path", "paths", "file_path", "query", "glob", "globs", "exclude_dirs", "regex", "case_sensitive",
+                "context", "start_line", "end_line", "limit",
                 "command", "script", "cwd", "argv", "timeout", "timeout_ms", "revision", "staged"}}, "timeout_seconds": self.request.timeout_seconds,
             "provenance": "native_tool_runner", "streaming": True,
             "delegation_path": [self.request.requested_by_agent_id, self.request.agent_id]}, self.protected)
@@ -685,10 +686,16 @@ class ToolRunnerAgent:
                 result_reference=next((item["reference"] for item in operation.references.get("result", []) if item["reference"]), ""),
                 verification_state=verification_state)
         activity_update = {"coding_activity": "debugging"} if status == "failed" and operation.public.get("coding_activity") == "verifying" else {}
+        output_preview = public_result.get("output", "") if operation.public.get("coding_activity") == "verifying" else ""
+        if public_result.get("search_status") in {"matches", "no_matches"}:
+            rows = public_result.get("matches", [])
+            output_preview = "\n".join(
+                f"{row['file']}:{row['line']}: {row['text']}" for row in rows[:4]
+            ) if rows else "\n".join(public_result.get("files", [])[:4])
         operation.emit("tool.completed" if status == "success" else "tool.waiting" if status == "waiting_approval" else "tool.cancelled" if status == "cancelled" else "tool.failed",
             status=status, exit_code=result.exit_code, termination_reason=result.termination_reason,
             result_summary=str(public_result.get("summary") or public_result.get("error") or status),
-            output_preview=public_result.get("output", "") if operation.public.get("coding_activity") == "verifying" else "",
+            output_preview=output_preview,
             changed_files=[m.path for m in mutations if m.status != "unknown"], output_references=operation.references, **activity_update)
         result.trace_complete = operation.trace_complete
         result.result["execution"] = result.model_dump(mode="json", exclude={"result", "mutations"})

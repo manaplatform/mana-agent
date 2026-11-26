@@ -106,19 +106,27 @@ def _evidence_result_fingerprint(content: str) -> str | None:
         result = json.loads(content)
     except (TypeError, ValueError):
         return None
-    if not isinstance(result, dict) or result.get("ok") is False:
+    if not isinstance(result, dict):
         return None
     def stable(value):
         if isinstance(value, dict):
             return {key: stable(item) for key, item in value.items() if key not in {
                 "cache_hit", "retained_detail_identity", "tool_execution", "operation_id", "execution_id",
                 "execution", "repository_evidence_refs", "repository_evidence_warning", "reused", "evidence",
+                "backend", "duration_ms", "returncode", "summary", "unavailable_executables",
+                "index", "query", "glob", "regex", "pattern",
             }}
         if isinstance(value, list):
             return [stable(item) for item in value]
         return value
 
     result = stable(result)
+    if isinstance(result.get("results"), list):
+        rows = [_evidence_result_fingerprint(json.dumps(row)) for row in result["results"]]
+        ids = sorted({row for row in rows if row is not None})
+        return canonical_digest(ids) if ids else None
+    if result.get("ok") is False:
+        return None
     if isinstance(result.get("observations"), list):
         rows = [_evidence_result_fingerprint(json.dumps(row.get("result"))) for row in result["observations"]]
         ids = sorted({row for row in rows if row is not None})
@@ -745,6 +753,7 @@ class InternalCodingEngine(CodingEngine):
         from mana_agent.context_cost.estimator import estimate_value_tokens
         from mana_agent.repository_evidence.observations import SOURCE_OUTPUT_BYTES
         from mana_agent.services.activity_context import emit_activity
+        from mana_agent.tools.repository_search import InvalidSearchPattern
 
         investigation = task.context.get("repository_investigation")
         adaptive_mode = task.context.get("adaptive_mode")
@@ -926,6 +935,7 @@ class InternalCodingEngine(CodingEngine):
         renewal_waiting_for_progress = False
         evidence_misses = 0
         max_evidence_misses = getattr(self, "max_no_progress_cycles", 3)
+        no_progress_result_required = False
 
         def checkpoint(*, poll=False):
             nonlocal continuation, messages, source_changes
@@ -945,6 +955,7 @@ class InternalCodingEngine(CodingEngine):
             for key in ("changed_files", "verification_results", "native_messages", "native_continuation"):
                 setattr(session.state, key, refreshed[key])
             messages = messages_from_records(session.state.native_messages)
+            session.dispatcher.invalidate_searches()
             source_changes = refreshed["adaptive_source_changes"]
             seen_evidence.clear()
             seen_evidence.update(refreshed["native_seen_evidence"])
@@ -988,6 +999,8 @@ class InternalCodingEngine(CodingEngine):
                         tool_reserve = 0
                 write_budget = AdaptiveWriteBudget(remaining, max_turns - turn, tool_reserve)
                 definitions = [entry for entry in tool_defs if write_budget.allows(entry["function"]["name"])]
+                if no_progress_result_required:
+                    definitions = [entry for entry in definitions if entry["function"]["name"] == CODING_RESULT_TOOL]
                 if USE_REPOSITORY_TOOL in selection_corrections:
                     definitions = [entry for entry in definitions if entry["function"]["name"] not in SHELL_TOOL_NAMES]
                 instruction = write_budget.instruction()
@@ -1101,6 +1114,8 @@ class InternalCodingEngine(CodingEngine):
 
             tool_calls = raw_tool_calls
             if adaptive_mode:
+                if no_progress_result_required and any(call.get("name") != CODING_RESULT_TOOL for call in tool_calls):
+                    raise RuntimeError("Coding stopped after repeated actions. The model did not report a blocker.")
                 terminal_calls = [call for call in tool_calls if call.get("name") == CODING_RESULT_TOOL]
                 if terminal_calls:
                     call = terminal_calls[0]
@@ -1253,6 +1268,10 @@ class InternalCodingEngine(CodingEngine):
                             break
                         try:
                             validate_delegated_discovery(name, arguments)
+                        except InvalidSearchPattern:
+                            # The read tool returns the pattern error without starting a command.
+                            # It consumes the normal search budget and provides no progress credit.
+                            pass
                         except DiscoveryScopeRequired:
                             rejection = ("SCOPED_EVIDENCE_REQUIRED", "Supply known repository-relative files or directories in paths, "
                                          "or a specific filename pattern in glob. Use ls if the top-level location is unknown.")
@@ -1609,7 +1628,13 @@ class InternalCodingEngine(CodingEngine):
                     renewal_waiting_for_progress = False
                 evidence_misses = 0 if novel else evidence_misses + 1
                 if adaptive_mode and evidence_misses > max_evidence_misses:
-                    raise RuntimeError("Repeated coding actions produced no new information or change after the model was asked to replan")
+                    if no_progress_result_required or turn + 1 >= max_turns:
+                        raise RuntimeError("Repeated coding actions produced no new information or change after the model was asked to replan")
+                    no_progress_result_required = True
+                    messages.append(UserMessage(
+                        f"Repeated actions did not advance the assignment. Call {CODING_RESULT_TOOL} alone "
+                        "and describe the actual blocker, relevant failed checks, and work completed."
+                    ))
                 if not patch_proposal and evidence_misses == max_evidence_misses:
                     if adaptive_mode:
                         emit_activity("coding.progress", title="Repeated coding actions are not progressing",
@@ -1619,7 +1644,7 @@ class InternalCodingEngine(CodingEngine):
                                       metadata={"reason_code": "CODING_NO_PROGRESS", "cycles": evidence_misses})
                     messages.append(UserMessage(
                         "Recent actions stopped producing new evidence or changes. Use existing observations to select "
-                        "an edit, a focused diagnostic, a materially different read, or a precise blocker."
+                        "an edit, a focused diagnostic, a related identifier, a different search scope, or a precise blocker."
                     ))
             else:
                 evidence_misses = 0

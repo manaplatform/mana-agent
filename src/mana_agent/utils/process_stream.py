@@ -25,7 +25,7 @@ def shared_process_group():
         _SHARED_PROCESS_GROUP.reset(token)
 
 
-def run_streaming_process(argv, **kwargs) -> subprocess.CompletedProcess:
+def run_streaming_process(argv, *, success_exit_codes=(0,), **kwargs) -> subprocess.CompletedProcess:
     """Record each actual subprocess separately, including Git/provider helpers."""
     from mana_agent.multi_agent.agents.tool_runner_agent import current_operation, RunningOperation
     parent = current_operation()
@@ -56,16 +56,21 @@ def run_streaming_process(argv, **kwargs) -> subprocess.CompletedProcess:
                 status="cancelled" if isinstance(exc, InterruptedError) else "timed_out" if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) else "failed",
                 termination_reason=str(exc))
             raise
-        operation.emit("command.completed", status="success" if result.returncode == 0 else "failed", exit_code=result.returncode)
+        accepted = result.returncode in success_exit_codes or result.stopped_at_capture_limit
+        operation.emit("command.completed", status="success" if accepted else "failed",
+                       exit_code=result.returncode, capture_truncated=result.capture_truncated)
         return result
 
 
 def _run_process(argv, *, cwd=None, env=None, timeout=None, input=None,
-                          capture_output=True, text=True, check=False, **kwargs) -> subprocess.CompletedProcess:
+                 capture_output=True, text=True, check=False, capture_limit_bytes=None,
+                 stream_stdout=True, stop_on_capture_limit=False, **kwargs) -> subprocess.CompletedProcess:
     """Adapter for Mana's captured text commands; display strings are never executed."""
     from mana_agent.multi_agent.agents.tool_runner_agent import current_operation
     operation = current_operation()
     limit = operation.runner.capture_limit if operation else 10_485_760
+    if capture_limit_bytes is not None:
+        limit = min(limit, capture_limit_bytes)
     popen_kwargs: dict[str, Any] = dict(kwargs)
     popen_kwargs.pop("encoding", None)
     popen_kwargs.pop("errors", None)
@@ -111,6 +116,8 @@ def _run_process(argv, *, cwd=None, env=None, timeout=None, input=None,
     from mana_agent.utils.redaction import PrivateKeyStreamFilter
     key_filters = {channel: PrivateKeyStreamFilter() for channel in pending}
     captured = {"stdout": bytearray(), "stderr": bytearray()}
+    capture_truncated = False
+    stopped_at_capture_limit = False
     ended: set[str] = set()
     start = time.monotonic()
     termination: BaseException | None = None
@@ -173,12 +180,19 @@ def _run_process(argv, *, cwd=None, env=None, timeout=None, input=None,
             except queue.Empty:
                 continue
             if body is None:
-                publish(channel, decoders[channel].decode(b"", final=True), final=True)
+                if stream_stdout or channel != "stdout":
+                    publish(channel, decoders[channel].decode(b"", final=True), final=True)
                 ended.add(channel)
                 continue
             remaining = max(0, limit - len(captured["stdout"]) - len(captured["stderr"]))
+            capture_truncated = capture_truncated or len(body) > remaining
             captured[channel].extend(body[:remaining])
-            publish(channel, decoders[channel].decode(body))
+            if (capture_truncated and stop_on_capture_limit and not stopped_at_capture_limit
+                    and termination is None and process.poll() is None):
+                stopped_at_capture_limit = True
+                stop(force_group=True)
+            if stream_stdout or channel != "stdout":
+                publish(channel, decoders[channel].decode(body))
         process.wait()
     finally:
         stop()
@@ -191,6 +205,8 @@ def _run_process(argv, *, cwd=None, env=None, timeout=None, input=None,
         termination.stdout, termination.stderr = stdout, stderr
         raise termination
     result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    result.capture_truncated = capture_truncated
+    result.stopped_at_capture_limit = stopped_at_capture_limit
     if check:
         result.check_returncode()
     return result

@@ -39,6 +39,19 @@ _DISCOVERY_PROPERTIES = {
     "repository_reason": {"type": "string", "description": "Required for an unrestricted investigation."},
 }
 
+_SEARCH_FILTER_PROPERTIES = {
+    "globs": {"type": "array", "items": {"type": "string"}, "description": "Alternative file filters. Brace alternatives are supported."},
+    "exclude_dirs": {"type": "array", "items": {"type": "string"}, "description": "Literal directory names at any depth, or repository-relative directory paths."},
+}
+_TEXT_SEARCH_PROPERTIES = {
+    **_DISCOVERY_PROPERTIES,
+    **_SEARCH_FILTER_PROPERTIES,
+    "query": {"type": "string"},
+    "regex": {"type": "boolean", "description": "Use a regular expression. Default is literal."},
+    "case_sensitive": {"type": "boolean", "description": "Default is case-sensitive."},
+    "context": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Lines of context on either side of a match."},
+    "limit": {"type": "integer"},
+}
 
 
 def _command_action_output() -> dict[str, Any]:
@@ -412,12 +425,7 @@ def coding_tool_contracts() -> list[ToolContract]:
             name="repo_search",
             description="Search repository text with regex or literal matching. " + DISCOVERY_DESCRIPTION,
             input_schema=_schema(
-                {
-                    "query": {"type": "string"},
-                    **_DISCOVERY_PROPERTIES,
-                    "regex": {"type": "boolean"},
-                    "limit": {"type": "integer"},
-                },
+                _TEXT_SEARCH_PROPERTIES,
                 ["query"],
             ),
             output_schema=_schema({"matches": {"type": "array"}, "truncated": {"type": "boolean"}}),
@@ -494,8 +502,8 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="repo_batch_search",
-            description="Run scoped text searches in one pass per selected set of paths. " + DISCOVERY_DESCRIPTION,
-            input_schema=_schema({"patterns": {"type": "array"}}, ["patterns"]),
+            description="Run independent scoped repository queries in one tool call. " + DISCOVERY_DESCRIPTION,
+            input_schema=_schema({"patterns": {"type": "array", "items": _schema(_TEXT_SEARCH_PROPERTIES, ["query"])}}, ["patterns"]),
             output_schema=_schema({"results": {"type": "array"}, "errors": {"type": "array"}}),
             error_format=common_error,
             safety_rules=[
@@ -588,7 +596,7 @@ def coding_tool_contracts() -> list[ToolContract]:
             description="Run multiple scoped regex or literal searches. " + DISCOVERY_DESCRIPTION,
             input_schema=_schema(
                 {
-                    "patterns": {"type": "array", "description": "Each spec: query, paths or glob, regex, limit, and repository_reason for unrestricted scope"},
+                    "patterns": {"type": "array", "items": _schema(_TEXT_SEARCH_PROPERTIES, ["query"])},
                     "concurrency": {"type": "integer", "description": "Search worker concurrency limit"},
                 },
                 ["patterns"],
@@ -874,7 +882,7 @@ def coding_tool_contracts() -> list[ToolContract]:
                 "List repository files with optional glob filtering. The default scope is top-level files. "
                 + DISCOVERY_DESCRIPTION
             ),
-            input_schema=_schema({**_DISCOVERY_PROPERTIES, "limit": {"type": "integer"}}),
+            input_schema=_schema({**_DISCOVERY_PROPERTIES, **_SEARCH_FILTER_PROPERTIES, "limit": {"type": "integer"}}),
             output_schema=_schema({"files": {"type": "array"}, "truncated": {"type": "boolean"}}),
             error_format=common_error,
             safety_rules=["Read-only.", "Skip VCS, cache, virtualenv, and binary-like metadata directories."],
@@ -903,8 +911,13 @@ def coding_tool_contracts() -> list[ToolContract]:
         ),
         ToolContract(
             name="run_command",
-            description="Run a non-destructive command in the project root.",
-            input_schema=_schema({"cmd": {"type": "string"}, "action_approval_id": {"type": "string", "description": "Grant for this exact pending command action."}}, ["cmd"]),
+            description="Run a command through the command approval policy. Use argv for direct execution, including advanced searches. Use cmd for shell syntax.",
+            input_schema=_schema({
+                "cmd": {"type": "string"},
+                "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "cwd": {"type": "string", "description": "Repository-relative working directory."},
+                "action_approval_id": {"type": "string", "description": "Grant for this exact pending command action."},
+            }),
             output_schema=_schema(_command_action_output()),
             error_format=common_error,
             safety_rules=["Block destructive shell patterns.", "Use project root as cwd.", "Return stdout/stderr and exit code."],

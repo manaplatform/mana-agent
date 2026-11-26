@@ -46,8 +46,13 @@ def observation_fingerprint(row: dict) -> str | None:
         return None
     if not isinstance(result, dict):
         return canonical_digest(result) if result else None
-    payload = {key: value for key, value in result.items()
-               if key not in {"ok", "execution", "mutations", "limit", "truncated", "repository_evidence_refs"}}
+    if "search_status" in result:
+        # A backend switch, runtime, or output summary cannot make the same
+        # paths, matching lines, and context into a new observation.
+        payload = {key: result[key] for key in ("matches", "files", "context") if result.get(key)}
+    else:
+        payload = {key: value for key, value in result.items()
+                   if key not in {"ok", "execution", "mutations", "limit", "truncated", "repository_evidence_refs"}}
     # Empty results remain available as negative evidence but do not justify more rounds.
     if not any(payload.get(key) for key in ("content", "files", "directories", "matches", "symbols", "edges", "nodes")):
         return None

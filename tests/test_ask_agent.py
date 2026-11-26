@@ -1714,8 +1714,11 @@ def test_ask_agent_api_workflow_limits_continuations(tmp_path: Path) -> None:
     assert result.answer == "Final prose answer after max continuations"
 
 
-def test_chat_sudo_request_searches_only_selected_files(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "project"
+@pytest.mark.parametrize("backend", ["rg", "python"])
+def test_chat_sudo_request_searches_only_selected_files(tmp_path: Path, monkeypatch, backend: str) -> None:
+    from mana_agent.tools import repository_search
+
+    root = (tmp_path / "project").resolve()
     paths = {
         "runtime/command.py": "def run_command():\n    authorize()\n",
         "runtime/approval.py": "def authorize():\n    return True\n",
@@ -1732,15 +1735,29 @@ def test_chat_sudo_request_searches_only_selected_files(tmp_path: Path, monkeypa
         pytest.fail("A model-scoped repository tool searched the compatibility index")
 
     monkeypatch.setattr(agent.search_service, "search", unexpected_index_search)
+    commands = []
     opened = []
-    original_open = Path.open
+    if backend == "rg":
+        if repository_search._executable("rg") is None:
+            pytest.skip("native ripgrep is unavailable")
+        command = repository_search._command
 
-    def track(path, *args, **kwargs):
-        if path.is_relative_to(root) and path.relative_to(root).as_posix() in paths:
-            opened.append(path.relative_to(root).as_posix())
-        return original_open(path, *args, **kwargs)
+        def track_command(argv, cwd, deadline):
+            assert cwd == root
+            commands.append((argv[argv.index("-e") + 1], argv[argv.index("--") + 1:]))
+            return command(argv, cwd, deadline)
 
-    monkeypatch.setattr(Path, "open", track)
+        monkeypatch.setattr(repository_search, "_command", track_command)
+    else:
+        monkeypatch.setattr(repository_search, "_executable", lambda _: None)
+        original_open = Path.open
+
+        def track_open(path, *args, **kwargs):
+            if path.is_relative_to(root) and path.relative_to(root).as_posix() in paths:
+                opened.append(path.relative_to(root).as_posix())
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", track_open)
     agent.llm = _FakeLLM([
         _FakeAssistantMessage("", tool_calls=[{
             "id": "command", "name": "repo_search",
@@ -1757,6 +1774,14 @@ def test_chat_sudo_request_searches_only_selected_files(tmp_path: Path, monkeypa
         _FakeAssistantMessage("The relevant code is command execution, approvals, and their tests.", tool_calls=[]),
     ])
     result = agent.run("Add sudo support to command execution.", root / ".mana/index", 5, max_steps=5, timeout_seconds=2)
-    assert {source.relative_path for source in result.sources} == set(paths) - {"connectors/email.py"}
-    assert set(opened) == set(paths) - {"connectors/email.py"}
+    selected = ["runtime/command.py", "runtime/approval.py", "tests/test_command.py"]
+    assert {source.relative_path for source in result.sources} == set(selected)
+    if backend == "rg":
+        assert commands == [
+            ("run_command", ["./runtime/command.py"]),
+            ("authorize", ["./runtime/approval.py"]),
+            ("authorize", ["./tests/test_command.py"]),
+        ]
+    else:
+        assert set(opened) == set(selected)
     assert not any("Duplicate tool call blocked" in str(w) for w in result.warnings)

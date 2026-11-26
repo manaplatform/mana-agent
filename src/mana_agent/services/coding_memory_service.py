@@ -655,6 +655,7 @@ class CodingMemoryService:
         arguments: dict[str, Any] | None,
         result: Any,
         status: str,
+        deduplicate: bool = False,
     ) -> None:
         """Persist one coding-agent tool call/result row."""
 
@@ -662,21 +663,29 @@ class CodingMemoryService:
         resolved_tool = str(tool_name or "").strip()
         if not resolved_flow or not resolved_tool:
             return
+        encoded_arguments = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
+        values = (resolved_flow, _utc_now(), resolved_tool, encoded_arguments,
+                  json.dumps(result, ensure_ascii=False, default=str, sort_keys=True), str(status or ""))
         with self._connect() as conn:
+            if deduplicate:
+                conn.execute(
+                    """
+                    INSERT INTO coding_flow_tool_calls
+                        (flow_id, created_at, tool_name, arguments_json, result_json, status)
+                    SELECT ?, ?, ?, ?, ?, ?
+                    WHERE NOT EXISTS (SELECT 1 FROM coding_flow_tool_calls
+                                      WHERE flow_id = ? AND tool_name = ? AND arguments_json = ?)
+                    """,
+                    (*values, resolved_flow, resolved_tool, encoded_arguments),
+                )
+                return
             conn.execute(
                 """
                 INSERT INTO coding_flow_tool_calls (
                     flow_id, created_at, tool_name, arguments_json, result_json, status
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    resolved_flow,
-                    _utc_now(),
-                    resolved_tool,
-                    json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True),
-                    json.dumps(result, ensure_ascii=False, default=str, sort_keys=True),
-                    str(status or ""),
-                ),
+                values,
             )
 
     def record_verification_result(self, *, flow_id: str, results: dict[str, Any], status: str) -> None:

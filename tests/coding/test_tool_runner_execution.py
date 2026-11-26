@@ -388,3 +388,32 @@ def test_document_dispatch_uses_the_existing_registered_adapter(tmp_path):
     result = dispatcher.dispatch("document_detect", {"path": "sample.csv"})
     assert result["ok"] is True
     assert result["execution"]["tool_name"] == "document_detect"
+
+
+def test_native_search_activity_reports_command_outcome_and_bounded_preview(tmp_path, monkeypatch):
+    import mana_agent.coding.live_events as live
+    from mana_agent.tools import repository_search
+
+    rg = repository_search._executable("rg")
+    if not rg:
+        pytest.skip("native ripgrep is unavailable")
+    source = tmp_path / "types.ts"
+    source.write_bytes(b"export interface StorageAreaUsage {}\r\n")
+    events = []
+    monkeypatch.setattr(live, "publish_coding_event", events.append)
+    dispatcher = ToolExecutionDispatcher.for_coding_task(repo_root=tmp_path, task_id="search-activity")
+
+    found = dispatcher.dispatch("repo_search", {
+        "query": r"StorageAreaUsage \{\}$", "paths": [source.name], "regex": True,
+    })
+    assert found["search_status"] == "matches"
+    missing = dispatcher.dispatch("repo_search", {"query": "UnavailableType", "paths": [source.name]})
+    assert missing["search_status"] == "no_matches"
+
+    commands = [event for event in events if event.event_type == "command.completed"]
+    assert [event.payload["exit_code"] for event in commands] == [0, 1]
+    assert all(event.status == "success" and event.duration_ms >= 0 for event in commands)
+    assert all(event.payload["display_argv"][0] == rg for event in commands)
+    assert all(event.payload["display_argv"][-1] == "./types.ts" for event in commands)
+    assert any("types.ts:1: export interface StorageAreaUsage {}" in event.output_preview for event in events)
+    assert not any(event.event_type == "tool.stdout" for event in events)

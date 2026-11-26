@@ -19,7 +19,7 @@ from mana_agent.repository_evidence.models import RuntimeWiringEvidence
 EVIDENCE_REFERENCE_TOOL = "repository_evidence_get"
 REPOSITORY_EVIDENCE_TOOLS = frozenset({
     "ls", "list_files", "batch_list_files", "read_file", "repo_batch_read", "batch_read_files",
-    "repo_search", "batch_search_files", "find_symbols", "call_graph",
+    "repo_search", "repo_batch_search", "batch_search_files", "find_symbols", "call_graph",
     "repository_evidence_query", EVIDENCE_REFERENCE_TOOL, INVESTIGATE, INTEGRATE,
 })
 SCOPED_SOURCE_TOOLS = frozenset({"ls", "read_file", "repo_search"})
@@ -31,6 +31,7 @@ SHELL_TOOL_NAMES = frozenset({"run_command", "run_script_once", "shell"})
 USE_REPOSITORY_TOOL = "USE_REPOSITORY_TOOL"
 REPOSITORY_INSPECTION_DESCRIPTION = (
     "Use read_file with a path or repo_search with literal paths or a targeted glob for source inspection. "
+    "If the search requires an unsupported option, select run_command with a literal argv array. "
     "For the top-level layout, call ls with only evidence_need. Use git_status or git_diff for checkout state. "
     f"Select {ISOLATED_CHECK_TOOL} separately with direct argv for a build or check."
 )
@@ -43,7 +44,7 @@ _SOURCE_INSPECTION_PROGRAMS = frozenset({"cat", "find", "grep", "egrep", "fgrep"
 _POSIX_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
 _WINDOWS_SHELLS = frozenset({"cmd", "powershell", "pwsh"})
 _EDIT_AND_CHECK_TOOLS = WRITE_TOOL_NAMES | {ISOLATED_CHECK_TOOL}
-_BROAD_EVIDENCE_TOOLS = (REPOSITORY_EVIDENCE_TOOLS | {"repo_batch_search"}) - SCOPED_SOURCE_TOOLS - {EVIDENCE_REFERENCE_TOOL}
+_BROAD_EVIDENCE_TOOLS = REPOSITORY_EVIDENCE_TOOLS - SCOPED_SOURCE_TOOLS - {EVIDENCE_REFERENCE_TOOL}
 
 
 @dataclass(frozen=True)
