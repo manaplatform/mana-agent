@@ -542,7 +542,10 @@ class ToolExecutionDispatcher:
 
         elif name in {"run_command", "run_script_once", "shell"}:
             direct_argv = args.get("argv") if name == "run_command" else None
-            if direct_argv is not None and any(key in args for key in ("cmd", "command", "script", "commands", "action")):
+            if direct_argv is not None and any(
+                args.get(key) not in (None, "", [], {})
+                for key in ("cmd", "command", "script", "commands", "action")
+            ):
                 raise ValueError("Select argv or a shell command string")
             shell_action = args.get("action") if name == "shell" else None
             if shell_action is not None and not isinstance(shell_action, dict):

@@ -221,7 +221,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.CODING, display_name="Coding", description="Implements repository changes.",
             owns=("implementation", "repository mutations"),
             handoff_targets=(LaneId.REVIEW, LaneId.VERIFY, LaneId.RELEASE),
-            allowed_tools=READ_CAPABILITIES + ("repository_write", "shell_write", "git_read", "context"),
+            allowed_tools=READ_CAPABILITIES + ("repository_write", "shell_write", "git_read", "git_write", "context"),
             denied_tools=("deployment", "release", "secrets", "email", "calendar"),
             allowed_models=(), max_concurrent_jobs=2, max_subagents=2,
             token_budget=None, cost_budget=None, default_priority=LanePriority.INTERACTIVE,

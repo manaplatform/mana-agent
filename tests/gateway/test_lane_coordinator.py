@@ -406,6 +406,12 @@ def test_tool_permissions_are_enforced_by_capability() -> None:
         ) == {"context"}
     with pytest.raises(LanePermissionError):
         validate_tool_permission(contracts[LaneId.REVIEW], "edit_file")
+    for tool in ("git_add", "git_commit", "git_push"):
+        assert validate_tool_permission(contracts[LaneId.CODING], tool, task_capabilities=("git_write",)) == {"git_write"}
+        with pytest.raises(LanePermissionError):
+            validate_tool_permission(contracts[LaneId.CODING], tool, task_capabilities=("git_read",))
+        with pytest.raises(LanePermissionError):
+            validate_tool_permission(contracts[LaneId.REVIEW], tool, task_capabilities=("git_write",))
 
 
 def test_duplicate_active_task_reuses_existing_reference(coordinator: LaneCoordinator) -> None:

@@ -582,7 +582,7 @@ class ModeWorkflow:
         else:
             capabilities = ["repository_read", "git_read", "test_execution"]
             if write:
-                capabilities.extend(("repository_write", "shell_read", "shell_write"))
+                capabilities.extend(("repository_write", "shell_read", "shell_write", "git_write"))
             parent_budget = self.lane.inspect_task(parent.task_id).budget
             reservation = self.lane.reserve(
                 normalized_intent=f"{parent.task_id}:{state['mode']}:adaptive", lane_id=LaneId.CODING,

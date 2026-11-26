@@ -4,6 +4,22 @@
 
 A reported model-judgment denial followed an approval request for a Git commit. The quoted commit and the original denial log were not available in this checkout; their precise cause and whether a human actually approved cannot be established from this investigation. An approval request is not evidence of an approval. No quoted commit was executed during this work.
 
+### Coding Git tools and direct argv
+
+On 2026-11-26, a native Coding session attempted `git rev-parse` and `git status` with direct argv. Both failed before process execution with `Select argv or a shell command string`; the session did not attempt a commit or push. The activity record shows argv but does not retain every submitted optional field, so the exact extra field cannot be established from that record. The dispatcher rejected even empty optional command fields whenever argv was present. It now ignores empty optional fields and still rejects a nonempty competing command before creating an action. An empty-field regression and a conflicting-command regression cover the boundary; the original session has not been replayed.
+
+Independently, the adaptive Coding lane and its write-capable task reservation omitted `git_write`, so their tool allowlist excluded staging, commit, and push despite those tools being registered. Write-capable Coding assignments now receive that capability; read-only assignments and review lanes do not. A capability is not permission to perform a particular Git mutation: the existing task, workspace, transactional policy, exact approval, and protected-operation checks still apply. Existing persisted assignments may need a fresh assignment to receive the new capability. The affected branch had no configured upstream at inspection; setting one or pushing requires a separately authorized Git operation.
+
+**Do not reintroduce:** rejecting argv solely for empty optional alternate fields, accepting a nonempty competing command, or exposing Git mutation by bypassing the scoped assignment and transactional approval checks.
+
+The agent did not run tests. User verification:
+
+```sh
+python -m pytest -q tests/coding/test_approval_binding_regressions.py -k 'direct_command_argv or direct_argv_ignores'
+python -m pytest -q tests/gateway/test_lane_coordinator.py -k tool_permissions_are_enforced_by_capability
+python -m pytest -q tests/gateway/test_debug_plan_mode_contract.py -k adaptive_coding_edits_and_repairs_on_one_assignment
+```
+
 ## Verified gaps
 
 `approval_request` used model judgment to approve or deny an inbox item and could submit under the assigned human reviewer's identity, or issue a grant itself. The internal coding dispatcher also converted foreign approvals into new grants by model judgment, and automatically retried failed commands with a model-suggested replacement. Such judgment is not a human decision. Standalone command requests and execution adapters use different task IDs, argv representations and execution metadata, while Git has its own adapter and exact action identity; a shell-command grant cannot authorize an independent Git action. An invalid grant was sometimes retried without the grant. Git commit previews previously did not fingerprint staged contents, so changes could retain the same porcelain status after approval.
