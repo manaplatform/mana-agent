@@ -307,3 +307,99 @@ def test_registered_automation_route_dispatches_from_multi_task_child_lane() -> 
     assert authorized == [
         ("automation-child-lane", tool_name) for tool_name in automation_tools
     ]
+
+
+def test_automation_route_reports_error_when_tool_fails_without_persisting(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+
+    class FailingToolExecutor:
+        def run(self, **_kwargs):
+            return SimpleNamespace(
+                answer="What exact filename should I use?",
+                sources=[],
+                warnings=[],
+                trace=[
+                    {
+                        "tool_name": "capability_search",
+                        "status": "error",
+                        "result": {"error": "Tool 'capability_search' has no registered capability category"},
+                    }
+                ],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    result = gateway._execute_automation_route(
+        decision=EntryRoutingDecision(
+            route="automation",
+            confidence=0.99,
+            reason="Create an automation.",
+            required_sources=("none",),
+            automation_operation="create",
+        ),
+        context=EntryRouteContext(
+            session_id="session-test",
+            conversation_id="session-test",
+            turn_id="turn-failed-tool",
+        ),
+        text="Create a file at 21:03.",
+        ask_service=SimpleNamespace(ask_agent=FailingToolExecutor()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-automation-error"
+    assert result.error
+    assert result.payload["goal_satisfied"] is False
+    assert AutomationService(tmp_path).list() == []
+
+
+def test_automation_route_clarification_without_mutation_marks_goal_unsatisfied(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+
+    class ClarifyingExecutor:
+        def run(self, **_kwargs):
+            return SimpleNamespace(
+                answer="What exact filename should the scheduled task create?",
+                sources=[],
+                warnings=[],
+                tool_traces=[],
+            )
+
+    gateway = object.__new__(AgentChatGateway)
+    gateway.root = tmp_path
+    gateway._index_dir = None
+    gateway._resolved_k = 4
+    gateway._agent_timeout_seconds = 30
+    gateway.config = SimpleNamespace(agent_max_steps=8)
+    result = gateway._execute_automation_route(
+        decision=EntryRoutingDecision(
+            route="automation",
+            confidence=0.99,
+            reason="Create an automation.",
+            required_sources=("none",),
+            automation_operation="create",
+        ),
+        context=EntryRouteContext(
+            session_id="session-test",
+            conversation_id="session-test",
+            turn_id="turn-clarify",
+        ),
+        text="Create a file at 21:03.",
+        ask_service=SimpleNamespace(ask_agent=ClarifyingExecutor()),
+        callbacks=None,
+    )
+
+    assert result.mode == "route-automation"
+    assert result.error is None
+    assert result.payload["goal_satisfied"] is False
+    assert result.payload["status"] == "waiting"

@@ -411,3 +411,40 @@ def test_provider_semantics_cannot_be_smuggled_under_a_tool_name(hub):
     private = hub.publish(event("tool.finished", semantic_kind="provider", summary="raw provider body"))
     assert private["visibility"] == "internal"
     assert hub.history(conversation_id="session_activity") == []
+
+
+def test_taskboard_save_projects_verified_evidence_status(tmp_path, monkeypatch):
+    from mana_agent.multi_agent.core.types import RiskLevel, TaskBoardItem, TaskStatus
+    from mana_agent.multi_agent.taskboard.taskboard import TaskBoard
+    import mana_agent.services.execution_event_hub as event_hub_module
+
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "mana"))
+    published = []
+
+    class CapturingHub:
+        def publish(self, notification, *, authoritative=False):
+            published.append(notification)
+            return notification
+
+    monkeypatch.setattr(event_hub_module, "get_execution_event_hub", lambda: CapturingHub())
+    board = TaskBoard(root=tmp_path)
+    task = TaskBoardItem(
+        task_id="task_tb_verified",
+        parent_task_id=None,
+        root_task_id="task_tb_verified",
+        title="Verified task",
+        user_request="Test verified projection",
+        normalized_goal="Test verified projection",
+        status=TaskStatus.DONE,
+        priority=100,
+        risk_level=RiskLevel.LOW,
+        verification_status="passed",
+        session_id="session_tb",
+        primary_repository_id="repo_tb",
+    )
+    board.tasks[task.task_id] = task
+    board.save()
+
+    updated = [item for item in published if item.get("type") == "task.updated"]
+    assert updated
+    assert updated[-1]["metadata"]["evidence_status"] == "verified"

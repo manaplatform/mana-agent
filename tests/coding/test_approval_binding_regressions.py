@@ -54,6 +54,21 @@ def test_direct_command_argv_preserves_literals_and_exact_approval(tmp_path, mon
     assert result["ok"] and result["stdout"].strip() == "literal ; $HOME"
 
 
+def test_direct_argv_ignores_empty_optional_command_fields_but_rejects_conflicts(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
+    agent = dispatcher(tmp_path)
+    argv = [sys.executable, "-c", "print(123)"]
+    args = {"argv": argv, "cmd": "", "command": "", "commands": [], "action": {}}
+    pending = agent.dispatch("run_command", args, call_id="empty-fields")
+    assert pending["permission_required"]
+    gateway = default_action_gateway(tmp_path)
+    grant = gateway.approve(pending["action_id"], approved_by=getpass.getuser())
+    result = agent.dispatch("run_command", {**args, "action_approval_id": grant}, call_id="approved-fields")
+    assert result["ok"] and result["stdout"].strip() == "123"
+    conflict = agent.dispatch("run_command", {"argv": argv, "cmd": "echo different"}, call_id="conflict")
+    assert not conflict["ok"] and "Select argv" in conflict["error"]
+
+
 def test_model_cannot_approve_or_deny_pending_request(tmp_path, monkeypatch):
     monkeypatch.setenv("MANA_HOME", str(tmp_path / "home"))
     pending = dispatcher(tmp_path).dispatch("run_command", {"command": "python -c 'print(1)'"}, call_id="x")

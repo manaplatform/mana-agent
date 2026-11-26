@@ -164,7 +164,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
         LaneId.ARTIFACT: LaneContract(
             lane_id=LaneId.ARTIFACT, display_name="Artifact", description="Creates and updates user artifacts outside repository workflows.",
             owns=("document artifacts", "spreadsheet artifacts", "PDF artifacts"), handoff_targets=(),
-            allowed_tools=("artifact_read", "artifact_write"), denied_tools=WRITE_CAPABILITIES + ("secrets",), allowed_models=(),
+            allowed_tools=("artifact_read", "artifact_write", "context"), denied_tools=WRITE_CAPABILITIES + ("secrets",), allowed_models=(),
             max_concurrent_jobs=2, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.INTERACTIVE, can_create_subagents=False, requires_repository=False,
             requires_write_access=False, lock_policy=LockMode.NONE, timeout_seconds=900,
@@ -182,6 +182,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
                 "media.artifact.write",
                 "media.status.read",
                 "media.generation.cancel",
+                "context",
             ),
             denied_tools=WRITE_CAPABILITIES + ("secrets",),
             allowed_models=(),
@@ -202,7 +203,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             description="Creates and updates validated Live Canvas surfaces.",
             owns=("live canvas surfaces",),
             handoff_targets=(),
-            allowed_tools=("canvas",),
+            allowed_tools=("canvas", "context"),
             denied_tools=WRITE_CAPABILITIES + ("secrets",),
             allowed_models=(),
             max_concurrent_jobs=2,
@@ -220,7 +221,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.CODING, display_name="Coding", description="Implements repository changes.",
             owns=("implementation", "repository mutations"),
             handoff_targets=(LaneId.REVIEW, LaneId.VERIFY, LaneId.RELEASE),
-            allowed_tools=READ_CAPABILITIES + ("repository_write", "shell_write", "git_read"),
+            allowed_tools=READ_CAPABILITIES + ("repository_write", "shell_write", "git_read", "git_write", "context"),
             denied_tools=("deployment", "release", "secrets", "email", "calendar"),
             allowed_models=(), max_concurrent_jobs=2, max_subagents=2,
             token_budget=None, cost_budget=None, default_priority=LanePriority.INTERACTIVE,
@@ -231,7 +232,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.RESEARCH, display_name="Research", description="Investigates external and repository information.",
             owns=("web research", "documentation", "dependencies", "external investigation"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("repository_read", "shell_read", "web_search", "browser", "git_read", "email", "calendar", "api"),
+            allowed_tools=("repository_read", "shell_read", "web_search", "browser", "git_read", "email", "calendar", "api", "context"),
             denied_tools=WRITE_CAPABILITIES + ("secrets",), allowed_models=(),
             max_concurrent_jobs=4, max_subagents=4, token_budget=None, cost_budget=None,
             default_priority=LanePriority.INTERACTIVE, can_create_subagents=True,
@@ -242,7 +243,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.REVIEW, display_name="Review", description="Reviews correctness, security, and architecture.",
             owns=("correctness review", "security review", "architectural review"),
             handoff_targets=(LaneId.CODING, LaneId.VERIFY),
-            allowed_tools=("repository_read", "shell_read", "git_read"), denied_tools=WRITE_CAPABILITIES + ("secrets",),
+            allowed_tools=("repository_read", "shell_read", "git_read", "context"), denied_tools=WRITE_CAPABILITIES + ("secrets",),
             allowed_models=(), max_concurrent_jobs=2, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.HIGH, can_create_subagents=False, requires_repository=True,
             requires_write_access=False, lock_policy=LockMode.REPOSITORY_READ, timeout_seconds=900,
@@ -251,7 +252,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.VERIFY, display_name="Verify", description="Runs tests, lint, types, and validation.",
             owns=("tests", "linting", "type checking", "validation"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("repository_read", "shell_read", "test_execution", "git_read"),
+            allowed_tools=("repository_read", "shell_read", "test_execution", "git_read", "context"),
             denied_tools=("repository_write", "git_write", "deployment", "release", "secrets"),
             allowed_models=(), max_concurrent_jobs=2, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.HIGH, can_create_subagents=False, requires_repository=True,
@@ -261,7 +262,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.RELEASE, display_name="Release", description="Prepares versions, changelogs, and packages.",
             owns=("versioning", "changelog", "packaging", "publishing preparation"),
             handoff_targets=(LaneId.OPERATIONS,),
-            allowed_tools=("repository_read", "repository_write", "shell_read", "shell_write", "git_read", "release", "test_execution"),
+            allowed_tools=("repository_read", "repository_write", "shell_read", "shell_write", "git_read", "release", "test_execution", "context"),
             denied_tools=("deployment", "secrets", "email", "calendar"), allowed_models=(),
             max_concurrent_jobs=1, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=True,
@@ -271,7 +272,7 @@ def default_lane_contracts() -> dict[LaneId, LaneContract]:
             lane_id=LaneId.OPERATIONS, display_name="Operations", description="Handles deployment, infrastructure, and monitoring.",
             owns=("deployment", "infrastructure checks", "monitoring"),
             handoff_targets=(LaneId.CODING,),
-            allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute", "server", "api", "mcp"),
+            allowed_tools=("shell_read", "shell_write", "deployment", "automation", "canvas", "browser", "git_read", "computer", "remote_ssh_execute", "server", "api", "mcp", "context"),
             denied_tools=("repository_write", "release", "secrets", "email", "calendar"), allowed_models=(),
             max_concurrent_jobs=1, max_subagents=0, token_budget=None, cost_budget=None,
             default_priority=LanePriority.NORMAL, can_create_subagents=False, requires_repository=False,
@@ -436,6 +437,10 @@ for _document_read_tool in ("document_detect", "document_read", "document_analyz
     TOOL_CAPABILITIES[_document_read_tool] = frozenset({"repository_read"})
 for _document_write_tool in ("document_create", "document_update", "document_delete"):
     TOOL_CAPABILITIES[_document_write_tool] = frozenset({"repository_write"})
+for _context_tool in (
+    "capability_search", "capability_load", "capability_unload", "context_read_artifact",
+):
+    TOOL_CAPABILITIES[_context_tool] = frozenset({"context"})
 try:
     from mana_agent.integrations.computer_control.tool_contracts import computer_tool_contracts
 except ImportError:  # optional integration packaging failure remains fail-closed
@@ -459,7 +464,11 @@ def validate_tool_permission(contract: LaneContract, tool_name: str, *, task_cap
         capabilities = frozenset({capability})
     denied = capabilities.intersection(contract.denied_tools)
     missing = capabilities.difference(contract.allowed_tools)
-    task_missing = capabilities.difference(task_capabilities) if task_capabilities else frozenset()
+    task_missing = (
+        frozenset()
+        if capabilities == frozenset({"context"})
+        else (capabilities.difference(task_capabilities) if task_capabilities else frozenset())
+    )
     if denied or missing or task_missing:
         reason = sorted(denied or missing or task_missing)
         raise LanePermissionError(f"Lane {contract.lane_id.value} cannot use {tool_name}: {', '.join(reason)}")

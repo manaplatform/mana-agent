@@ -89,6 +89,7 @@ def build_automation_tools(root: str | Path) -> list[Any]:
                 "and once/run_at for one-time jobs. Returns the persisted record and truthful deployment."
             ),
             input_model=_Create,
+            metadata={"transactional_adapter": "automation_create"},
             func=lambda name, description, trigger, job, timezone, target_runtime,
             permission_references, retry_policy, misfire_policy, idempotency_key,
             source_decision_id: _result(lambda: service.create(

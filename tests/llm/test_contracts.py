@@ -1,4 +1,7 @@
 from __future__ import annotations
+import asyncio
+import json
+from datetime import datetime
 import pytest
 from pydantic import BaseModel, ValidationError
 from mana_agent.llm.messages import AssistantMessage, ContentBlock, UserMessage, ToolCall, ToolResultMessage, messages_from_records, validate_conversation
@@ -50,6 +53,75 @@ def test_native_tool_does_not_coerce_wrong_input_types():
     tool = ToolBinding.from_callable(count)
     with pytest.raises(ValueError):
         tool.call({"value": "3"})
+
+
+@pytest.mark.parametrize("async_call", [False, True])
+def test_tool_observer_serializes_typed_arguments_without_changing_handler_values(async_call):
+    from mana_agent.automations.runtime_tools import _Create
+    from mana_agent.automations.service import AgentPromptJob, OnceTrigger
+
+    class Observer:
+        def __init__(self):
+            self.started = []
+            self.finished = []
+
+        def tool_started(self, serialized, input_str, **kwargs):
+            self.started.append((serialized, json.loads(input_str), kwargs))
+
+        def tool_finished(self, output, **kwargs):
+            self.finished.append((output, kwargs))
+
+        def tool_failed(self, error, **kwargs):
+            pytest.fail(f"Unexpected tool failure: {error}")
+
+    received = []
+
+    def handler(**values):
+        received.append(values)
+        return {"ok": True}
+
+    async def async_handler(**values):
+        return handler(**values)
+
+    tool = ToolBinding.from_callable(handler, name="typed", input_model=_Create, coroutine=async_handler)
+    observer = Observer()
+    args = {
+        "source_decision_id": "decision", "name": "Once", "timezone": "UTC",
+        "trigger": {"type": "once", "run_at": "2030-01-01T00:00:00Z", "timezone": "UTC"},
+        "job": {"type": "agent_prompt", "prompt": "Run once"},
+        "idempotency_key": "test", "permission_references": ["permission"],
+    }
+    config = {"callbacks": [observer], "tool_call_id": "call-1"}
+    result = asyncio.run(tool.call_async(args, config=config)) if async_call else tool.call(args, config=config)
+
+    assert result == {"ok": True}
+    assert isinstance(received[0]["trigger"], OnceTrigger)
+    assert isinstance(received[0]["trigger"].run_at, datetime)
+    assert isinstance(received[0]["job"], AgentPromptJob)
+    assert observer.started[0][1]["trigger"]["type"] == "once"
+    assert observer.started[0][1]["trigger"]["run_at"].startswith("2030-01-01T00:00:00")
+    assert observer.started[0][2]["run_id"] == "call-1"
+    assert observer.finished == [({"ok": True}, {"run_id": "call-1"})]
+
+
+def test_tool_observer_redacts_nested_typed_secrets():
+    class Payload(BaseModel):
+        api_key: str
+
+    class Input(BaseModel):
+        payload: Payload
+
+    class Observer:
+        def tool_started(self, serialized, input_str, **kwargs):
+            self.payload = json.loads(input_str)
+
+        def tool_finished(self, output, **kwargs):
+            pass
+
+    observer = Observer()
+    tool = ToolBinding.from_callable(lambda payload: payload.api_key, name="typed", input_model=Input)
+    assert tool.call({"payload": {"api_key": "private-value"}}, config={"callbacks": [observer]}) == "private-value"
+    assert observer.payload["payload"]["api_key"] == "***REDACTED***"
 
 
 def test_user_message_accepts_message_id_and_turn_id_and_ignores_extra():

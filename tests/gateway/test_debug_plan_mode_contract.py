@@ -128,6 +128,7 @@ def test_adaptive_coding_edits_and_repairs_on_one_assignment(mode_gateway, monke
 
         def with_tools(self, tools):
             self.tools = {tool["function"]["name"] for tool in tools}
+            assert {"git_add", "git_commit", "git_push"} <= self.tools
             return self
 
         async def generate(self, messages, *, continuation):

@@ -12574,18 +12574,41 @@ class AgentChatGateway:
                 if len(deleted_ids) == 1
                 else f"s: {', '.join(deleted_ids)}"
             )
+        serialized_traces = _serialize_tool_traces(response)
+        warnings = [str(item) for item in (getattr(response, "warnings", []) or [])]
+        payload: dict[str, Any] = {
+            "route": "automation",
+            "automation_records": persisted_cards,
+            "deleted_automation_ids": deleted_ids,
+        }
+        if not changed and not deleted_ids and decision.automation_operation in {
+            "create", "update", "delete", "enable", "disable", "run_now",
+        }:
+            has_tool_error = any(
+                isinstance(trace, dict) and str(trace.get("status") or "").lower() == "error"
+                for trace in serialized_traces
+            )
+            payload["goal_satisfied"] = False
+            if has_tool_error:
+                return ChatTurnResult(
+                    answer=answer,
+                    error="Automation tool execution failed without persisting changes.",
+                    sources=list(getattr(response, "sources", []) or []),
+                    mode="route-automation-error",
+                    decision=decision,
+                    trace=serialized_traces,
+                    warnings=warnings,
+                    payload=payload,
+                )
+            payload["status"] = "waiting"
         return ChatTurnResult(
             answer=answer,
             sources=list(getattr(response, "sources", []) or []),
             mode="route-automation",
             decision=decision,
-            trace=_serialize_tool_traces(response),
-            warnings=[str(item) for item in (getattr(response, "warnings", []) or [])],
-            payload={
-                "route": "automation",
-                "automation_records": persisted_cards,
-                "deleted_automation_ids": deleted_ids,
-            },
+            trace=serialized_traces,
+            warnings=warnings,
+            payload=payload,
         )
 
     def _execute_api_route(

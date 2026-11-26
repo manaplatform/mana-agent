@@ -149,6 +149,8 @@ class ActionPolicy:
             return self._http(action)
         if action.tool_name == "git":
             return self._git(action)
+        if action.tool_name == "automation":
+            return self._automation(action)
         if action.tool_name == "canvas":
             return self._canvas(action)
         if action.tool_name == "api_integration":
@@ -185,6 +187,18 @@ class ActionPolicy:
             "Computer-control actions require exact approval.",
             ["approve_computer_control"],
         )
+
+    def _automation(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:
+        args = action.normalized_arguments
+        if (action.operation_name != "create" or len(action.target_resources) != 1
+            or not action.target_resources[0].startswith("automation://")
+            or not str(args.get("source_decision_id") or "").strip()
+            or not str(args.get("arguments_sha256") or "").strip()
+            or args.get("target_runtime") not in {"local", "github"}):
+            return PolicyOutcome.DENY, ["invalid_automation_action"], "Automation creation requires a validated target and decision.", ["automation_shape"]
+        if args["target_runtime"] == "github":
+            return PolicyOutcome.REQUIRE_APPROVAL, ["remote_automation_deployment"], "Remote scheduler deployment requires exact approval.", ["approve_remote_automation"]
+        return PolicyOutcome.ALLOW, ["local_automation_create"], "A model-selected local automation may be created.", ["allow_local_automation"]
 
     def _canvas(self, action: ActionIntent) -> tuple[PolicyOutcome, list[str], str, list[str]]:
         allowed_operations = {

@@ -8,7 +8,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, get_type_hints
 from pydantic import BaseModel, ConfigDict, create_model
+from pydantic_core import to_jsonable_python
 from mana_agent.multi_agent.tools.operation_policy import validate_arguments
+from mana_agent.utils.redaction import redact_secrets
 
 if TYPE_CHECKING:
     from mana_agent.tools.contracts import ToolContract
@@ -83,12 +85,16 @@ class ToolBinding:
             validate_arguments(rendered, self.contract.output_schema, "result")
         return value
 
+    @staticmethod
+    def _observer_input(values: dict[str, Any]) -> str:
+        return json.dumps(redact_secrets(to_jsonable_python(values)), ensure_ascii=False)
+
     def call(self, arguments: Any, *, config: dict[str, Any] | None = None) -> Any:
         values = self._arguments(arguments)
         run_id = str((config or {}).get("tool_call_id") or uuid.uuid4().hex)
         observers = list((config or {}).get("callbacks") or [])
         for observer in observers:
-            observer.tool_started({"name": self.name}, json.dumps(values, ensure_ascii=False), run_id=run_id)
+            observer.tool_started({"name": self.name}, self._observer_input(values), run_id=run_id)
         try:
             if self.handler is None:
                 if self.async_handler is not None:
@@ -121,7 +127,7 @@ class ToolBinding:
         run_id = str((config or {}).get("tool_call_id") or uuid.uuid4().hex)
         observers = list((config or {}).get("callbacks") or [])
         for observer in observers:
-            observer.tool_started({"name": self.name}, json.dumps(values, ensure_ascii=False), run_id=run_id)
+            observer.tool_started({"name": self.name}, self._observer_input(values), run_id=run_id)
         try:
             result = self._output(await self.async_handler(**values))
         except BaseException as exc:
