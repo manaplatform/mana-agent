@@ -7,6 +7,14 @@ The creation tool was classified as a side effect without an adapter, even thoug
 
 A subsequent user-run AskAgent regression failed after it persisted the definition: ToolRunner removes `prompt` fields from model-facing results, so hashing that projection could not match the full persisted record. The adapter now fingerprints a fresh authoritative read and checks a second read against it and the selected typed request. The regression covers an omitted prompt and a different requested job. The user supplied the failure; the correction has not been rerun.
 
+## Typed trigger rejected by activity serialization
+
+On 2026-11-26, two one-time creation attempts were recorded as failed with `Object of type OnceTrigger is not JSON serializable`; the user reported that no automation was created. The durable action records show failed execution attempts, but do not contain a traceback or independently prove the absence of a definition. When an activity callback is present, `ToolBinding` validates the input into nested Pydantic models, then passes those Python objects directly to `json.dumps` before invoking the handler. This path explains the observed error; interval triggers and other typed inputs are also affected. Earlier direct-tool and AskAgent tests used no callback and missed the failing boundary.
+
+The synchronous and asynchronous callback paths now convert validated values to JSON-compatible structures and redact secrets before emitting activity, while handlers still receive the original typed objects. Coverage exercises both paths, nested secret redaction, and one-time and interval creation through AskAgent with an activity observer. No schedule format or persisted-definition migration is required. These changes remain unverified until the commands below are run; actual scheduler deployment and job execution also require separate observation.
+
+**Do not reintroduce:** Never pass validated Python model instances directly to the JSON encoder for tool activity. Serialize a redacted JSON-compatible projection and preserve the typed handler arguments.
+
 **Do not reintroduce:** Do not allow automation mutations through the model-tool gate by classification alone or test only direct tool calls. Preserve the action gateway, policy, deduplication and persisted-state verification on the real AskAgent path. Do not compare a filtered model-facing result with an unfiltered stored definition.
 
 The change is unverified until the user runs:
@@ -14,4 +22,5 @@ The change is unverified until the user runs:
 ```sh
 python -m pytest -q tests/gateway/test_automation_transactional.py tests/gateway/test_automation_route.py
 python -m pytest -q tests/test_ask_agent.py -k automation_create_through_transactional_adapter
+python -m pytest -q tests/llm/test_contracts.py -k 'tool_observer'
 ```

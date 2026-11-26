@@ -234,8 +234,12 @@ def test_ask_agent_executes_canvas_create_through_transactional_adapter(
     assert snapshot.components[0].id == "root"
 
 
+@pytest.mark.parametrize("trigger", [
+    {"type": "interval", "every_seconds": 18000, "anchor_at": "2030-01-01T00:00:00Z"},
+    {"type": "once", "run_at": "2030-01-01T00:00:00Z", "timezone": "UTC"},
+])
 def test_ask_agent_executes_automation_create_through_transactional_adapter(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch, trigger,
 ) -> None:
     from mana_agent.automations.service import AutomationService
 
@@ -245,11 +249,25 @@ def test_ask_agent_executes_automation_create_through_transactional_adapter(
         lambda root, automation_id: AutomationService(root).get(automation_id),
     )
     agent = _build_agent(tmp_path)
+    class Observer:
+        def __init__(self):
+            self.started = []
+
+        def tool_started(self, serialized, input_str, **kwargs):
+            self.started.append(json.loads(input_str))
+
+        def tool_finished(self, output, **kwargs):
+            pass
+
+        def tool_failed(self, error, **kwargs):
+            pytest.fail(f"Unexpected tool failure: {error}")
+
+    observer = Observer()
     agent.llm = _FakeLLM([
         _FakeAssistantMessage("", tool_calls=[{
             "id": "automation-1", "name": "automation_create", "args": {
                 "source_decision_id": "decision-1", "name": "Scheduled check",
-                "description": "", "trigger": {"type": "interval", "every_seconds": 18000, "anchor_at": "2030-01-01T00:00:00Z"},
+                "description": "", "trigger": trigger,
                 "job": {"type": "agent_prompt", "prompt": "Check the workspace."},
                 "timezone": "UTC", "target_runtime": "local", "permission_references": [],
                 "retry_policy": {}, "misfire_policy": {}, "idempotency_key": "test-create",
@@ -260,13 +278,15 @@ def test_ask_agent_executes_automation_create_through_transactional_adapter(
     result = agent.run(
         "Schedule a check.", tmp_path / ".mana/index", 2, max_steps=3,
         timeout_seconds=2, tool_policy={"allowed_tools": ["automation_create"]},
-        transactional_parent_task_id="task-automation",
+        transactional_parent_task_id="task-automation", callbacks=[observer],
     )
     assert result.trace[0].status == "ok", result.trace[0].output_preview
     assert '"action_state": "committed"' in result.trace[0].output_preview
     records = AutomationService(tmp_path).list()
     assert len(records) == 1
     assert records[0].job.prompt == "Check the workspace."
+    assert observer.started[0]["trigger"]["type"] == trigger["type"]
+    assert records[0].trigger.type == trigger["type"]
 
 
 class _CountingTool:
